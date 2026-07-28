@@ -149,6 +149,7 @@ content-addressed chunks rather than loading entire files into model context.
 - [Protocol specification](docs/protocol-spec.md)
 - [Template protocol](docs/template-protocol.md)
 - [Schemas, templates, and conformance vectors](protocol/README.md)
+- [Proposed canonical streaming-transfer decision](docs/adr/0001-stream-immutable-versions-through-canonical-manifests.md)
 
 Protocol `0.x` and crate `0.x` releases are pre-stable. Wire and filesystem
 contracts may change between minor versions until 1.0.
