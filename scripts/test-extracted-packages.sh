@@ -36,6 +36,13 @@ tar -xzf "$cli_archive" -C "$extraction_root"
 core_source="$extraction_root/$(basename "$core_archive" .crate)"
 cli_source="$extraction_root/$(basename "$cli_archive" .crate)"
 
+test -f "$core_source/tests/local_versions.rs"
+test -f "$core_source/tests/sharing.rs"
+test -f "$core_source/tests/sync_simulator.rs"
+test -f "$core_source/tests/template_upgrades.rs"
+test -f "$core_source/tests/workspace.rs"
+test -f "$cli_source/tests/cli.rs"
+
 cargo test \
   --manifest-path "$core_source/Cargo.toml" \
   --locked

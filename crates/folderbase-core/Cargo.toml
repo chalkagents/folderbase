@@ -11,7 +11,13 @@ description = "Local-first Folderbase protocol and filesystem primitives for hum
 documentation = "https://docs.rs/folderbase-core"
 keywords = ["agents", "filesystem", "local-first", "knowledge"]
 categories = ["filesystem", "data-structures"]
-exclude = ["tests/**"]
+exclude = [
+  "tests/change_set_conformance.rs",
+  "tests/inspection.rs",
+  "tests/migration.rs",
+  "tests/template_conformance.rs",
+  "tests/templates.rs",
+]
 
 [dependencies]
 cap-std.workspace = true
