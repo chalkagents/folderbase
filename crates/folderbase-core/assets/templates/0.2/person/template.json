@@ -1,0 +1,61 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.person",
+  "version": "0.2.0",
+  "name": "Person Folderbase",
+  "description": "Optional starting guidance for a person's durable life and work context.",
+  "suggested_folderbase_kind": "person",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "purpose",
+      "prompt": "What should this folderbase help you understand or continue across time?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What season, priorities, and commitments are active right now?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next concrete action this folderbase should make easier?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Areas",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Long-lived areas of responsibility."
+    },
+    {
+      "target": "Projects",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Active bounded outcomes."
+    },
+    {
+      "target": "Reference",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Durable supporting knowledge."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Areas/` — long-lived responsibilities and standards.\n- `Projects/` — active outcomes with a finish line.\n- `Reference/` — durable material worth finding again.\n\n## Operating rules\n- Private by default; sharing requires an explicit grant from this folderbase.\n- Treat this layout as starting guidance and reorganize it when life changes.\n- Keep consequential personal decisions and current priorities understandable to a future authorized agent.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ]
+}

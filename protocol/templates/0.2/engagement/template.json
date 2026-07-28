@@ -1,0 +1,67 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.engagement",
+  "version": "0.2.0",
+  "name": "Engagement Folderbase",
+  "description": "Optional starting guidance for work governed by a relationship between organizations.",
+  "suggested_folderbase_kind": "engagement",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this engagement folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "purpose",
+      "prompt": "What relationship and shared outcome does this engagement govern?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What obligations, delivery state, and relationship context are current?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next concrete action, and who needs to know about it?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Agreements",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Approved scope, responsibilities, and commercial or operating agreements."
+    },
+    {
+      "target": "Deliverables",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Outputs approved for this engagement."
+    },
+    {
+      "target": "Meetings",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Relationship-specific meetings and follow-ups."
+    },
+    {
+      "target": "Decisions",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Engagement decisions and rationale."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Agreements/` — approved scope, responsibilities, and operating agreements.\n- `Deliverables/` — outputs produced through this relationship.\n- `Meetings/` — relationship-specific conversations and follow-ups.\n- `Decisions/` — engagement decisions and rationale.\n\n## Operating rules\n- Keep this relationship boundary distinct from each participant's organization folderbase.\n- Share only explicitly approved knowledge; folder nesting and template kind grant no access.\n- Adapt the layout as the engagement evolves while preserving obligations and decision history.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ]
+}

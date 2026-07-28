@@ -1,0 +1,3 @@
+[submodule "synthetic-mobile-sdk"]
+	path = mobile/synthetic-sdk
+	url = https://example.invalid/synthetic/loyalty-sdk.git

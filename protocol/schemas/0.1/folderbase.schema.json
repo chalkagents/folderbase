@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "title": "Folderbase 0.1 folderbase manifest",
+  "description": "The machine-readable root record for a Folderbase workspace.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "folderbase",
+    "policies"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocolVersion"
+    },
+    "folderbase": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "status",
+        "created_at",
+        "entry"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/folderbaseId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "person",
+            "organization",
+            "engagement",
+            "project",
+            "customer",
+            "temporary",
+            "custom"
+          ]
+        },
+        "status": {
+          "enum": [
+            "active",
+            "paused",
+            "archived"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "entry": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            {
+              "const": "FOLDERBASE.md"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "adapters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "agent",
+          "path"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "path": {
+            "$ref": "#/$defs/safeRelativePath"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "policies": {
+      "type": "object",
+      "required": [
+        "availability",
+        "structural_changes",
+        "archive",
+        "cloud_sync"
+      ],
+      "properties": {
+        "availability": {
+          "enum": [
+            "keep_local",
+            "managed",
+            "cloud_only"
+          ]
+        },
+        "structural_changes": {
+          "enum": [
+            "suggest",
+            "approve",
+            "autonomous"
+          ]
+        },
+        "archive": {
+          "enum": [
+            "manual",
+            "approve",
+            "automatic"
+          ]
+        },
+        "cloud_sync": {
+          "enum": [
+            "disabled",
+            "enabled"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^0\\.1\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$"
+    }
+  }
+}

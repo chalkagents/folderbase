@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.1/object.schema.json",
+  "title": "Folderbase 0.1 knowledge object",
+  "description": "Stable identity, materialization, lifecycle, provenance, and relationships for folderbase content.",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "path",
+    "lifecycle",
+    "provenance"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "id": {
+      "$ref": "#/$defs/objectId"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "path": {
+      "$ref": "#/$defs/safeRelativePath"
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\s]+/[^/\\s]+$"
+    },
+    "content": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "digest"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 16,
+          "pattern": "^[0-9a-f]+$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "draft",
+            "canonical",
+            "superseded",
+            "archived",
+            "deleted"
+          ]
+        },
+        "superseded_by": {
+          "$ref": "#/$defs/objectId"
+        },
+        "archived_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "remote_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_restore_size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "source"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_path": {
+          "$ref": "#/$defs/safeRelativePath"
+        }
+      },
+      "additionalProperties": true
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "target": {
+            "$ref": "#/$defs/objectId"
+          },
+          "external": {
+            "type": "object",
+            "required": [
+              "kind",
+              "id"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "target"
+            ],
+            "properties": {
+              "target": true
+            }
+          },
+          {
+            "required": [
+              "external"
+            ],
+            "properties": {
+              "external": true
+            }
+          }
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "protocol_version": "0.2.0",
+  "id": "folderbase.cyclic",
+  "version": "0.2.0",
+  "name": "Cyclic upgrade",
+  "suggested_folderbase_kind": "project",
+  "artifacts": [],
+  "upgrade_edges": [
+    {
+      "from": "0.1.0",
+      "to": "0.2.0"
+    },
+    {
+      "from": "0.2.0",
+      "to": "0.1.0"
+    }
+  ]
+}

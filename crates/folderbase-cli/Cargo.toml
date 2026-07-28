@@ -1,0 +1,28 @@
+[package]
+name = "folderbase-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Folderbase command-line tools for agent-ready local-first folders."
+documentation = "https://docs.rs/folderbase-cli"
+keywords = ["agents", "filesystem", "local-first", "knowledge"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "folderbase"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+folderbase-core = { version = "0.1.0", path = "../folderbase-core" }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

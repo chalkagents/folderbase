@@ -1,0 +1,15 @@
+{
+  "protocol_version": "0.2.0",
+  "id": "folderbase.unsafe",
+  "version": "0.2.0",
+  "name": "Unsafe",
+  "suggested_folderbase_kind": "project",
+  "artifacts": [
+    {
+      "target": "../outside.md",
+      "kind": "text",
+      "content": "unsafe",
+      "install": "create_if_missing"
+    }
+  ]
+}

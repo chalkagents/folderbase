@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "title": "Folderbase 0.2 template package",
+  "description": "Transparent, data-only starting guidance for a folderbase.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "id",
+    "version",
+    "name",
+    "suggested_folderbase_kind",
+    "artifacts"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^0\\.2\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "version": {
+      "$ref": "#/$defs/semanticVersion"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "suggested_folderbase_kind": {
+      "$ref": "#/$defs/folderbaseKind"
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "prompt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "answer_type": {
+            "enum": [
+              "text",
+              "boolean"
+            ],
+            "default": "text"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "patternProperties": {
+          "^x-": true
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "target",
+          "kind",
+          "install"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/safeRelativePath"
+          },
+          "kind": {
+            "enum": [
+              "directory",
+              "text"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "install": {
+            "const": "create_if_missing"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "text"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "content"
+              ]
+            }
+          }
+        ],
+        "patternProperties": {
+          "^x-": true
+        },
+        "additionalProperties": false
+      }
+    },
+    "upgrade_edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/semanticVersion"
+          },
+          "to": {
+            "$ref": "#/$defs/semanticVersion"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "patternProperties": {
+          "^x-": true
+        },
+        "additionalProperties": false
+      }
+    },
+    "hooks": false,
+    "scripts": false,
+    "commands": false,
+    "permissions": false,
+    "members": false,
+    "membership": false,
+    "grants": false,
+    "shares": false
+  },
+  "patternProperties": {
+    "^x-": true
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "semanticVersion": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "folderbaseKind": {
+      "enum": [
+        "person",
+        "organization",
+        "engagement",
+        "project",
+        "customer",
+        "temporary",
+        "custom"
+      ]
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\/$)[^\\u0000]+$"
+    }
+  }
+}

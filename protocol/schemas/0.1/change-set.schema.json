@@ -1,0 +1,368 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.1/change-set.schema.json",
+  "title": "Folderbase 0.1 change set",
+  "description": "Work produced against an isolated checkout and a known base version.",
+  "type": "object",
+  "required": [
+    "id",
+    "checkout_id",
+    "base_version",
+    "operations",
+    "status"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocolVersion"
+    },
+    "id": {
+      "$ref": "#/$defs/changeSetId"
+    },
+    "checkout_id": {
+      "$ref": "#/$defs/checkoutId"
+    },
+    "base_version": {
+      "$ref": "#/$defs/versionId"
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/createOperation"
+          },
+          {
+            "$ref": "#/$defs/updateOperation"
+          },
+          {
+            "$ref": "#/$defs/moveOperation"
+          },
+          {
+            "$ref": "#/$defs/deleteOperation"
+          }
+        ]
+      }
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "approved",
+        "applying",
+        "applied",
+        "conflicted",
+        "rejected"
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^0\\.1\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "changeSetId": {
+      "type": "string",
+      "pattern": "^changeset_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "checkoutId": {
+      "type": "string",
+      "pattern": "^checkout_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "versionId": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "candidateBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 524288
+    },
+    "candidateContent": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "forbidCreateFields": {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "base_version_id"
+            ]
+          },
+          {
+            "required": [
+              "destination_relative_path"
+            ]
+          },
+          {
+            "required": [
+              "storage_key"
+            ]
+          }
+        ]
+      }
+    },
+    "forbidUpdateFields": {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "destination_relative_path"
+            ]
+          },
+          {
+            "required": [
+              "storage_key"
+            ]
+          }
+        ]
+      }
+    },
+    "forbidNonContentFields": {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "version_id"
+            ]
+          },
+          {
+            "required": [
+              "sha256"
+            ]
+          },
+          {
+            "required": [
+              "bytes"
+            ]
+          },
+          {
+            "required": [
+              "media_type"
+            ]
+          },
+          {
+            "required": [
+              "content_base64"
+            ]
+          },
+          {
+            "required": [
+              "storage_key"
+            ]
+          }
+        ]
+      }
+    },
+    "createOperation": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_id",
+            "relative_path",
+            "version_id",
+            "sha256",
+            "bytes",
+            "content_base64"
+          ],
+          "properties": {
+            "type": {
+              "const": "create"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "bytes": {
+              "$ref": "#/$defs/candidateBytes"
+            },
+            "media_type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "content_base64": {
+              "$ref": "#/$defs/candidateContent"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "$ref": "#/$defs/forbidCreateFields"
+        }
+      ]
+    },
+    "updateOperation": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_id",
+            "base_version_id",
+            "relative_path",
+            "version_id",
+            "sha256",
+            "bytes",
+            "content_base64"
+          ],
+          "properties": {
+            "type": {
+              "const": "update"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "base_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "bytes": {
+              "$ref": "#/$defs/candidateBytes"
+            },
+            "media_type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "content_base64": {
+              "$ref": "#/$defs/candidateContent"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "$ref": "#/$defs/forbidUpdateFields"
+        }
+      ]
+    },
+    "moveOperation": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_id",
+            "base_version_id",
+            "relative_path",
+            "destination_relative_path"
+          ],
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "base_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "destination_relative_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "$ref": "#/$defs/forbidNonContentFields"
+        }
+      ]
+    },
+    "deleteOperation": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_id",
+            "base_version_id",
+            "relative_path"
+          ],
+          "properties": {
+            "type": {
+              "const": "delete"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "base_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "$ref": "#/$defs/forbidNonContentFields"
+        },
+        {
+          "not": {
+            "required": [
+              "destination_relative_path"
+            ]
+          }
+        }
+      ]
+    },
+    "digest": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "digest"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 16,
+          "pattern": "^[0-9a-f]+$"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

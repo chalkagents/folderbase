@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible problem in Folderbase
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. For security issues, stop here and follow SECURITY.md.
+
+  - type: input
+    id: version
+    attributes:
+      label: Folderbase version
+      description: Paste the release version or commit SHA.
+      placeholder: folderbase 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the operating system, architecture, and installation method.
+      placeholder: macOS 15, Apple silicon, cargo install
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe example that reproduces the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Remove credentials, private paths, and personal or client data.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This report contains no secrets or private data.
+          required: true

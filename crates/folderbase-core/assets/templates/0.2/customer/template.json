@@ -1,0 +1,73 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.customer",
+  "version": "0.2.0",
+  "name": "Customer Context Folderbase",
+  "description": "Optional starting guidance only when customer context needs its own explicit security or retention boundary.",
+  "suggested_folderbase_kind": "customer",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this customer context folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "boundary_reason",
+      "prompt": "Why does this customer context need its own security, ownership, retention, or lifecycle boundary instead of an Account Workspace?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "purpose",
+      "prompt": "What customer relationship and outcome should this folderbase make understandable?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What is true about the account, active work, stakeholders, and risks now?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next concrete account action?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Account",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Approved account context, stakeholders, and relationship history."
+    },
+    {
+      "target": "Projects",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Navigation to bounded customer projects."
+    },
+    {
+      "target": "Meetings",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Customer conversations and follow-ups."
+    },
+    {
+      "target": "Deliverables",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Approved customer-facing outputs."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Boundary reason\n${boundary_reason}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Account/` — approved customer context, stakeholders, and relationship history.\n- `Projects/` — pointers to separately governed project folderbases; do not duplicate their canonical content here.\n- `Meetings/` — customer conversations owned by this boundary.\n- `Deliverables/` — approved customer-facing outputs owned by this boundary.\n\n## Operating rules\n- Use an Account Workspace composition instead when the authorized engagement and project folderbases already supply the needed customer view.\n- Keep this separate folderbase only while its explicit boundary reason remains true.\n- This template does not grant the customer, a partner, or an agent access; every share remains explicit.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ]
+}

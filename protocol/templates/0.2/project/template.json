@@ -1,0 +1,44 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.project",
+  "version": "0.2.0",
+  "name": "Project Folderbase",
+  "description": "Optional starting guidance for a bounded project.",
+  "suggested_folderbase_kind": "project",
+  "questions": [
+    {
+      "id": "purpose",
+      "prompt": "What outcome does this project exist to achieve?",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Decisions",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Suggested decision-log location."
+    },
+    {
+      "target": "Deliverables",
+      "kind": "directory",
+      "install": "create_if_missing"
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# Folderbase\n\n## Purpose\nDescribe what this folderbase exists to accomplish.\n",
+      "install": "create_if_missing"
+    }
+  ],
+  "upgrade_edges": [
+    {
+      "from": "0.1.0",
+      "to": "0.2.0",
+      "notes": "Adds optional template provenance without enforcing a layout.",
+      "x-review": "User approval still controls application."
+    }
+  ],
+  "x-folderbase-note": "Unknown extension fields remain transparent data."
+}

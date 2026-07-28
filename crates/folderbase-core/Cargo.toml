@@ -1,0 +1,31 @@
+[package]
+name = "folderbase-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Local-first Folderbase protocol and filesystem primitives for humans and agents."
+documentation = "https://docs.rs/folderbase-core"
+keywords = ["agents", "filesystem", "local-first", "knowledge"]
+categories = ["filesystem", "data-structures"]
+
+[dependencies]
+cap-std.workspace = true
+chrono.workspace = true
+libc.workspace = true
+same-file.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-casefold.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+tempfile.workspace = true

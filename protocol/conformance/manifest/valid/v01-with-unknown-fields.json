@@ -1,0 +1,25 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "protocol_version": "0.1.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475",
+    "name": "Legacy Folderbase",
+    "kind": "project",
+    "status": "active",
+    "created_at": "2026-07-26T00:00:00Z",
+    "entry": "FOLDERBASE.md",
+    "x-future-folderbase-field": {
+      "preserve": true
+    }
+  },
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "approve",
+    "cloud_sync": "disabled",
+    "x-future-policy": "preserve"
+  },
+  "x-future-root-field": [
+    "preserve"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.custom",
+  "version": "0.2.0",
+  "name": "Custom Folderbase",
+  "description": "Minimal starting guidance when the useful shape does not match another starter.",
+  "suggested_folderbase_kind": "custom",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "purpose",
+      "prompt": "What body of knowledge or work should this folderbase make understandable?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What is true about it now, including what is still unclear?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next concrete action or organizing question?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Knowledge",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Durable source material and context."
+    },
+    {
+      "target": "Working",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Active work whose durable shape is still emerging."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Knowledge/` — durable source material and context.\n- `Working/` — active work whose lasting shape is still emerging.\n\n## Operating rules\n- This remains an ordinary folder; the custom template is guidance, not a permanent schema.\n- Template kind, naming, and nesting grant no access and weaken no protocol guardrail.\n- Adapt the structure when evidence shows a better organization; keep navigation current.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ]
+}

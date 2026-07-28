@@ -1,0 +1,3 @@
+[submodule "synthetic-scanner"]
+	path = synthetic-scanner
+	url = https://example.invalid/synthetic/security-scanner.git

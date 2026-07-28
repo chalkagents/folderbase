@@ -1,0 +1,62 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.project",
+  "version": "0.2.2",
+  "name": "Project Folderbase",
+  "description": "Optional starting guidance for a bounded body of work with an outcome and finish line.",
+  "suggested_folderbase_kind": "project",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this project folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "purpose",
+      "prompt": "What bounded outcome does this project exist to achieve?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What is true about the project, its risks, and its progress right now?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next concrete action?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Decisions",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Consequential project decisions and their rationale."
+    },
+    {
+      "target": "Deliverables",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Project outputs and handoff material."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Decisions/` — consequential decisions and why they were made.\n- `Deliverables/` — project outputs and handoff material.\n\n## Operating rules\n- Keep this folderbase centered on one bounded outcome and its finish line.\n- Treat the layout as starting guidance; reorganize it when the project needs a clearer shape.\n- Template kind, ancestry, and folder nesting grant no access.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ],
+  "upgrade_edges": [
+    {
+      "from": "0.2.1",
+      "to": "0.2.2",
+      "notes": "Completes the concise folderbase entry with navigation, operating rules, and unresolved work."
+    }
+  ]
+}

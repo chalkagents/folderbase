@@ -1,0 +1,5 @@
+# Representative repository policy. These patterns intentionally do not hide
+# the tiny classification samples committed elsewhere in this safe fixture.
+vendor/
+.cache/
+config/*.local

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.temporary",
+  "version": "0.2.0",
+  "name": "Temporary Folderbase",
+  "description": "Optional starting guidance for exploratory or time-bounded work with an explicit exit.",
+  "suggested_folderbase_kind": "temporary",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this temporary folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "purpose",
+      "prompt": "What short-lived outcome exists, and what is its exit condition?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What is known, unknown, or in progress right now?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next experiment or concrete action?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Working",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Active scratch work and evidence."
+    },
+    {
+      "target": "Outputs",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Results worth promoting or handing off."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Working/` — active scratch work, evidence, and experiments.\n- `Outputs/` — results worth promoting or handing off.\n\n## Operating rules\n- Keep the exit condition visible; temporary describes lifecycle, not weaker security.\n- Promote durable knowledge deliberately before closing or archiving this folderbase.\n- Reorganize freely while the work is active; do not silently delete source evidence.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ]
+}

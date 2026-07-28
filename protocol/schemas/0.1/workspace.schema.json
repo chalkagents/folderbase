@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.1/workspace.schema.json",
+  "title": "Folderbase 0.1 workspace descriptor",
+  "description": "A navigation-only composition of independently authorized folderbases.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "id",
+    "name",
+    "folderbases"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocolVersion"
+    },
+    "id": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "folderbases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "folderbase_id",
+          "label",
+          "path"
+        ],
+        "properties": {
+          "folderbase_id": {
+            "$ref": "#/$defs/folderbaseId"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "$ref": "#/$defs/safeRelativePath"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^0\\.1\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^workspace_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$"
+    }
+  }
+}

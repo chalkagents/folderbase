@@ -1,0 +1,31 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template-application.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "template_application_019fabcd-1234-7abc-8abc-1234567890ab",
+  "folderbase_id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+  "state": "pending",
+  "template": {
+    "id": "example.project",
+    "version": "1.1.0",
+    "package_digest": {
+      "algorithm": "sha256",
+      "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "comparison": {
+    "source": "origin",
+    "version": "1.0.0",
+    "application_id": null
+  },
+  "applied_at": "2026-07-26T00:00:00Z",
+  "created_paths": [],
+  "preserved_targets": [],
+  "plan_digest": {
+    "algorithm": "sha256",
+    "digest": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "record_digest": {
+    "algorithm": "sha256",
+    "digest": "5555555555555555555555555555555555555555555555555555555555555555"
+  }
+}

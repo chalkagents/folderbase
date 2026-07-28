@@ -1,0 +1,61 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.organization",
+  "version": "0.2.0",
+  "name": "Organization Folderbase",
+  "description": "Optional starting guidance for shared organizational knowledge and operations.",
+  "suggested_folderbase_kind": "organization",
+  "questions": [
+    {
+      "id": "folderbase_name",
+      "prompt": "What should this organization folderbase be called?",
+      "answer_type": "text",
+      "required": false
+    },
+    {
+      "id": "purpose",
+      "prompt": "What does this organization exist to accomplish?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What is true about the organization, its priorities, and its operating state now?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next organization-level action that needs clear ownership?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Operations",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Organization-wide processes, roles, and recurring work."
+    },
+    {
+      "target": "Projects",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Pointers and context for bounded organizational projects."
+    },
+    {
+      "target": "Decisions",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Consequential decisions and their rationale."
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# ${folderbase_name}\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Navigate\n- `Operations/` — organization-wide roles, processes, and recurring work.\n- `Projects/` — active bounded initiatives and their navigation.\n- `Decisions/` — consequential decisions and why they were made.\n\n## Operating rules\n- Organization-wide membership and narrower shares are managed outside this template.\n- Folder ancestry never grants access to another folderbase or engagement.\n- Adapt this starting layout as the organization grows; preserve durable navigation and decision context.\n\n## Unresolved work\n- Next action: ${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ]
+}

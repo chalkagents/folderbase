@@ -1,0 +1,55 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+  "protocol_version": "0.2.0",
+  "id": "folderbase.project",
+  "version": "0.2.1",
+  "name": "Project Folderbase",
+  "description": "Optional starting guidance for a bounded project.",
+  "suggested_folderbase_kind": "project",
+  "questions": [
+    {
+      "id": "purpose",
+      "prompt": "What outcome does this project exist to achieve?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "current_state",
+      "prompt": "What is true about this project right now?",
+      "answer_type": "text",
+      "required": true
+    },
+    {
+      "id": "next_action",
+      "prompt": "What is the next concrete action?",
+      "answer_type": "text",
+      "required": true
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "Decisions",
+      "kind": "directory",
+      "install": "create_if_missing",
+      "x-purpose": "Suggested decision-log location."
+    },
+    {
+      "target": "Deliverables",
+      "kind": "directory",
+      "install": "create_if_missing"
+    },
+    {
+      "target": "FOLDERBASE.md",
+      "kind": "text",
+      "content": "# Folderbase\n\n## Purpose\n${purpose}\n\n## Current state\n${current_state}\n\n## Next action\n${next_action}\n",
+      "install": "create_if_missing"
+    }
+  ],
+  "upgrade_edges": [
+    {
+      "from": "0.2.0",
+      "to": "0.2.1",
+      "notes": "Adds typed setup questions and an explicitly rendered folderbase entry."
+    }
+  ]
+}

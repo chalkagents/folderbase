@@ -1,0 +1,325 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.1/migration.schema.json",
+  "title": "Folderbase 0.1 migration plan",
+  "description": "A previewable and recoverable plan for structural change.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "id",
+    "state",
+    "source_inventory",
+    "base_folderbase_version",
+    "questions",
+    "proposed_folderbases",
+    "operations",
+    "exclusions",
+    "storage_impact",
+    "rollback"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocolVersion"
+    },
+    "id": {
+      "$ref": "#/$defs/migrationId"
+    },
+    "state": {
+      "enum": [
+        "analyzing",
+        "questions",
+        "proposed",
+        "approved",
+        "applying",
+        "verified",
+        "rejected",
+        "rolled_back"
+      ]
+    },
+    "source_inventory": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "digest"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 16,
+          "pattern": "^[0-9a-f]+$"
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "file_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "base_folderbase_version": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "prompt",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^question_[a-z0-9][a-z0-9_-]*$"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "unanswered",
+              "answered"
+            ]
+          },
+          "answer": true
+        },
+        "additionalProperties": true
+      }
+    },
+    "proposed_folderbases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "path"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/folderbaseId"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "person",
+              "organization",
+              "engagement",
+              "project",
+              "customer",
+              "temporary",
+              "custom"
+            ]
+          },
+          "path": {
+            "$ref": "#/$defs/safeRelativePath"
+          },
+          "permission_boundary_reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/safeRelativePath"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "classification": {
+            "enum": [
+              "generated",
+              "reconstructable",
+              "local_secret",
+              "intentionally_local",
+              "temporary",
+              "unsupported",
+              "other"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "storage_impact": {
+      "type": "object",
+      "required": [
+        "local_bytes_delta",
+        "cloud_bytes_delta"
+      ],
+      "properties": {
+        "local_bytes_delta": {
+          "type": "integer"
+        },
+        "cloud_bytes_delta": {
+          "type": "integer"
+        },
+        "reclaimable_local_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "rollback": {
+      "type": "object",
+      "required": [
+        "snapshot_required",
+        "strategy"
+      ],
+      "properties": {
+        "snapshot_required": {
+          "const": true
+        },
+        "strategy": {
+          "enum": [
+            "restore_snapshot",
+            "reverse_operations"
+          ]
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^0\\.1\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "migrationId": {
+      "type": "string",
+      "pattern": "^migration_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$"
+    },
+    "operation": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^operation_[a-z0-9][a-z0-9_-]*$"
+        },
+        "type": {
+          "enum": [
+            "create_folderbase",
+            "create_folder",
+            "create_object",
+            "move_object",
+            "copy_object",
+            "mark_canonical",
+            "mark_superseded",
+            "archive_object",
+            "add_relationship",
+            "update_adapter",
+            "update_policy"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "completed",
+            "failed",
+            "rolled_back"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "source_path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "destination_path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "object_id": {
+          "$ref": "#/$defs/objectId"
+        },
+        "target_object_id": {
+          "$ref": "#/$defs/objectId"
+        },
+        "folderbase_id": {
+          "$ref": "#/$defs/folderbaseId"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

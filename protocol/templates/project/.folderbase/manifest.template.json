@@ -1,0 +1,28 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "protocol_version": "0.1.0",
+  "folderbase": {
+    "id": "${FOLDERBASE_ID}",
+    "name": "${FOLDERBASE_NAME}",
+    "kind": "project",
+    "status": "active",
+    "created_at": "${CREATED_AT_RFC3339}",
+    "entry": "FOLDERBASE.md"
+  },
+  "adapters": [
+    {
+      "agent": "codex",
+      "path": "AGENTS.md"
+    },
+    {
+      "agent": "claude",
+      "path": "CLAUDE.md"
+    }
+  ],
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "approve",
+    "cloud_sync": "disabled"
+  }
+}

@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.2/template-application.schema.json",
+  "title": "Folderbase verified template application",
+  "description": "An immutable record written only after safe additive template guidance is verified.",
+  "type": "object",
+  "required": [
+    "$schema",
+    "protocol_version",
+    "id",
+    "folderbase_id",
+    "state",
+    "template",
+    "comparison",
+    "applied_at",
+    "created_paths",
+    "preserved_targets",
+    "plan_digest",
+    "record_digest"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://folderbase.ai/protocol/0.2/template-application.schema.json"
+    },
+    "protocol_version": {
+      "const": "0.2.0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^template_application_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "folderbase_id": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "state": {
+      "const": "verified"
+    },
+    "template": {
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "package_digest"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "version": {
+          "$ref": "#/$defs/semanticVersion"
+        },
+        "package_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "comparison": {
+      "type": "object",
+      "required": [
+        "source",
+        "version",
+        "application_id"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "origin",
+            "application"
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/semanticVersion"
+        },
+        "application_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^template_application_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "const": "origin"
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "application_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "const": "application"
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "application_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "applied_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_paths": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/typedPath"
+      }
+    },
+    "preserved_targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/typedPath"
+      }
+    },
+    "plan_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "record_digest": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "semanticVersion": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\/$)[^\\u0000]+$"
+    },
+    "sha256": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "digest"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "typedPath": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "kind": {
+          "enum": [
+            "directory",
+            "text"
+          ]
+        },
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "directory"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "bytes": {
+                "type": "null"
+              },
+              "sha256": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "bytes": {
+                "type": "integer"
+              },
+              "sha256": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

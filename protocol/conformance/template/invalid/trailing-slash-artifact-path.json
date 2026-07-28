@@ -1,0 +1,14 @@
+{
+  "protocol_version": "0.2.0",
+  "id": "folderbase.trailing-slash",
+  "version": "0.2.0",
+  "name": "Trailing slash target",
+  "suggested_folderbase_kind": "project",
+  "artifacts": [
+    {
+      "target": "Decisions/",
+      "kind": "directory",
+      "install": "create_if_missing"
+    }
+  ]
+}

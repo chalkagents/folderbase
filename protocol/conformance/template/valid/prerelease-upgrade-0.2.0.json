@@ -1,0 +1,15 @@
+{
+  "protocol_version": "0.2.0",
+  "id": "folderbase.prerelease",
+  "version": "0.2.0",
+  "name": "Prerelease upgrade",
+  "suggested_folderbase_kind": "project",
+  "artifacts": [],
+  "upgrade_edges": [
+    {
+      "from": "0.2.0-alpha.1",
+      "to": "0.2.0",
+      "x-release-note": "A stable release follows its prerelease."
+    }
+  ]
+}

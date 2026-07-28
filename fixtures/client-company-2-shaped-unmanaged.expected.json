@@ -1,0 +1,261 @@
+{
+  "fixture": "client-company-2-shaped-unmanaged",
+  "safety": {
+    "contains_live_data": false,
+    "source_must_remain_unmanaged": true,
+    "inspection_must_be_read_only": true,
+    "secret_contents_must_not_appear_in_reports": true,
+    "relationships_grant_access": false
+  },
+  "inspection_v0_1_baseline": {
+    "file_count": 44,
+    "generated_file_count": 5,
+    "secret_shaped_file_count": 2,
+    "temporary_file_count": 1,
+    "large_file_count": 0,
+    "versioned_file_count": 6,
+    "git_repositories": [
+      "Loyalty-Revamp/Reference-App",
+      "Reference/Client Company 2-dev",
+      "Security-Remediation/Tooling"
+    ]
+  },
+  "provenance_labels": [
+    "ChalkAgents",
+    "Prosperna",
+    "Okada"
+  ],
+  "expected_topology": {
+    "workspace": "Okada Account Workspace",
+    "folderbases": [
+      "Okada Account Folderbase",
+      "ChalkAgents-Prosperna Engagement Folderbase",
+      "Security Remediation Project Folderbase",
+      "Loyalty Revamp Project Folderbase",
+      "Support and Maintenance Project Folderbase",
+      "Commercial Folderbase"
+    ],
+    "views": [
+      "Client-shared View"
+    ],
+    "permission_inheritance": false
+  },
+  "authoritative_context_candidates": [
+    "Account/README.md",
+    "Engagement-Provenance/README.md",
+    "Evidence/Curated/README.md",
+    "emails/README.md",
+    "Reference/Client Company 2-dev/README.md",
+    "Reference/Client Company 2-dev/.chalk/README.md"
+  ],
+  "generated_or_reconstructable": [
+    "dashboard/node_modules/example-package/package.json",
+    "dashboard/.next/build-manifest.json",
+    "Reference/Client Company 2-dev/mobile/.dart_tool/package_config.json",
+    "Loyalty-Revamp/Reference-App/dist/bundle.js",
+    "Security-Remediation/Tooling/target/debug/tool-output.bin"
+  ],
+  "secret_shaped_local_only": [
+    "Reference/Client Company 2-dev/config/api_key.txt",
+    "Reference/Client Company 2-dev/config/.env.synthetic"
+  ],
+  "version_families": [
+    [
+      "Commercial-Restricted/Agreement_Draft_v2.md",
+      "Commercial-Restricted/Agreement_Revised_v3.md",
+      "Commercial-Restricted/Agreement_Final_v4.md"
+    ],
+    [
+      "Loyalty-Revamp/Proposals/Loyalty_Proposal_Draft_v2.md",
+      "Loyalty-Revamp/Proposals/Loyalty_Proposal_Revised_v3.md",
+      "Loyalty-Revamp/Proposals/Loyalty_Proposal_Final_v4.md"
+    ]
+  ],
+  "nested_repository_markers": [
+    "Reference/Client Company 2-dev/.gitmodules",
+    "Security-Remediation/Tooling/.gitmodules",
+    "Loyalty-Revamp/Reference-App/.gitmodules"
+  ],
+  "raw_evidence": [
+    "Evidence/Raw/Emails/thread-001.eml",
+    "Evidence/Raw/Attachments/remediation-evidence.zip"
+  ],
+  "curated_evidence": [
+    "Evidence/Curated/README.md"
+  ],
+  "tiny_format_placeholders": [
+    "Commercial-Restricted/Invoices/Synthetic-Invoice.pdf",
+    "Evidence/Raw/Attachments/remediation-evidence.zip",
+    "Loyalty-Revamp/Data/loyalty-reference.sqlite",
+    "Reference/Media/Architecture-Overview.pdf",
+    "Reference/Media/Walkthrough-LARGE-PLACEHOLDER.mp4"
+  ],
+  "client_shared_candidates": [
+    "Client-Shared/Project-Overview.md",
+    "Client-Shared/Candidate-Scope.md",
+    "Security-Remediation/Client-Deliverables/Completion-Note.md"
+  ],
+  "migration_grouping_v1": {
+    "threshold": 32,
+    "question_count": 20,
+    "assignment_scope_count": 44,
+    "groups": [
+      {
+        "source_root": ".",
+        "content_kind": "canonical",
+        "source_paths": [
+          "AGENTS.md",
+          "README.md"
+        ]
+      },
+      {
+        "source_root": "Account",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Account/README.md"
+        ]
+      },
+      {
+        "source_root": "ChalkAgents-Prosperna-Client-Engagement",
+        "content_kind": "canonical",
+        "source_paths": [
+          "ChalkAgents-Prosperna-Client-Engagement/README.md"
+        ]
+      },
+      {
+        "source_root": "Client-Shared",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Client-Shared/Candidate-Scope.md",
+          "Client-Shared/Project-Overview.md"
+        ]
+      },
+      {
+        "source_root": "Commercial-Restricted",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Commercial-Restricted/Access-Scope.md",
+          "Commercial-Restricted/Agreement_Draft_v2.md",
+          "Commercial-Restricted/Agreement_Final_v4.md",
+          "Commercial-Restricted/Agreement_Revised_v3.md",
+          "Commercial-Restricted/Invoices/Synthetic-Invoice.pdf"
+        ]
+      },
+      {
+        "source_root": "Evidence",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Evidence/Curated/README.md",
+          "Evidence/Raw/Attachments/remediation-evidence.zip",
+          "Evidence/Raw/Emails/thread-001.eml"
+        ]
+      },
+      {
+        "source_root": "Loyalty-Revamp-Project",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Loyalty-Revamp-Project/Data/loyalty-reference.sqlite",
+          "Loyalty-Revamp-Project/Proposals/Loyalty_Proposal_Draft_v2.md",
+          "Loyalty-Revamp-Project/Proposals/Loyalty_Proposal_Final_v4.md",
+          "Loyalty-Revamp-Project/Proposals/Loyalty_Proposal_Revised_v3.md",
+          "Loyalty-Revamp-Project/README.md",
+          "Loyalty-Revamp-Project/Reference-App/.gitmodules",
+          "Loyalty-Revamp-Project/Reference-App/README.md",
+          "Loyalty-Revamp-Project/Requirements/CR-SYNTHETIC.md"
+        ]
+      },
+      {
+        "source_root": "Loyalty-Revamp-Project",
+        "content_kind": "generated",
+        "source_paths": [
+          "Loyalty-Revamp-Project/Reference-App/dist"
+        ]
+      },
+      {
+        "source_root": "Reference",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Reference/Client Company 2-dev/.chalk/README.md",
+          "Reference/Client Company 2-dev/.gitignore",
+          "Reference/Client Company 2-dev/.gitmodules",
+          "Reference/Client Company 2-dev/README.md",
+          "Reference/Media/Architecture-Overview.pdf",
+          "Reference/Media/Walkthrough-LARGE-PLACEHOLDER.mp4"
+        ]
+      },
+      {
+        "source_root": "Reference",
+        "content_kind": "generated",
+        "source_paths": [
+          "Reference/Client Company 2-dev/mobile/.dart_tool"
+        ]
+      },
+      {
+        "source_root": "Reference",
+        "content_kind": "secret_shaped",
+        "source_paths": [
+          "Reference/Client Company 2-dev/config/.env.synthetic",
+          "Reference/Client Company 2-dev/config/api_key.txt"
+        ]
+      },
+      {
+        "source_root": "Security-Remediation",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Security-Remediation/Client-Deliverables/Completion-Note.md",
+          "Security-Remediation/Finding-001.md",
+          "Security-Remediation/README.md",
+          "Security-Remediation/Tooling/.gitmodules",
+          "Security-Remediation/Tooling/README.md"
+        ]
+      },
+      {
+        "source_root": "Security-Remediation",
+        "content_kind": "generated",
+        "source_paths": [
+          "Security-Remediation/Tooling/target"
+        ]
+      },
+      {
+        "source_root": "Support-and-Maintenance-Project",
+        "content_kind": "canonical",
+        "source_paths": [
+          "Support-and-Maintenance-Project/README.md",
+          "Support-and-Maintenance-Project/Reports/Weekly-Status.md"
+        ]
+      },
+      {
+        "source_root": "dashboard",
+        "content_kind": "generated",
+        "source_paths": [
+          "dashboard/.next",
+          "dashboard/node_modules"
+        ]
+      },
+      {
+        "source_root": "emails",
+        "content_kind": "canonical",
+        "source_paths": [
+          "emails/README.md"
+        ]
+      },
+      {
+        "source_root": "tmp",
+        "content_kind": "temporary",
+        "source_paths": [
+          "tmp/render-preview.tmp"
+        ]
+      }
+    ]
+  },
+  "future_red_test_expectations": [
+    "The analyzer proposes an account workspace rather than one root folderbase.",
+    "Account, engagement, security, loyalty, support, and commercial scopes receive explicit typed dispositions.",
+    "Client-Shared is proposed as a scoped view candidate, not permission inherited from its folder name.",
+    "Generated and reconstructable paths are excluded by policy without deletion.",
+    "Secret-shaped paths remain local-only and their contents never enter a report.",
+    "Raw evidence remains retained and traceable from the curated index.",
+    "Both version families require a canonical-choice review.",
+    "Every proposed folderbase is independently valid and the workspace grants no access."
+  ]
+}

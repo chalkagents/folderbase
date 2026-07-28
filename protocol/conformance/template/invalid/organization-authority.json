@@ -1,0 +1,11 @@
+{
+  "protocol_version": "0.2.0",
+  "id": "folderbase.organization",
+  "version": "0.2.0",
+  "name": "Organization starter",
+  "suggested_folderbase_kind": "organization",
+  "artifacts": [],
+  "permissions": {
+    "grant": "owner"
+  }
+}

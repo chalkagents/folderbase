@@ -1,0 +1,745 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.2/migration.schema.json",
+  "title": "Folderbase Migration Plan 0.2",
+  "description": "A durable, previewable, digest-bound plan for adopting or reorganizing a folderbase.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "id",
+    "root",
+    "state",
+    "source_inventory",
+    "answers",
+    "template_references",
+    "targets",
+    "operations",
+    "exclusions"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": "0.2.0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^migration_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "enum": [
+        "proposed",
+        "approved",
+        "applying",
+        "verified",
+        "conflicted",
+        "rejected",
+        "rolled_back"
+      ]
+    },
+    "source_inventory": {
+      "$ref": "#/$defs/sourceInventory"
+    },
+    "answers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/answer"
+      }
+    },
+    "template_references": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/exclusion"
+      }
+    },
+    "approval_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "x-folderbase-grouped-assignments-v1": {
+      "$ref": "#/$defs/groupedAssignments"
+    },
+    "x-folderbase-expanded-reconstructable-trees-v1": {
+      "$ref": "#/$defs/expandedReconstructableTrees"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableSha256": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{2}(?:/|$))(?!.*//)[^\\u0000]+$"
+    },
+    "nullableSafeRelativePath": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sourceFile": {
+      "type": "object",
+      "required": [
+        "path",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceInventory": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "digest",
+        "files"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceFile"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "required": [
+        "question_id",
+        "answer"
+      ],
+      "properties": {
+        "question_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exceptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/answerException"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "answerException": {
+      "type": "object",
+      "required": [
+        "source_path",
+        "target_id"
+      ],
+      "properties": {
+        "source_path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "target_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupedAssignments": {
+      "type": "object",
+      "required": [
+        "version",
+        "groups"
+      ],
+      "properties": {
+        "version": {
+          "const": "1"
+        },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/groupedAssignment"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupedAssignment": {
+      "type": "object",
+      "required": [
+        "question_id",
+        "rule_version",
+        "source_root",
+        "members",
+        "content_kind",
+        "coverage_digest",
+        "default_target_id",
+        "exceptions"
+      ],
+      "properties": {
+        "question_id": {
+          "type": "string",
+          "pattern": "^question_assignment_group_[0-9a-f]{64}$"
+        },
+        "rule_version": {
+          "const": "top_level_content_kind_v1"
+        },
+        "source_root": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/groupedAssignmentMember"
+          }
+        },
+        "content_kind": {
+          "enum": [
+            "canonical",
+            "generated",
+            "secret_shaped",
+            "temporary"
+          ]
+        },
+        "coverage_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "default_target_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exceptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/answerException"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupedAssignmentMember": {
+      "type": "object",
+      "required": [
+        "source_path",
+        "source_kind"
+      ],
+      "properties": {
+        "source_path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "source_kind": {
+          "enum": [
+            "regular_file",
+            "reconstructable_tree"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "expandedReconstructableTrees": {
+      "type": "object",
+      "required": [
+        "version",
+        "trees"
+      ],
+      "properties": {
+        "version": {
+          "const": "1"
+        },
+        "trees": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/expandedReconstructableTree"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "expandedReconstructableTree": {
+      "type": "object",
+      "required": [
+        "source_root",
+        "source_paths"
+      ],
+      "properties": {
+        "source_root": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "source_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/safeRelativePath"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "path",
+        "suggested_name",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "folderbase",
+            "workspace",
+            "scoped_view",
+            "retained_folder",
+            "exclusion"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "suggested_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "path"
+          ],
+          "properties": {
+            "type": {
+              "const": "create_folder"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "source_path",
+            "destination_path",
+            "expected_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "copy_file"
+            },
+            "source_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "destination_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "source_path",
+            "destination_path",
+            "expected_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "move_object"
+            },
+            "source_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "destination_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "path",
+            "managed_block",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "update_adapter"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "managed_block": {
+              "type": "string"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "path",
+            "content",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "update_ignore_policy"
+            },
+            "path": {
+              "const": ".folderbaseignore"
+            },
+            "content": {
+              "type": "string"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "manifest_path",
+            "policy",
+            "value",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "update_policy"
+            },
+            "manifest_path": {
+              "const": ".folderbase/manifest.json"
+            },
+            "policy": {
+              "type": "string",
+              "pattern": "^[a-z][a-z_]*$"
+            },
+            "value": true,
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "manifest_path",
+            "new_kind",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "change_kind"
+            },
+            "manifest_path": {
+              "const": ".folderbase/manifest.json"
+            },
+            "new_kind": {
+              "enum": [
+                "person",
+                "organization",
+                "engagement",
+                "project",
+                "customer",
+                "temporary",
+                "custom"
+              ]
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_record_path",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "mark_canonical"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_record_path",
+            "superseded_by",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "mark_superseded"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "superseded_by": {
+              "type": "string",
+              "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_record_path",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "archive_object"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "object_record_path",
+            "relationship_type",
+            "target_object_id",
+            "expected_sha256",
+            "expected_result_sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "add_relationship"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "relationship_type": {
+              "type": "string",
+              "pattern": "^[a-z][a-z_]*$"
+            },
+            "target_object_id": {
+              "type": "string",
+              "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_result_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "snapshot_path": {
+              "$ref": "#/$defs/nullableSafeRelativePath"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/nullableSha256"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "exclusion": {
+      "type": "object",
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
