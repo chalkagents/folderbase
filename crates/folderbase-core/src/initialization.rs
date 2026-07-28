@@ -49,6 +49,7 @@ pub fn plan_initialization(
         options.clone(),
         None,
         InitializationRequest::Ordinary { options },
+        InitializationInventoryBudget::default(),
     )
 }
 
@@ -67,7 +68,8 @@ pub fn plan_template_initialization(
     };
     refuse_symlink_root(root.as_ref())?;
     let root = canonical_directory(root.as_ref())?;
-    refuse_nested_target(&root)?;
+    let mut inventory_budget = InitializationInventoryBudget::default();
+    refuse_nested_target(&root, &mut inventory_budget)?;
     let folderbase_name = resolve_folderbase_name(&root, options.name.as_deref())?;
     let mut rendered_answers = answers.clone();
     if package
@@ -94,13 +96,14 @@ pub fn plan_template_initialization(
     }
     options.name = Some(folderbase_name);
     let rendered = render_template(package, &root, &rendered_answers)?;
-    let preconditions = template_preconditions(&root, package, &rendered)?;
+    let preconditions = template_preconditions(&root, package, &rendered, &mut inventory_budget)?;
     let package_digest = template_package_sha256(package)?;
     plan_initialization_with_template(
         &root,
         options,
         Some((rendered, preconditions, package_digest)),
         request,
+        inventory_budget,
     )
 }
 
@@ -113,9 +116,10 @@ fn plan_initialization_with_template(
         String,
     )>,
     request: InitializationRequest,
+    mut inventory_budget: InitializationInventoryBudget,
 ) -> Result<InitializationPlan> {
     let root = canonical_directory(root)?;
-    refuse_nested_target(&root)?;
+    refuse_nested_target(&root, &mut inventory_budget)?;
     if is_provider_controlled(&root) {
         return Err(FolderbaseError::ProviderControlled(root));
     }
@@ -139,7 +143,6 @@ fn plan_initialization_with_template(
     let mut directories = Vec::new();
     let mut writes = Vec::new();
     let mut template_preconditions = Vec::new();
-    let mut inventory_budget = InitializationInventoryBudget::default();
     let destination_inventory =
         snapshot_destination_inventory(&root_dir, &root, &mut inventory_budget)?;
     let mut preserved_paths = destination_inventory
@@ -694,10 +697,10 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
     if current_handle != plan.root_handle {
         return Err(FolderbaseError::PlanRootIdentityChanged(root));
     }
-    refuse_nested_target(&root)?;
+    let mut preflight_budget = InitializationInventoryBudget::default();
+    refuse_nested_target(&root, &mut preflight_budget)?;
     let root_dir = Dir::from_std_file(root_file);
 
-    let mut preflight_budget = InitializationInventoryBudget::default();
     verify_template_preconditions(&root_dir, plan, &mut preflight_budget)?;
     validate_planned_paths_against_existing(&plan.root, &plan.directories, &plan.writes)?;
     verify_destinations_absent(&root_dir, plan, &mut preflight_budget)?;
@@ -868,10 +871,10 @@ fn template_preconditions(
     root: &Path,
     package: &TemplatePackage,
     rendered: &TemplateRenderPlan,
+    boundary_budget: &mut InitializationInventoryBudget,
 ) -> Result<Vec<TemplateArtifactPrecondition>> {
     let root_dir = open_root_capability(root)?.directory;
     let mut preconditions = Vec::new();
-    let mut boundary_budget = InitializationInventoryBudget::default();
     for path in &rendered.existing_paths {
         let artifact = package
             .artifacts
@@ -906,7 +909,7 @@ fn template_preconditions(
                 if has_nested_folderbase_marker_capability(
                     &directory,
                     destination.clone(),
-                    &mut boundary_budget,
+                    boundary_budget,
                 )? {
                     return Err(FolderbaseError::InvalidRecord {
                         path: destination,
@@ -1005,8 +1008,7 @@ fn verify_template_preconditions(
     Ok(())
 }
 
-fn refuse_nested_target(root: &Path) -> Result<()> {
-    let mut budget = InitializationInventoryBudget::default();
+fn refuse_nested_target(root: &Path, budget: &mut InitializationInventoryBudget) -> Result<()> {
     for ancestor in root.ancestors().skip(1) {
         let metadata = fs::symlink_metadata(ancestor)
             .map_err(|source| FolderbaseError::io(ancestor, source))?;
@@ -1014,8 +1016,7 @@ fn refuse_nested_target(root: &Path) -> Result<()> {
             continue;
         }
         let directory = open_root_capability(ancestor)?.directory;
-        if has_nested_folderbase_marker_capability(&directory, ancestor.to_path_buf(), &mut budget)?
-        {
+        if has_nested_folderbase_marker_capability(&directory, ancestor.to_path_buf(), budget)? {
             return Err(FolderbaseError::InvalidRecord {
                 path: root.to_path_buf(),
                 message: format!(
