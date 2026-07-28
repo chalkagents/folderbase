@@ -257,6 +257,34 @@ Kinds select starting templates and recommendations. They do not change the
 permission invariant, prohibit expansion, or require a folderbase to preserve the
 template's suggested layout.
 
+## Initialization approval binding
+
+Initialization is additive, but a reviewed dry-run can still become stale
+before apply. The reference Core therefore emits an opaque SHA-256 plan digest
+and accepts that digest when applying an approved initialization.
+
+The digest commits to:
+
+- the canonical destination and exact initialization request
+- exact template identity, semantic package digest, and typed answers
+- planned directories and protocol writes, with manifest fields interpreted
+  as Core semantics
+- existing-path and template preconditions
+- visible destination files, directories, symlinks, and nested-folderbase
+  boundaries
+- reconstructable-directory and boundary traversal policy
+
+Generated Folderbase IDs and timestamps are excluded, so repeated dry-runs
+over unchanged state produce the same digest. Descendants of a nested
+Folderbase or a recognized reconstructable dependency tree are not hashed;
+the boundary or reconstructable-tree presence is committed instead.
+
+An apply carrying an expected digest must replan the exact request inside the
+Core before its first write. A mismatch is a typed stale-plan error and creates
+no protocol files. The successful result returns the digest that was applied.
+Clients treat this digest as opaque and must not reproduce or normalize the
+Core's canonicalization.
+
 ## Templates and organization guidance
 
 A template is optional, versioned starting guidance. It may propose:

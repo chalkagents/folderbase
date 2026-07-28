@@ -22,7 +22,10 @@ mod validation;
 mod workspace;
 
 pub use error::{FolderbaseError, Result};
-pub use initialization::{initialize, plan_initialization, plan_template_initialization};
+pub use initialization::{
+    initialize, initialize_with_expected_plan_digest, plan_initialization,
+    plan_template_initialization,
+};
 pub use inspection::inspect;
 pub use local_versions::{
     ApprovedHistoryTransfer, CaptureResult, ContentDigest, HistoryTransferPlan,
@@ -40,15 +43,15 @@ pub use migration::{
 };
 pub use model::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseKind, InitializationOptions,
-    InitializationPlan, InitializationResult, InspectionReport, InventorySummary,
-    NestedFolderbaseBoundary, NestedFolderbaseState, PlannedDirectory, PlannedTemplateAddition,
-    PlannedWrite, PreservedPath, ReconstructableTree, TemplateAnswerType, TemplateAnswerValue,
-    TemplateApplicationCreatedPath, TemplateApplicationPreservedTarget, TemplateApplicationRecord,
-    TemplateApplicationResult, TemplateApplicationState, TemplateArtifactKind,
-    TemplateArtifactPrecondition, TemplateComparisonSource, TemplateDescriptor,
-    TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest, TemplateQuestion,
-    TemplateRenderPlan, TemplateStructuralChange, TemplateStructuralChangeKind, ValidationFinding,
-    ValidationLevel, ValidationReport, ValidationSeverity,
+    InitializationPlan, InitializationPlanDigest, InitializationResult, InspectionReport,
+    InventorySummary, NestedFolderbaseBoundary, NestedFolderbaseState, PlannedDirectory,
+    PlannedTemplateAddition, PlannedWrite, PreservedPath, ReconstructableTree, TemplateAnswerType,
+    TemplateAnswerValue, TemplateApplicationCreatedPath, TemplateApplicationPreservedTarget,
+    TemplateApplicationRecord, TemplateApplicationResult, TemplateApplicationState,
+    TemplateArtifactKind, TemplateArtifactPrecondition, TemplateComparisonSource,
+    TemplateDescriptor, TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest,
+    TemplateQuestion, TemplateRenderPlan, TemplateStructuralChange, TemplateStructuralChangeKind,
+    ValidationFinding, ValidationLevel, ValidationReport, ValidationSeverity,
 };
 pub use sharing::{
     AccessDecision, AccessReason, AccessRequest, FolderbaseRegistration, ShareGrant,

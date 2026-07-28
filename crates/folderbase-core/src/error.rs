@@ -24,6 +24,16 @@ pub enum FolderbaseError {
     #[error("preserved path changed after the initialization plan was created: {0}")]
     PlanPreconditionChanged(PathBuf),
 
+    #[error(
+        "initialization plan digest must be exactly 64 lowercase hexadecimal SHA-256 characters"
+    )]
+    InvalidInitializationPlanDigest,
+
+    #[error(
+        "initialization plan changed after approval: expected {expected}, current plan is {actual}"
+    )]
+    InitializationPlanChanged { expected: String, actual: String },
+
     #[error("migration is not in the required state: expected {expected}, found {actual}")]
     InvalidMigrationState {
         expected: &'static str,

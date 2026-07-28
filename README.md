@@ -72,12 +72,21 @@ Preview the additive initialization:
 folderbase init /path/to/project --dry-run --json
 ```
 
-Initialize only after reviewing the plan:
+The JSON plan includes a stable Core-owned `plan_digest`. To bind approval to
+the exact reviewed request, template, protocol writes, boundaries, and visible
+destination state, apply with that digest:
 
 ```sh
-folderbase init /path/to/project
+folderbase init /path/to/project \
+  --expected-plan-digest DIGEST_FROM_DRY_RUN \
+  --json
 folderbase validate /path/to/project --json
 ```
+
+The Core replans immediately before its first write. If the folder, request, or
+template semantics changed, it returns `initialization_plan_changed` and writes
+nothing. `folderbase init /path/to/project` remains available for direct,
+single-step initialization.
 
 Initialization leaves the original files in place and adds the Folderbase
 protocol surface:

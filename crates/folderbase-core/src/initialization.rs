@@ -8,18 +8,21 @@ use std::{
 use cap_std::fs::{Dir, OpenOptions};
 use chrono::Utc;
 use same_file::Handle;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use uuid::Uuid;
 
+use crate::model::{
+    InitializationDestinationEntry, InitializationDestinationKind, InitializationRequest,
+};
 use crate::template::template_package_sha256;
 use crate::workspace::has_nested_folderbase_marker;
 use crate::{
     FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlan,
-    InitializationResult, PlannedDirectory, PlannedWrite, PreservedPath, Result,
-    TemplateAnswerValue, TemplateArtifactKind, TemplateArtifactPrecondition, TemplatePackage,
-    TemplateRenderPlan, render_template,
+    InitializationPlanDigest, InitializationResult, PlannedDirectory, PlannedWrite, PreservedPath,
+    Result, TemplateAnswerValue, TemplateArtifactKind, TemplateArtifactPrecondition,
+    TemplatePackage, TemplateRenderPlan, render_template,
 };
 
 const FOLDERBASE_ENTRY: &str = "FOLDERBASE.md";
@@ -33,7 +36,12 @@ pub fn plan_initialization(
     root: impl AsRef<Path>,
     options: InitializationOptions,
 ) -> Result<InitializationPlan> {
-    plan_initialization_with_template(root.as_ref(), options, None)
+    plan_initialization_with_template(
+        root.as_ref(),
+        options.clone(),
+        None,
+        InitializationRequest::Ordinary { options },
+    )
 }
 
 /// Produce a complete, read-only plan for adopting an ordinary folder with a
@@ -44,6 +52,11 @@ pub fn plan_template_initialization(
     package: &TemplatePackage,
     answers: &BTreeMap<String, TemplateAnswerValue>,
 ) -> Result<InitializationPlan> {
+    let request = InitializationRequest::Template {
+        options: options.clone(),
+        package: Box::new(package.clone()),
+        answers: answers.clone(),
+    };
     refuse_symlink_root(root.as_ref())?;
     let root = canonical_directory(root.as_ref())?;
     refuse_nested_target(&root)?;
@@ -79,6 +92,7 @@ pub fn plan_template_initialization(
         &root,
         options,
         Some((rendered, preconditions, package_digest)),
+        request,
     )
 }
 
@@ -90,6 +104,7 @@ fn plan_initialization_with_template(
         Vec<TemplateArtifactPrecondition>,
         String,
     )>,
+    request: InitializationRequest,
 ) -> Result<InitializationPlan> {
     let root = canonical_directory(root)?;
     refuse_nested_target(&root)?;
@@ -113,7 +128,16 @@ fn plan_initialization_with_template(
     let mut directories = Vec::new();
     let mut writes = Vec::new();
     let mut template_preconditions = Vec::new();
-    let mut preserved_paths = snapshot_existing_files(&root)?;
+    let destination_inventory = snapshot_destination_inventory(&root)?;
+    let mut preserved_paths = destination_inventory
+        .iter()
+        .filter_map(|entry| {
+            entry.sha256.as_ref().map(|sha256| PreservedPath {
+                path: entry.path.clone(),
+                sha256: sha256.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
     let mut warnings = Vec::new();
 
     let template_provenance = if let Some((rendered, preconditions, package_digest)) =
@@ -300,6 +324,18 @@ fn plan_initialization_with_template(
     preserved_paths.sort_by(|left, right| left.path.cmp(&right.path));
     warnings.sort();
 
+    let plan_digest = initialization_plan_digest(InitializationDigestInput {
+        root: &root,
+        request: &request,
+        folderbase_kind: options.kind,
+        directories: &directories,
+        writes: &writes,
+        template_preconditions: &template_preconditions,
+        preserved_paths: &preserved_paths,
+        warnings: &warnings,
+        destination_inventory: &destination_inventory,
+    })?;
+
     Ok(InitializationPlan {
         root,
         folderbase_id,
@@ -310,8 +346,311 @@ fn plan_initialization_with_template(
         template_preconditions,
         preserved_paths,
         warnings,
+        plan_digest,
         root_handle,
+        request,
+        destination_inventory,
     })
+}
+
+struct InitializationDigestInput<'a> {
+    root: &'a Path,
+    request: &'a InitializationRequest,
+    folderbase_kind: FolderbaseKind,
+    directories: &'a [PlannedDirectory],
+    writes: &'a [PlannedWrite],
+    template_preconditions: &'a [TemplateArtifactPrecondition],
+    preserved_paths: &'a [PreservedPath],
+    warnings: &'a [String],
+    destination_inventory: &'a [InitializationDestinationEntry],
+}
+
+fn initialization_plan_digest(
+    input: InitializationDigestInput<'_>,
+) -> Result<InitializationPlanDigest> {
+    let mut hasher = Sha256::new();
+    digest_bytes(&mut hasher, b"domain", b"folderbase.initialization-plan.v1");
+    digest_path(&mut hasher, b"root", input.root);
+    digest_text(
+        &mut hasher,
+        b"resolved_folderbase_kind",
+        folderbase_kind_name(input.folderbase_kind),
+    );
+    digest_request(&mut hasher, input.request)?;
+
+    digest_u64(
+        &mut hasher,
+        b"directory_count",
+        input.directories.len() as u64,
+    );
+    for directory in input.directories {
+        digest_path(&mut hasher, b"directory_path", &directory.path);
+        digest_text(
+            &mut hasher,
+            b"directory_purpose",
+            directory.purpose.as_str(),
+        );
+    }
+
+    digest_u64(&mut hasher, b"write_count", input.writes.len() as u64);
+    for write in input.writes {
+        digest_path(&mut hasher, b"write_path", &write.path);
+        digest_text(&mut hasher, b"write_purpose", write.purpose.as_str());
+        if write.path == Path::new(MANIFEST) {
+            let mut manifest = serde_json::from_str::<Value>(&write.content)
+                .map_err(|source| FolderbaseError::json(input.root.join(MANIFEST), source))?;
+            for pointer in [
+                "/folderbase/id",
+                "/folderbase/created_at",
+                "/folderbase/template_provenance/applied_at",
+            ] {
+                if let Some(value) = manifest.pointer_mut(pointer) {
+                    *value = Value::String("<volatile>".to_owned());
+                }
+            }
+            digest_json_value(&mut hasher, b"write_manifest_semantics", &manifest);
+        } else {
+            digest_bytes(&mut hasher, b"write_content", write.content.as_bytes());
+        }
+    }
+
+    digest_u64(
+        &mut hasher,
+        b"template_precondition_count",
+        input.template_preconditions.len() as u64,
+    );
+    for precondition in input.template_preconditions {
+        digest_path(
+            &mut hasher,
+            b"template_precondition_path",
+            &precondition.path,
+        );
+        digest_text(
+            &mut hasher,
+            b"template_precondition_kind",
+            template_artifact_kind_name(precondition.kind),
+        );
+    }
+
+    digest_u64(
+        &mut hasher,
+        b"preserved_path_count",
+        input.preserved_paths.len() as u64,
+    );
+    for preserved in input.preserved_paths {
+        digest_path(&mut hasher, b"preserved_path", &preserved.path);
+        digest_text(&mut hasher, b"preserved_sha256", preserved.sha256.as_str());
+    }
+
+    digest_u64(&mut hasher, b"warning_count", input.warnings.len() as u64);
+    for warning in input.warnings {
+        digest_text(&mut hasher, b"warning", warning);
+    }
+
+    digest_u64(
+        &mut hasher,
+        b"destination_inventory_count",
+        input.destination_inventory.len() as u64,
+    );
+    for entry in input.destination_inventory {
+        digest_path(&mut hasher, b"destination_path", &entry.path);
+        digest_text(
+            &mut hasher,
+            b"destination_kind",
+            destination_kind_name(entry.kind),
+        );
+        digest_optional_u64(&mut hasher, b"destination_bytes", entry.bytes);
+        digest_optional_text(&mut hasher, b"destination_sha256", entry.sha256.as_deref());
+        match &entry.symlink_target {
+            Some(target) => {
+                digest_text(&mut hasher, b"destination_symlink_present", "true");
+                digest_path(&mut hasher, b"destination_symlink_target", target);
+            }
+            None => digest_text(&mut hasher, b"destination_symlink_present", "false"),
+        }
+    }
+
+    Ok(InitializationPlanDigest {
+        algorithm: "sha256".to_owned(),
+        digest: format!("{:x}", hasher.finalize()),
+    })
+}
+
+fn digest_request(hasher: &mut Sha256, request: &InitializationRequest) -> Result<()> {
+    let options = match request {
+        InitializationRequest::Ordinary { options } => {
+            digest_text(hasher, b"request_type", "ordinary");
+            options
+        }
+        InitializationRequest::Template {
+            options,
+            package,
+            answers,
+        } => {
+            digest_text(hasher, b"request_type", "template");
+            digest_text(hasher, b"template_id", package.id());
+            digest_text(hasher, b"template_version", package.version());
+            digest_text(
+                hasher,
+                b"template_package_sha256",
+                &template_package_sha256(package)?,
+            );
+            digest_u64(hasher, b"template_answer_count", answers.len() as u64);
+            for (id, answer) in answers {
+                digest_text(hasher, b"template_answer_id", id);
+                match answer {
+                    TemplateAnswerValue::Text(value) => {
+                        digest_text(hasher, b"template_answer_type", "text");
+                        digest_text(hasher, b"template_answer_value", value);
+                    }
+                    TemplateAnswerValue::Boolean(value) => {
+                        digest_text(hasher, b"template_answer_type", "boolean");
+                        digest_text(
+                            hasher,
+                            b"template_answer_value",
+                            if *value { "true" } else { "false" },
+                        );
+                    }
+                }
+            }
+            options
+        }
+    };
+    match &options.name {
+        Some(name) => {
+            digest_text(hasher, b"request_name_present", "true");
+            digest_text(hasher, b"request_name", name);
+        }
+        None => digest_text(hasher, b"request_name_present", "false"),
+    }
+    digest_text(hasher, b"request_kind", folderbase_kind_name(options.kind));
+    digest_text(
+        hasher,
+        b"request_create_agent_adapters",
+        if options.create_agent_adapters {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    Ok(())
+}
+
+fn digest_json_value(hasher: &mut Sha256, label: &[u8], value: &Value) {
+    digest_bytes(hasher, b"json_label", label);
+    match value {
+        Value::Null => digest_text(hasher, b"json_type", "null"),
+        Value::Bool(value) => {
+            digest_text(hasher, b"json_type", "boolean");
+            digest_text(
+                hasher,
+                b"json_boolean",
+                if *value { "true" } else { "false" },
+            );
+        }
+        Value::Number(value) => {
+            digest_text(hasher, b"json_type", "number");
+            digest_text(hasher, b"json_number", &value.to_string());
+        }
+        Value::String(value) => {
+            digest_text(hasher, b"json_type", "string");
+            digest_text(hasher, b"json_string", value);
+        }
+        Value::Array(values) => {
+            digest_text(hasher, b"json_type", "array");
+            digest_u64(hasher, b"json_array_length", values.len() as u64);
+            for value in values {
+                digest_json_value(hasher, b"json_array_value", value);
+            }
+        }
+        Value::Object(values) => {
+            digest_text(hasher, b"json_type", "object");
+            digest_u64(hasher, b"json_object_length", values.len() as u64);
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                digest_text(hasher, b"json_object_key", key);
+                digest_json_value(hasher, b"json_object_value", &values[key]);
+            }
+        }
+    }
+}
+
+fn digest_path(hasher: &mut Sha256, label: &[u8], path: &Path) {
+    digest_bytes(hasher, b"path_label", label);
+    digest_os_str(hasher, b"path_value", path.as_os_str());
+}
+
+fn digest_os_str(hasher: &mut Sha256, label: &[u8], value: &std::ffi::OsStr) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        digest_bytes(hasher, label, value.as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes = value
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        digest_bytes(hasher, label, &bytes);
+    }
+    #[cfg(not(any(unix, windows)))]
+    digest_bytes(hasher, label, value.as_encoded_bytes());
+}
+
+fn digest_text(hasher: &mut Sha256, label: &[u8], value: &str) {
+    digest_bytes(hasher, label, value.as_bytes());
+}
+
+fn digest_optional_text(hasher: &mut Sha256, label: &[u8], value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest_bytes(hasher, b"optional_present", label);
+            digest_text(hasher, label, value);
+        }
+        None => digest_bytes(hasher, b"optional_absent", label),
+    }
+}
+
+fn digest_optional_u64(hasher: &mut Sha256, label: &[u8], value: Option<u64>) {
+    match value {
+        Some(value) => {
+            digest_bytes(hasher, b"optional_present", label);
+            digest_u64(hasher, label, value);
+        }
+        None => digest_bytes(hasher, b"optional_absent", label),
+    }
+}
+
+fn digest_u64(hasher: &mut Sha256, label: &[u8], value: u64) {
+    digest_bytes(hasher, label, &value.to_be_bytes());
+}
+
+fn digest_bytes(hasher: &mut Sha256, label: &[u8], value: &[u8]) {
+    hasher.update((label.len() as u64).to_be_bytes());
+    hasher.update(label);
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn template_artifact_kind_name(kind: TemplateArtifactKind) -> &'static str {
+    match kind {
+        TemplateArtifactKind::Directory => "directory",
+        TemplateArtifactKind::Text => "text",
+    }
+}
+
+fn destination_kind_name(kind: InitializationDestinationKind) -> &'static str {
+    match kind {
+        InitializationDestinationKind::Directory => "directory",
+        InitializationDestinationKind::File => "file",
+        InitializationDestinationKind::Symlink => "symlink",
+        InitializationDestinationKind::ReconstructableDirectory => "reconstructable_directory",
+        InitializationDestinationKind::NestedFolderbase => "nested_folderbase",
+        InitializationDestinationKind::Other => "other",
+    }
 }
 
 fn resolve_folderbase_name(root: &Path, requested: Option<&str>) -> Result<String> {
@@ -366,12 +705,16 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
     if current_handle != plan.root_handle {
         return Err(FolderbaseError::PlanRootIdentityChanged(root));
     }
+    refuse_nested_target(&root)?;
     let root_dir = Dir::from_std_file(root_file);
 
     verify_template_preconditions(&root_dir, plan)?;
     verify_preserved_paths(&root_dir, plan)?;
     validate_planned_paths_against_existing(&plan.root, &plan.directories, &plan.writes)?;
     verify_destinations_absent(&root_dir, plan)?;
+    if snapshot_destination_inventory(&root)? != plan.destination_inventory {
+        return Err(FolderbaseError::PlanPreconditionChanged(root));
+    }
 
     for directory in &plan.directories {
         create_directory_no_clobber(&root_dir, &plan.root, &directory.path)?;
@@ -402,7 +745,34 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
             .iter()
             .map(|preserved| preserved.path.clone())
             .collect(),
+        applied_plan_digest: plan.plan_digest.clone(),
     })
+}
+
+/// Replan the exact Core request against the current destination and apply it
+/// only when its digest is the one the caller approved.
+pub fn initialize_with_expected_plan_digest(
+    plan: &InitializationPlan,
+    expected: &InitializationPlanDigest,
+) -> Result<InitializationResult> {
+    expected.validate()?;
+    let current = match &plan.request {
+        InitializationRequest::Ordinary { options } => {
+            plan_initialization(&plan.root, options.clone())?
+        }
+        InitializationRequest::Template {
+            options,
+            package,
+            answers,
+        } => plan_template_initialization(&plan.root, options.clone(), package, answers)?,
+    };
+    if current.plan_digest != *expected {
+        return Err(FolderbaseError::InitializationPlanChanged {
+            expected: expected.digest.clone(),
+            actual: current.plan_digest.digest.clone(),
+        });
+    }
+    initialize(&current)
 }
 
 pub(crate) fn create_directory_no_clobber(root_dir: &Dir, root: &Path, path: &Path) -> Result<()> {
@@ -607,47 +977,91 @@ pub(crate) fn refuse_template_target_inside_nested_folderbase(
     Ok(())
 }
 
-fn snapshot_existing_files(root: &Path) -> Result<Vec<PreservedPath>> {
-    fn visit(root: &Path, current: &Path, preserved: &mut Vec<PreservedPath>) -> Result<()> {
+fn snapshot_destination_inventory(root: &Path) -> Result<Vec<InitializationDestinationEntry>> {
+    fn visit(
+        root: &Path,
+        current: &Path,
+        inventory: &mut Vec<InitializationDestinationEntry>,
+    ) -> Result<()> {
         let entries =
             fs::read_dir(current).map_err(|source| FolderbaseError::io(current, source))?;
         for entry in entries {
             let entry = entry.map_err(|source| FolderbaseError::io(current, source))?;
             let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("walked path stays under root")
+                .to_path_buf();
             let metadata =
                 fs::symlink_metadata(&path).map_err(|source| FolderbaseError::io(&path, source))?;
             if metadata.file_type().is_symlink() {
-                // Unrelated symlinks are never followed or changed by this
-                // additive plan. Symlinks on a planned target/ancestor are
-                // rejected separately by safe_destination.
+                inventory.push(InitializationDestinationEntry {
+                    path: relative,
+                    kind: InitializationDestinationKind::Symlink,
+                    bytes: None,
+                    sha256: None,
+                    symlink_target: Some(
+                        fs::read_link(&path)
+                            .map_err(|source| FolderbaseError::io(&path, source))?,
+                    ),
+                });
                 continue;
             }
             if metadata.is_dir() {
                 let name = entry.file_name();
                 if is_expensive_reconstructable_directory(&name) {
+                    inventory.push(InitializationDestinationEntry {
+                        path: relative,
+                        kind: InitializationDestinationKind::ReconstructableDirectory,
+                        bytes: None,
+                        sha256: None,
+                        symlink_target: None,
+                    });
                     continue;
                 }
                 if path != root && has_nested_folderbase_marker(&path)? {
+                    inventory.push(InitializationDestinationEntry {
+                        path: relative,
+                        kind: InitializationDestinationKind::NestedFolderbase,
+                        bytes: None,
+                        sha256: None,
+                        symlink_target: None,
+                    });
                     continue;
                 }
-                visit(root, &path, preserved)?;
+                inventory.push(InitializationDestinationEntry {
+                    path: relative,
+                    kind: InitializationDestinationKind::Directory,
+                    bytes: None,
+                    sha256: None,
+                    symlink_target: None,
+                });
+                visit(root, &path, inventory)?;
             } else if metadata.is_file() {
-                preserved.push(PreservedPath {
-                    path: path
-                        .strip_prefix(root)
-                        .expect("walked path stays under root")
-                        .to_path_buf(),
-                    sha256: sha256_path(&path)?,
+                inventory.push(InitializationDestinationEntry {
+                    path: relative,
+                    kind: InitializationDestinationKind::File,
+                    bytes: Some(metadata.len()),
+                    sha256: Some(sha256_path(&path)?),
+                    symlink_target: None,
+                });
+            } else {
+                inventory.push(InitializationDestinationEntry {
+                    path: relative,
+                    kind: InitializationDestinationKind::Other,
+                    bytes: None,
+                    sha256: None,
+                    symlink_target: None,
                 });
             }
         }
         Ok(())
     }
 
-    let mut preserved = Vec::new();
-    visit(root, root, &mut preserved)?;
-    preserved.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(preserved)
+    let mut inventory = Vec::new();
+    visit(root, root, &mut inventory)?;
+    inventory.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(inventory)
 }
 
 fn is_expensive_reconstructable_directory(name: &std::ffi::OsStr) -> bool {

@@ -6,11 +6,12 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use folderbase_core::{
     ApprovedMigration, FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlan,
-    InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
-    MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview, MigrationResult,
-    MigrationState, RollbackResult, TemplateAnswerType, TemplateAnswerValue, TemplatePackage,
-    ValidationLevel, ValidationReport, ValidationSeverity, VersionId, analyze_migration,
-    apply_migration, approve_migration, initialize, inspect, list_workspace, load_builtin_template,
+    InitializationPlanDigest, InitializationResult, InspectionReport, LocalVersionStore,
+    MAX_WORKSPACE_TEXT_BYTES, MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview,
+    MigrationResult, MigrationState, RollbackResult, TemplateAnswerType, TemplateAnswerValue,
+    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
+    analyze_migration, apply_migration, approve_migration, initialize,
+    initialize_with_expected_plan_digest, inspect, list_workspace, load_builtin_template,
     plan_initialization, plan_migration, plan_template_initialization, preview_migration,
     read_workspace_text, save_workspace_text, validate,
 };
@@ -73,6 +74,10 @@ enum Command {
         /// Emit the plan or initialization result as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Apply only if Core replans to this approved SHA-256 digest.
+        #[arg(long, conflicts_with = "dry_run")]
+        expected_plan_digest: Option<String>,
     },
 
     /// Validate a folderbase without repairing it.
@@ -333,6 +338,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
             template,
             answers,
             json,
+            expected_plan_digest,
         } => {
             let options = InitializationOptions {
                 name,
@@ -361,7 +367,13 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     print_initialization_plan(&plan);
                 }
             } else {
-                let result = initialize(&plan)?;
+                let result = match expected_plan_digest {
+                    Some(digest) => {
+                        let expected = InitializationPlanDigest::parse_sha256(digest)?;
+                        initialize_with_expected_plan_digest(&plan, &expected)?
+                    }
+                    None => initialize(&plan)?,
+                };
                 if json {
                     print_json(&result);
                 } else {
@@ -698,6 +710,9 @@ fn print_json(value: &impl serde::Serialize) {
 }
 
 fn command_emits_json_errors(command: &Command) -> bool {
+    if let Command::Init { json, .. } = command {
+        return *json;
+    }
     let Command::Transform { command } = command else {
         return false;
     };
@@ -721,6 +736,8 @@ fn error_code(error: &FolderbaseError) -> &'static str {
         FolderbaseError::PlanRootMismatch { .. } => "plan_root_mismatch",
         FolderbaseError::PlanRootIdentityChanged(_) => "plan_root_identity_changed",
         FolderbaseError::PlanPreconditionChanged(_) => "plan_precondition_changed",
+        FolderbaseError::InvalidInitializationPlanDigest => "invalid_initialization_plan_digest",
+        FolderbaseError::InitializationPlanChanged { .. } => "initialization_plan_changed",
         FolderbaseError::InvalidMigrationState { .. } => "invalid_migration_state",
         FolderbaseError::MigrationApprovalMismatch => "migration_approval_mismatch",
         FolderbaseError::MigrationSourceChanged(_) => "migration_source_changed",
@@ -777,6 +794,11 @@ fn print_initialization_plan(plan: &InitializationPlan) {
         plan.template_preconditions().len(),
         plan.preserved_paths().len()
     );
+    println!(
+        "Plan digest {}:{}",
+        plan.plan_digest().algorithm(),
+        plan.plan_digest().digest()
+    );
     for directory in plan.directories() {
         println!(
             "  create directory {} — {}",
@@ -807,6 +829,11 @@ fn print_initialization_plan(plan: &InitializationPlan) {
 fn print_initialization_result(result: &InitializationResult) {
     println!("Initialized {}", result.root.display());
     println!("Folderbase {}", result.folderbase_id);
+    println!(
+        "Applied plan {}:{}",
+        result.applied_plan_digest.algorithm(),
+        result.applied_plan_digest.digest()
+    );
     println!(
         "{} paths created · {} preserved",
         result.created_paths.len(),
@@ -1102,6 +1129,7 @@ mod tests {
             template,
             answers,
             json,
+            expected_plan_digest,
         } = cli.command
         else {
             panic!("expected init command");
@@ -1115,6 +1143,7 @@ mod tests {
         assert!(template.is_none());
         assert!(answers.is_empty());
         assert!(json);
+        assert!(expected_plan_digest.is_none());
     }
 
     #[test]
