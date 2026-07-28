@@ -57,6 +57,141 @@ fn init_dry_run_is_read_only() {
 }
 
 #[test]
+fn init_dry_run_json_exposes_a_stable_core_plan_digest() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    std::fs::write(root.path().join("notes.md"), "existing\n").expect("existing file");
+
+    let first = init_dry_run_json(root.path(), &[]);
+    let second = init_dry_run_json(root.path(), &[]);
+
+    assert_ne!(first["folderbase_id"], second["folderbase_id"]);
+    assert_eq!(first["plan_digest"], second["plan_digest"]);
+    assert_eq!(first["plan_digest"]["algorithm"], "sha256");
+    assert_eq!(
+        first["plan_digest"]["digest"]
+            .as_str()
+            .expect("digest")
+            .len(),
+        64
+    );
+    assert!(!root.path().join(".folderbase").exists());
+}
+
+#[test]
+fn init_digest_refuses_a_same_path_same_shape_root_replacement_across_processes() {
+    let parent = tempfile::tempdir().expect("parent directory");
+    let root = parent.path().join("workspace");
+    let reviewed = parent.path().join("reviewed-original");
+    std::fs::create_dir(&root).expect("reviewed root");
+    std::fs::write(root.join("notes.md"), "same visible shape\n").expect("reviewed file");
+    let plan = init_dry_run_json(&root, &[]);
+    let digest = plan["plan_digest"]["digest"].as_str().expect("digest");
+
+    std::fs::rename(&root, &reviewed).expect("move reviewed root");
+    std::fs::create_dir(&root).expect("replacement root");
+    std::fs::write(root.join("notes.md"), "same visible shape\n").expect("replacement file");
+
+    folderbase()
+        .args([
+            "init",
+            root.to_str().unwrap(),
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("initialization_plan_changed"));
+
+    assert_no_protocol_writes(&root);
+    assert_no_protocol_writes(&reviewed);
+}
+
+#[test]
+fn init_applies_only_the_exact_approved_digest_and_returns_it() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    let plan = init_dry_run_json(root.path(), &[]);
+    let digest = plan["plan_digest"]["digest"].as_str().expect("digest");
+
+    let output = folderbase()
+        .args([
+            "init",
+            root.path().to_str().unwrap(),
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .output()
+        .expect("approved apply");
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("result JSON");
+
+    assert_eq!(result["applied_plan_digest"], plan["plan_digest"]);
+    assert!(root.path().join(".folderbase/manifest.json").is_file());
+}
+
+#[test]
+fn init_refuses_stale_wrong_and_malformed_digests_without_writes() {
+    let stale_root = tempfile::tempdir().expect("stale folder");
+    let plan = init_dry_run_json(stale_root.path(), &[]);
+    let digest = plan["plan_digest"]["digest"].as_str().expect("digest");
+    std::fs::write(stale_root.path().join("late.md"), "late\n").expect("late file");
+
+    folderbase()
+        .args([
+            "init",
+            stale_root.path().to_str().unwrap(),
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "\"code\": \"initialization_plan_changed\"",
+        ));
+    assert_no_protocol_writes(stale_root.path());
+
+    for invalid in ["0".repeat(64), "NOT-A-SHA256".to_owned()] {
+        let root = tempfile::tempdir().expect("invalid digest folder");
+        folderbase()
+            .args([
+                "init",
+                root.path().to_str().unwrap(),
+                "--expected-plan-digest",
+                &invalid,
+                "--json",
+            ])
+            .assert()
+            .code(2);
+        assert_no_protocol_writes(root.path());
+    }
+}
+
+#[test]
+fn init_digest_binds_the_exact_request_semantics() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    let plan = init_dry_run_json(root.path(), &[]);
+    let digest = plan["plan_digest"]["digest"].as_str().expect("digest");
+
+    folderbase()
+        .args([
+            "init",
+            root.path().to_str().unwrap(),
+            "--name",
+            "Changed request",
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("initialization_plan_changed"));
+
+    assert_no_protocol_writes(root.path());
+}
+
+#[test]
 fn generated_folderbase_entry_is_immediately_useful() {
     let root = tempfile::tempdir().expect("ordinary project");
 
@@ -168,6 +303,29 @@ fn every_shipped_starter_is_available_to_the_installed_cli() {
             folderbase_entry.starts_with(&format!("# {folderbase_name}\n")),
             "{template} must render the manifest display name"
         );
+    }
+}
+
+fn init_dry_run_json(root: &std::path::Path, extra: &[&str]) -> serde_json::Value {
+    let mut arguments = vec!["init", root.to_str().unwrap(), "--dry-run", "--json"];
+    arguments.extend_from_slice(extra);
+    let output = folderbase()
+        .args(arguments)
+        .output()
+        .expect("initialization dry run");
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).expect("plan JSON")
+}
+
+fn assert_no_protocol_writes(root: &std::path::Path) {
+    for path in [
+        ".folderbase",
+        "FOLDERBASE.md",
+        ".folderbaseignore",
+        "AGENTS.md",
+        "CLAUDE.md",
+    ] {
+        assert!(!root.join(path).exists(), "{path} must not be written");
     }
 }
 

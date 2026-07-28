@@ -72,12 +72,31 @@ Preview the additive initialization:
 folderbase init /path/to/project --dry-run --json
 ```
 
-Initialize only after reviewing the plan:
+The JSON plan includes a stable Core-owned `plan_digest`. To bind approval to
+the exact reviewed request, template, protocol writes, boundaries, and visible
+destination state, apply with that digest:
 
 ```sh
-folderbase init /path/to/project
+folderbase init /path/to/project \
+  --expected-plan-digest DIGEST_FROM_DRY_RUN \
+  --json
 folderbase validate /path/to/project --json
 ```
+
+The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
+Core compares it and performs a bounded, metadata-only preflight immediately
+before its first write. The digest includes the physical filesystem identity of
+the reviewed root, so replacing a folder with a same-path, same-shape folder in
+another process is stale. New paths, kind changes, boundary changes, or planned
+target collisions also return a typed stale-plan error with no protocol writes.
+Content edits to ordinary preserved files do not create approval churn because
+Core never writes those files. `folderbase init /path/to/project` remains
+available for direct, single-step initialization.
+
+This is optimistic concurrency, not atomic filesystem isolation. A race after
+preflight is contained by root-capability traversal, no-follow parent opens,
+and per-write no-clobber installation; competing bytes are preserved and the
+operation fails rather than overwriting them.
 
 Initialization leaves the original files in place and adds the Folderbase
 protocol surface:

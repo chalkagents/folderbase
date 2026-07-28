@@ -1,0 +1,20 @@
+diff --git a/crates/folderbase-core/tests/initialization_plan_digest_red.rs b/crates/folderbase-core/tests/initialization_plan_digest_red.rs
+new file mode 100644
+index 0000000..de1ddb1
+--- /dev/null
++++ b/crates/folderbase-core/tests/initialization_plan_digest_red.rs
+@@ -0,0 +1,14 @@
++use folderbase_core::{InitializationOptions, plan_initialization};
++
++#[test]
++fn initialization_plan_exposes_a_stable_core_owned_digest() {
++    let root = tempfile::tempdir().expect("ordinary folder");
++    let first =
++        plan_initialization(root.path(), InitializationOptions::default()).expect("first plan");
++    let second =
++        plan_initialization(root.path(), InitializationOptions::default()).expect("second plan");
++
++    assert_eq!(first.plan_digest(), second.plan_digest());
++    assert_eq!(first.plan_digest().algorithm(), "sha256");
++    assert_eq!(first.plan_digest().digest().len(), 64);
++}

@@ -257,6 +257,53 @@ Kinds select starting templates and recommendations. They do not change the
 permission invariant, prohibit expansion, or require a folderbase to preserve the
 template's suggested layout.
 
+## Initialization approval binding
+
+Initialization is additive, but a reviewed dry-run can still become stale
+before apply. The reference Core therefore emits an opaque SHA-256 plan digest
+and accepts that digest when applying an approved initialization.
+
+The digest commits to:
+
+- the canonical destination, physical filesystem root identity, and exact
+  initialization request
+- exact template identity, semantic package digest, and typed answers
+- planned directories and protocol writes, with manifest fields interpreted
+  as Core semantics
+- existing-path and template preconditions
+- visible destination paths and kinds for ordinary files, directories,
+  symlinks, and nested-folderbase boundaries
+- the canonical reconstructable-directory policy and explicit collapsed Git
+  metadata boundaries
+
+Generated Folderbase IDs and timestamps are excluded, so repeated dry-runs
+over unchanged semantic state produce the same digest. Preserved ordinary-file
+contents and sizes are not read or committed because initialization never
+writes those files. Descendants of a nested Folderbase, recognized
+reconstructable tree, or `.git` metadata boundary are not traversed; the
+boundary path and kind are committed instead.
+
+The CLI creates one Core plan. An apply carrying an expected digest compares it
+to that exact plan and then performs one bounded metadata-only destination
+inventory before its first write. A digest mismatch, destination membership or
+kind change, boundary change, traversal-limit refusal, or planned-target
+collision creates no protocol files. The successful result returns the digest
+that was applied. Clients treat this digest as opaque and must not reproduce or
+normalize the Core's canonicalization.
+
+Initialization inventory traversal is bounded to 50,000 entries, 64 levels,
+4,096 encoded bytes per relative path, 16 MiB of canonical inventory input,
+2,000,000 path-component visits, and 2,000,000 directory-entry observations.
+Budget accounting happens before names are retained in memory and also covers
+nested-boundary probes. Traversal uses a root directory capability and opens
+child directories without following symlinks. Large ordinary files are
+metadata-only and therefore require no content hydration.
+
+The preflight is optimistic concurrency, not atomic filesystem isolation.
+Races after preflight are contained by no-follow parent capabilities and
+per-write no-clobber installation. A competing path is preserved and apply
+fails rather than overwriting it.
+
 ## Templates and organization guidance
 
 A template is optional, versioned starting guidance. It may propose:

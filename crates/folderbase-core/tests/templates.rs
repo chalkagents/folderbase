@@ -1196,18 +1196,25 @@ fn existing_folderbase_entry_and_agent_adapters_are_never_overwritten() {
 }
 
 #[test]
-fn stale_adoption_plan_fails_before_write() {
+fn adoption_plan_with_late_destination_membership_fails_before_write() {
     let root = tempfile::tempdir().expect("ordinary project");
     fs::write(root.path().join("README.md"), "initial\n").expect("existing file");
     let plan = project_adoption_plan(root.path());
-    fs::write(root.path().join("README.md"), "changed after planning\n").expect("external edit");
+    fs::write(root.path().join("arrived-later.md"), "late\n").expect("late file");
 
     let error = initialize(&plan).expect_err("stale plan must fail");
 
-    assert!(matches!(error, FolderbaseError::PlanPreconditionChanged(_)));
+    assert!(matches!(
+        error,
+        FolderbaseError::InitializationDestinationChanged(_)
+    ));
     assert_eq!(
-        fs::read_to_string(root.path().join("README.md")).expect("external edit remains"),
-        "changed after planning\n"
+        fs::read_to_string(root.path().join("README.md")).expect("existing file remains"),
+        "initial\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("arrived-later.md")).expect("late file remains"),
+        "late\n"
     );
     assert!(!root.path().join(".folderbase").exists());
     assert!(!root.path().join("FOLDERBASE.md").exists());

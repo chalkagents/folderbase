@@ -1,5 +1,28 @@
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitializationInventoryLimitKind {
+    Entries,
+    Depth,
+    PathBytes,
+    EncodedInventoryBytes,
+    PathComponentWork,
+    DirectoryEntryWork,
+}
+
+impl std::fmt::Display for InitializationInventoryLimitKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Entries => "entries",
+            Self::Depth => "depth",
+            Self::PathBytes => "path_bytes",
+            Self::EncodedInventoryBytes => "encoded_inventory_bytes",
+            Self::PathComponentWork => "path_component_work",
+            Self::DirectoryEntryWork => "directory_entry_work",
+        })
+    }
+}
+
 /// Errors that prevent an operation from producing a trustworthy result.
 #[derive(Debug, thiserror::Error)]
 pub enum FolderbaseError {
@@ -23,6 +46,25 @@ pub enum FolderbaseError {
 
     #[error("preserved path changed after the initialization plan was created: {0}")]
     PlanPreconditionChanged(PathBuf),
+
+    #[error(
+        "initialization plan digest must be exactly 64 lowercase hexadecimal SHA-256 characters"
+    )]
+    InvalidInitializationPlanDigest,
+
+    #[error(
+        "initialization plan changed after approval: expected {expected}, current plan is {actual}"
+    )]
+    InitializationPlanChanged { expected: String, actual: String },
+
+    #[error("initialization destination changed after approval: {0}")]
+    InitializationDestinationChanged(PathBuf),
+
+    #[error("initialization inventory exceeded the {limit} limit of {maximum}")]
+    InitializationInventoryLimitExceeded {
+        limit: InitializationInventoryLimitKind,
+        maximum: u64,
+    },
 
     #[error("migration is not in the required state: expected {expected}, found {actual}")]
     InvalidMigrationState {

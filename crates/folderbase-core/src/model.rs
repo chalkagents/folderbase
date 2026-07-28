@@ -582,6 +582,100 @@ impl Default for InitializationOptions {
     }
 }
 
+/// An opaque, Core-owned commitment to every semantically relevant decision
+/// in an initialization plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InitializationPlanDigest {
+    pub(crate) algorithm: String,
+    pub(crate) digest: String,
+}
+
+impl InitializationPlanDigest {
+    pub fn parse_sha256(digest: impl Into<String>) -> crate::Result<Self> {
+        let digest = digest.into();
+        if !Self::is_valid_sha256(&digest) {
+            return Err(crate::FolderbaseError::InvalidInitializationPlanDigest);
+        }
+        Ok(Self {
+            algorithm: "sha256".to_owned(),
+            digest,
+        })
+    }
+
+    pub fn algorithm(&self) -> &str {
+        &self.algorithm
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(crate) fn validate(&self) -> crate::Result<()> {
+        if self.algorithm != "sha256" || !Self::is_valid_sha256(&self.digest) {
+            return Err(crate::FolderbaseError::InvalidInitializationPlanDigest);
+        }
+        Ok(())
+    }
+
+    fn is_valid_sha256(digest: &str) -> bool {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum InitializationRequest {
+    Ordinary {
+        options: InitializationOptions,
+    },
+    Template {
+        options: InitializationOptions,
+        package: Box<TemplatePackage>,
+        answers: BTreeMap<String, TemplateAnswerValue>,
+    },
+}
+
+impl std::fmt::Debug for InitializationRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordinary { options } => formatter
+                .debug_struct("Ordinary")
+                .field("options", options)
+                .finish(),
+            Self::Template {
+                options,
+                package,
+                answers,
+            } => formatter
+                .debug_struct("Template")
+                .field("options", options)
+                .field("template_id", &package.id)
+                .field("template_version", &package.version)
+                .field("answer_ids", &answers.keys().collect::<Vec<_>>())
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InitializationDestinationEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: InitializationDestinationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitializationDestinationKind {
+    Directory,
+    File,
+    Symlink,
+    ReconstructableDirectory,
+    GitMetadata,
+    NestedFolderbase,
+    Other,
+}
+
 /// A previewable initialization plan that can only be created by the core.
 ///
 /// Its fields are intentionally read-only to callers. Applying arbitrary
@@ -597,8 +691,11 @@ pub struct InitializationPlan {
     pub(crate) template_preconditions: Vec<TemplateArtifactPrecondition>,
     pub(crate) preserved_paths: Vec<PreservedPath>,
     pub(crate) warnings: Vec<String>,
+    pub(crate) plan_digest: InitializationPlanDigest,
     #[serde(skip_serializing)]
     pub(crate) root_handle: Handle,
+    #[serde(skip_serializing)]
+    pub(crate) destination_inventory: Vec<InitializationDestinationEntry>,
 }
 
 impl InitializationPlan {
@@ -636,6 +733,10 @@ impl InitializationPlan {
 
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    pub fn plan_digest(&self) -> &InitializationPlanDigest {
+        &self.plan_digest
     }
 }
 
@@ -693,7 +794,6 @@ impl PlannedWrite {
 #[derive(Debug, Serialize)]
 pub struct PreservedPath {
     pub(crate) path: PathBuf,
-    pub(crate) sha256: String,
 }
 
 impl PreservedPath {
@@ -708,6 +808,7 @@ pub struct InitializationResult {
     pub folderbase_id: String,
     pub created_paths: Vec<PathBuf>,
     pub preserved_paths: Vec<PathBuf>,
+    pub applied_plan_digest: InitializationPlanDigest,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
