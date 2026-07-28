@@ -56,23 +56,5 @@ do
 done
 
 cargo package --workspace --locked --allow-dirty
-cargo install \
-  --path crates/folderbase-cli \
-  --locked \
-  --root "$temporary_root/install"
-
-folderbase="$temporary_root/install/bin/folderbase"
-"$folderbase" --version
-
-mkdir -p "$temporary_root/outside-checkout/unmanaged"
-cd "$temporary_root/outside-checkout"
-"$folderbase" init unmanaged \
-  --template folderbase.project@0.2.2 \
-  --answer purpose='Verify the installed Folderbase package.' \
-  --answer current_state='The package is installed outside its checkout.' \
-  --answer next_action='Continue from the initialized Folderbase.' \
-  --json > initialization.json
-
-test -f unmanaged/.folderbase/manifest.json
-test -f unmanaged/.folderbaseignore
-test -f unmanaged/FOLDERBASE.md
+"$repository_root/scripts/test-extracted-packages.sh" \
+  "$CARGO_TARGET_DIR/package"
