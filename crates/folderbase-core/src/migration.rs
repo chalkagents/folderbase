@@ -2290,8 +2290,11 @@ pub fn apply_migration(approved: ApprovedMigration) -> Result<MigrationResult> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyCheckpoint {
+    MigrationDirectoryPrepared,
+    JournalStaged,
     JournalPrepared,
     JournalCreated,
+    StagingCreated,
     OperationPlanned(usize),
     OperationApplied(usize),
     OperationCompleted(usize),
@@ -2337,8 +2340,7 @@ fn apply_migration_with_hook(
     let migration_dir = PathBuf::from(MIGRATIONS_DIR).join(&plan.id);
     let journal_path = migration_dir.join("result.json");
     let journal_absolute = prepare_migration_directory(&plan.root, &migration_dir, &journal_path)?;
-    plan.state = MigrationState::Applying;
-    persist_plan(&plan)?;
+    checkpoint(ApplyCheckpoint::MigrationDirectoryPrepared);
     let mut journal = MigrationJournal {
         protocol_version: "0.2.0".to_owned(),
         id: plan.id.clone(),
@@ -2363,13 +2365,18 @@ fn apply_migration_with_hook(
         completed_operations: 0,
         in_flight_operation: None,
     };
-    if let Err(error) = write_json_new(&journal_absolute, &journal) {
-        plan.state = MigrationState::Conflicted;
-        let _ = persist_plan(&plan);
-        cleanup_staging(&plan.root, &plan.id);
+    write_json_new_with_hook(&journal_absolute, &journal, || {
+        checkpoint(ApplyCheckpoint::JournalStaged);
+    })?;
+    checkpoint(ApplyCheckpoint::JournalPrepared);
+    plan.state = MigrationState::Applying;
+    persist_plan(&plan)?;
+    checkpoint(ApplyCheckpoint::JournalCreated);
+    if let Err(error) = create_migration_staging(&plan.root, &plan.id) {
+        record_unstarted_additive_rollback(&mut plan, &journal_absolute, &mut journal)?;
         return Err(error);
     }
-    checkpoint(ApplyCheckpoint::JournalCreated);
+    checkpoint(ApplyCheckpoint::StagingCreated);
 
     for index in 0..journal.operations.len() {
         journal.in_flight_operation = Some(index);
@@ -2418,6 +2425,21 @@ fn apply_migration_with_hook(
         created_paths: journal.created_paths,
         journal_path,
     })
+}
+
+fn record_unstarted_additive_rollback(
+    plan: &mut MigrationPlan,
+    journal_path: &Path,
+    journal: &mut MigrationJournal,
+) -> Result<()> {
+    journal.state = MigrationState::RolledBack;
+    if let Err(error) = persist_journal(journal_path, journal) {
+        plan.state = MigrationState::Conflicted;
+        let _ = persist_plan(plan);
+        return Err(error);
+    }
+    plan.state = MigrationState::RolledBack;
+    persist_plan(plan)
 }
 
 fn apply_structural_migration(
@@ -3276,7 +3298,14 @@ fn prepare_migration_directory(
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(FolderbaseError::WouldOverwrite(migration_dir));
     }
-    let staging = migration_dir.join("staging");
+    safe_join(root, journal_path)
+}
+
+fn create_migration_staging(root: &Path, migration_id: &str) -> Result<()> {
+    let staging_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(migration_id)
+        .join("staging");
+    let staging = safe_join(root, &staging_relative)?;
     fs::create_dir(&staging).map_err(|source| {
         if source.kind() == std::io::ErrorKind::AlreadyExists {
             FolderbaseError::WouldOverwrite(staging.clone())
@@ -3285,7 +3314,7 @@ fn prepare_migration_directory(
         }
     })?;
     sync_parent(&staging)?;
-    safe_join(root, journal_path)
+    Ok(())
 }
 
 fn create_directory_if_missing(path: &Path) -> Result<()> {
@@ -6198,24 +6227,50 @@ fn write_bytes_new(path: &Path, content: &[u8]) -> Result<()> {
 }
 
 fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
+    write_json_new_with_hook(path, value, || {})
+}
+
+fn write_json_new_with_hook(
+    path: &Path,
+    value: &impl Serialize,
+    mut checkpoint: impl FnMut(),
+) -> Result<()> {
     let content =
         serde_json::to_vec_pretty(value).map_err(|source| FolderbaseError::json(path, source))?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|source| {
+    let parent = path.parent().ok_or_else(|| {
+        invalid_journal(
+            path,
+            "new JSON record path does not have a parent directory",
+        )
+    })?;
+    let temporary = parent.join(format!(".record-{}.tmp", Uuid::now_v7()));
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| FolderbaseError::io(&temporary, source))?;
+        file.write_all(&content)
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all())
+            .map_err(|source| FolderbaseError::io(&temporary, source))?;
+        drop(file);
+        checkpoint();
+        fs::hard_link(&temporary, path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::AlreadyExists {
                 FolderbaseError::WouldOverwrite(path.to_path_buf())
             } else {
                 FolderbaseError::io(path, source)
             }
         })?;
-    file.write_all(&content)
-        .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.sync_all())
-        .map_err(|source| FolderbaseError::io(path, source))?;
-    sync_parent(path)
+        sync_directory(parent)?;
+        fs::remove_file(&temporary).map_err(|source| FolderbaseError::io(&temporary, source))?;
+        sync_directory(parent)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
 }
 
 fn persist_plan(plan: &MigrationPlan) -> Result<()> {
@@ -6320,7 +6375,9 @@ mod tests {
     #[test]
     fn every_durable_apply_checkpoint_can_be_reopened_and_recovered() {
         for fault in [
+            ApplyCheckpoint::JournalPrepared,
             ApplyCheckpoint::JournalCreated,
+            ApplyCheckpoint::StagingCreated,
             ApplyCheckpoint::OperationCompleted(0),
             ApplyCheckpoint::OperationCompleted(1),
             ApplyCheckpoint::OperationCompleted(2),
@@ -6349,7 +6406,11 @@ mod tests {
             let (_, journal) =
                 load_journal(&canonical_root(root.path()).unwrap(), &migration_id).unwrap();
             let expected_completed = match fault {
-                ApplyCheckpoint::JournalPrepared | ApplyCheckpoint::JournalCreated => 0,
+                ApplyCheckpoint::MigrationDirectoryPrepared
+                | ApplyCheckpoint::JournalStaged
+                | ApplyCheckpoint::JournalPrepared
+                | ApplyCheckpoint::JournalCreated
+                | ApplyCheckpoint::StagingCreated => 0,
                 ApplyCheckpoint::OperationPlanned(index)
                 | ApplyCheckpoint::OperationApplied(index) => index,
                 ApplyCheckpoint::OperationCompleted(index) => index + 1,
@@ -6368,6 +6429,96 @@ mod tests {
                 b"source\n"
             );
         }
+    }
+
+    #[test]
+    fn interrupted_before_additive_journal_publication_can_retry_the_approved_plan() {
+        for fault in [
+            ApplyCheckpoint::MigrationDirectoryPrepared,
+            ApplyCheckpoint::JournalStaged,
+        ] {
+            let root = migration_fixture();
+            let analysis = analyze_migration(root.path()).unwrap();
+            let answers = typed_answers(&analysis);
+            let plan = plan_migration(analysis, answers, "Organized").unwrap();
+            let migration_id = plan.id.clone();
+            let approved = approve_migration(plan).unwrap();
+
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                apply_migration_with_hook(approved, |checkpoint| {
+                    if checkpoint == fault {
+                        panic!("simulated process termination");
+                    }
+                })
+            }));
+            assert!(interrupted.is_err());
+            assert!(!root.path().join("Organized").exists());
+
+            let approved = ApprovedMigration::reopen(root.path(), &migration_id).unwrap();
+            let result = apply_migration(approved).unwrap();
+            assert_eq!(result.state, MigrationState::Verified);
+            assert_eq!(
+                fs::read(root.path().join("Organized/README.md")).unwrap(),
+                b"source\n"
+            );
+        }
+    }
+
+    #[test]
+    fn additive_journal_collision_preserves_unowned_staging_bytes() {
+        let root = migration_fixture();
+        let analysis = analyze_migration(root.path()).unwrap();
+        let answers = typed_answers(&analysis);
+        let plan = plan_migration(analysis, answers, "Organized").unwrap();
+        let migration_id = plan.id.clone();
+        let approved = approve_migration(plan).unwrap();
+        let migration_dir = root.path().join(MIGRATIONS_DIR).join(&migration_id);
+        let staging = migration_dir.join("staging");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("unowned.txt"), b"do not delete\n").unwrap();
+        fs::write(migration_dir.join("result.json"), b"collision\n").unwrap();
+
+        assert!(apply_migration(approved).is_err());
+        assert_eq!(
+            fs::read(staging.join("unowned.txt")).unwrap(),
+            b"do not delete\n"
+        );
+    }
+
+    #[test]
+    fn additive_staging_collision_rolls_back_without_deleting_unowned_bytes() {
+        let root = migration_fixture();
+        let analysis = analyze_migration(root.path()).unwrap();
+        let answers = typed_answers(&analysis);
+        let plan = plan_migration(analysis, answers, "Organized").unwrap();
+        let migration_id = plan.id.clone();
+        let approved = approve_migration(plan).unwrap();
+        let staging = root
+            .path()
+            .join(MIGRATIONS_DIR)
+            .join(&migration_id)
+            .join("staging");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("unowned.txt"), b"do not delete\n").unwrap();
+
+        assert!(apply_migration(approved).is_err());
+        assert_eq!(
+            MigrationResult::reopen(root.path(), &migration_id)
+                .unwrap()
+                .state,
+            MigrationState::RolledBack
+        );
+        assert_eq!(
+            MigrationPlan::reopen(root.path(), &migration_id)
+                .unwrap()
+                .state,
+            MigrationState::RolledBack
+        );
+        assert_eq!(
+            fs::read(staging.join("unowned.txt")).unwrap(),
+            b"do not delete\n"
+        );
+        assert!(!root.path().join("Organized").exists());
     }
 
     #[test]
