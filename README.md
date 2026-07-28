@@ -151,8 +151,10 @@ chunk range has been streamed and checked.
 
 ## Protocol
 
+- [Domain language](CONTEXT.md)
 - [Protocol specification](docs/protocol-spec.md)
 - [Template protocol](docs/template-protocol.md)
+- [Proposed Reorganization Plan decision](docs/adr/0002-evolve-existing-folderbases-through-reorganization-plans.md)
 - [Schemas, templates, and conformance vectors](protocol/README.md)
 - [Accepted canonical streaming-transfer decision](docs/adr/0001-stream-immutable-versions-through-canonical-manifests.md)
 
