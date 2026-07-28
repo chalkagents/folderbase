@@ -45,4 +45,26 @@ cargo test \
   --offline \
   --config "patch.crates-io.folderbase-core.path='$core_source'"
 
+cargo install \
+  --path "$cli_source" \
+  --offline \
+  --root "$extraction_root/install" \
+  --config "patch.crates-io.folderbase-core.path='$core_source'"
+
+folderbase="$extraction_root/install/bin/folderbase"
+"$folderbase" --version
+
+mkdir -p "$extraction_root/outside-checkout/unmanaged"
+cd "$extraction_root/outside-checkout"
+"$folderbase" init unmanaged \
+  --template folderbase.project@0.2.2 \
+  --answer purpose='Verify the installed Folderbase package.' \
+  --answer current_state='The package is installed outside its checkout.' \
+  --answer next_action='Continue from the initialized Folderbase.' \
+  --json > initialization.json
+
+test -f unmanaged/.folderbase/manifest.json
+test -f unmanaged/.folderbaseignore
+test -f unmanaged/FOLDERBASE.md
+
 printf '%s\n' 'Extracted Cargo packages are self-contained and testable.'
