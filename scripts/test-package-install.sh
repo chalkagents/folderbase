@@ -56,6 +56,8 @@ do
 done
 
 cargo package --workspace --locked --allow-dirty
+"$repository_root/scripts/test-extracted-packages.sh" \
+  "$CARGO_TARGET_DIR/package"
 cargo install \
   --path crates/folderbase-cli \
   --locked \

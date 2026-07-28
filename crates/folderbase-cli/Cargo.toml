@@ -11,6 +11,7 @@ description = "Folderbase command-line tools for agent-ready local-first folders
 documentation = "https://docs.rs/folderbase-cli"
 keywords = ["agents", "filesystem", "local-first", "knowledge"]
 categories = ["command-line-utilities", "filesystem"]
+exclude = ["tests/**"]
 
 [[bin]]
 name = "folderbase"
