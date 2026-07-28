@@ -85,8 +85,10 @@ folderbase validate /path/to/project --json
 
 The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
 Core compares it and performs a bounded, metadata-only preflight immediately
-before its first write. New paths, kind changes, boundary changes, or planned
-target collisions return a typed stale-plan error with no protocol writes.
+before its first write. The digest includes the physical filesystem identity of
+the reviewed root, so replacing a folder with a same-path, same-shape folder in
+another process is stale. New paths, kind changes, boundary changes, or planned
+target collisions also return a typed stale-plan error with no protocol writes.
 Content edits to ordinary preserved files do not create approval churn because
 Core never writes those files. `folderbase init /path/to/project` remains
 available for direct, single-step initialization.

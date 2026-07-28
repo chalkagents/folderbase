@@ -265,7 +265,8 @@ and accepts that digest when applying an approved initialization.
 
 The digest commits to:
 
-- the canonical destination and exact initialization request
+- the canonical destination, physical filesystem root identity, and exact
+  initialization request
 - exact template identity, semantic package digest, and typed answers
 - planned directories and protocol writes, with manifest fields interpreted
   as Core semantics
@@ -292,9 +293,11 @@ normalize the Core's canonicalization.
 
 Initialization inventory traversal is bounded to 50,000 entries, 64 levels,
 4,096 encoded bytes per relative path, 16 MiB of canonical inventory input,
-and 2,000,000 path-component visits. Traversal uses a root directory capability
-and opens child directories without following symlinks. Large ordinary files
-are metadata-only and therefore require no content hydration.
+2,000,000 path-component visits, and 2,000,000 directory-entry observations.
+Budget accounting happens before names are retained in memory and also covers
+nested-boundary probes. Traversal uses a root directory capability and opens
+child directories without following symlinks. Large ordinary files are
+metadata-only and therefore require no content hydration.
 
 The preflight is optimistic concurrency, not atomic filesystem isolation.
 Races after preflight are contained by no-follow parent capabilities and

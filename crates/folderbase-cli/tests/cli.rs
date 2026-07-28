@@ -78,6 +78,36 @@ fn init_dry_run_json_exposes_a_stable_core_plan_digest() {
 }
 
 #[test]
+fn init_digest_refuses_a_same_path_same_shape_root_replacement_across_processes() {
+    let parent = tempfile::tempdir().expect("parent directory");
+    let root = parent.path().join("workspace");
+    let reviewed = parent.path().join("reviewed-original");
+    std::fs::create_dir(&root).expect("reviewed root");
+    std::fs::write(root.join("notes.md"), "same visible shape\n").expect("reviewed file");
+    let plan = init_dry_run_json(&root, &[]);
+    let digest = plan["plan_digest"]["digest"].as_str().expect("digest");
+
+    std::fs::rename(&root, &reviewed).expect("move reviewed root");
+    std::fs::create_dir(&root).expect("replacement root");
+    std::fs::write(root.join("notes.md"), "same visible shape\n").expect("replacement file");
+
+    folderbase()
+        .args([
+            "init",
+            root.to_str().unwrap(),
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("initialization_plan_changed"));
+
+    assert_no_protocol_writes(&root);
+    assert_no_protocol_writes(&reviewed);
+}
+
+#[test]
 fn init_applies_only_the_exact_approved_digest_and_returns_it() {
     let root = tempfile::tempdir().expect("ordinary folder");
     let plan = init_dry_run_json(root.path(), &[]);

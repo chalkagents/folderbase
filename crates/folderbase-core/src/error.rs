@@ -1,5 +1,28 @@
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitializationInventoryLimitKind {
+    Entries,
+    Depth,
+    PathBytes,
+    EncodedInventoryBytes,
+    PathComponentWork,
+    DirectoryEntryWork,
+}
+
+impl std::fmt::Display for InitializationInventoryLimitKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Entries => "entries",
+            Self::Depth => "depth",
+            Self::PathBytes => "path_bytes",
+            Self::EncodedInventoryBytes => "encoded_inventory_bytes",
+            Self::PathComponentWork => "path_component_work",
+            Self::DirectoryEntryWork => "directory_entry_work",
+        })
+    }
+}
+
 /// Errors that prevent an operation from producing a trustworthy result.
 #[derive(Debug, thiserror::Error)]
 pub enum FolderbaseError {
@@ -38,7 +61,10 @@ pub enum FolderbaseError {
     InitializationDestinationChanged(PathBuf),
 
     #[error("initialization inventory exceeded the {limit} limit of {maximum}")]
-    InitializationInventoryLimitExceeded { limit: &'static str, maximum: u64 },
+    InitializationInventoryLimitExceeded {
+        limit: InitializationInventoryLimitKind,
+        maximum: u64,
+    },
 
     #[error("migration is not in the required state: expected {expected}, found {actual}")]
     InvalidMigrationState {

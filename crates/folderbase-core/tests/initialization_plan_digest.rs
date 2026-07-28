@@ -3,9 +3,9 @@ use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 
 use folderbase_core::{
-    FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlanDigest,
-    TemplateAnswerValue, initialize_with_expected_plan_digest, load_builtin_template,
-    plan_initialization, plan_template_initialization,
+    FolderbaseError, FolderbaseKind, InitializationInventoryLimitKind, InitializationOptions,
+    InitializationPlanDigest, TemplateAnswerValue, initialize_with_expected_plan_digest,
+    load_builtin_template, plan_initialization, plan_template_initialization,
 };
 
 #[test]
@@ -175,7 +175,30 @@ fn traversal_depth_is_bounded_with_a_typed_no_write_refusal() {
         .expect_err("over-deep inventory must be refused");
     assert!(matches!(
         error,
-        FolderbaseError::InitializationInventoryLimitExceeded { limit: "depth", .. }
+        FolderbaseError::InitializationInventoryLimitExceeded {
+            limit: InitializationInventoryLimitKind::Depth,
+            ..
+        }
+    ));
+    assert_no_protocol_writes(root.path());
+}
+
+#[test]
+fn a_single_huge_directory_is_bounded_before_unlimited_name_retention() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    for index in 0..=50_000 {
+        fs::File::create(root.path().join(format!("entry-{index:05}")))
+            .expect("bounded directory entry");
+    }
+
+    let error = plan_initialization(root.path(), InitializationOptions::default())
+        .expect_err("over-wide inventory must be refused");
+    assert!(matches!(
+        error,
+        FolderbaseError::InitializationInventoryLimitExceeded {
+            limit: InitializationInventoryLimitKind::Entries,
+            maximum: 50_000,
+        }
     ));
     assert_no_protocol_writes(root.path());
 }

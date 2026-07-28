@@ -22,7 +22,7 @@ mod traversal_policy;
 mod validation;
 mod workspace;
 
-pub use error::{FolderbaseError, Result};
+pub use error::{FolderbaseError, InitializationInventoryLimitKind, Result};
 pub use initialization::{
     initialize, initialize_with_expected_plan_digest, plan_initialization,
     plan_template_initialization,
