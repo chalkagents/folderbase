@@ -2290,8 +2290,10 @@ pub fn apply_migration(approved: ApprovedMigration) -> Result<MigrationResult> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyCheckpoint {
+    MigrationDirectoryPrepared,
     JournalPrepared,
     JournalCreated,
+    StagingCreated,
     OperationPlanned(usize),
     OperationApplied(usize),
     OperationCompleted(usize),
@@ -2337,8 +2339,7 @@ fn apply_migration_with_hook(
     let migration_dir = PathBuf::from(MIGRATIONS_DIR).join(&plan.id);
     let journal_path = migration_dir.join("result.json");
     let journal_absolute = prepare_migration_directory(&plan.root, &migration_dir, &journal_path)?;
-    plan.state = MigrationState::Applying;
-    persist_plan(&plan)?;
+    checkpoint(ApplyCheckpoint::MigrationDirectoryPrepared);
     let mut journal = MigrationJournal {
         protocol_version: "0.2.0".to_owned(),
         id: plan.id.clone(),
@@ -2364,12 +2365,15 @@ fn apply_migration_with_hook(
         in_flight_operation: None,
     };
     if let Err(error) = write_json_new(&journal_absolute, &journal) {
-        plan.state = MigrationState::Conflicted;
-        let _ = persist_plan(&plan);
         cleanup_staging(&plan.root, &plan.id);
         return Err(error);
     }
+    checkpoint(ApplyCheckpoint::JournalPrepared);
+    plan.state = MigrationState::Applying;
+    persist_plan(&plan)?;
     checkpoint(ApplyCheckpoint::JournalCreated);
+    create_migration_staging(&plan.root, &plan.id)?;
+    checkpoint(ApplyCheckpoint::StagingCreated);
 
     for index in 0..journal.operations.len() {
         journal.in_flight_operation = Some(index);
@@ -3276,7 +3280,14 @@ fn prepare_migration_directory(
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(FolderbaseError::WouldOverwrite(migration_dir));
     }
-    let staging = migration_dir.join("staging");
+    safe_join(root, journal_path)
+}
+
+fn create_migration_staging(root: &Path, migration_id: &str) -> Result<()> {
+    let staging_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(migration_id)
+        .join("staging");
+    let staging = safe_join(root, &staging_relative)?;
     fs::create_dir(&staging).map_err(|source| {
         if source.kind() == std::io::ErrorKind::AlreadyExists {
             FolderbaseError::WouldOverwrite(staging.clone())
@@ -3285,7 +3296,7 @@ fn prepare_migration_directory(
         }
     })?;
     sync_parent(&staging)?;
-    safe_join(root, journal_path)
+    Ok(())
 }
 
 fn create_directory_if_missing(path: &Path) -> Result<()> {
@@ -6320,7 +6331,9 @@ mod tests {
     #[test]
     fn every_durable_apply_checkpoint_can_be_reopened_and_recovered() {
         for fault in [
+            ApplyCheckpoint::JournalPrepared,
             ApplyCheckpoint::JournalCreated,
+            ApplyCheckpoint::StagingCreated,
             ApplyCheckpoint::OperationCompleted(0),
             ApplyCheckpoint::OperationCompleted(1),
             ApplyCheckpoint::OperationCompleted(2),
@@ -6349,7 +6362,10 @@ mod tests {
             let (_, journal) =
                 load_journal(&canonical_root(root.path()).unwrap(), &migration_id).unwrap();
             let expected_completed = match fault {
-                ApplyCheckpoint::JournalPrepared | ApplyCheckpoint::JournalCreated => 0,
+                ApplyCheckpoint::MigrationDirectoryPrepared
+                | ApplyCheckpoint::JournalPrepared
+                | ApplyCheckpoint::JournalCreated
+                | ApplyCheckpoint::StagingCreated => 0,
                 ApplyCheckpoint::OperationPlanned(index)
                 | ApplyCheckpoint::OperationApplied(index) => index,
                 ApplyCheckpoint::OperationCompleted(index) => index + 1,
@@ -6368,6 +6384,34 @@ mod tests {
                 b"source\n"
             );
         }
+    }
+
+    #[test]
+    fn interrupted_additive_apply_before_journaling_can_retry_the_approved_plan() {
+        let root = migration_fixture();
+        let analysis = analyze_migration(root.path()).unwrap();
+        let answers = typed_answers(&analysis);
+        let plan = plan_migration(analysis, answers, "Organized").unwrap();
+        let migration_id = plan.id.clone();
+        let approved = approve_migration(plan).unwrap();
+
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            apply_migration_with_hook(approved, |checkpoint| {
+                if checkpoint == ApplyCheckpoint::MigrationDirectoryPrepared {
+                    panic!("simulated process termination");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        assert!(!root.path().join("Organized").exists());
+
+        let approved = ApprovedMigration::reopen(root.path(), &migration_id).unwrap();
+        let result = apply_migration(approved).unwrap();
+        assert_eq!(result.state, MigrationState::Verified);
+        assert_eq!(
+            fs::read(root.path().join("Organized/README.md")).unwrap(),
+            b"source\n"
+        );
     }
 
     #[test]
