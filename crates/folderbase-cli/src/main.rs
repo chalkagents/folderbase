@@ -738,6 +738,10 @@ fn error_code(error: &FolderbaseError) -> &'static str {
         FolderbaseError::PlanPreconditionChanged(_) => "plan_precondition_changed",
         FolderbaseError::InvalidInitializationPlanDigest => "invalid_initialization_plan_digest",
         FolderbaseError::InitializationPlanChanged { .. } => "initialization_plan_changed",
+        FolderbaseError::InitializationDestinationChanged(_) => "initialization_plan_changed",
+        FolderbaseError::InitializationInventoryLimitExceeded { .. } => {
+            "initialization_inventory_limit_exceeded"
+        }
         FolderbaseError::InvalidMigrationState { .. } => "invalid_migration_state",
         FolderbaseError::MigrationApprovalMismatch => "migration_approval_mismatch",
         FolderbaseError::MigrationSourceChanged(_) => "migration_source_changed",

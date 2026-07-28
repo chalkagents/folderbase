@@ -663,9 +663,6 @@ impl std::fmt::Debug for InitializationRequest {
 pub(crate) struct InitializationDestinationEntry {
     pub(crate) path: PathBuf,
     pub(crate) kind: InitializationDestinationKind,
-    pub(crate) bytes: Option<u64>,
-    pub(crate) sha256: Option<String>,
-    pub(crate) symlink_target: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +671,7 @@ pub(crate) enum InitializationDestinationKind {
     File,
     Symlink,
     ReconstructableDirectory,
+    GitMetadata,
     NestedFolderbase,
     Other,
 }
@@ -696,8 +694,6 @@ pub struct InitializationPlan {
     pub(crate) plan_digest: InitializationPlanDigest,
     #[serde(skip_serializing)]
     pub(crate) root_handle: Handle,
-    #[serde(skip_serializing)]
-    pub(crate) request: InitializationRequest,
     #[serde(skip_serializing)]
     pub(crate) destination_inventory: Vec<InitializationDestinationEntry>,
 }
@@ -798,7 +794,6 @@ impl PlannedWrite {
 #[derive(Debug, Serialize)]
 pub struct PreservedPath {
     pub(crate) path: PathBuf,
-    pub(crate) sha256: String,
 }
 
 impl PreservedPath {

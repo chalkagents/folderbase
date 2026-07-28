@@ -83,10 +83,18 @@ folderbase init /path/to/project \
 folderbase validate /path/to/project --json
 ```
 
-The Core replans immediately before its first write. If the folder, request, or
-template semantics changed, it returns `initialization_plan_changed` and writes
-nothing. `folderbase init /path/to/project` remains available for direct,
-single-step initialization.
+The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
+Core compares it and performs a bounded, metadata-only preflight immediately
+before its first write. New paths, kind changes, boundary changes, or planned
+target collisions return a typed stale-plan error with no protocol writes.
+Content edits to ordinary preserved files do not create approval churn because
+Core never writes those files. `folderbase init /path/to/project` remains
+available for direct, single-step initialization.
+
+This is optimistic concurrency, not atomic filesystem isolation. A race after
+preflight is contained by root-capability traversal, no-follow parent opens,
+and per-write no-clobber installation; competing bytes are preserved and the
+operation fails rather than overwriting them.
 
 Initialization leaves the original files in place and adds the Folderbase
 protocol surface:

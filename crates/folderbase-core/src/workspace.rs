@@ -11,30 +11,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::{ContentDigest, FolderbaseError, LocalVersionStore, ObjectId, Result, VersionId};
+use crate::{
+    ContentDigest, FolderbaseError, LocalVersionStore, ObjectId, Result, VersionId,
+    traversal_policy::{
+        is_reconstructable_directory, is_reserved_workspace_component as is_reserved_component,
+    },
+};
 
 pub const MAX_WORKSPACE_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES: usize = 50_000;
 const MAX_WORKSPACE_DEPTH: usize = 64;
-const RECONSTRUCTABLE_DIRECTORIES: &[&str] = &[
-    "node_modules",
-    ".next",
-    ".nuxt",
-    ".sites",
-    ".svelte-kit",
-    ".wrangler",
-    "dist",
-    "build",
-    "coverage",
-    ".build",
-    ".swiftpm",
-    ".venv",
-    "__pycache__",
-    ".dart_tool",
-    "Pods",
-    "DerivedData",
-    "target",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -344,15 +330,7 @@ pub(crate) fn resolve_existing_workspace_file(
 }
 
 pub(crate) fn is_reserved_workspace_component(name: &OsStr) -> bool {
-    name.to_str().is_some_and(|name| {
-        name.eq_ignore_ascii_case(".folderbase") || name.eq_ignore_ascii_case(".git")
-    })
-}
-
-fn is_reconstructable_directory(name: &OsStr) -> bool {
-    RECONSTRUCTABLE_DIRECTORIES
-        .iter()
-        .any(|candidate| name == OsStr::new(candidate))
+    is_reserved_component(name)
 }
 
 pub(crate) fn has_nested_folderbase_marker(path: &Path) -> Result<bool> {

@@ -270,20 +270,36 @@ The digest commits to:
 - planned directories and protocol writes, with manifest fields interpreted
   as Core semantics
 - existing-path and template preconditions
-- visible destination files, directories, symlinks, and nested-folderbase
-  boundaries
-- reconstructable-directory and boundary traversal policy
+- visible destination paths and kinds for ordinary files, directories,
+  symlinks, and nested-folderbase boundaries
+- the canonical reconstructable-directory policy and explicit collapsed Git
+  metadata boundaries
 
 Generated Folderbase IDs and timestamps are excluded, so repeated dry-runs
-over unchanged state produce the same digest. Descendants of a nested
-Folderbase or a recognized reconstructable dependency tree are not hashed;
-the boundary or reconstructable-tree presence is committed instead.
+over unchanged semantic state produce the same digest. Preserved ordinary-file
+contents and sizes are not read or committed because initialization never
+writes those files. Descendants of a nested Folderbase, recognized
+reconstructable tree, or `.git` metadata boundary are not traversed; the
+boundary path and kind are committed instead.
 
-An apply carrying an expected digest must replan the exact request inside the
-Core before its first write. A mismatch is a typed stale-plan error and creates
-no protocol files. The successful result returns the digest that was applied.
-Clients treat this digest as opaque and must not reproduce or normalize the
-Core's canonicalization.
+The CLI creates one Core plan. An apply carrying an expected digest compares it
+to that exact plan and then performs one bounded metadata-only destination
+inventory before its first write. A digest mismatch, destination membership or
+kind change, boundary change, traversal-limit refusal, or planned-target
+collision creates no protocol files. The successful result returns the digest
+that was applied. Clients treat this digest as opaque and must not reproduce or
+normalize the Core's canonicalization.
+
+Initialization inventory traversal is bounded to 50,000 entries, 64 levels,
+4,096 encoded bytes per relative path, 16 MiB of canonical inventory input,
+and 2,000,000 path-component visits. Traversal uses a root directory capability
+and opens child directories without following symlinks. Large ordinary files
+are metadata-only and therefore require no content hydration.
+
+The preflight is optimistic concurrency, not atomic filesystem isolation.
+Races after preflight are contained by no-follow parent capabilities and
+per-write no-clobber installation. A competing path is preserved and apply
+fails rather than overwriting it.
 
 ## Templates and organization guidance
 

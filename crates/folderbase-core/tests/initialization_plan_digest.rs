@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Seek, SeekFrom, Write};
 
 use folderbase_core::{
     FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlanDigest,
@@ -47,7 +48,8 @@ fn request_semantics_change_the_plan_digest() {
 }
 
 #[test]
-fn visible_destination_changes_change_the_plan_digest() {
+fn visible_destination_membership_changes_but_preserved_file_contents_do_not_change_the_plan_digest()
+ {
     let root = tempfile::tempdir().expect("ordinary folder");
     fs::write(root.path().join("notes.md"), "before\n").expect("existing file");
     let baseline =
@@ -61,9 +63,10 @@ fn visible_destination_changes_change_the_plan_digest() {
     fs::write(root.path().join("notes.md"), "after\n").expect("changed file");
     let with_changed_target = plan_initialization(root.path(), InitializationOptions::default())
         .expect("changed target plan");
-    assert_ne!(
+    assert_eq!(
         with_late_file.plan_digest(),
-        with_changed_target.plan_digest()
+        with_changed_target.plan_digest(),
+        "Core never writes a preserved ordinary file, so its content is not part of approval"
     );
 }
 
@@ -90,18 +93,122 @@ fn nested_folderbase_boundaries_change_the_plan_digest_without_hashing_their_con
 }
 
 #[test]
-fn reconstructable_tree_contents_do_not_create_approval_churn() {
+fn every_canonical_reconstructable_tree_is_collapsed_for_initialization_approval() {
+    for name in [
+        "node_modules",
+        ".next",
+        ".nuxt",
+        ".sites",
+        ".svelte-kit",
+        ".wrangler",
+        "dist",
+        "build",
+        "coverage",
+        ".build",
+        ".swiftpm",
+        ".venv",
+        "__pycache__",
+        ".dart_tool",
+        "Pods",
+        "DerivedData",
+        "target",
+    ] {
+        let root = tempfile::tempdir().expect("ordinary folder");
+        let tree = root.path().join(name);
+        fs::create_dir(&tree).expect("reconstructable directory");
+        fs::write(tree.join("cache"), "one\n").expect("cache");
+        let before =
+            plan_initialization(root.path(), InitializationOptions::default()).expect("before");
+
+        fs::write(tree.join("cache"), "two\n").expect("cache update");
+        fs::write(tree.join("late"), "late\n").expect("late cache");
+        let after =
+            plan_initialization(root.path(), InitializationOptions::default()).expect("after");
+
+        assert_eq!(
+            before.plan_digest(),
+            after.plan_digest(),
+            "{name} must use the same reconstructable policy as inspection and workspace listing"
+        );
+    }
+}
+
+#[test]
+fn a_large_sparse_preserved_file_is_metadata_only_and_can_change_before_apply() {
+    const MOVIE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+    const SAMPLE_OFFSET: u64 = 5 * 1024 * 1024 * 1024;
     let root = tempfile::tempdir().expect("ordinary folder");
-    fs::create_dir(root.path().join("node_modules")).expect("reconstructable directory");
-    fs::write(root.path().join("node_modules/cache"), "one\n").expect("cache");
-    let before =
-        plan_initialization(root.path(), InitializationOptions::default()).expect("before");
+    let movie_path = root.path().join("feature-film.mov");
+    let mut movie = fs::File::create(&movie_path).expect("sparse movie");
+    movie.set_len(MOVIE_BYTES).expect("sparse length");
+    movie.seek(SeekFrom::Start(SAMPLE_OFFSET)).expect("seek");
+    movie.write_all(b"before").expect("sample bytes");
+    movie.sync_all().expect("movie synced");
 
-    fs::write(root.path().join("node_modules/cache"), "two\n").expect("cache update");
-    fs::write(root.path().join("node_modules/late"), "late\n").expect("late cache");
-    let after = plan_initialization(root.path(), InitializationOptions::default()).expect("after");
+    let plan =
+        plan_initialization(root.path(), InitializationOptions::default()).expect("approved plan");
+    let approved = plan.plan_digest().clone();
 
-    assert_eq!(before.plan_digest(), after.plan_digest());
+    movie.seek(SeekFrom::Start(SAMPLE_OFFSET)).expect("seek");
+    movie.write_all(b"after!").expect("same-length user edit");
+    movie.sync_all().expect("movie synced");
+
+    let result = initialize_with_expected_plan_digest(&plan, &approved)
+        .expect("preserved movie contents are outside the write set");
+    assert_eq!(result.applied_plan_digest, approved);
+    assert_eq!(
+        fs::metadata(movie_path).expect("preserved movie").len(),
+        MOVIE_BYTES
+    );
+}
+
+#[test]
+fn traversal_depth_is_bounded_with_a_typed_no_write_refusal() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    let mut deepest = root.path().to_path_buf();
+    for index in 0..66 {
+        deepest.push(format!("d{index}"));
+        fs::create_dir(&deepest).expect("nested directory");
+    }
+
+    let error = plan_initialization(root.path(), InitializationOptions::default())
+        .expect_err("over-deep inventory must be refused");
+    assert!(matches!(
+        error,
+        FolderbaseError::InitializationInventoryLimitExceeded { limit: "depth", .. }
+    ));
+    assert_no_protocol_writes(root.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_preserved_file_replaced_by_an_outside_symlink_is_refused_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("ordinary folder");
+    let outside = tempfile::tempdir().expect("outside folder");
+    let outside_file = outside.path().join("private.md");
+    fs::write(&outside_file, "outside bytes\n").expect("outside file");
+    let preserved = root.path().join("notes.md");
+    fs::write(&preserved, "inside bytes\n").expect("inside file");
+
+    let plan =
+        plan_initialization(root.path(), InitializationOptions::default()).expect("approved plan");
+    let approved = plan.plan_digest().clone();
+    fs::remove_file(&preserved).expect("replace preserved file");
+    symlink(&outside_file, &preserved).expect("outside symlink");
+
+    let error = initialize_with_expected_plan_digest(&plan, &approved)
+        .expect_err("file-to-symlink swap must be refused");
+    assert!(matches!(
+        error,
+        FolderbaseError::InitializationDestinationChanged(_)
+    ));
+    assert_no_protocol_writes(root.path());
+    assert_eq!(
+        fs::read_to_string(outside_file).expect("outside bytes preserved"),
+        "outside bytes\n"
+    );
 }
 
 #[test]
@@ -141,7 +248,7 @@ fn template_identity_and_answers_change_the_plan_digest() {
 }
 
 #[test]
-fn exact_approved_digest_replans_then_applies_and_returns_the_digest() {
+fn exact_approved_digest_applies_the_single_core_plan_and_returns_the_digest() {
     let root = tempfile::tempdir().expect("ordinary folder");
     fs::write(root.path().join("notes.md"), "preserve me\n").expect("existing file");
     let plan =
@@ -170,7 +277,7 @@ fn stale_or_wrong_approved_digest_refuses_before_any_write() {
         .expect_err("destination changed after approval");
     assert!(matches!(
         error,
-        FolderbaseError::InitializationPlanChanged { .. }
+        FolderbaseError::InitializationDestinationChanged(_)
     ));
     assert_no_protocol_writes(stale_root.path());
 
@@ -188,19 +295,7 @@ fn stale_or_wrong_approved_digest_refuses_before_any_write() {
 }
 
 #[test]
-fn changed_content_nested_boundary_and_template_request_refuse_approved_apply() {
-    let changed_root = tempfile::tempdir().expect("changed folder");
-    fs::write(changed_root.path().join("notes.md"), "before\n").expect("existing file");
-    let changed_plan = plan_initialization(changed_root.path(), InitializationOptions::default())
-        .expect("approved content plan");
-    let approved = changed_plan.plan_digest().clone();
-    fs::write(changed_root.path().join("notes.md"), "after\n").expect("changed content");
-    assert!(matches!(
-        initialize_with_expected_plan_digest(&changed_plan, &approved),
-        Err(FolderbaseError::InitializationPlanChanged { .. })
-    ));
-    assert_no_protocol_writes(changed_root.path());
-
+fn nested_boundary_and_template_request_changes_refuse_approved_apply() {
     let boundary_root = tempfile::tempdir().expect("boundary folder");
     let nested = boundary_root.path().join("client");
     fs::create_dir(&nested).expect("nested directory");
@@ -212,7 +307,7 @@ fn changed_content_nested_boundary_and_template_request_refuse_approved_apply() 
     fs::write(nested.join(".folderbase/manifest.json"), "{}\n").expect("nested marker");
     assert!(matches!(
         initialize_with_expected_plan_digest(&boundary_plan, &approved),
-        Err(FolderbaseError::InitializationPlanChanged { .. })
+        Err(FolderbaseError::InitializationDestinationChanged(_))
     ));
     assert_no_protocol_writes(boundary_root.path());
 

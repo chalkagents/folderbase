@@ -34,6 +34,12 @@ pub enum FolderbaseError {
     )]
     InitializationPlanChanged { expected: String, actual: String },
 
+    #[error("initialization destination changed after approval: {0}")]
+    InitializationDestinationChanged(PathBuf),
+
+    #[error("initialization inventory exceeded the {limit} limit of {maximum}")]
+    InitializationInventoryLimitExceeded { limit: &'static str, maximum: u64 },
+
     #[error("migration is not in the required state: expected {expected}, found {actual}")]
     InvalidMigrationState {
         expected: &'static str,

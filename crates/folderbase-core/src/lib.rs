@@ -18,6 +18,7 @@ mod sharing;
 mod sync;
 mod template;
 mod template_expansion;
+mod traversal_policy;
 mod validation;
 mod workspace;
 

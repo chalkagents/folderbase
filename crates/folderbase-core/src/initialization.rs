@@ -1,10 +1,12 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use chrono::Utc;
 use same_file::Handle;
@@ -17,6 +19,7 @@ use crate::model::{
     InitializationDestinationEntry, InitializationDestinationKind, InitializationRequest,
 };
 use crate::template::template_package_sha256;
+use crate::traversal_policy::{is_git_metadata_component, is_reconstructable_directory};
 use crate::workspace::has_nested_folderbase_marker;
 use crate::{
     FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlan,
@@ -30,6 +33,11 @@ const MANIFEST: &str = ".folderbase/manifest.json";
 const IGNORE_FILE: &str = ".folderbaseignore";
 const CODEX_ADAPTER: &str = "AGENTS.md";
 const CLAUDE_ADAPTER: &str = "CLAUDE.md";
+const MAX_INITIALIZATION_INVENTORY_ENTRIES: usize = 50_000;
+const MAX_INITIALIZATION_DEPTH: usize = 64;
+const MAX_INITIALIZATION_PATH_BYTES: usize = 4_096;
+const MAX_INITIALIZATION_ENCODED_INVENTORY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INITIALIZATION_PATH_COMPONENT_WORK: usize = 2_000_000;
 
 /// Produce a complete, read-only plan for adopting an existing folder.
 pub fn plan_initialization(
@@ -128,14 +136,13 @@ fn plan_initialization_with_template(
     let mut directories = Vec::new();
     let mut writes = Vec::new();
     let mut template_preconditions = Vec::new();
-    let destination_inventory = snapshot_destination_inventory(&root)?;
+    let root_dir = open_root_capability(&root)?;
+    let destination_inventory = snapshot_destination_inventory(&root_dir, &root)?;
     let mut preserved_paths = destination_inventory
         .iter()
-        .filter_map(|entry| {
-            entry.sha256.as_ref().map(|sha256| PreservedPath {
-                path: entry.path.clone(),
-                sha256: sha256.clone(),
-            })
+        .filter(|entry| entry.kind == InitializationDestinationKind::File)
+        .map(|entry| PreservedPath {
+            path: entry.path.clone(),
         })
         .collect::<Vec<_>>();
     let mut warnings = Vec::new();
@@ -348,7 +355,6 @@ fn plan_initialization_with_template(
         warnings,
         plan_digest,
         root_handle,
-        request,
         destination_inventory,
     })
 }
@@ -439,7 +445,6 @@ fn initialization_plan_digest(
     );
     for preserved in input.preserved_paths {
         digest_path(&mut hasher, b"preserved_path", &preserved.path);
-        digest_text(&mut hasher, b"preserved_sha256", preserved.sha256.as_str());
     }
 
     digest_u64(&mut hasher, b"warning_count", input.warnings.len() as u64);
@@ -459,15 +464,6 @@ fn initialization_plan_digest(
             b"destination_kind",
             destination_kind_name(entry.kind),
         );
-        digest_optional_u64(&mut hasher, b"destination_bytes", entry.bytes);
-        digest_optional_text(&mut hasher, b"destination_sha256", entry.sha256.as_deref());
-        match &entry.symlink_target {
-            Some(target) => {
-                digest_text(&mut hasher, b"destination_symlink_present", "true");
-                digest_path(&mut hasher, b"destination_symlink_target", target);
-            }
-            None => digest_text(&mut hasher, b"destination_symlink_present", "false"),
-        }
     }
 
     Ok(InitializationPlanDigest {
@@ -604,26 +600,6 @@ fn digest_text(hasher: &mut Sha256, label: &[u8], value: &str) {
     digest_bytes(hasher, label, value.as_bytes());
 }
 
-fn digest_optional_text(hasher: &mut Sha256, label: &[u8], value: Option<&str>) {
-    match value {
-        Some(value) => {
-            digest_bytes(hasher, b"optional_present", label);
-            digest_text(hasher, label, value);
-        }
-        None => digest_bytes(hasher, b"optional_absent", label),
-    }
-}
-
-fn digest_optional_u64(hasher: &mut Sha256, label: &[u8], value: Option<u64>) {
-    match value {
-        Some(value) => {
-            digest_bytes(hasher, b"optional_present", label);
-            digest_u64(hasher, label, value);
-        }
-        None => digest_bytes(hasher, b"optional_absent", label),
-    }
-}
-
 fn digest_u64(hasher: &mut Sha256, label: &[u8], value: u64) {
     digest_bytes(hasher, label, &value.to_be_bytes());
 }
@@ -648,6 +624,7 @@ fn destination_kind_name(kind: InitializationDestinationKind) -> &'static str {
         InitializationDestinationKind::File => "file",
         InitializationDestinationKind::Symlink => "symlink",
         InitializationDestinationKind::ReconstructableDirectory => "reconstructable_directory",
+        InitializationDestinationKind::GitMetadata => "git_metadata",
         InitializationDestinationKind::NestedFolderbase => "nested_folderbase",
         InitializationDestinationKind::Other => "other",
     }
@@ -709,11 +686,10 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
     let root_dir = Dir::from_std_file(root_file);
 
     verify_template_preconditions(&root_dir, plan)?;
-    verify_preserved_paths(&root_dir, plan)?;
     validate_planned_paths_against_existing(&plan.root, &plan.directories, &plan.writes)?;
     verify_destinations_absent(&root_dir, plan)?;
-    if snapshot_destination_inventory(&root)? != plan.destination_inventory {
-        return Err(FolderbaseError::PlanPreconditionChanged(root));
+    if snapshot_destination_inventory(&root_dir, &root)? != plan.destination_inventory {
+        return Err(FolderbaseError::InitializationDestinationChanged(root));
     }
 
     for directory in &plan.directories {
@@ -749,35 +725,26 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
     })
 }
 
-/// Replan the exact Core request against the current destination and apply it
-/// only when its digest is the one the caller approved.
+/// Apply the exact read-only Core plan only when its digest is the one the
+/// caller approved.
 pub fn initialize_with_expected_plan_digest(
     plan: &InitializationPlan,
     expected: &InitializationPlanDigest,
 ) -> Result<InitializationResult> {
     expected.validate()?;
-    let current = match &plan.request {
-        InitializationRequest::Ordinary { options } => {
-            plan_initialization(&plan.root, options.clone())?
-        }
-        InitializationRequest::Template {
-            options,
-            package,
-            answers,
-        } => plan_template_initialization(&plan.root, options.clone(), package, answers)?,
-    };
-    if current.plan_digest != *expected {
+    if plan.plan_digest != *expected {
         return Err(FolderbaseError::InitializationPlanChanged {
             expected: expected.digest.clone(),
-            actual: current.plan_digest.digest.clone(),
+            actual: plan.plan_digest.digest.clone(),
         });
     }
-    initialize(&current)
+    initialize(plan)
 }
 
 pub(crate) fn create_directory_no_clobber(root_dir: &Dir, root: &Path, path: &Path) -> Result<()> {
     ensure_safe_relative(path)?;
-    if let Err(source) = root_dir.create_dir(path) {
+    let (parent, name) = open_parent_dir_nofollow(root_dir, root, path)?;
+    if let Err(source) = parent.create_dir(&name) {
         return Err(if source.kind() == std::io::ErrorKind::AlreadyExists {
             FolderbaseError::WouldOverwrite(root.join(path))
         } else {
@@ -795,43 +762,68 @@ pub(crate) fn install_text_no_clobber(
     staging_label: &str,
 ) -> Result<()> {
     ensure_safe_relative(path)?;
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        let metadata = root_dir
-            .symlink_metadata(parent)
-            .map_err(|source| FolderbaseError::io(root.join(parent), source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(FolderbaseError::UnsafePath(root.join(parent)));
-        }
-    }
+    let (destination_parent, destination_name) = open_parent_dir_nofollow(root_dir, root, path)?;
 
     let staged_path = PathBuf::from(format!(
         ".folderbase/.{staging_label}-{}.tmp",
         Uuid::now_v7()
     ));
+    let (staging_parent, staging_name) = open_parent_dir_nofollow(root_dir, root, &staged_path)?;
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut staged = root_dir
-        .open_with(&staged_path, &options)
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    let mut staged = staging_parent
+        .open_with(&staging_name, &options)
         .map_err(|source| FolderbaseError::io(root.join(&staged_path), source))?;
     if let Err(source) = staged.write_all(content).and_then(|()| staged.sync_all()) {
         drop(staged);
-        let _ = root_dir.remove_file(&staged_path);
+        let _ = staging_parent.remove_file(&staging_name);
         return Err(FolderbaseError::io(root.join(&staged_path), source));
     }
     drop(staged);
 
-    if let Err(source) = root_dir.hard_link(&staged_path, root_dir, path) {
-        let _ = root_dir.remove_file(&staged_path);
+    if let Err(source) =
+        staging_parent.hard_link(&staging_name, &destination_parent, &destination_name)
+    {
+        let _ = staging_parent.remove_file(&staging_name);
         return Err(if source.kind() == std::io::ErrorKind::AlreadyExists {
             FolderbaseError::WouldOverwrite(root.join(path))
         } else {
             FolderbaseError::io(root.join(path), source)
         });
     }
-    let _ = root_dir.remove_file(&staged_path);
+    let _ = staging_parent.remove_file(&staging_name);
     Ok(())
+}
+
+fn open_parent_dir_nofollow(
+    root_dir: &Dir,
+    root: &Path,
+    path: &Path,
+) -> Result<(Dir, std::ffi::OsString)> {
+    ensure_safe_relative(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| FolderbaseError::UnsafePath(path.to_path_buf()))?
+        .to_os_string();
+    let mut current = root_dir
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(root, source))?;
+    if let Some(parent) = path.parent() {
+        let mut traversed = PathBuf::new();
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+            };
+            traversed.push(component);
+            current = current
+                .open_dir_nofollow(component)
+                .map_err(|source| FolderbaseError::io(root.join(&traversed), source))?;
+        }
+    }
+    Ok((current, name))
 }
 
 pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf> {
@@ -862,6 +854,7 @@ fn template_preconditions(
     package: &TemplatePackage,
     rendered: &TemplateRenderPlan,
 ) -> Result<Vec<TemplateArtifactPrecondition>> {
+    let root_dir = open_root_capability(root)?;
     let mut preconditions = Vec::new();
     for path in &rendered.existing_paths {
         let artifact = package
@@ -873,7 +866,8 @@ fn template_preconditions(
                 message: "rendered existing target is not declared by its template".to_owned(),
             })?;
         let destination = safe_destination(root, path)?;
-        let metadata = fs::symlink_metadata(&destination)
+        let metadata = root_dir
+            .symlink_metadata(path)
             .map_err(|source| FolderbaseError::io(&destination, source))?;
         let expected_type = match artifact.kind {
             TemplateArtifactKind::Directory => metadata.is_dir(),
@@ -888,16 +882,36 @@ fn template_preconditions(
                 ),
             });
         }
-        if artifact.kind == TemplateArtifactKind::Directory
-            && has_nested_folderbase_marker(&destination)?
-        {
-            return Err(FolderbaseError::InvalidRecord {
-                path: destination,
-                message: "existing template directory is already a nested folderbase".to_owned(),
-            });
-        }
-        let handle = Handle::from_path(&destination)
-            .map_err(|source| FolderbaseError::io(&destination, source))?;
+        let handle = match artifact.kind {
+            TemplateArtifactKind::Directory => {
+                let directory = root_dir
+                    .open_dir_nofollow(path)
+                    .map_err(|source| FolderbaseError::io(&destination, source))?;
+                if has_nested_folderbase_marker_capability(&directory, destination.clone())? {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: destination,
+                        message: "existing template directory is already a nested folderbase"
+                            .to_owned(),
+                    });
+                }
+                Handle::from_file(
+                    directory
+                        .try_clone()
+                        .map_err(|source| FolderbaseError::io(&destination, source))?
+                        .into_std_file(),
+                )
+                .map_err(|source| FolderbaseError::io(&destination, source))?
+            }
+            TemplateArtifactKind::Text => {
+                let mut options = OpenOptions::new();
+                options.read(true).follow(FollowSymlinks::No);
+                let file = root_dir
+                    .open_with(path, &options)
+                    .map_err(|source| FolderbaseError::io(&destination, source))?;
+                Handle::from_file(file.into_std())
+                    .map_err(|source| FolderbaseError::io(&destination, source))?
+            }
+        };
         preconditions.push(TemplateArtifactPrecondition {
             path: path.clone(),
             kind: artifact.kind,
@@ -924,12 +938,33 @@ fn verify_template_preconditions(root_dir: &Dir, plan: &InitializationPlan) -> R
         if metadata.file_type().is_symlink() || !expected_type {
             return Err(changed());
         }
-        if precondition.kind == TemplateArtifactKind::Directory
-            && has_nested_folderbase_marker(&destination).map_err(|_| changed())?
-        {
-            return Err(changed());
-        }
-        let current_handle = Handle::from_path(&destination).map_err(|_| changed())?;
+        let current_handle = match precondition.kind {
+            TemplateArtifactKind::Directory => {
+                let directory = root_dir
+                    .open_dir_nofollow(&precondition.path)
+                    .map_err(|_| changed())?;
+                if has_nested_folderbase_marker_capability(&directory, destination.clone())
+                    .map_err(|_| changed())?
+                {
+                    return Err(changed());
+                }
+                Handle::from_file(
+                    directory
+                        .try_clone()
+                        .map_err(|_| changed())?
+                        .into_std_file(),
+                )
+                .map_err(|_| changed())?
+            }
+            TemplateArtifactKind::Text => {
+                let mut options = OpenOptions::new();
+                options.read(true).follow(FollowSymlinks::No);
+                let file = root_dir
+                    .open_with(&precondition.path, &options)
+                    .map_err(|_| changed())?;
+                Handle::from_file(file.into_std()).map_err(|_| changed())?
+            }
+        };
         if current_handle != precondition.handle {
             return Err(changed());
         }
@@ -977,108 +1012,192 @@ pub(crate) fn refuse_template_target_inside_nested_folderbase(
     Ok(())
 }
 
-fn snapshot_destination_inventory(root: &Path) -> Result<Vec<InitializationDestinationEntry>> {
+fn open_root_capability(root: &Path) -> Result<Dir> {
+    let file = fs::File::open(root).map_err(|source| FolderbaseError::io(root, source))?;
+    Ok(Dir::from_std_file(file))
+}
+
+#[derive(Default)]
+struct InitializationInventoryBudget {
+    entries: usize,
+    encoded_bytes: usize,
+    path_component_work: usize,
+}
+
+impl InitializationInventoryBudget {
+    fn record(&mut self, path: &Path, depth: usize) -> Result<()> {
+        if depth > MAX_INITIALIZATION_DEPTH {
+            return Err(inventory_limit("depth", MAX_INITIALIZATION_DEPTH as u64));
+        }
+        let path_bytes = path.as_os_str().as_encoded_bytes().len();
+        if path_bytes > MAX_INITIALIZATION_PATH_BYTES {
+            return Err(inventory_limit(
+                "path_bytes",
+                MAX_INITIALIZATION_PATH_BYTES as u64,
+            ));
+        }
+        self.entries = self.entries.saturating_add(1);
+        if self.entries > MAX_INITIALIZATION_INVENTORY_ENTRIES {
+            return Err(inventory_limit(
+                "entries",
+                MAX_INITIALIZATION_INVENTORY_ENTRIES as u64,
+            ));
+        }
+        // The encoded form contains the canonical relative path plus one
+        // kind tag and length framing. The conservative constant keeps the
+        // in-memory plan and its canonical hash input bounded.
+        self.encoded_bytes = self
+            .encoded_bytes
+            .saturating_add(path_bytes)
+            .saturating_add(32);
+        if self.encoded_bytes > MAX_INITIALIZATION_ENCODED_INVENTORY_BYTES {
+            return Err(inventory_limit(
+                "encoded_inventory_bytes",
+                MAX_INITIALIZATION_ENCODED_INVENTORY_BYTES as u64,
+            ));
+        }
+        self.path_component_work = self.path_component_work.saturating_add(depth);
+        if self.path_component_work > MAX_INITIALIZATION_PATH_COMPONENT_WORK {
+            return Err(inventory_limit(
+                "path_component_work",
+                MAX_INITIALIZATION_PATH_COMPONENT_WORK as u64,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn inventory_limit(limit: &'static str, maximum: u64) -> FolderbaseError {
+    FolderbaseError::InitializationInventoryLimitExceeded { limit, maximum }
+}
+
+fn snapshot_destination_inventory(
+    root_dir: &Dir,
+    root: &Path,
+) -> Result<Vec<InitializationDestinationEntry>> {
     fn visit(
         root: &Path,
-        current: &Path,
+        current_dir: &Dir,
+        relative_parent: &Path,
+        depth: usize,
+        budget: &mut InitializationInventoryBudget,
         inventory: &mut Vec<InitializationDestinationEntry>,
     ) -> Result<()> {
-        let entries =
-            fs::read_dir(current).map_err(|source| FolderbaseError::io(current, source))?;
-        for entry in entries {
-            let entry = entry.map_err(|source| FolderbaseError::io(current, source))?;
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .expect("walked path stays under root")
-                .to_path_buf();
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|source| FolderbaseError::io(&path, source))?;
-            if metadata.file_type().is_symlink() {
-                inventory.push(InitializationDestinationEntry {
-                    path: relative,
-                    kind: InitializationDestinationKind::Symlink,
-                    bytes: None,
-                    sha256: None,
-                    symlink_target: Some(
-                        fs::read_link(&path)
-                            .map_err(|source| FolderbaseError::io(&path, source))?,
-                    ),
-                });
-                continue;
-            }
-            if metadata.is_dir() {
-                let name = entry.file_name();
-                if is_expensive_reconstructable_directory(&name) {
-                    inventory.push(InitializationDestinationEntry {
-                        path: relative,
-                        kind: InitializationDestinationKind::ReconstructableDirectory,
-                        bytes: None,
-                        sha256: None,
-                        symlink_target: None,
-                    });
-                    continue;
+        let mut names = current_dir
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(root.join(relative_parent), source))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name())
+                    .map_err(|source| FolderbaseError::io(root.join(relative_parent), source))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        names.sort();
+
+        for name in names {
+            let relative = relative_parent.join(&name);
+            budget.record(&relative, depth)?;
+            let metadata = current_dir
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(root.join(&relative), source))?;
+            let kind = if metadata.file_type().is_symlink() {
+                InitializationDestinationKind::Symlink
+            } else if metadata.is_dir() {
+                if is_git_metadata_component(&name) {
+                    InitializationDestinationKind::GitMetadata
+                } else if is_reconstructable_directory(&name) {
+                    InitializationDestinationKind::ReconstructableDirectory
+                } else {
+                    let child = current_dir
+                        .open_dir_nofollow(&name)
+                        .map_err(|source| FolderbaseError::io(root.join(&relative), source))?;
+                    if has_nested_folderbase_marker_capability(&child, root.join(&relative))? {
+                        InitializationDestinationKind::NestedFolderbase
+                    } else {
+                        inventory.push(InitializationDestinationEntry {
+                            path: relative.clone(),
+                            kind: InitializationDestinationKind::Directory,
+                        });
+                        visit(root, &child, &relative, depth + 1, budget, inventory)?;
+                        continue;
+                    }
                 }
-                if path != root && has_nested_folderbase_marker(&path)? {
-                    inventory.push(InitializationDestinationEntry {
-                        path: relative,
-                        kind: InitializationDestinationKind::NestedFolderbase,
-                        bytes: None,
-                        sha256: None,
-                        symlink_target: None,
-                    });
-                    continue;
-                }
-                inventory.push(InitializationDestinationEntry {
-                    path: relative,
-                    kind: InitializationDestinationKind::Directory,
-                    bytes: None,
-                    sha256: None,
-                    symlink_target: None,
-                });
-                visit(root, &path, inventory)?;
             } else if metadata.is_file() {
-                inventory.push(InitializationDestinationEntry {
-                    path: relative,
-                    kind: InitializationDestinationKind::File,
-                    bytes: Some(metadata.len()),
-                    sha256: Some(sha256_path(&path)?),
-                    symlink_target: None,
-                });
+                InitializationDestinationKind::File
             } else {
-                inventory.push(InitializationDestinationEntry {
-                    path: relative,
-                    kind: InitializationDestinationKind::Other,
-                    bytes: None,
-                    sha256: None,
-                    symlink_target: None,
-                });
-            }
+                InitializationDestinationKind::Other
+            };
+            inventory.push(InitializationDestinationEntry {
+                path: relative,
+                kind,
+            });
         }
         Ok(())
     }
 
     let mut inventory = Vec::new();
-    visit(root, root, &mut inventory)?;
+    let mut budget = InitializationInventoryBudget::default();
+    visit(
+        root,
+        root_dir,
+        Path::new(""),
+        1,
+        &mut budget,
+        &mut inventory,
+    )?;
     inventory.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(inventory)
 }
 
-fn is_expensive_reconstructable_directory(name: &std::ffi::OsStr) -> bool {
-    [
-        ".git",
-        "node_modules",
-        ".next",
-        "dist",
-        "build",
-        "coverage",
-        ".venv",
-        "__pycache__",
-        ".dart_tool",
-        "Pods",
-    ]
-    .iter()
-    .any(|candidate| name == std::ffi::OsStr::new(candidate))
+fn has_nested_folderbase_marker_capability(directory: &Dir, display_path: PathBuf) -> Result<bool> {
+    let mut has_entry = false;
+    let mut state_names = Vec::new();
+    for entry in directory
+        .read_dir(".")
+        .map_err(|source| FolderbaseError::io(&display_path, source))?
+    {
+        let entry = entry.map_err(|source| FolderbaseError::io(&display_path, source))?;
+        let name = entry.file_name();
+        if os_name_eq_ignore_ascii_case(&name, "FOLDERBASE.md") {
+            has_entry = true;
+        } else if os_name_eq_ignore_ascii_case(&name, ".folderbase") {
+            state_names.push(name);
+        }
+    }
+    if !has_entry {
+        return Ok(false);
+    }
+
+    for name in state_names {
+        let metadata = directory
+            .symlink_metadata(&name)
+            .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?;
+        if metadata.file_type().is_symlink() {
+            return Ok(true);
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let state_dir = directory
+            .open_dir_nofollow(&name)
+            .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?;
+        for entry in state_dir
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?
+        {
+            let entry =
+                entry.map_err(|source| FolderbaseError::io(display_path.join(&name), source))?;
+            if os_name_eq_ignore_ascii_case(&entry.file_name(), "manifest.json") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn os_name_eq_ignore_ascii_case(name: &OsStr, expected: &str) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
 }
 
 fn plan_missing_parent_directories(
@@ -1339,7 +1458,6 @@ fn plan_file(
             {
                 preserved_paths.push(PreservedPath {
                     path: relative_path.to_path_buf(),
-                    sha256: sha256_path(&destination)?,
                 });
             }
         }
@@ -1352,33 +1470,6 @@ fn plan_file(
             });
         }
         Err(source) => return Err(FolderbaseError::io(destination, source)),
-    }
-    Ok(())
-}
-
-fn verify_preserved_paths(root_dir: &Dir, plan: &InitializationPlan) -> Result<()> {
-    for preserved in &plan.preserved_paths {
-        ensure_safe_relative(&preserved.path)?;
-        safe_destination(&plan.root, &preserved.path)
-            .map_err(|_| FolderbaseError::PlanPreconditionChanged(preserved.path.clone()))?;
-        let metadata = root_dir
-            .symlink_metadata(&preserved.path)
-            .map_err(|_| FolderbaseError::PlanPreconditionChanged(preserved.path.clone()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(FolderbaseError::PlanPreconditionChanged(
-                preserved.path.clone(),
-            ));
-        }
-        let mut file = root_dir
-            .open(&preserved.path)
-            .map_err(|_| FolderbaseError::PlanPreconditionChanged(preserved.path.clone()))?;
-        let digest = sha256_reader(&mut file)
-            .map_err(|_| FolderbaseError::PlanPreconditionChanged(preserved.path.clone()))?;
-        if digest != preserved.sha256 {
-            return Err(FolderbaseError::PlanPreconditionChanged(
-                preserved.path.clone(),
-            ));
-        }
     }
     Ok(())
 }
@@ -1551,7 +1642,10 @@ mod tests {
         fs::remove_file(temp.path().join(FOLDERBASE_ENTRY)).unwrap();
 
         let error = initialize(&plan).unwrap_err();
-        assert!(matches!(error, FolderbaseError::PlanPreconditionChanged(_)));
+        assert!(matches!(
+            error,
+            FolderbaseError::InitializationDestinationChanged(_)
+        ));
         assert!(!temp.path().join(MANIFEST).exists());
         assert!(!temp.path().join(CODEX_ADAPTER).exists());
     }

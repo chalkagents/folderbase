@@ -21,6 +21,7 @@ exclude = [
 
 [dependencies]
 cap-std.workspace = true
+cap-fs-ext.workspace = true
 chrono.workspace = true
 libc.workspace = true
 same-file.workspace = true

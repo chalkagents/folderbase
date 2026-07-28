@@ -24,7 +24,7 @@ path = "src/main.rs"
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-folderbase-core = { version = "0.1.1", path = "../folderbase-core" }
+folderbase-core = { version = "0.2.0", path = "../folderbase-core" }
 
 [dev-dependencies]
 assert_cmd.workspace = true

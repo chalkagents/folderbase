@@ -9,6 +9,9 @@ use walkdir::WalkDir;
 use crate::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseError, InventorySummary,
     NestedFolderbaseBoundary, NestedFolderbaseState, ReconstructableTree, Result,
+    traversal_policy::{
+        is_folderbase_state_component, is_git_metadata_component, is_reconstructable_directory,
+    },
 };
 
 const LARGE_FILE_BYTES: u64 = 100 * 1024 * 1024;
@@ -135,11 +138,7 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
             }
         }
 
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(".folderbase"))
-        {
+        if is_folderbase_state_component(entry.file_name()) {
             if file_type.is_dir() {
                 entries.skip_current_dir();
             }
@@ -155,11 +154,7 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
             continue;
         }
 
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
-        {
+        if is_git_metadata_component(entry.file_name()) {
             if file_type.is_dir() {
                 entries.skip_current_dir();
             }
@@ -391,63 +386,23 @@ fn classify(
 }
 
 fn is_generated(path: &Path) -> bool {
-    const GENERATED_DIRECTORIES: &[&str] = &[
-        ".dart_tool",
-        ".build",
-        ".next",
-        ".nuxt",
-        ".sites",
-        ".svelte-kit",
-        ".swiftpm",
-        ".venv",
-        ".wrangler",
-        "Pods",
-        "__pycache__",
-        "build",
-        "coverage",
-        "DerivedData",
-        "dist",
-        "node_modules",
-        "target",
-    ];
     const GENERATED_EXTENSIONS: &[&str] =
         &["class", "o", "obj", "pyc", "pyo", "wasm", "xcuserstate"];
 
-    has_component(path, GENERATED_DIRECTORIES)
-        || path
-            .extension()
-            .and_then(OsStr::to_str)
-            .is_some_and(|extension| {
-                GENERATED_EXTENSIONS
-                    .iter()
-                    .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-            })
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name) if is_reconstructable_directory(name)
+        )
+    }) || path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            GENERATED_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
         || file_name_eq(path, ".DS_Store")
-}
-
-fn is_reconstructable_directory(name: &OsStr) -> bool {
-    const RECONSTRUCTABLE_DIRECTORIES: &[&str] = &[
-        "node_modules",
-        ".next",
-        ".nuxt",
-        ".sites",
-        ".svelte-kit",
-        ".wrangler",
-        "dist",
-        "build",
-        "coverage",
-        ".build",
-        ".swiftpm",
-        ".venv",
-        "__pycache__",
-        ".dart_tool",
-        "Pods",
-        "DerivedData",
-        "target",
-    ];
-    RECONSTRUCTABLE_DIRECTORIES
-        .iter()
-        .any(|candidate| name == OsStr::new(candidate))
 }
 
 fn is_secret_shaped(path: &Path) -> bool {
@@ -651,17 +606,6 @@ fn boundary_reason(path: &Path) -> Option<(&'static str, &'static str)> {
         ));
     }
     None
-}
-
-fn has_component(path: &Path, candidates: &[&str]) -> bool {
-    path.components().any(|component| {
-        let Component::Normal(part) = component else {
-            return false;
-        };
-        candidates
-            .iter()
-            .any(|candidate| part == OsStr::new(candidate))
-    })
 }
 
 fn has_component_case_insensitive(path: &Path, candidates: &[&str]) -> bool {
