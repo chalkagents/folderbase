@@ -20,7 +20,6 @@ use crate::model::{
 };
 use crate::template::template_package_sha256;
 use crate::traversal_policy::{is_git_metadata_component, is_reconstructable_directory};
-use crate::workspace::has_nested_folderbase_marker;
 use crate::{
     FolderbaseError, FolderbaseKind, InitializationInventoryLimitKind, InitializationOptions,
     InitializationPlan, InitializationPlanDigest, InitializationResult, PlannedDirectory,
@@ -140,7 +139,9 @@ fn plan_initialization_with_template(
     let mut directories = Vec::new();
     let mut writes = Vec::new();
     let mut template_preconditions = Vec::new();
-    let destination_inventory = snapshot_destination_inventory(&root_dir, &root)?;
+    let mut inventory_budget = InitializationInventoryBudget::default();
+    let destination_inventory =
+        snapshot_destination_inventory(&root_dir, &root, &mut inventory_budget)?;
     let mut preserved_paths = destination_inventory
         .iter()
         .filter(|entry| entry.kind == InitializationDestinationKind::File)
@@ -160,7 +161,12 @@ fn plan_initialization_with_template(
             .map(|addition| addition.path.as_path())
             .chain(rendered.existing_paths.iter().map(PathBuf::as_path))
         {
-            refuse_template_target_inside_nested_folderbase(&root, path)?;
+            refuse_template_target_inside_nested_folderbase_capability(
+                &root_dir,
+                &root,
+                path,
+                &mut inventory_budget,
+            )?;
         }
         for addition in rendered.additions {
             match addition.kind {
@@ -691,10 +697,13 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
     refuse_nested_target(&root)?;
     let root_dir = Dir::from_std_file(root_file);
 
-    verify_template_preconditions(&root_dir, plan)?;
+    let mut preflight_budget = InitializationInventoryBudget::default();
+    verify_template_preconditions(&root_dir, plan, &mut preflight_budget)?;
     validate_planned_paths_against_existing(&plan.root, &plan.directories, &plan.writes)?;
-    verify_destinations_absent(&root_dir, plan)?;
-    if snapshot_destination_inventory(&root_dir, &root)? != plan.destination_inventory {
+    verify_destinations_absent(&root_dir, plan, &mut preflight_budget)?;
+    if snapshot_destination_inventory(&root_dir, &root, &mut preflight_budget)?
+        != plan.destination_inventory
+    {
         return Err(FolderbaseError::InitializationDestinationChanged(root));
     }
 
@@ -933,8 +942,11 @@ fn template_preconditions(
     Ok(preconditions)
 }
 
-fn verify_template_preconditions(root_dir: &Dir, plan: &InitializationPlan) -> Result<()> {
-    let mut boundary_budget = InitializationInventoryBudget::default();
+fn verify_template_preconditions(
+    root_dir: &Dir,
+    plan: &InitializationPlan,
+    boundary_budget: &mut InitializationInventoryBudget,
+) -> Result<()> {
     for precondition in &plan.template_preconditions {
         let changed = || FolderbaseError::PlanPreconditionChanged(precondition.path.clone());
         ensure_safe_relative(&precondition.path).map_err(|_| changed())?;
@@ -958,7 +970,7 @@ fn verify_template_preconditions(root_dir: &Dir, plan: &InitializationPlan) -> R
                 let is_nested = match has_nested_folderbase_marker_capability(
                     &directory,
                     destination.clone(),
-                    &mut boundary_budget,
+                    boundary_budget,
                 ) {
                     Ok(is_nested) => is_nested,
                     Err(error @ FolderbaseError::InitializationInventoryLimitExceeded { .. }) => {
@@ -994,8 +1006,16 @@ fn verify_template_preconditions(root_dir: &Dir, plan: &InitializationPlan) -> R
 }
 
 fn refuse_nested_target(root: &Path) -> Result<()> {
+    let mut budget = InitializationInventoryBudget::default();
     for ancestor in root.ancestors().skip(1) {
-        if ancestor.is_dir() && has_nested_folderbase_marker(ancestor)? {
+        let metadata = fs::symlink_metadata(ancestor)
+            .map_err(|source| FolderbaseError::io(ancestor, source))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let directory = open_root_capability(ancestor)?.directory;
+        if has_nested_folderbase_marker_capability(&directory, ancestor.to_path_buf(), &mut budget)?
+        {
             return Err(FolderbaseError::InvalidRecord {
                 path: root.to_path_buf(),
                 message: format!(
@@ -1012,19 +1032,46 @@ pub(crate) fn refuse_template_target_inside_nested_folderbase(
     root: &Path,
     target: &Path,
 ) -> Result<()> {
-    let mut current = root.to_path_buf();
+    let root_dir = open_root_capability(root)?.directory;
+    let mut budget = InitializationInventoryBudget::default();
+    refuse_template_target_inside_nested_folderbase_capability(&root_dir, root, target, &mut budget)
+}
+
+fn refuse_template_target_inside_nested_folderbase_capability(
+    root_dir: &Dir,
+    root: &Path,
+    target: &Path,
+    budget: &mut InitializationInventoryBudget,
+) -> Result<()> {
+    ensure_safe_relative(target)?;
+    let mut current_dir = root_dir
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(root, source))?;
+    let mut current_path = root.to_path_buf();
     if let Some(parent) = target.parent() {
         for component in parent.components() {
             let Component::Normal(component) = component else {
                 return Err(FolderbaseError::UnsafePath(target.to_path_buf()));
             };
-            current.push(component);
-            if current.is_dir() && has_nested_folderbase_marker(&current)? {
+            current_path.push(component);
+            let metadata = match current_dir.symlink_metadata(component) {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(source) => return Err(FolderbaseError::io(&current_path, source)),
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(FolderbaseError::UnsafePath(current_path));
+            }
+            current_dir = current_dir
+                .open_dir_nofollow(component)
+                .map_err(|source| FolderbaseError::io(&current_path, source))?;
+            if has_nested_folderbase_marker_capability(&current_dir, current_path.clone(), budget)?
+            {
                 return Err(FolderbaseError::InvalidRecord {
                     path: target.to_path_buf(),
                     message: format!(
                         "template target is inside nested folderbase at {}",
-                        current.display()
+                        current_path.display()
                     ),
                 });
             }
@@ -1100,7 +1147,6 @@ fn root_digest_identity(_metadata: &fs::Metadata, root: &Path) -> Result<Vec<u8>
     })
 }
 
-#[derive(Default)]
 struct InitializationInventoryBudget {
     entries: usize,
     encoded_bytes: usize,
@@ -1108,15 +1154,26 @@ struct InitializationInventoryBudget {
     directory_entry_work: usize,
 }
 
+impl Default for InitializationInventoryBudget {
+    fn default() -> Self {
+        Self {
+            entries: 0,
+            encoded_bytes: digest_frame_len(b"destination_inventory_count", 8),
+            path_component_work: 0,
+            directory_entry_work: 0,
+        }
+    }
+}
+
 impl InitializationInventoryBudget {
-    fn record(&mut self, path: &Path, depth: usize) -> Result<()> {
+    fn record_path(&mut self, path: &Path, depth: usize) -> Result<()> {
         if depth > MAX_INITIALIZATION_DEPTH {
             return Err(inventory_limit(
                 InitializationInventoryLimitKind::Depth,
                 MAX_INITIALIZATION_DEPTH as u64,
             ));
         }
-        let path_bytes = path.as_os_str().as_encoded_bytes().len();
+        let path_bytes = digest_os_str_len(path.as_os_str());
         if path_bytes > MAX_INITIALIZATION_PATH_BYTES {
             return Err(inventory_limit(
                 InitializationInventoryLimitKind::PathBytes,
@@ -1130,13 +1187,10 @@ impl InitializationInventoryBudget {
                 MAX_INITIALIZATION_INVENTORY_ENTRIES as u64,
             ));
         }
-        // The encoded form contains the canonical relative path plus one
-        // kind tag and length framing. The conservative constant keeps the
-        // in-memory plan and its canonical hash input bounded.
         self.encoded_bytes = self
             .encoded_bytes
-            .saturating_add(path_bytes)
-            .saturating_add(32);
+            .saturating_add(digest_frame_len(b"path_label", b"destination_path".len()))
+            .saturating_add(digest_frame_len(b"path_value", path_bytes));
         if self.encoded_bytes > MAX_INITIALIZATION_ENCODED_INVENTORY_BYTES {
             return Err(inventory_limit(
                 InitializationInventoryLimitKind::EncodedInventoryBytes,
@@ -1148,6 +1202,20 @@ impl InitializationInventoryBudget {
             return Err(inventory_limit(
                 InitializationInventoryLimitKind::PathComponentWork,
                 MAX_INITIALIZATION_PATH_COMPONENT_WORK as u64,
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_kind(&mut self, kind: InitializationDestinationKind) -> Result<()> {
+        self.encoded_bytes = self.encoded_bytes.saturating_add(digest_frame_len(
+            b"destination_kind",
+            destination_kind_name(kind).len(),
+        ));
+        if self.encoded_bytes > MAX_INITIALIZATION_ENCODED_INVENTORY_BYTES {
+            return Err(inventory_limit(
+                InitializationInventoryLimitKind::EncodedInventoryBytes,
+                MAX_INITIALIZATION_ENCODED_INVENTORY_BYTES as u64,
             ));
         }
         Ok(())
@@ -1165,6 +1233,27 @@ impl InitializationInventoryBudget {
     }
 }
 
+fn digest_frame_len(label: &[u8], value_len: usize) -> usize {
+    16usize
+        .saturating_add(label.len())
+        .saturating_add(value_len)
+}
+
+fn digest_os_str_len(value: &OsStr) -> usize {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        value.as_bytes().len()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        value.encode_wide().count().saturating_mul(2)
+    }
+    #[cfg(not(any(unix, windows)))]
+    value.as_encoded_bytes().len()
+}
+
 fn inventory_limit(limit: InitializationInventoryLimitKind, maximum: u64) -> FolderbaseError {
     FolderbaseError::InitializationInventoryLimitExceeded { limit, maximum }
 }
@@ -1172,6 +1261,7 @@ fn inventory_limit(limit: InitializationInventoryLimitKind, maximum: u64) -> Fol
 fn snapshot_destination_inventory(
     root_dir: &Dir,
     root: &Path,
+    budget: &mut InitializationInventoryBudget,
 ) -> Result<Vec<InitializationDestinationEntry>> {
     fn visit(
         root: &Path,
@@ -1191,7 +1281,7 @@ fn snapshot_destination_inventory(
             budget.observe_directory_entry()?;
             let name = entry.file_name();
             let relative = relative_parent.join(&name);
-            budget.record(&relative, depth)?;
+            budget.record_path(&relative, depth)?;
             names.push(name);
         }
         names.sort();
@@ -1219,6 +1309,7 @@ fn snapshot_destination_inventory(
                     )? {
                         InitializationDestinationKind::NestedFolderbase
                     } else {
+                        budget.record_kind(InitializationDestinationKind::Directory)?;
                         inventory.push(InitializationDestinationEntry {
                             path: relative.clone(),
                             kind: InitializationDestinationKind::Directory,
@@ -1232,6 +1323,7 @@ fn snapshot_destination_inventory(
             } else {
                 InitializationDestinationKind::Other
             };
+            budget.record_kind(kind)?;
             inventory.push(InitializationDestinationEntry {
                 path: relative,
                 kind,
@@ -1241,15 +1333,7 @@ fn snapshot_destination_inventory(
     }
 
     let mut inventory = Vec::new();
-    let mut budget = InitializationInventoryBudget::default();
-    visit(
-        root,
-        root_dir,
-        Path::new(""),
-        1,
-        &mut budget,
-        &mut inventory,
-    )?;
+    visit(root, root_dir, Path::new(""), 1, budget, &mut inventory)?;
     inventory.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(inventory)
 }
@@ -1577,7 +1661,11 @@ fn plan_file(
     Ok(())
 }
 
-fn verify_destinations_absent(root_dir: &Dir, plan: &InitializationPlan) -> Result<()> {
+fn verify_destinations_absent(
+    root_dir: &Dir,
+    plan: &InitializationPlan,
+    budget: &mut InitializationInventoryBudget,
+) -> Result<()> {
     for path in plan
         .directories
         .iter()
@@ -1586,7 +1674,9 @@ fn verify_destinations_absent(root_dir: &Dir, plan: &InitializationPlan) -> Resu
     {
         ensure_safe_relative(path)?;
         safe_destination(&plan.root, path)?;
-        refuse_template_target_inside_nested_folderbase(&plan.root, path)?;
+        refuse_template_target_inside_nested_folderbase_capability(
+            root_dir, &plan.root, path, budget,
+        )?;
         match root_dir.symlink_metadata(path) {
             Ok(_) => return Err(FolderbaseError::WouldOverwrite(plan.root.join(path))),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -1784,5 +1874,24 @@ mod tests {
             plan_initialization(&provider_root, InitializationOptions::default()).unwrap_err();
         assert!(matches!(error, FolderbaseError::ProviderControlled(_)));
         assert!(!provider_root.join(MANIFEST).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_parent_probe_never_follows_a_symlink_outside_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("Nested")).unwrap();
+
+        let error = refuse_template_target_inside_nested_folderbase(
+            root.path(),
+            Path::new("Nested/file.md"),
+        )
+        .expect_err("a template parent symlink must fail closed");
+
+        assert!(matches!(error, FolderbaseError::UnsafePath(_)));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 }
