@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -31,6 +32,9 @@ jobs:
 
       - name: Enforce the Folderbase-only public surface
         run: scripts/check-public-eclipse.sh
+
+      - name: Enforce the CI trigger policy
+        run: scripts/check-ci-policy.sh
 
       - name: Check formatting
         run: cargo fmt --all -- --check
