@@ -27,4 +27,15 @@ if ! awk '
   exit 1
 fi
 
+while IFS= read -r action_line
+do
+  action_reference=${action_line#*@}
+  action_reference=${action_reference%% *}
+  if [[ ! "$action_reference" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'CI action is not pinned to an immutable commit: %s\n' \
+      "$action_line" >&2
+    exit 1
+  fi
+done < <(grep -E '^[[:space:]]*uses:' "$workflow")
+
 echo "CI trigger policy is valid."
