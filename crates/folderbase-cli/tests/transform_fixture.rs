@@ -381,7 +381,7 @@ const GOLDEN_FOLDERBASES: &[&str] = &[
     "Commercial-Restricted.folderbase",
     "Loyalty-Revamp-Project.folderbase",
     "Security-Remediation.folderbase",
-    "Support-and-Maintenance-Project.folderbase",
+    "Support-And-Maintenance-Project.folderbase",
 ];
 
 struct GoldenFixture {
@@ -941,7 +941,13 @@ fn approved_decisions_create_valid_independent_folderbases() {
     let (_, result) = golden_apply(&fixture.root, &analysis);
     assert_eq!(result["state"], "verified");
 
+    let created_paths = result["created_paths"].as_array().unwrap();
     for folderbase_name in GOLDEN_FOLDERBASES {
+        let expected_entry = format!("Organized/{folderbase_name}/FOLDERBASE.md");
+        assert!(
+            created_paths.iter().any(|path| path == &expected_entry),
+            "apply output must preserve the portable path spelling for {folderbase_name}"
+        );
         let root = fixture.root.join("Organized").join(folderbase_name);
         folderbase()
             .args(["validate", root.to_str().unwrap(), "--json"])
