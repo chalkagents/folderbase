@@ -10,6 +10,8 @@ mod error;
 mod folder_analysis;
 mod folderbase_capture;
 pub mod folderbase_version;
+#[cfg(test)]
+mod folderbase_version_producer_tests;
 pub mod guide_policy;
 mod initialization;
 mod inspection;

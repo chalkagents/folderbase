@@ -35,11 +35,18 @@ already represented through its reserved reference. A discovered nested
 Folderbase becomes one typed boundary exclusion and none of its descendants are
 entered.
 
+Planning walks through root-relative, no-follow directory capabilities. It
+classifies ignore policy before opening a child directory, probes nested markers
+without enumerating their descendants, rechecks opened directory identities, and
+streams directory entries directly into the aggregate record bound. It does not
+sort or retain an unbounded directory listing before enforcing that bound.
+
 In-scope paths use the exact Folderbase Version v1 portability, Unicode
 collision, depth, count, and per-object-size bounds. Non-UTF-8 in-scope paths
 fail closed. A bounded, controlled JSON encoder is the only public way to encode
-an existing `FolderbaseVersion`; crate-private construction validates before a
-value can exist and does not restore raw public Serde deserialization.
+an existing `FolderbaseVersion`; a crate-private producer can assemble every v1
+record kind from verified references, but complete validation still runs before
+a value can exist. This does not restore raw public Serde deserialization.
 
 This decision remains Proposed because this slice deliberately does **not**
 implement or claim byte verification, Object ID/Object Version assignment,

@@ -45,6 +45,14 @@ symlink fidelity:
 malformed nested marker:
   UnsafePortablePath("Clients/Malformed/CON")
   (planning descended past an invalid child entry marker)
+
+symlink root:
+  `FolderbaseVersionStore::open` accepted the symlink target after canonicalizing
+  before root attestation
+
+crate-private producer:
+  no sibling-accessible constructors for `RootManifest`, `PathBinding`, or the
+  closed `FolderbaseVersionParts`
 ```
 
 The initial RED command was also repeated after a clean generated-target failure
@@ -59,15 +67,28 @@ Focused public tests currently prove:
 cargo test --package folderbase-core --test folderbase_version_conformance --locked
   14 passed
 
+cargo test --package folderbase-core --lib folderbase_version_producer_tests --locked
+  1 passed
+
+cargo test --package folderbase-core --lib capability_tests --locked
+  1 passed
+
 cargo test --package folderbase-core --test folderbase_capture --locked
-  13 passed on macOS
+  15 passed on macOS
   plus Linux-only non-UTF-8 and case-collision coverage in hosted CI
 ```
 
 The capture suite proves:
 
 - exact root attestation, no writes, and optional Local Head binding;
+- rejection of a caller-supplied symlink root before canonicalization;
+- capability-relative Local Head reads that reject an intermediate state
+  symlink;
+- direct sibling-module construction of every v1 producer record shape without
+  raw deserialization, followed by complete validation and bounded encoding;
 - ordered Core defaults plus user negation and required-marker override;
+- streaming, root-relative no-follow traversal that classifies ignored
+  directories before opening them and rechecks opened directory identities;
 - no descent into a definitively ignored or nested Folderbase directory,
   including a malformed nested entry marker paired with nested state;
 - opaque metadata handling for PDF, video, CSV, SQLite, Git pack, and unknown

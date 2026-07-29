@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use folderbase_core::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CapturePlanLimitKind,
-    FolderbaseCaptureError, FolderbaseVersionStore, MAX_CAPTURE_PLAN_RECORDS,
+    FolderbaseCaptureError, FolderbaseVersionStore, MAX_CAPTURE_PLAN_RECORDS, RootAttestationError,
     attest_folderbase_root,
 };
 use tempfile::{TempDir, tempdir};
@@ -61,6 +61,43 @@ fn open_and_plan_bind_metadata_to_one_attested_root_without_writing() {
     assert_eq!(plan.exclusions().len(), 0);
     assert_eq!(plan.ignored_paths().len(), 0);
     assert_eq!(state_paths(root.path()), state_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn open_rejects_a_supplied_symlink_root_before_canonicalizing_it() {
+    let root = folderbase();
+    let links = tempdir().expect("link parent");
+    let linked_root = links.path().join("linked-folderbase");
+    std::os::unix::fs::symlink(root.path(), &linked_root).expect("root symlink");
+
+    assert!(matches!(
+        FolderbaseVersionStore::open(&linked_root),
+        Err(FolderbaseCaptureError::RootAttestation(
+            RootAttestationError::RootSymlink { root }
+        )) if root == linked_root
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn open_rejects_a_supplied_windows_directory_reparse_root() {
+    let root = folderbase();
+    let links = tempdir().expect("link parent");
+    let linked_root = links.path().join("linked-folderbase");
+    if let Err(source) = std::os::windows::fs::symlink_dir(root.path(), &linked_root) {
+        if source.kind() == std::io::ErrorKind::PermissionDenied {
+            return;
+        }
+        panic!("directory reparse point: {source}");
+    }
+
+    assert!(matches!(
+        FolderbaseVersionStore::open(&linked_root),
+        Err(FolderbaseCaptureError::RootAttestation(
+            RootAttestationError::RootSymlink { root }
+        )) if root == linked_root
+    ));
 }
 
 #[test]
@@ -325,6 +362,30 @@ fn plan_is_bound_to_the_current_optional_device_local_head() {
         "fbversion_0198ee40-a111-7aaa-8000-000000000001"
     );
     assert_eq!(head.version_sha256(), "a".repeat(64));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_head_never_follows_an_intermediate_state_symlink() {
+    let root = folderbase();
+    let receipt = attest_folderbase_root(root.path()).expect("root receipt");
+    let outside = tempdir().expect("outside local state");
+    fs::write(
+        outside.path().join("head.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "format": "folderbase-local-head-v1",
+            "folderbase_id": FOLDERBASE_ID,
+            "root_instance_sha256": receipt.root_instance_sha256,
+            "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
+            "version_sha256": "c".repeat(64)
+        }))
+        .expect("head JSON"),
+    )
+    .expect("outside head");
+    std::os::unix::fs::symlink(outside.path(), root.path().join(".folderbase/local"))
+        .expect("intermediate state symlink");
+
+    assert!(FolderbaseVersionStore::open(root.path()).is_err());
 }
 
 #[test]

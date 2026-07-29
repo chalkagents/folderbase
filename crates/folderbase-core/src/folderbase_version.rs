@@ -71,17 +71,23 @@ struct FolderbaseVersionWire {
 /// their referenced bytes. Construction still performs the complete protocol
 /// validation before returning a `FolderbaseVersion`.
 pub(crate) struct FolderbaseVersionParts {
-    pub(crate) format: String,
-    pub(crate) protocol_version: String,
-    pub(crate) folderbase_id: String,
-    pub(crate) version_id: String,
-    pub(crate) parents: Vec<String>,
-    pub(crate) created_at: String,
-    pub(crate) path_policy: PathPolicy,
-    pub(crate) root_manifest: RootManifest,
-    pub(crate) bindings: Vec<PathBinding>,
-    pub(crate) tombstones: Vec<Tombstone>,
-    pub(crate) exclusions: Vec<Exclusion>,
+    format: String,
+    protocol_version: String,
+    folderbase_id: String,
+    version_id: String,
+    parents: Vec<String>,
+    created_at: String,
+    path_policy: PathPolicy,
+    root_manifest: RootManifest,
+    bindings: Vec<PathBinding>,
+    tombstones: Vec<Tombstone>,
+    exclusions: Vec<Exclusion>,
+}
+
+pub(crate) struct FolderbaseVersionEntries {
+    bindings: Vec<PathBinding>,
+    tombstones: Vec<Tombstone>,
+    exclusions: Vec<Exclusion>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -231,6 +237,167 @@ pub enum ExclusionKind {
 pub enum ExclusionReason {
     NestedFolderbaseBoundary,
     UnsupportedV1,
+}
+
+// This phase deliberately exposes the producer seam before the later sealing
+// transaction consumes it.
+#[allow(dead_code)]
+impl FolderbaseVersionParts {
+    /// Assemble the closed v1 shape from producer-verified references.
+    ///
+    /// `FolderbaseVersion::from_verified_parts` still enforces every protocol
+    /// invariant before a value can exist.
+    pub(crate) fn portable_v1_from_verified_producer(
+        folderbase_id: impl Into<String>,
+        version_id: impl Into<String>,
+        parents: Vec<String>,
+        created_at: impl Into<String>,
+        root_manifest: RootManifest,
+        entries: FolderbaseVersionEntries,
+    ) -> Self {
+        Self {
+            format: VERSION_FORMAT_V1.to_owned(),
+            protocol_version: "0.4".to_owned(),
+            folderbase_id: folderbase_id.into(),
+            version_id: version_id.into(),
+            parents,
+            created_at: created_at.into(),
+            path_policy: PathPolicy::portable_v1(),
+            root_manifest,
+            bindings: entries.bindings,
+            tombstones: entries.tombstones,
+            exclusions: entries.exclusions,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl FolderbaseVersionEntries {
+    pub(crate) fn from_verified_producer(
+        bindings: Vec<PathBinding>,
+        tombstones: Vec<Tombstone>,
+        exclusions: Vec<Exclusion>,
+    ) -> Self {
+        Self {
+            bindings,
+            tombstones,
+            exclusions,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl PathPolicy {
+    fn portable_v1() -> Self {
+        Self {
+            format: PATH_POLICY_FORMAT_V1.to_owned(),
+            normalization: "NFC".to_owned(),
+            normalization_unicode_version: "17.0.0".to_owned(),
+            case_folding: "full-default".to_owned(),
+            case_folding_unicode_version: "9.0.0".to_owned(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl RootManifest {
+    pub(crate) fn from_verified_producer(
+        object_version_id: impl Into<String>,
+        content_sha256: impl Into<String>,
+        bytes: u64,
+    ) -> Self {
+        Self {
+            path: ".folderbase/manifest.json".to_owned(),
+            object_version_id: object_version_id.into(),
+            content_sha256: content_sha256.into(),
+            bytes: ExactU64(bytes),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl PathBinding {
+    pub(crate) fn directory_from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+    ) -> Self {
+        Self::Directory(DirectoryBinding {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: LiveLifecycle::Live,
+            kind: DirectoryKind::Directory,
+        })
+    }
+
+    pub(crate) fn regular_file_from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        object_version_id: impl Into<String>,
+        content_sha256: impl Into<String>,
+        bytes: u64,
+        executable: bool,
+    ) -> Self {
+        Self::RegularFile(RegularFileBinding {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: LiveLifecycle::Live,
+            kind: RegularFileKind::RegularFile,
+            object_version_id: object_version_id.into(),
+            content_sha256: content_sha256.into(),
+            bytes: ExactU64(bytes),
+            executable,
+        })
+    }
+
+    pub(crate) fn symlink_from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        object_version_id: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        Self::Symlink(SymlinkBinding {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: LiveLifecycle::Live,
+            kind: SymlinkKind::Symlink,
+            object_version_id: object_version_id.into(),
+            target: target.into(),
+            target_safety: SymlinkTargetSafety::RelativeWithinFolderbase,
+        })
+    }
+}
+
+#[allow(dead_code)]
+impl Tombstone {
+    pub(crate) fn from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        deleted_kind: DeletedKind,
+        last_object_version_id: Option<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: DeletedLifecycle::Deleted,
+            deleted_kind,
+            last_object_version_id,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl Exclusion {
+    pub(crate) fn from_verified_producer(
+        path: impl Into<String>,
+        kind: ExclusionKind,
+        reason: ExclusionReason,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1342,16 +1509,20 @@ pub(crate) fn validate_capture_sha256(value: &str) -> Result<(), FolderbaseVersi
     validate_sha256(value)
 }
 
-pub(crate) fn validate_capture_symlink_target(
-    link_path: &str,
-    target: &str,
+pub(crate) fn validate_capture_symlink_targets<'a>(
+    targets: impl IntoIterator<Item = (&'a str, &'a str)>,
     nested_boundaries: &[String],
-) -> Result<(), FolderbaseVersionError> {
+) -> Result<(), &'a str> {
     let nested_boundaries = nested_boundaries
         .iter()
         .map(|path| portable_folded_key(path))
         .collect::<Vec<_>>();
-    validate_symlink_target(link_path, target, &nested_boundaries)
+    for (link_path, target) in targets {
+        if validate_symlink_target(link_path, target, &nested_boundaries).is_err() {
+            return Err(link_path);
+        }
+    }
+    Ok(())
 }
 
 fn validate_portable_path(path: &str) -> Result<PathKeys, FolderbaseVersionError> {
