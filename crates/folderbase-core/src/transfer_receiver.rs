@@ -254,7 +254,7 @@ impl PersistentTransfer {
                 Ok(ChunkAcceptance::AlreadyPresent)
             }
             Err(source) => {
-                let _ = self.chunks.remove_file(&staging);
+                remove_named_file_if_same(&self.chunks, &staging, &staging_identity);
                 Err(TransferReceiverError::Io(source))
             }
         }
