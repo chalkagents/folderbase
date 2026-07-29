@@ -158,7 +158,7 @@ chunk range has been streamed and checked.
 - [Proposed Reorganization Plan decision](docs/adr/0002-evolve-existing-folderbases-through-reorganization-plans.md)
 - [Schemas, templates, and conformance vectors](protocol/README.md)
 - [Accepted canonical streaming-transfer decision](docs/adr/0001-stream-immutable-versions-through-canonical-manifests.md)
-- [Proposed bounded full-state Folderbase Version decision](docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md)
+- [Accepted bounded full-state Folderbase Version decision](docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md)
 
 Protocol `0.x` and crate `0.x` releases are pre-stable. Wire and filesystem
 contracts may change between minor versions until 1.0.

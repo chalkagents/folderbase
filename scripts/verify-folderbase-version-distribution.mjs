@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   lstatSync,
   readFileSync,
   readdirSync,
@@ -10,12 +11,22 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const releaseManifestPath = join(
+const candidateManifestPath = join(
   repositoryRoot,
   "protocol",
   "releases",
   "0.4",
   "folderbase-version-v1.candidate.json",
+);
+if (existsSync(candidateManifestPath)) {
+  throw new Error("candidate release manifest must not remain after release");
+}
+const releaseManifestPath = join(
+  repositoryRoot,
+  "protocol",
+  "releases",
+  "0.4",
+  "folderbase-version-v1.json",
 );
 const release = JSON.parse(readFileSync(releaseManifestPath, "utf8"));
 const expectedKeys = [
@@ -35,7 +46,7 @@ if (
 }
 const expectedHeader = {
   format: "folderbase-protocol-source-release-v1",
-  status: "candidate",
+  status: "released",
   protocol_version: "0.4",
   contract: "folderbase-version-v1",
   distribution: "repository-tag-source-archive",
@@ -100,7 +111,7 @@ const requiredNonConformanceFiles = [
   "crates/folderbase-core/src/folderbase_version.rs",
   "crates/folderbase-core/tests/folderbase_version_conformance.rs",
   "docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md",
-  "protocol/releases/0.4/folderbase-version-v1.candidate.json",
+  "protocol/releases/0.4/folderbase-version-v1.json",
   "protocol/schemas/0.4/folderbase-version.schema.json",
   "scripts/verify-folderbase-version-digest-vectors.mjs",
   "scripts/verify-folderbase-version-distribution.mjs",

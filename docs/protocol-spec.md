@@ -739,9 +739,10 @@ grant. A separate projection artifact will bind only authorized content.
 The repository/tag source archive is the normative cross-language protocol
 distribution. The `folderbase-core` Cargo package contains the Rust runtime module,
 but intentionally does not duplicate the workspace-level schema, fixtures, or
-reference encoder. The candidate release manifest at
-`protocol/releases/0.4/folderbase-version-v1.candidate.json` declares the exact
-source-release surface and remains a candidate while ADR-0004 is Proposed.
+reference encoder. The released manifest at
+`protocol/releases/0.4/folderbase-version-v1.json` declares the exact
+source-release surface. ADR-0004 is Accepted, and CI rejects either a non-released
+status or a remaining candidate manifest.
 
 ## Checkout
 
