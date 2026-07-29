@@ -289,3 +289,40 @@ fn sealed_bytes_use_sha256_without_file_format_interpretation() {
         entry.path() == "unknown.bin" && entry.kind() == CaptureEntryKind::RegularFile
     }));
 }
+
+#[cfg(windows)]
+#[test]
+fn read_version_needs_no_windows_directory_write_authority() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::{
+        Foundation::GENERIC_READ,
+        Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        },
+    };
+
+    fn hold_read_only_directory(path: &Path) -> fs::File {
+        let mut options = fs::OpenOptions::new();
+        options
+            .read(true)
+            .access_mode(GENERIC_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ);
+        options.open(path).expect("read-only directory handle")
+    }
+
+    let root = folderbase();
+    fs::write(root.path().join("proof.pdf"), b"%PDF opaque").expect("proof");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let sealed = store
+        .seal_capture(store.plan_capture().expect("plan"))
+        .expect("seal");
+
+    let _root_read_only = hold_read_only_directory(root.path());
+    let _state_read_only = hold_read_only_directory(&root.path().join(".folderbase"));
+    let version = store
+        .read_version(sealed.version_id())
+        .expect("read-only version verification");
+    assert_eq!(version.version_id(), sealed.version_id());
+}

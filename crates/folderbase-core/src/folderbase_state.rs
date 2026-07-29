@@ -702,6 +702,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_only_state_capability_reads_existing_records_without_mutation_authority() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::write(fixture.path().join(".folderbase/proof"), b"read-only").expect("proof");
+
+        let state =
+            FolderbaseState::open_existing_read_only(fixture.path()).expect("read-only state");
+        assert_eq!(
+            state
+                .read_bounded(Path::new(".folderbase/proof"), 64)
+                .expect("bounded read"),
+            Some(b"read-only".to_vec())
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn mutating_state_open_rejects_a_directory_junction_root() {
