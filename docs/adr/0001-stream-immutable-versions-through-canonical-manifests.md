@@ -1,6 +1,6 @@
 # Stream immutable versions through canonical manifests
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -19,7 +19,7 @@ seam should solve immutable object transfer without prematurely fixing the
 Folderbase Version, Remote Head, compare-and-swap, provider, or sharing wire
 contracts.
 
-## Proposed decision
+## Decision
 
 Folderbase Core will expose one bounded-memory transfer path from an exact
 immutable `LocalVersionStore` version to an atomically installed, verified
@@ -229,6 +229,21 @@ Future chunk algorithms or manifest encodings receive new identifiers and
 conformance vectors. Existing identifiers never change meaning. A receiver may
 support multiple versions, but it must fail closed on an unsupported one
 rather than reinterpret it.
+
+## Acceptance evidence
+
+Founder direction and the public/private product boundary were confirmed before
+implementation. The canonical manifest contract, schema, Rust validator,
+conformance vectors, and independent JavaScript digest implementation merged in
+PR 13 at commit `67877f00c1efb3af8b244229d7b32e1e6946b7ce`.
+
+Both independent review axes reported no findings after remediation. Hosted PR
+CI run `30423502912` and post-merge `main` run `30423673665` passed the Rust
+quality gate, including formatting, strict linting, locked workspace tests,
+public-surface checks, extracted package verification, offline CLI installation,
+and out-of-checkout initialization. This accepts the manifest contract only;
+the source, receiver, verifier, and capability-rooted materializer remain the
+separate implementation slices described above.
 
 ## Explicit deferrals
 
