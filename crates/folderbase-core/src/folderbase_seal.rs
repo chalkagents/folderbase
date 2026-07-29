@@ -2856,6 +2856,37 @@ mod tests {
     }
 
     #[test]
+    fn active_journal_bounds_assignments_and_tombstones_as_one_version_entry_set() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let mut transaction = assign_capture_transaction(
+            &plan,
+            &capture_plan_sha256(&plan).expect("plan digest"),
+            None,
+        )
+        .expect("assignment");
+        transaction.target_tombstones = (0..crate::folderbase_version::MAX_VERSION_ENTRIES)
+            .map(|index| {
+                Tombstone::from_verified_producer(
+                    format!("deleted/{index:05}.bin"),
+                    ObjectId::new().to_string(),
+                    DeletedKind::RegularFile,
+                    Some(VersionId::new().to_string()),
+                )
+            })
+            .collect();
+
+        let error = validate_transaction(&store, &transaction)
+            .expect_err("journal aggregate must fit one bounded Folderbase Version");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(message)
+                if message.contains("aggregate")
+        ));
+    }
+
+    #[test]
     fn future_version_envelope_is_bounded_before_journal_or_immutable_writes() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
