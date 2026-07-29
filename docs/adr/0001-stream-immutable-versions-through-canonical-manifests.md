@@ -107,14 +107,13 @@ beside the requested destination. It verifies every chunk plus the complete
 object SHA-256, byte length, deterministic chunk boundaries, and canonical
 manifest digest, synchronizes the new file, and installs it atomically without
 overwriting an existing path. Until that installation succeeds, the
-destination is absent and the transfer remains resumable. Failure cleanup may
-remove only staging files created by that operation. Destination resolution
-is relative to an opened `cap_std::fs::Dir`-style root capability supplied by
-the caller. Core opens and holds parent filesystem components without
-following symlinks, requires an existing directory parent and absent leaf,
-synchronizes the parent after installation, and keeps staging state private to
-the current user. A bare absolute destination path is not part of this
-interface.
+destination is absent and the transfer remains resumable. Destination
+resolution is relative to an opened `cap_std::fs::Dir`-style root capability
+supplied by the caller. Core opens and holds parent filesystem components
+without following symlinks, requires an existing directory parent and absent
+leaf, synchronizes the parent after installation, and keeps staging state
+private to the current user. A bare absolute destination path is not part of
+this interface.
 
 The implementation may retain whole-buffer convenience helpers for small local
 callers, but the sync engine, hosted verifier, and Core release acceptance tests
@@ -234,6 +233,93 @@ before accepting chunks and validates both the manifest and every already
 installed chunk when reopening after a process or device restart. Transfer
 checkpoints and temporary chunks are local runtime state, not canonical
 Folderbase history and not authorization.
+
+The receiver implementation fixes these additional v1 details:
+
+1. `transfer_receiver::PersistentTransfer::create()` receives an opened root
+   capability, one normal nonempty child-directory name, and the selected
+   canonical manifest. It derives the manifest digest rather than accepting a
+   redundant expected value. `open()` receives that same capability and child
+   name plus the durable expected digest held by the caller. Absolute paths,
+   separators, dot components, symlinks, and clobbering an existing child are
+   rejected.
+2. A checkpoint contains only `manifest.json`, `receiver.lock`, and `chunks/`.
+   The canonical digest is recomputed from the validated manifest and compared
+   with the caller's expected digest on reopen; no second digest file can drift
+   from the manifest. `receiver.lock` is the checkpoint writer lease, not
+   canonical content. It is created and synchronized with the checkpoint,
+   reopened without following symlinks, and its retained file identity is
+   revalidated whenever the receiver acquires it. On Unix, directories are
+   created and reopened with exact mode `0700`, while the manifest, receiver
+   lock, chunk, and staging files require exact mode `0600`. Reopen fails closed
+   if any owner, group, or other permission bit differs.
+3. Chunk receipt reads and hashes the complete retry stream before returning
+   either `Accepted` or `AlreadyPresent`. It writes through one private
+   lowercase-hyphenated UUIDv7 staging file, synchronizes that file, installs
+   with a no-clobber link, and applies the platform directory-persistence policy
+   defined below to the chunks directory. The receiver retains the verified
+   staging file identity, proves the no-follow staging name still identifies
+   that file immediately before linking, and proves the installed destination
+   identifies it before reporting `Accepted`. An identity change fails closed
+   without treating a replacement pathname as operation-owned cleanup. Each
+   receiver instance serializes receipt in process, and independently opened
+   instances and processes acquire the standard-library exclusive
+   `receiver.lock` lease before inspecting or changing staging state. While
+   holding that lease, a receipt reclaims only exact private regular UUIDv7
+   staging entries left by a completed or crashed prior receipt. It then
+   identity-checks and removes its own staging entry on every ordinary result,
+   propagating removal and directory-synchronization failures on platforms that
+   expose that primitive rather than allowing retries to consume unbounded
+   storage. A short, long, corrupt, unknown, or conflicting retry returns no
+   acceptance result and never replaces an installed chunk.
+4. Resume enumeration inspects at most the caller's capped page of sequential
+   descriptor indices and returns the next descriptor index as its cursor.
+   Reopen validates every installed in-manifest chunk. It ignores only regular,
+   private staging files with the exact operation-owned UUIDv7 spelling;
+   leading-zero chunk aliases, out-of-range chunks, other UUID versions,
+   unknown entries, directories, and symlinks fail closed. The ambiguous
+   pre-v1 checkpoint shape returns an explicit unsupported-checkpoint error.
+5. Source planning and whole-object verification call the same canonical
+   content-defined chunk planner. Both use one fixed 64 KiB buffer. The verifier
+   reads only the declared object length plus the one byte required to prove
+   exact EOF, then checks byte length, whole-object digest, every deterministic
+   boundary and chunk digest, and the canonical manifest digest before
+   returning `VerifiedObject`.
+
+Checkpoint creation synchronizes the manifest and receiver lock, then applies
+the platform directory-persistence policy defined below to the checkpoint and
+caller-supplied parent capability before returning. A failed
+create may leave an invalid orphan child for explicit inspection or removal;
+Core does not recursively clean an externally named path after failure because
+concurrent state may have appeared there. An opened receiver retains the exact
+checkpoint and chunks directory capabilities, so replacement names are never
+followed by the current process. The writer contract requires all Folderbase
+receivers for a checkpoint to honor `receiver.lock`; a same-user actor that
+deliberately mutates private checkpoint files while ignoring that lease is
+outside this coordination boundary. Even then, retained staging, destination,
+and lock identities are checked at the operation boundaries and mismatches fail
+closed without following symlinks. Receiver v1 exposes no public per-file
+cleanup or garbage-collection API: bounded stale cleanup is an internal part of
+the next leased receipt.
+
+Directory-entry durability follows the strongest documented primitive on each
+supported platform. Unix implementations reopen `.` beneath the retained
+capability without following symlinks and synchronize that real directory
+descriptor; this avoids attempting to synchronize Linux `O_PATH` capability
+handles. Windows synchronizes every staged regular file before no-clobber
+installation, but does not claim a POSIX-style directory `fsync`: Windows
+documents no equivalent directory-entry flush and `FlushFileBuffers` requires a
+writable file handle. Receiver success on Windows therefore proves verified
+file content and atomic installation, while power-loss persistence of the
+directory entry follows the filesystem's platform behavior. macOS and Windows
+run the public receiver suite in hosted CI so this intentional difference
+cannot silently become a nonfunctional receiver.
+
+This receiver slice deliberately has no destination path or materialization
+method. The next materializer slice must independently define and test its
+destination-root capability, no-follow parent authority, no-clobber atomic
+installation, and parent-directory durability. Receiving verified chunks is
+not authority to install them anywhere.
 
 Core 0.3.0 will add the versioned manifest schema and conformance vectors.
 Core 0.1.0 through 0.2.1 exposed only the

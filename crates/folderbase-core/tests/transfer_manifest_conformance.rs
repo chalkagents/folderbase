@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs,
     io::Cursor,
     path::{Path, PathBuf},
@@ -371,6 +372,46 @@ fn validation_rejects_descriptor_count_before_inspecting_descriptors() {
             maximum: MAX_CHUNK_DESCRIPTORS
         })
     );
+}
+
+#[test]
+fn bounded_decoder_rejects_more_than_the_descriptor_cap_before_validation() {
+    let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut encoded = format!(
+        r#"{{"format":"folderbase-chunk-manifest-v1","algorithm":"folderbase-cdc-v1+sha256","profile":"standard-v1","minimum_chunk_bytes":262144,"average_chunk_bytes":1048576,"maximum_chunk_bytes":4194304,"object_sha256":"{digest}","object_bytes":1,"chunks":["#
+    );
+    for index in 0..MAX_CHUNK_DESCRIPTORS {
+        if index > 0 {
+            encoded.push(',');
+        }
+        write!(
+            encoded,
+            r#"{{"index":{index},"offset":{index},"bytes":1,"sha256":"{digest}"}}"#
+        )
+        .unwrap();
+    }
+    write!(
+        encoded,
+        r#",{{"index":{MAX_CHUNK_DESCRIPTORS},"offset":{MAX_CHUNK_DESCRIPTORS},"bytes":1,"sha256":"{digest}"}}]}}"#
+    )
+    .unwrap();
+    assert!(
+        encoded.len() as u64 <= MAX_ENCODED_MANIFEST_BYTES,
+        "the descriptor-count cap, not the encoded-size cap, must reject this manifest"
+    );
+
+    assert!(
+        serde_json::from_str::<ChunkManifest>(&encoded).is_err(),
+        "direct manifest deserialization must not construct more than the descriptor cap"
+    );
+    assert!(matches!(
+        ChunkManifest::decode_bounded(Cursor::new(encoded)),
+        Err(ManifestError::InvalidManifest(
+            ManifestViolation::TooManyDescriptors {
+                maximum: MAX_CHUNK_DESCRIPTORS
+            }
+        ))
+    ));
 }
 
 #[test]

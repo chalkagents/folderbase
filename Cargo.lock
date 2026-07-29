@@ -537,6 +537,8 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+ "winapi-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

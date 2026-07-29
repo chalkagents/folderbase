@@ -35,3 +35,5 @@ unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 uuid = { version = "1.18", features = ["serde", "v7"] }
 walkdir = "2.5"
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }

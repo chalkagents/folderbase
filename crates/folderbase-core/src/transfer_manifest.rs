@@ -4,9 +4,12 @@
 //! legacy [`crate::chunk_transfer::ChunkManifest`] remains a distinct
 //! small-buffer checkpoint shape and is never decoded here.
 
-use std::io::Read;
+use std::{fmt, io::Read};
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{IgnoredAny, SeqAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 
 pub const MAX_ENCODED_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
@@ -17,6 +20,8 @@ pub const CHUNKING_ALGORITHM_V1: &str = "folderbase-cdc-v1+sha256";
 pub const STANDARD_PROFILE_V1: &str = "standard-v1";
 pub const LARGE_PROFILE_V1: &str = "large-v1";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// Fixed I/O memory used by canonical transfer planning and verification.
+pub const TRANSFER_IO_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProfileParameters {
@@ -56,6 +61,7 @@ pub struct ChunkManifest {
     pub object_sha256: String,
     #[serde(deserialize_with = "deserialize_object_size")]
     pub object_bytes: u64,
+    #[serde(deserialize_with = "deserialize_bounded_chunks")]
     pub chunks: Vec<ChunkDescriptor>,
 }
 
@@ -71,6 +77,15 @@ pub struct ChunkDescriptor {
     pub sha256: String,
 }
 
+/// Integrity proof for one exact whole object observed by this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedObject {
+    pub manifest_format: String,
+    pub manifest_digest: String,
+    pub object_sha256: String,
+    pub object_bytes: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     #[error("encoded chunk manifest exceeds {maximum_bytes} bytes")]
@@ -81,6 +96,27 @@ pub enum ManifestError {
 
     #[error("chunk manifest violates the protocol: {0}")]
     InvalidManifest(#[from] ManifestViolation),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ObjectVerificationError {
+    #[error("chunk manifest violates the protocol: {0}")]
+    InvalidManifest(#[from] ManifestViolation),
+
+    #[error("object input failed: {0}")]
+    Reader(#[source] std::io::Error),
+
+    #[error("object exceeds the v1 maximum of {maximum} bytes")]
+    ObjectTooLarge { maximum: u64 },
+
+    #[error("object length {actual} differs from manifest length {expected}")]
+    ObjectLengthMismatch { expected: u64, actual: u64 },
+
+    #[error("whole-object digest differs from the manifest")]
+    ObjectDigestMismatch,
+
+    #[error("content-defined chunk plan differs from the manifest")]
+    ChunkPlanMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -151,7 +187,23 @@ impl ChunkManifest {
                 maximum_bytes: MAX_ENCODED_MANIFEST_BYTES,
             });
         }
-        let manifest: Self = serde_json::from_slice(&encoded)?;
+        Self::decode_slice_bounded(&encoded)
+    }
+
+    pub(crate) fn decode_slice_bounded(encoded: &[u8]) -> Result<Self, ManifestError> {
+        if encoded.len() as u64 > MAX_ENCODED_MANIFEST_BYTES {
+            return Err(ManifestError::EncodedManifestTooLarge {
+                maximum_bytes: MAX_ENCODED_MANIFEST_BYTES,
+            });
+        }
+        let descriptor_count: DescriptorCountProbe = serde_json::from_slice(encoded)?;
+        if descriptor_count.chunks.exceeds_maximum {
+            return Err(ManifestViolation::TooManyDescriptors {
+                maximum: MAX_CHUNK_DESCRIPTORS,
+            }
+            .into());
+        }
+        let manifest: Self = serde_json::from_slice(encoded)?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -271,6 +323,226 @@ impl ChunkManifest {
         }
         Ok(format!("{:x}", digest.finalize()))
     }
+
+    /// Verify one complete ordered object stream against this canonical plan.
+    ///
+    /// Memory use is bounded by the fixed 64 KiB I/O buffer and the public
+    /// descriptor cap already enforced by manifest v1.
+    pub fn verify_object(
+        &self,
+        mut reader: impl Read,
+    ) -> Result<VerifiedObject, ObjectVerificationError> {
+        self.validate()?;
+        let observed = plan_streamed_manifest(
+            reader.by_ref().take(self.object_bytes.saturating_add(1)),
+            &self.profile,
+        )?;
+        if observed.object_bytes != self.object_bytes {
+            return Err(ObjectVerificationError::ObjectLengthMismatch {
+                expected: self.object_bytes,
+                actual: observed.object_bytes,
+            });
+        }
+        if observed.object_sha256 != self.object_sha256 {
+            return Err(ObjectVerificationError::ObjectDigestMismatch);
+        }
+        if observed.chunks != self.chunks {
+            return Err(ObjectVerificationError::ChunkPlanMismatch);
+        }
+        Ok(VerifiedObject {
+            manifest_format: self.format.clone(),
+            manifest_digest: self.canonical_digest()?,
+            object_sha256: self.object_sha256.clone(),
+            object_bytes: self.object_bytes,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct DescriptorCountProbe {
+    chunks: DescriptorCount,
+}
+
+struct DescriptorCount {
+    exceeds_maximum: bool,
+}
+
+impl<'de> Deserialize<'de> for DescriptorCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(DescriptorCountVisitor)
+    }
+}
+
+struct DescriptorCountVisitor;
+
+impl<'de> Visitor<'de> for DescriptorCountVisitor {
+    type Value = DescriptorCount;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an array of chunk descriptors")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut count = 0_usize;
+        while sequence.next_element::<IgnoredAny>()?.is_some() {
+            count = count.saturating_add(1);
+        }
+        Ok(DescriptorCount {
+            exceeds_maximum: count > MAX_CHUNK_DESCRIPTORS,
+        })
+    }
+}
+
+fn deserialize_bounded_chunks<'de, D>(deserializer: D) -> Result<Vec<ChunkDescriptor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_seq(BoundedChunkDescriptorsVisitor)
+}
+
+struct BoundedChunkDescriptorsVisitor;
+
+impl<'de> Visitor<'de> for BoundedChunkDescriptorsVisitor {
+    type Value = Vec<ChunkDescriptor>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a bounded array of chunk descriptors")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let initial_capacity = sequence.size_hint().unwrap_or(0).min(MAX_CHUNK_DESCRIPTORS);
+        let mut chunks = Vec::with_capacity(initial_capacity);
+        while chunks.len() < MAX_CHUNK_DESCRIPTORS {
+            match sequence.next_element()? {
+                Some(descriptor) => chunks.push(descriptor),
+                None => return Ok(chunks),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom(format!(
+                "chunk manifest has more than {MAX_CHUNK_DESCRIPTORS} descriptors"
+            )));
+        }
+        Ok(chunks)
+    }
+}
+
+pub(crate) fn plan_streamed_manifest(
+    mut reader: impl Read,
+    profile: &str,
+) -> Result<ChunkManifest, ObjectVerificationError> {
+    let parameters = profile_parameters(profile).ok_or(ManifestViolation::UnknownProfile)?;
+    let mask = parameters.average_chunk_bytes - 1;
+    let mut chunks = Vec::new();
+    let mut buffer = [0_u8; TRANSFER_IO_BUFFER_BYTES];
+    let mut object_hasher = Sha256::new();
+    let mut chunk_hasher = Sha256::new();
+    let mut object_bytes = 0_u64;
+    let mut chunk_offset = 0_u64;
+    let mut chunk_bytes = 0_u64;
+    let mut rolling = 0_u64;
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(ObjectVerificationError::Reader)?;
+        if read == 0 {
+            break;
+        }
+        object_bytes = object_bytes
+            .checked_add(read as u64)
+            .filter(|bytes| *bytes <= MAX_OBJECT_BYTES)
+            .ok_or(ObjectVerificationError::ObjectTooLarge {
+                maximum: MAX_OBJECT_BYTES,
+            })?;
+        object_hasher.update(&buffer[..read]);
+        let mut unhashed_start = 0;
+        for (position, byte) in buffer[..read].iter().enumerate() {
+            rolling = rolling
+                .rotate_left(1)
+                .wrapping_add((*byte as u64).wrapping_mul(0x9e37_79b1));
+            chunk_bytes += 1;
+            let at_content_boundary =
+                chunk_bytes >= parameters.minimum_chunk_bytes && (rolling & mask) == 0;
+            let at_maximum = chunk_bytes >= parameters.maximum_chunk_bytes;
+            if at_content_boundary || at_maximum {
+                chunk_hasher.update(&buffer[unhashed_start..=position]);
+                push_streamed_descriptor(
+                    &mut chunks,
+                    chunk_offset,
+                    chunk_bytes,
+                    chunk_hasher.finalize_reset(),
+                )?;
+                chunk_offset += chunk_bytes;
+                chunk_bytes = 0;
+                rolling = 0;
+                unhashed_start = position + 1;
+            }
+        }
+        chunk_hasher.update(&buffer[unhashed_start..read]);
+    }
+    if chunk_bytes > 0 {
+        push_streamed_descriptor(
+            &mut chunks,
+            chunk_offset,
+            chunk_bytes,
+            chunk_hasher.finalize(),
+        )?;
+    }
+
+    let manifest = ChunkManifest {
+        format: MANIFEST_FORMAT_V1.to_owned(),
+        algorithm: CHUNKING_ALGORITHM_V1.to_owned(),
+        profile: profile.to_owned(),
+        minimum_chunk_bytes: parameters.minimum_chunk_bytes,
+        average_chunk_bytes: parameters.average_chunk_bytes,
+        maximum_chunk_bytes: parameters.maximum_chunk_bytes,
+        object_sha256: format!("{:x}", object_hasher.finalize()),
+        object_bytes,
+        chunks,
+    };
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+fn push_streamed_descriptor(
+    chunks: &mut Vec<ChunkDescriptor>,
+    offset: u64,
+    bytes: u64,
+    digest: impl AsRef<[u8]>,
+) -> Result<(), ObjectVerificationError> {
+    if chunks.len() >= MAX_CHUNK_DESCRIPTORS {
+        return Err(ManifestViolation::TooManyDescriptors {
+            maximum: MAX_CHUNK_DESCRIPTORS,
+        }
+        .into());
+    }
+    let index = u32::try_from(chunks.len()).expect("manifest descriptor cap fits u32");
+    chunks.push(ChunkDescriptor {
+        index,
+        offset,
+        bytes,
+        sha256: digest_hex(digest.as_ref()),
+    });
+    Ok(())
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 pub(crate) fn is_sha256(value: &str) -> bool {
