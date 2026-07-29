@@ -25,6 +25,28 @@ error[E0599]: no method named `read_version`
 error[E0599]: no variant named `CaptureStateChanged`
 ```
 
+The final standards review added a second explicit RED commit:
+
+```text
+bc4950333d90b3f560d5395ebe767a06525c88a1
+test(core): expose final FB-41F sealing bounds
+```
+
+At that exact commit, the focused unit target failed to compile because the
+bounded source-reader argument and bounded preflight seam did not yet exist:
+
+```text
+error[E0599]: no method named `seal_capture_with_hook_and_limits`
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+```
+
+The corresponding GREEN implementation is:
+
+```text
+010cf10c4fb5be0f9f1159f7bfa0771dd8542655
+fix(core): bound FB-41F sealing before publication
+```
+
 ## Green behavior
 
 The implementation proves:
@@ -36,8 +58,13 @@ The implementation proves:
 - Unix device/inode and Windows volume plus 128-bit File ID continuity from
   opened no-follow handles;
 - new IDs persisted in a durable transaction before immutable object writes;
-- exact active-journal cardinality and prior-lineage validation, plus one
-  declared writer/restart byte bound;
+- exact active-journal cardinality and prior-lineage validation, with bounded
+  streaming JSON encoding under the same declared writer/restart byte bound;
+- preflight encoding of the complete future Folderbase Version before the
+  journal or any immutable object is published;
+- content reads stop after one byte beyond the exact planned length, remove
+  staging, and report the concurrent source change without consuming a growing
+  file to EOF;
 - Local Head anchoring of the complete capture-journal digest, with
   post-Head journal-observation tamper refusal;
 - exact committed parent and timestamp validation before recovery may project
@@ -55,12 +82,15 @@ The implementation proves:
   verification before Local Head compare-and-replace;
 - capability-confined journal, blob, Object Version, Folderbase Version,
   derived projection, identity, and Head publication;
+- one capture-specific physical-identity projection, without a second
+  path-identity representation that could diverge;
 - a retained-parent swap regression proving an outside symlink receives no
   state writes;
 - a seal-prelude regression proving no lock or state publication occurs before
   the retained state capability is open and the plan is re-attested;
 - shared Windows reparse-point rejection for root, state, workspace, and seal
-  mutation paths, plus a native Windows directory-junction regression;
+  mutation paths, plus native Windows directory-junction and writable
+  directory-flush regressions;
 - an exclusive cross-platform transaction file-lock contention test;
 - fresh-process recovery at journal, object-write, Folderbase-Version,
   Head-replace, and cleanup checkpoints;
@@ -77,10 +107,10 @@ cargo test -p folderbase-core --test folderbase_seal
 6 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
-12 passed; 0 failed
+13 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
-1 passed; 0 failed
+2 passed; 0 failed on macOS
 
 cargo test -p folderbase-core --lib local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 1 passed; 0 failed
@@ -91,6 +121,10 @@ passed
 cargo clippy --workspace --all-targets -- -D warnings
 passed
 ```
+
+The Windows target has three state tests: bounded source streaming, junction
+refusal, and writable-capability publication/flush. Their runtime result is
+owned by the checked-in `windows-latest` CI job.
 
 Full local workspace gate:
 

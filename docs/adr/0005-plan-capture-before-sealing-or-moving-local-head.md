@@ -69,6 +69,9 @@ reuse. Unix records bind device and inode; Windows records bind the volume
 serial number and complete 128-bit File ID obtained from the no-follow handle.
 A replacement after Head publication retains the identity of the sealed entry,
 so the next capture detects the mismatch and refuses until Tombstones exist.
+Capture continuity has one canonical capture-identity projection; the legacy
+workspace path-identity representation is not also written by the capture
+transaction.
 
 Content blobs, immutable Object Version records, and the complete bounded
 Folderbase Version are installed append-only with temp-file fsync, atomic
@@ -82,21 +85,29 @@ repairing derived state, or publishing any capture record; it does not invoke
 the legacy ambient-path transaction recovery prelude. Data and directory
 handles are flushed, and visible `.folderbase` attachment is verified before
 and after Head replacement. Exact root and state junctions/reparse points are
-rejected on Windows. A state-directory swap can leave only a detached orphan
-and cannot redirect publication through a symlink or junction.
+rejected on Windows. Windows state directory capabilities request the write
+authority required by `FlushFileBuffers`, and native CI executes directory
+creation, publication, replacement, and flush through those retained
+capabilities. A state-directory swap can leave only a detached orphan and
+cannot redirect publication through a symlink or junction.
 
-The active journal uses the same explicit byte bound for write and restart read.
-Before any immutable write, its assignment count and every path, kind, observed
-identity, reused Object ID, prior Object Version, and root-manifest parent are
-matched exactly to the approved plan and verified prior Head. The active capture
-journal remains until derived regular-file object projections and physical
-identity records are repaired. After Head publication, recovery first verifies
-the Head-anchored digest of the complete journal and requires the committed
-version's parents and timestamp to match that immutable intent before journal
-identity evidence can be projected. A retry after interruption at journal,
-Object Version, Folderbase Version, Local Head, or cleanup boundaries converges
-on the exact journal-assigned version. A stale attempt may discard only its
-intent; verified immutable records remain safe, reusable orphans.
+The active journal uses bounded streaming JSON encoding and the same explicit
+byte bound for write and restart read. Before publishing that journal or any
+immutable object, Core constructs and bounded-encodes the complete future
+Folderbase Version envelope. Its assignment count and every path, kind,
+observed identity, reused Object ID, prior Object Version, and root-manifest
+parent are matched exactly to the approved plan and verified prior Head.
+Included content streams are capped at the exact approved length plus one byte:
+a growing source is refused as a concurrent state change and staging is
+removed, instead of reading an attacker-controlled stream to EOF. The active
+capture journal remains until derived regular-file object projections and
+physical identity records are repaired. After Head publication, recovery first
+verifies the Head-anchored digest of the complete journal and requires the
+committed version's parents and timestamp to match that immutable intent before
+journal identity evidence can be projected. A retry after interruption at
+journal, Object Version, Folderbase Version, Local Head, or cleanup boundaries
+converges on the exact journal-assigned version. A stale attempt may discard
+only its intent; verified immutable records remain safe, reusable orphans.
 
 This decision remains **Proposed**. This slice does not yet produce Tombstones,
 so deletion, same-path recreation, and kind replacement are refused without
