@@ -1,10 +1,11 @@
 use std::{
     cell::Cell,
     io::{Cursor, Read},
-    path::Path,
+    path::{Path, PathBuf},
+    process::{Child, Command, ExitStatus},
     rc::Rc,
     sync::{Arc, Barrier, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -115,6 +116,120 @@ impl Read for PanickingReader {
     fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
         panic!("simulated receiver crash")
     }
+}
+
+struct ProcessMarkerReader {
+    inner: Cursor<Vec<u8>>,
+    entered: PathBuf,
+    release: Option<PathBuf>,
+    marked: bool,
+}
+
+impl Read for ProcessMarkerReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.marked {
+            std::fs::write(&self.entered, b"entered")?;
+            self.marked = true;
+            if let Some(release) = &self.release
+                && !wait_for_path(release, Duration::from_secs(10))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "receiver helper timed out waiting for release",
+                ));
+            }
+        }
+        self.inner.read(buffer)
+    }
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_child(child: &mut Child, timeout: Duration) -> ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("receiver helper process timed out");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn spawn_receiver_process_helper(
+    root: &Path,
+    digest: &str,
+    entered: &Path,
+    release: Option<&Path>,
+    outcome: &Path,
+    started: Option<&Path>,
+) -> Child {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "receiver_process_lock_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("FOLDERBASE_TEST_RECEIVER_ROOT", root)
+        .env("FOLDERBASE_TEST_RECEIVER_DIGEST", digest)
+        .env("FOLDERBASE_TEST_RECEIVER_ENTERED", entered)
+        .env("FOLDERBASE_TEST_RECEIVER_OUTCOME", outcome);
+    if let Some(release) = release {
+        command.env("FOLDERBASE_TEST_RECEIVER_RELEASE", release);
+    }
+    if let Some(started) = started {
+        command.env("FOLDERBASE_TEST_RECEIVER_STARTED", started);
+    }
+    command.spawn().unwrap()
+}
+
+fn run_receiver_process_helper_from_environment() {
+    let Some(root) = std::env::var_os("FOLDERBASE_TEST_RECEIVER_ROOT") else {
+        return;
+    };
+    let digest = std::env::var("FOLDERBASE_TEST_RECEIVER_DIGEST").unwrap();
+    let entered = PathBuf::from(std::env::var_os("FOLDERBASE_TEST_RECEIVER_ENTERED").unwrap());
+    let release = std::env::var_os("FOLDERBASE_TEST_RECEIVER_RELEASE").map(PathBuf::from);
+    let outcome = PathBuf::from(std::env::var_os("FOLDERBASE_TEST_RECEIVER_OUTCOME").unwrap());
+
+    let root = Dir::open_ambient_dir(root, ambient_authority()).unwrap();
+    let transfer = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
+    if let Some(started) = std::env::var_os("FOLDERBASE_TEST_RECEIVER_STARTED") {
+        std::fs::write(started, b"started").unwrap();
+    }
+    let acceptance = transfer
+        .accept_chunk_from(
+            0,
+            ProcessMarkerReader {
+                inner: Cursor::new(b"hello folderbase".to_vec()),
+                entered,
+                release,
+                marked: false,
+            },
+        )
+        .unwrap();
+    let encoded = match acceptance {
+        ChunkAcceptance::Accepted => "accepted",
+        ChunkAcceptance::AlreadyPresent => "already-present",
+    };
+    std::fs::write(outcome, encoded).unwrap();
 }
 
 #[test]
@@ -857,70 +972,59 @@ fn concurrent_accepts_install_exactly_one_chunk_without_clobbering() {
 }
 
 #[test]
-fn independently_opened_receivers_serialize_chunk_acceptance() {
+fn independent_processes_serialize_chunk_acceptance() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
     let manifest = single_chunk_manifest();
     let digest = manifest.canonical_digest().unwrap();
-    let first = PersistentTransfer::create(&root, "inbound", manifest).unwrap();
-    let second = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
-    let (first_paused_sender, first_paused_receiver) = mpsc::sync_channel(0);
-    let (first_resume_sender, first_resume_receiver) = mpsc::sync_channel(0);
-    let (second_started_sender, second_started_receiver) = mpsc::sync_channel(0);
-    let (second_read_sender, second_read_receiver) = mpsc::sync_channel(0);
-    let (second_resume_sender, second_resume_receiver) = mpsc::sync_channel(0);
+    drop(PersistentTransfer::create(&root, "inbound", manifest).unwrap());
+    let holder_entered = temporary.path().join("holder-entered");
+    let holder_release = temporary.path().join("holder-release");
+    let holder_outcome = temporary.path().join("holder-outcome");
+    let waiter_started = temporary.path().join("waiter-started");
+    let waiter_entered = temporary.path().join("waiter-entered");
+    let waiter_outcome = temporary.path().join("waiter-outcome");
 
-    let first_accept = std::thread::spawn(move || {
-        first.accept_chunk_from(
-            0,
-            BlockingReader {
-                inner: Cursor::new(b"hello folderbase".to_vec()),
-                paused: Some(first_paused_sender),
-                resume: first_resume_receiver,
-            },
-        )
-    });
-    first_paused_receiver.recv().unwrap();
+    let mut holder = spawn_receiver_process_helper(
+        temporary.path(),
+        &digest,
+        &holder_entered,
+        Some(&holder_release),
+        &holder_outcome,
+        None,
+    );
+    assert!(
+        wait_for_path(&holder_entered, Duration::from_secs(5)),
+        "the holder process must enter its reader while owning the lease"
+    );
+    let mut waiter = spawn_receiver_process_helper(
+        temporary.path(),
+        &digest,
+        &waiter_entered,
+        None,
+        &waiter_outcome,
+        Some(&waiter_started),
+    );
+    assert!(
+        wait_for_path(&waiter_started, Duration::from_secs(5)),
+        "the waiter process must report immediately before requesting receipt"
+    );
 
-    let second_accept = std::thread::spawn(move || {
-        second_started_sender.send(()).unwrap();
-        second.accept_chunk_from(
-            0,
-            BlockingReader {
-                inner: Cursor::new(b"hello folderbase".to_vec()),
-                paused: Some(second_read_sender),
-                resume: second_resume_receiver,
-            },
-        )
-    });
-    second_started_receiver.recv().unwrap();
+    let waiter_was_blocked = !wait_for_path(&waiter_entered, Duration::from_secs(1));
+    std::fs::write(&holder_release, b"release").unwrap();
+    let holder_status = wait_for_child(&mut holder, Duration::from_secs(5));
+    let waiter_status = wait_for_child(&mut waiter, Duration::from_secs(5));
 
     assert!(
-        second_read_receiver
-            .recv_timeout(Duration::from_millis(150))
-            .is_err(),
-        "the second receiver must wait for the checkpoint lease before creating staging or reading"
+        waiter_was_blocked,
+        "the waiter process must not enter its reader while another process owns the lease"
     );
+    assert!(holder_status.success(), "holder helper failed");
+    assert!(waiter_status.success(), "waiter helper failed");
+    assert_eq!(std::fs::read_to_string(holder_outcome).unwrap(), "accepted");
     assert_eq!(
-        std::fs::read_dir(temporary.path().join("inbound/chunks"))
-            .unwrap()
-            .count(),
-        1,
-        "only the lease holder may create a staging file"
-    );
-
-    first_resume_sender.send(()).unwrap();
-    assert_eq!(
-        first_accept.join().unwrap().unwrap(),
-        ChunkAcceptance::Accepted
-    );
-    second_read_receiver
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap();
-    second_resume_sender.send(()).unwrap();
-    assert_eq!(
-        second_accept.join().unwrap().unwrap(),
-        ChunkAcceptance::AlreadyPresent
+        std::fs::read_to_string(waiter_outcome).unwrap(),
+        "already-present"
     );
     assert_eq!(
         std::fs::read_dir(temporary.path().join("inbound/chunks"))
@@ -929,6 +1033,12 @@ fn independently_opened_receivers_serialize_chunk_acceptance() {
         1,
         "accepted bytes remain without retained staging"
     );
+}
+
+#[test]
+#[ignore = "subprocess helper for receiver lease tests"]
+fn receiver_process_lock_helper() {
+    run_receiver_process_helper_from_environment();
 }
 
 #[test]
