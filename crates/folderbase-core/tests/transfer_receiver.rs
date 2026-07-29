@@ -286,10 +286,12 @@ fn replacing_the_verified_staging_path_never_accepts_the_replacement() {
 }
 
 #[test]
-fn rejected_chunk_inputs_change_no_accepted_state() {
+fn rejected_chunk_inputs_leave_inspectable_staging_without_accepted_state() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
-    let transfer = PersistentTransfer::create(&root, "inbound", single_chunk_manifest()).unwrap();
+    let manifest = single_chunk_manifest();
+    let digest = manifest.canonical_digest().unwrap();
+    let transfer = PersistentTransfer::create(&root, "inbound", manifest).unwrap();
 
     assert!(matches!(
         transfer.accept_chunk_from(0, Cursor::new(b"short")),
@@ -312,11 +314,29 @@ fn rejected_chunk_inputs_change_no_accepted_state() {
         transfer.missing_chunks(None, 8).unwrap().chunk_indices,
         vec![0]
     );
+    assert!(!temporary.path().join("inbound/chunks/0.chunk").exists());
+    let retained = std::fs::read_dir(temporary.path().join("inbound/chunks"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(
-        std::fs::read_dir(temporary.path().join("inbound/chunks"))
-            .unwrap()
-            .count(),
-        0
+        retained.len(),
+        3,
+        "each rejected stream is retained for checkpoint inspection"
+    );
+    assert!(retained.iter().all(|name| {
+        name.strip_prefix(".chunk-")
+            .and_then(|name| name.strip_suffix(".part"))
+            .and_then(|uuid| uuid::Uuid::parse_str(uuid).ok())
+            .is_some_and(|uuid| uuid.get_version() == Some(uuid::Version::SortRand))
+    }));
+    drop(transfer);
+
+    let reopened = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
+    assert_eq!(
+        reopened.missing_chunks(None, 8).unwrap().chunk_indices,
+        vec![0],
+        "retained staging must not become accepted state during resume"
     );
 }
 
@@ -685,8 +705,9 @@ fn private_checkpoint_modes_are_set_and_revalidated() {
 fn concurrent_accepts_install_exactly_one_chunk_without_clobbering() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
-    let transfer =
-        Arc::new(PersistentTransfer::create(&root, "inbound", single_chunk_manifest()).unwrap());
+    let manifest = single_chunk_manifest();
+    let digest = manifest.canonical_digest().unwrap();
+    let transfer = Arc::new(PersistentTransfer::create(&root, "inbound", manifest).unwrap());
     let barrier = Arc::new(Barrier::new(8));
     let mut threads = Vec::new();
     for _ in 0..8 {
@@ -725,7 +746,16 @@ fn concurrent_accepts_install_exactly_one_chunk_without_clobbering() {
         std::fs::read_dir(temporary.path().join("inbound/chunks"))
             .unwrap()
             .count(),
-        1
+        9,
+        "accepted and already-present retries retain their private staging entries"
+    );
+    drop(transfer);
+
+    let reopened = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
+    assert_eq!(
+        reopened.missing_chunks(None, 1).unwrap().chunk_indices,
+        Vec::<u32>::new(),
+        "bounded resume must ignore retained exact staging entries"
     );
 }
 

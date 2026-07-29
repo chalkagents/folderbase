@@ -107,14 +107,13 @@ beside the requested destination. It verifies every chunk plus the complete
 object SHA-256, byte length, deterministic chunk boundaries, and canonical
 manifest digest, synchronizes the new file, and installs it atomically without
 overwriting an existing path. Until that installation succeeds, the
-destination is absent and the transfer remains resumable. Failure cleanup may
-remove only staging files created by that operation. Destination resolution
-is relative to an opened `cap_std::fs::Dir`-style root capability supplied by
-the caller. Core opens and holds parent filesystem components without
-following symlinks, requires an existing directory parent and absent leaf,
-synchronizes the parent after installation, and keeps staging state private to
-the current user. A bare absolute destination path is not part of this
-interface.
+destination is absent and the transfer remains resumable. Destination
+resolution is relative to an opened `cap_std::fs::Dir`-style root capability
+supplied by the caller. Core opens and holds parent filesystem components
+without following symlinks, requires an existing directory parent and absent
+leaf, synchronizes the parent after installation, and keeps staging state
+private to the current user. A bare absolute destination path is not part of
+this interface.
 
 The implementation may retain whole-buffer convenience helpers for small local
 callers, but the sync engine, hosted verifier, and Core release acceptance tests
@@ -258,8 +257,12 @@ The receiver implementation fixes these additional v1 details:
    name still identifies that file immediately before linking, and proves the
    installed destination identifies it before reporting `Accepted`. An
    identity change fails closed without treating a replacement pathname as
-   operation-owned cleanup. A short, long, corrupt, unknown, or conflicting
-   retry returns no acceptance result and never replaces an installed chunk.
+   operation-owned cleanup. Receiver v1 never removes a pathname during
+   acceptance or error handling because its portable filesystem dependencies
+   cannot atomically bind unlink to an opened identity. Exact private staging
+   entries are retained as ignored runtime state for checkpoint inspection. A
+   short, long, corrupt, unknown, or conflicting retry returns no acceptance
+   result and never replaces an installed chunk.
 4. Resume enumeration inspects at most the caller's capped page of sequential
    descriptor indices and returns the next descriptor index as its cursor.
    Reopen validates every installed in-manifest chunk. It ignores only regular,
@@ -280,7 +283,9 @@ an invalid orphan child for explicit inspection or removal; Core does not
 recursively clean an externally named path after failure because concurrent
 state may have appeared there. An opened receiver retains the exact checkpoint
 and chunks directory capabilities, so replacement names are never followed by
-the current process.
+the current process. A later exclusive, identity-bound checkpoint lifecycle
+may remove the whole checkpoint after it has proved ownership and exclusion;
+receiver v1 exposes no per-file cleanup or garbage-collection API.
 
 This receiver slice deliberately has no destination path or materialization
 method. The next materializer slice must independently define and test its
