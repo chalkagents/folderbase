@@ -169,7 +169,7 @@ impl FolderbaseVersionStore {
         version_id: &str,
     ) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
         let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
-        let state = FolderbaseState::open_existing(&self.root_attestation.root)?;
+        let state = FolderbaseState::open_existing_read_only(&self.root_attestation.root)?;
         read_and_verify_folderbase_version(self, &local, &state, version_id)
     }
 

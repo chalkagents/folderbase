@@ -6,7 +6,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -28,20 +28,29 @@ pub(crate) struct PublishedBlob {
     pub(crate) bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateAccess {
+    ReadOnly,
+    Mutable,
+}
+
 pub(crate) struct FolderbaseState {
     root: Dir,
     state: Dir,
     state_identity: Handle,
     display_root: PathBuf,
+    access: StateAccess,
 }
 
 impl FolderbaseState {
     pub(crate) fn open(root: &Path) -> Result<Self> {
-        let root_cap = open_root_nofollow(root)?;
+        let access = StateAccess::Mutable;
+        let root_cap = open_root_nofollow(root, access)?;
         let state = match open_directory_nofollow(
             &root_cap,
             OsStr::new(STATE_COMPONENT),
             &root.join(STATE_COMPONENT),
+            access,
         ) {
             Ok(state) => state,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -57,6 +66,7 @@ impl FolderbaseState {
                     &root_cap,
                     OsStr::new(STATE_COMPONENT),
                     &root.join(STATE_COMPONENT),
+                    access,
                 )
                 .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?
             }
@@ -70,15 +80,25 @@ impl FolderbaseState {
             state,
             state_identity,
             display_root: root.to_path_buf(),
+            access,
         })
     }
 
     pub(crate) fn open_existing(root: &Path) -> Result<Self> {
-        let root_cap = open_root_nofollow(root)?;
+        Self::open_existing_with_access(root, StateAccess::Mutable)
+    }
+
+    pub(crate) fn open_existing_read_only(root: &Path) -> Result<Self> {
+        Self::open_existing_with_access(root, StateAccess::ReadOnly)
+    }
+
+    fn open_existing_with_access(root: &Path, access: StateAccess) -> Result<Self> {
+        let root_cap = open_root_nofollow(root, access)?;
         let state = open_directory_nofollow(
             &root_cap,
             OsStr::new(STATE_COMPONENT),
             &root.join(STATE_COMPONENT),
+            access,
         )
         .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
@@ -87,11 +107,13 @@ impl FolderbaseState {
             state,
             state_identity,
             display_root: root.to_path_buf(),
+            access,
         })
     }
 
     pub(crate) fn ensure_private_dir(&self, relative: &Path) -> Result<()> {
         let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
         let mut directory = self.state.try_clone().map_err(|source| {
             FolderbaseError::io(self.display_root.join(STATE_COMPONENT), source)
         })?;
@@ -101,7 +123,7 @@ impl FolderbaseState {
                 return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
             };
             display.push(name);
-            directory = match open_directory_nofollow(&directory, name, &display) {
+            directory = match open_directory_nofollow(&directory, name, &display, self.access) {
                 Ok(child) => child,
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                     let builder = private_directory_builder();
@@ -110,7 +132,7 @@ impl FolderbaseState {
                         Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
                         Err(source) => return Err(FolderbaseError::io(&display, source)),
                     }
-                    open_directory_nofollow(&directory, name, &display)
+                    open_directory_nofollow(&directory, name, &display, self.access)
                         .map_err(|source| FolderbaseError::io(&display, source))?
                 }
                 Err(source) => return Err(FolderbaseError::io(&display, source)),
@@ -166,6 +188,7 @@ impl FolderbaseState {
 
     pub(crate) fn open_lock_file(&self, relative: &Path) -> Result<File> {
         let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
         let (parent, name) = self.open_parent(&relative)?;
         let display = self.display_path(&relative);
         let mut options = CapOpenOptions::new();
@@ -197,6 +220,7 @@ impl FolderbaseState {
         maximum_bytes: u64,
     ) -> Result<PublishedBlob> {
         let relative = state_relative(directory)?;
+        self.require_mutable(&relative)?;
         let parent = self.open_dir(&relative)?;
         let display = self.display_path(&relative);
         let temporary = OsString::from(format!(".blob-{}.tmp", Uuid::now_v7()));
@@ -302,6 +326,7 @@ impl FolderbaseState {
         after_parent_open: impl FnOnce(),
     ) -> Result<()> {
         let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
         let (parent, name) = self.open_parent(&relative)?;
         after_parent_open();
         let display = self.display_path(&relative);
@@ -328,6 +353,7 @@ impl FolderbaseState {
 
     pub(crate) fn replace(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
         let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
         let (parent, name) = self.open_parent(&relative)?;
         let display = self.display_path(&relative);
         let temporary = OsString::from(format!(".replace-{}.tmp", Uuid::now_v7()));
@@ -342,6 +368,7 @@ impl FolderbaseState {
 
     pub(crate) fn remove_durable(&self, relative: &Path) -> Result<()> {
         let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
         let (parent, name) = self.open_parent(&relative)?;
         let display = self.display_path(&relative);
         match parent.remove_file(&name) {
@@ -356,6 +383,7 @@ impl FolderbaseState {
             &self.root,
             OsStr::new(STATE_COMPONENT),
             &self.display_root.join(STATE_COMPONENT),
+            self.access,
         )
         .map_err(|source| FolderbaseError::io(self.display_root.join(STATE_COMPONENT), source))?;
         let visible_identity =
@@ -383,7 +411,7 @@ impl FolderbaseState {
                     return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
                 };
                 display.push(component);
-                directory = open_directory_nofollow(&directory, component, &display)
+                directory = open_directory_nofollow(&directory, component, &display, self.access)
                     .map_err(|source| FolderbaseError::io(&display, source))?;
             }
         }
@@ -400,10 +428,23 @@ impl FolderbaseState {
                 return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
             };
             display.push(component);
-            directory = open_directory_nofollow(&directory, component, &display)
+            directory = open_directory_nofollow(&directory, component, &display, self.access)
                 .map_err(|source| FolderbaseError::io(&display, source))?;
         }
         Ok(directory)
+    }
+
+    fn require_mutable(&self, relative: &Path) -> Result<()> {
+        if self.access == StateAccess::Mutable {
+            return Ok(());
+        }
+        Err(FolderbaseError::io(
+            self.display_path(relative),
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "read-only Folderbase state capability cannot mutate",
+            ),
+        ))
     }
 
     fn display_path(&self, relative: &Path) -> PathBuf {
@@ -528,7 +569,7 @@ fn verify_exact_file(parent: &Dir, name: &OsStr, expected: &[u8], display: &Path
     Ok(())
 }
 
-fn open_root_nofollow(root: &Path) -> Result<Dir> {
+fn open_root_nofollow(root: &Path, _access: StateAccess) -> Result<Dir> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -544,8 +585,12 @@ fn open_root_nofollow(root: &Path) -> Result<Dir> {
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
             FILE_SHARE_WRITE,
         };
+        let desired_access = match _access {
+            StateAccess::ReadOnly => GENERIC_READ,
+            StateAccess::Mutable => GENERIC_READ | GENERIC_WRITE,
+        };
         options
-            .access_mode(GENERIC_READ | GENERIC_WRITE)
+            .access_mode(desired_access)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
@@ -562,12 +607,22 @@ fn open_root_nofollow(root: &Path) -> Result<Dir> {
 }
 
 #[cfg(not(windows))]
-fn open_directory_nofollow(parent: &Dir, name: &OsStr, _display: &Path) -> std::io::Result<Dir> {
+fn open_directory_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    _display: &Path,
+    _access: StateAccess,
+) -> std::io::Result<Dir> {
     parent.open_dir_nofollow(name)
 }
 
 #[cfg(windows)]
-fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::io::Result<Dir> {
+fn open_directory_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+    access: StateAccess,
+) -> std::io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -575,11 +630,16 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::i
     };
 
     let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    if access == StateAccess::Mutable {
+        options.write(true);
+    }
+    let desired_access = match access {
+        StateAccess::ReadOnly => GENERIC_READ,
+        StateAccess::Mutable => GENERIC_READ | GENERIC_WRITE,
+    };
     options
-        .read(true)
-        .write(true)
-        .follow(FollowSymlinks::No)
-        .access_mode(GENERIC_READ | GENERIC_WRITE)
+        .access_mode(desired_access)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     let file = parent.open_with(name, &options)?.into_std();
@@ -716,6 +776,11 @@ mod tests {
                 .expect("bounded read"),
             Some(b"read-only".to_vec())
         );
+        assert!(matches!(
+            state.publish_new(Path::new(".folderbase/forbidden"), b"no"),
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[cfg(windows)]
