@@ -2677,4 +2677,49 @@ mod tests {
             "preflight refusal occurs before immutable content writes"
         );
     }
+
+    #[test]
+    fn repeat_capture_stops_at_the_approved_length_without_moving_local_head() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let repeat = store.plan_capture().expect("repeat plan");
+        let mut grew_source = false;
+
+        let error = store
+            .seal_capture_with_hook(repeat, |checkpoint| {
+                if !grew_source
+                    && checkpoint
+                        == &CaptureCheckpoint::BeforeObjectBytesRead("active.bin".to_owned())
+                {
+                    grew_source = true;
+                    use std::io::Write;
+
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(root.path().join("active.bin"))
+                        .expect("open growing regular source")
+                        .write_all(b"x")
+                        .expect("grow beyond approved length");
+                }
+            })
+            .expect_err("repeat capture must reject growth beyond the approved length");
+
+        assert!(grew_source, "repeat verification must expose its byte-read seam");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::CaptureStateChanged(path)
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("prior Local Head").version_id,
+            genesis.version_id()
+        );
+        assert!(
+            active_transaction(root.path()).is_none(),
+            "repeat verification must fail before assigning a new transaction"
+        );
+    }
 }
