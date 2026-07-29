@@ -53,7 +53,7 @@ impl ObjectId {
         &self.0
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(format!("obj_{}", Uuid::now_v7()))
     }
 
@@ -84,7 +84,7 @@ impl VersionId {
         &self.0
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(format!("version_{}", Uuid::now_v7()))
     }
 
@@ -359,7 +359,7 @@ pub(crate) struct VersionedReplaceResult {
     pub content: ContentDigest,
 }
 
-struct StoreTransactionLock {
+pub(crate) struct StoreTransactionLock {
     file: File,
 }
 
@@ -1052,7 +1052,7 @@ impl LocalVersionStore {
         Ok(record)
     }
 
-    fn read_version_record(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
+    pub(crate) fn read_version_record(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
         let path = self.version_record_path(version_id);
         version_id.validate(&path)?;
         let record: LocalVersionRecord = read_json(&path)?;
@@ -1125,7 +1125,7 @@ impl LocalVersionStore {
         Ok(events)
     }
 
-    fn ensure_store_layout(&self) -> Result<()> {
+    pub(crate) fn ensure_store_layout(&self) -> Result<()> {
         for relative in [
             OBJECTS_DIRECTORY,
             VERSION_RECORDS_DIRECTORY,
@@ -1143,7 +1143,7 @@ impl LocalVersionStore {
         Ok(())
     }
 
-    fn acquire_transaction_lock(&self) -> Result<StoreTransactionLock> {
+    pub(crate) fn acquire_transaction_lock(&self) -> Result<StoreTransactionLock> {
         ensure_directory_chain(&self.root, Path::new(LOCKS_DIRECTORY))?;
         let lock_path = self.root.join(TRANSACTION_LOCK_PATH);
         let mut options = OpenOptions::new();
@@ -1284,7 +1284,71 @@ impl LocalVersionStore {
         Ok(content)
     }
 
-    fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
+    /// Install bytes from a capability-opened ordinary file into the existing
+    /// content-addressed blob store.
+    ///
+    /// The capture producer owns source-identity checks before and after this
+    /// call. This method owns only append-only blob installation and
+    /// verification.
+    pub(crate) fn install_content_reader(
+        &self,
+        mut reader: impl Read,
+        source_label: &Path,
+    ) -> Result<ContentDigest> {
+        let blob_directory = self.root.join(BLOBS_DIRECTORY);
+        let staged_path = unique_staged_path(&blob_directory, "capture-blob");
+        let mut staged = open_new(&staged_path)?;
+        let mut hasher = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+        let copy_result = (|| -> Result<()> {
+            loop {
+                let read = reader
+                    .read(&mut buffer)
+                    .map_err(|source| FolderbaseError::io(source_label, source))?;
+                if read == 0 {
+                    break;
+                }
+                staged
+                    .write_all(&buffer[..read])
+                    .map_err(|source| FolderbaseError::io(&staged_path, source))?;
+                hasher.update(&buffer[..read]);
+                bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+                    invalid_record(source_label, "content length exceeds supported range")
+                })?;
+            }
+            staged
+                .sync_all()
+                .map_err(|source| FolderbaseError::io(&staged_path, source))
+        })();
+        drop(staged);
+        if let Err(error) = copy_result {
+            let _ = fs::remove_file(&staged_path);
+            return Err(error);
+        }
+
+        let content = ContentDigest {
+            algorithm: "sha256".to_owned(),
+            digest: digest_hex(hasher.finalize().as_slice()),
+            bytes,
+        };
+        let blob_path = self.blob_path(&content.digest);
+        match install_no_clobber(&staged_path, &blob_path) {
+            Ok(()) => sync_parent_directory(&blob_path)?,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&staged_path)
+                    .map_err(|remove| FolderbaseError::io(&staged_path, remove))?;
+            }
+            Err(source) => {
+                let _ = fs::remove_file(&staged_path);
+                return Err(FolderbaseError::io(&blob_path, source));
+            }
+        }
+        verify_file_content(&blob_path, &content)?;
+        Ok(content)
+    }
+
+    pub(crate) fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
         let content = ContentDigest {
             algorithm: "sha256".to_owned(),
             digest: format!("{:x}", Sha256::digest(bytes)),
@@ -1310,7 +1374,10 @@ impl LocalVersionStore {
         Ok(content)
     }
 
-    fn install_or_verify_version_record(&self, record: &LocalVersionRecord) -> Result<()> {
+    pub(crate) fn install_or_verify_version_record(
+        &self,
+        record: &LocalVersionRecord,
+    ) -> Result<()> {
         let path = self.version_record_path(&record.id);
         match write_json_new(&path, record) {
             Ok(()) => Ok(()),
@@ -1332,6 +1399,77 @@ impl LocalVersionStore {
     fn write_object_projection(&self, record: &LocalObjectRecord) -> Result<()> {
         let path = self.object_record_path(&record.id);
         write_json_replace(&path, record)
+    }
+
+    /// Install one derived regular-file object projection after its containing
+    /// Folderbase Version has become Local Head.
+    pub(crate) fn write_capture_object_projection(
+        &self,
+        record: &LocalObjectRecord,
+        expected_materialized_content: &ContentDigest,
+    ) -> Result<()> {
+        self.validate_object_record_membership(
+            &record.id,
+            record,
+            &self.object_record_path(&record.id),
+        )?;
+        self.write_object_projection(record)?;
+        let materialized = self.root.join(&record.path);
+        if verify_file_content(&materialized, expected_materialized_content).is_ok() {
+            self.write_local_file_identity(&record.id, &materialized)?;
+        }
+        Ok(())
+    }
+
+    /// Verify a referenced immutable Object Version without consulting a
+    /// mutable object projection.
+    pub(crate) fn verify_capture_object_version(
+        &self,
+        object_id: &ObjectId,
+        version_id: &VersionId,
+        expected: &ContentDigest,
+    ) -> Result<LocalVersionRecord> {
+        let record = self.read_version_record(version_id)?;
+        if record.object_id != *object_id || record.content != *expected {
+            return Err(invalid_record(
+                self.version_record_path(version_id),
+                "Object Version does not match the sealed Folderbase Version reference",
+            ));
+        }
+        verify_file_content(&self.blob_path(&record.content.digest), &record.content)?;
+        Ok(record)
+    }
+
+    pub(crate) fn verify_capture_version_record(
+        &self,
+        version_id: &VersionId,
+        expected: &ContentDigest,
+    ) -> Result<LocalVersionRecord> {
+        let record = self.read_version_record(version_id)?;
+        if record.content != *expected {
+            return Err(invalid_record(
+                self.version_record_path(version_id),
+                "Object Version bytes do not match the sealed Folderbase Version reference",
+            ));
+        }
+        verify_file_content(&self.blob_path(&record.content.digest), &record.content)?;
+        Ok(record)
+    }
+
+    pub(crate) fn verify_capture_record_integrity(
+        &self,
+        object_id: &ObjectId,
+        version_id: &VersionId,
+    ) -> Result<LocalVersionRecord> {
+        let record = self.read_version_record(version_id)?;
+        if record.object_id != *object_id {
+            return Err(invalid_record(
+                self.version_record_path(version_id),
+                "Object Version belongs to a different stable Object",
+            ));
+        }
+        verify_file_content(&self.blob_path(&record.content.digest), &record.content)?;
+        Ok(record)
     }
 
     fn install_or_verify_restore(&self, restore: &PendingRestore) -> Result<()> {

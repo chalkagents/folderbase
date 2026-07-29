@@ -95,7 +95,11 @@ fn genesis_seals_mixed_opaque_bytes_and_fidelity_before_advancing_local_head() {
             .iter()
             .all(|binding| !binding.path().starts_with(".folderbase/"))
     );
-    assert!(version.lookup_binding("node_modules/pkg/index.js").is_none());
+    assert!(
+        version
+            .lookup_binding("node_modules/pkg/index.js")
+            .is_none()
+    );
 
     for path in [
         ".folderbaseignore",
@@ -104,7 +108,6 @@ fn genesis_seals_mixed_opaque_bytes_and_fidelity_before_advancing_local_head() {
         "movie.mov",
         "data.csv",
         "database.sqlite",
-        ".git/objects/pack/test.pack",
         "bounded-large.bin",
     ] {
         let binding = version.lookup_binding(path).expect("regular binding");
@@ -121,6 +124,12 @@ fn genesis_seals_mixed_opaque_bytes_and_fidelity_before_advancing_local_head() {
             binding.content_sha256().expect("content digest")
         );
     }
+    assert!(
+        version
+            .lookup_binding(".git/objects/pack/test.pack")
+            .is_some(),
+        "Git repository bytes remain in the Folderbase Version even though the legacy workspace projection collapses .git"
+    );
 
     #[cfg(unix)]
     {
@@ -149,7 +158,9 @@ fn update_reuses_only_prior_verified_head_bindings_and_noop_retry_converges() {
     let genesis = store
         .seal_capture(store.plan_capture().expect("genesis plan"))
         .expect("genesis");
-    let first = store.read_version(genesis.version_id()).expect("genesis version");
+    let first = store
+        .read_version(genesis.version_id())
+        .expect("genesis version");
     let first_docs_id = first.lookup_binding("docs").unwrap().object_id().to_owned();
     let first_note = first.lookup_binding("docs/notes.md").unwrap();
     let first_note_id = first_note.object_id().to_owned();
@@ -161,15 +172,17 @@ fn update_reuses_only_prior_verified_head_bindings_and_noop_retry_converges() {
     let update = store
         .seal_capture(store.plan_capture().expect("update plan"))
         .expect("update");
-    let second = store.read_version(update.version_id()).expect("updated version");
+    let second = store
+        .read_version(update.version_id())
+        .expect("updated version");
     assert_eq!(second.parents(), &[genesis.version_id().to_owned()]);
-    assert_eq!(second.lookup_binding("docs").unwrap().object_id(), first_docs_id);
+    assert_eq!(
+        second.lookup_binding("docs").unwrap().object_id(),
+        first_docs_id
+    );
     let second_note = second.lookup_binding("docs/notes.md").unwrap();
     assert_eq!(second_note.object_id(), first_note_id);
-    assert_ne!(
-        second_note.object_version_id().unwrap(),
-        first_note_version
-    );
+    assert_ne!(second_note.object_version_id().unwrap(), first_note_version);
     assert!(second.lookup_binding("docs/new.pdf").is_some());
 
     let retry = store
@@ -193,12 +206,7 @@ fn stale_plan_or_concurrent_edit_fails_without_moving_local_head() {
         Err(FolderbaseCaptureError::CaptureStateChanged(path))
             if path == Path::new("active.sqlite")
     ));
-    assert!(
-        !root
-            .path()
-            .join(".folderbase/local/head.json")
-            .exists()
-    );
+    assert!(!root.path().join(".folderbase/local/head.json").exists());
 }
 
 #[test]
@@ -219,20 +227,10 @@ fn sealed_bytes_use_sha256_without_file_format_interpretation() {
         Some(format!("{:x}", Sha256::digest(bytes)).as_str())
     );
     assert_eq!(
-        version
-            .lookup_binding("unknown.bin")
-            .unwrap()
-            .kind(),
+        version.lookup_binding("unknown.bin").unwrap().kind(),
         PathBindingKind::RegularFile
     );
-    assert!(
-        store
-            .plan_capture()
-            .unwrap()
-            .entries()
-            .iter()
-            .any(|entry| {
-                entry.path() == "unknown.bin" && entry.kind() == CaptureEntryKind::RegularFile
-            })
-    );
+    assert!(store.plan_capture().unwrap().entries().iter().any(|entry| {
+        entry.path() == "unknown.bin" && entry.kind() == CaptureEntryKind::RegularFile
+    }));
 }

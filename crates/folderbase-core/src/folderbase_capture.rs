@@ -16,16 +16,16 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, Metadata, OpenOptions};
 use ignore::{Match, gitignore::GitignoreBuilder};
 use same_file::Handle;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    FolderbaseRootAttestation, RootAttestationError, attest_folderbase_root,
+    FolderbaseError, FolderbaseRootAttestation, RootAttestationError, attest_folderbase_root,
     folderbase_version::{
-        MAX_OBJECT_BYTES, MAX_VERSION_ENTRIES, validate_capture_path, validate_capture_sha256,
-        validate_capture_symlink_targets, validate_capture_version_id,
+        FolderbaseVersionError, MAX_OBJECT_BYTES, MAX_VERSION_ENTRIES, validate_capture_path,
+        validate_capture_sha256, validate_capture_symlink_targets, validate_capture_version_id,
     },
     traversal_policy::{RECONSTRUCTABLE_DIRECTORIES, is_folderbase_state_component},
 };
@@ -51,7 +51,8 @@ impl fmt::Display for CapturePlanLimitKind {
 }
 
 /// Metadata kind observed for a future live Path Binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureEntryKind {
     Directory,
     RegularFile,
@@ -66,6 +67,7 @@ pub struct CapturePlanEntry {
     bytes: Option<u64>,
     executable: Option<bool>,
     symlink_target: Option<String>,
+    observed: CaptureMetadataFingerprint,
 }
 
 impl CapturePlanEntry {
@@ -88,9 +90,78 @@ impl CapturePlanEntry {
     pub fn symlink_target(&self) -> Option<&str> {
         self.symlink_target.as_deref()
     }
+
+    pub(crate) fn observed(&self) -> &CaptureMetadataFingerprint {
+        &self.observed
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CaptureMetadataFingerprint {
+    pub(crate) bytes: u64,
+    pub(crate) modified_unix_nanos: Option<u128>,
+    pub(crate) readonly: bool,
+    pub(crate) executable: bool,
+    pub(crate) device: Option<u64>,
+    pub(crate) inode: Option<u64>,
+}
+
+impl CaptureMetadataFingerprint {
+    pub(crate) fn from_cap_metadata(metadata: &Metadata) -> Self {
+        let modified_unix_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos());
+        #[cfg(unix)]
+        let (device, inode) = {
+            use cap_std::fs::MetadataExt;
+
+            (Some(metadata.dev()), Some(metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let (device, inode) = (None, None);
+        Self {
+            bytes: metadata.len(),
+            modified_unix_nanos,
+            readonly: metadata.permissions().readonly(),
+            executable: is_executable(metadata),
+            device,
+            inode,
+        }
+    }
+
+    pub(crate) fn from_std_metadata(metadata: &fs::Metadata) -> Self {
+        let modified_unix_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos());
+        #[cfg(unix)]
+        let (device, inode, executable) = {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            (
+                Some(metadata.dev()),
+                Some(metadata.ino()),
+                metadata.permissions().mode() & 0o111 != 0,
+            )
+        };
+        #[cfg(not(unix))]
+        let (device, inode, executable) = (None, None, false);
+        Self {
+            bytes: metadata.len(),
+            modified_unix_nanos,
+            readonly: metadata.permissions().readonly(),
+            executable,
+            device,
+            inode,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureExclusionKind {
     NestedFolderbase,
     HardLink,
@@ -101,7 +172,8 @@ pub enum CaptureExclusionKind {
     OtherSpecial,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CaptureExclusionReason {
     NestedFolderbaseBoundary,
     UnsupportedV1,
@@ -262,6 +334,30 @@ pub enum FolderbaseCaptureError {
     #[error("capture planning state changed while it was being observed")]
     PlanningStateChanged,
 
+    #[error("capture state changed after planning at: {0}")]
+    CaptureStateChanged(PathBuf),
+
+    #[error("capture plan belongs to a different Folderbase Version Store")]
+    PlanStoreMismatch,
+
+    #[error("Local Head changed after capture planning")]
+    LocalHeadChanged,
+
+    #[error("the prior Local Head cannot be verified: {0}")]
+    InvalidPriorLocalHead(String),
+
+    #[error("this update requires Tombstone production, which is not implemented yet: {0}")]
+    TombstonesRequired(PathBuf),
+
+    #[error("durable capture transaction is invalid: {0}")]
+    InvalidCaptureTransaction(String),
+
+    #[error(transparent)]
+    LocalStore(#[from] FolderbaseError),
+
+    #[error(transparent)]
+    FolderbaseVersion(#[from] FolderbaseVersionError),
+
     #[error("capture inventory exceeded the {limit} limit of {maximum} at {path}")]
     InventoryLimitExceeded {
         limit: CapturePlanLimitKind,
@@ -280,7 +376,7 @@ pub enum FolderbaseCaptureError {
 /// Read-only handle for planning Folderbase Version capture.
 #[derive(Debug)]
 pub struct FolderbaseVersionStore {
-    root_attestation: FolderbaseRootAttestation,
+    pub(crate) root_attestation: FolderbaseRootAttestation,
 }
 
 impl FolderbaseVersionStore {
@@ -485,6 +581,7 @@ impl<'a> CapturePlanner<'a> {
                     bytes: None,
                     executable: None,
                     symlink_target: None,
+                    observed: CaptureMetadataFingerprint::from_cap_metadata(&metadata),
                 });
                 self.visit_directory(&child, &relative)?;
                 verify_child_identity(directory, &name, &identity, &display_path)?;
@@ -530,6 +627,7 @@ impl<'a> CapturePlanner<'a> {
                 bytes,
                 executable,
                 symlink_target,
+                observed: CaptureMetadataFingerprint::from_cap_metadata(&metadata),
             });
         }
         Ok(())
