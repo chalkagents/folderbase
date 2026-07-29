@@ -1046,6 +1046,7 @@ fn build_and_install_capture(
                     binding.object_id() == assignment.object_id
                         && binding.content_sha256() == Some(content.digest.as_str())
                         && binding.bytes() == Some(content.bytes)
+                        && binding.executable() == entry.executable()
                 }) {
                     let version_id = VersionId::parse(
                         assignment.prior_object_version_id.clone().ok_or_else(|| {
