@@ -397,7 +397,9 @@ fn plan_manifest(
         profile.name(),
     )
     .map_err(|error| match error {
-        ObjectVerificationError::Reader(source) => TransferSourceError::Io(source),
+        ObjectVerificationError::Reader(source) | ObjectVerificationError::Writer(source) => {
+            TransferSourceError::Io(source)
+        }
         ObjectVerificationError::InvalidManifest(source) => {
             TransferSourceError::InvalidManifest(source)
         }

@@ -102,18 +102,18 @@ expected digest and length. A complete chunk is installed with no-clobber
 semantics and an exact retry reports `AlreadyPresent`. A short, long, corrupt,
 unknown, or conflicting chunk changes no accepted state.
 
-Materialization streams accepted chunks in manifest order into a unique file
-beside the requested destination. It verifies every chunk plus the complete
-object SHA-256, byte length, deterministic chunk boundaries, and canonical
-manifest digest, synchronizes the new file, and installs it atomically without
-overwriting an existing path. Until that installation succeeds, the
-destination is absent and the transfer remains resumable. Destination
-resolution is relative to an opened `cap_std::fs::Dir`-style root capability
-supplied by the caller. Core opens and holds parent filesystem components
-without following symlinks, requires an existing directory parent and absent
-leaf, synchronizes the parent after installation, and keeps staging state
-private to the current user. A bare absolute destination path is not part of
-this interface.
+Materialization streams accepted chunks in manifest order into an `object`
+file inside one unique private staging directory beside the requested
+destination. It verifies every chunk plus the complete object SHA-256, byte
+length, deterministic chunk boundaries, and canonical manifest digest,
+synchronizes the new file, and installs it atomically without overwriting an
+existing path. Until that installation succeeds, the destination is absent and
+the transfer remains resumable. Destination resolution is relative to an
+opened `cap_std::fs::Dir`-style root capability supplied by the caller. Core
+opens and holds parent filesystem components without following symlinks,
+requires an existing directory parent and absent leaf, synchronizes the parent
+after installation, and keeps staging state private to the current user. A
+bare absolute destination path is not part of this interface.
 
 The implementation may retain whole-buffer convenience helpers for small local
 callers, but the sync engine, hosted verifier, and Core release acceptance tests
@@ -285,6 +285,49 @@ The receiver implementation fixes these additional v1 details:
    exact EOF, then checks byte length, whole-object digest, every deterministic
    boundary and chunk digest, and the canonical manifest digest before
    returning `VerifiedObject`.
+6. `PersistentTransfer::materialize_to()` receives a caller-opened destination
+   root capability and one exact nonempty relative path. It rejects absolute,
+   parent, dot, repeated-separator, and trailing-separator spellings before
+   mutation; preserves ordinary spaces, Unicode, and platform-supported opaque
+   path bytes; opens every existing parent without following symlinks; and
+   refuses every existing leaf, including a directory, symlink, or dangling
+   symlink. Missing parents are never created implicitly.
+7. Materialization holds the checkpoint writer lease for preflight, streaming,
+   installation, cleanup, and destination-parent persistence. Before staging,
+   it proves every descriptor has an accepted private regular chunk. Its
+   ordered reader enforces each physical chunk's exact EOF and retains and
+   revalidates that chunk pathname identity after reading it. A short, extended,
+   corrupt, symlinked, missing, or same-bytes path replacement fails closed.
+8. The materializer streams accepted chunks through the same canonical
+   whole-object planner, verifier, and 64 KiB buffer while copying into an
+   `object` file inside one private
+   `.folderbase-materialize-<uuidv7>.part` directory beside the destination.
+   It establishes best-effort cleanup as soon as that directory is opened,
+   retains the directory capability and object identity, synchronizes the
+   object, and revalidates the staging pathname, object, and receiver-lock
+   identities before installation. The no-clobber hard link is sourced from
+   the retained directory capability rather than the externally visible
+   staging pathname. Core proves the destination is the staged inode and
+   applies the platform directory-persistence policy. Cleanup removes
+   `object` capability-relative. It first compares the live name with the
+   retained identity, then relinquishes both identity handles before unlinking
+   so platforms that deny deletion while a handle is open can proceed. It
+   likewise relinquishes the retained directory-identity handle before
+   consuming the open directory with the platform's nonrecursive removal
+   primitive, then synchronizes the destination parent. Under the cooperative
+   destination-parent mutation contract, a replacement already present when
+   identity validation runs is neither linked nor removed. These post-check
+   transitions intentionally trade an atomic adversarial-rename claim for
+   cross-platform deletion semantics: open-directory removal is best-effort
+   and nonrecursive, not a security boundary against a deliberate rename after
+   validation. The materializer never scans user folders for stale-looking
+   names.
+9. Once the no-clobber link succeeds, a late identity, synchronization,
+   staging-cleanup, or lease-release failure never causes Core to delete the
+   installed destination. Such a retry observes the existing leaf and refuses
+   to overwrite it. Successful and failed materializations do not consume or
+   mutate accepted chunks, so one verified receiver can materialize more than
+   one caller-authorized destination.
 
 Checkpoint creation synchronizes the manifest and receiver lock, then applies
 the platform directory-persistence policy defined below to the checkpoint and
@@ -298,9 +341,18 @@ receivers for a checkpoint to honor `receiver.lock`; a same-user actor that
 deliberately mutates private checkpoint files while ignoring that lease is
 outside this coordination boundary. Even then, retained staging, destination,
 and lock identities are checked at the operation boundaries and mismatches fail
-closed without following symlinks. Receiver v1 exposes no public per-file
-cleanup or garbage-collection API: bounded stale cleanup is an internal part of
-the next leased receipt.
+closed without following symlinks. The same boundary applies to a same-user
+actor that discovers and deliberately mutates entries *inside* a random private
+materialization staging directory while the operation is running: Core checks
+the object before linking and the installed identity afterward, but does not
+claim an atomic security boundary against an actor holding that directory open.
+Top-level staging-name replacement cannot redirect the retained hard-link
+source or capability-relative object cleanup. Removal of the top-level staging
+directory uses the strongest available open-directory primitive, but deliberate
+concurrent rewrites of that destination-parent namespace are likewise outside
+the writer coordination boundary. Receiver v1 exposes no public per-file cleanup
+or garbage-collection API: bounded stale cleanup is an internal part of the
+next leased receipt.
 
 Directory-entry durability follows the strongest documented primitive on each
 supported platform. Unix implementations reopen `.` beneath the retained
@@ -315,11 +367,20 @@ directory entry follows the filesystem's platform behavior. macOS and Windows
 run the public receiver suite in hosted CI so this intentional difference
 cannot silently become a nonfunctional receiver.
 
-This receiver slice deliberately has no destination path or materialization
-method. The next materializer slice must independently define and test its
-destination-root capability, no-follow parent authority, no-clobber atomic
-installation, and parent-directory durability. Receiving verified chunks is
-not authority to install them anywhere.
+Opaque destination names mean platform-supported path bytes, not bytes the host
+filesystem rejects. On the tested macOS/APFS environment, attempting to create
+an invalid UTF-8 hard-link leaf fails at the operating-system boundary with
+`EILSEQ` (`Illegal byte sequence`). Core returns that I/O failure without
+normalizing the name or creating a destination. The non-UTF-8 round-trip
+conformance proof therefore runs on Unix hosts whose filesystem/API accepts
+those opaque bytes; macOS still preserves every platform-valid Unicode/path
+spelling exactly.
+
+Receiving verified chunks is not authority to install them anywhere.
+Materialization occurs only when a caller supplies an already opened
+destination-root capability and a relative destination beneath it. Core does
+not derive that capability from checkpoint metadata, a bare ambient path, a
+share grant, or a remote object identifier.
 
 Core 0.3.0 will add the versioned manifest schema and conformance vectors.
 Core 0.1.0 through 0.2.1 exposed only the
@@ -361,8 +422,30 @@ the complete locked workspace suite, strict formatting and linting, public
 eclipse and CI-policy checks, extracted-package verification, and offline CLI
 installation. Both independent review axes reported no findings after
 remediation. Hosted PR CI run `30430141590` and post-merge `main` run
-`30430363260` passed. The receiver, whole-object verifier, and
-capability-rooted materializer remain unimplemented by the source slice.
+`30430363260` passed.
+
+The subsequent receiver and verifier slice merged in PR 17 at commit
+`5a7cb7e5f9188b99f0e155c90abc6018928531b2`. Hosted PR CI run
+`30442748503` passed the complete Linux quality gate and the public receiver
+suite on macOS and Windows. Its public evidence covers checkpoint creation and
+restart, streamed exact and idempotent receipt, bounded pagination, canonical
+whole-object verification, private state, stale staging recovery, retained
+identity checks, same-process and independent-process writer serialization,
+and platform-specific durability behavior.
+
+The materializer slice extends that same public receiver suite with complete
+and empty objects; incomplete, short, extended, corrupt, and symlinked chunks;
+first/middle/final multi-chunk incompleteness; exact unsafe-path rejection,
+including Windows prefixes, roots, devices, and separator aliases; missing and
+symlinked parents; every existing-leaf kind; private staging and replacement
+identity through deterministic retained-handle unit proofs; same-thread and
+independent-process no-clobber races; opaque Markdown, CSV, PDF, office,
+database, image, audio, video, Git pack, and unknown bytes; spaces, Unicode,
+and platform-supported non-UTF-8 names; disk-backed multi-megabyte streaming;
+deterministic same-bytes accepted-chunk replacement; accepted-chunk reuse; and
+capture/source/receiver restart through final materialization. Hosted CI and
+independent review remain merge gates for that slice rather than claims made by
+this decision record.
 
 ## Explicit deferrals
 

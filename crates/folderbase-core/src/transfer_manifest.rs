@@ -4,7 +4,10 @@
 //! legacy [`crate::chunk_transfer::ChunkManifest`] remains a distinct
 //! small-buffer checkpoint shape and is never decoded here.
 
-use std::{fmt, io::Read};
+use std::{
+    fmt,
+    io::{Read, Write},
+};
 
 use serde::{
     Deserialize, Serialize,
@@ -105,6 +108,9 @@ pub enum ObjectVerificationError {
 
     #[error("object input failed: {0}")]
     Reader(#[source] std::io::Error),
+
+    #[error("verified object output failed: {0}")]
+    Writer(#[source] std::io::Error),
 
     #[error("object exceeds the v1 maximum of {maximum} bytes")]
     ObjectTooLarge { maximum: u64 },
@@ -330,12 +336,21 @@ impl ChunkManifest {
     /// descriptor cap already enforced by manifest v1.
     pub fn verify_object(
         &self,
+        reader: impl Read,
+    ) -> Result<VerifiedObject, ObjectVerificationError> {
+        self.verify_object_and_copy(reader, std::io::sink())
+    }
+
+    pub(crate) fn verify_object_and_copy(
+        &self,
         mut reader: impl Read,
+        writer: impl Write,
     ) -> Result<VerifiedObject, ObjectVerificationError> {
         self.validate()?;
-        let observed = plan_streamed_manifest(
+        let observed = plan_streamed_manifest_and_copy(
             reader.by_ref().take(self.object_bytes.saturating_add(1)),
             &self.profile,
+            writer,
         )?;
         if observed.object_bytes != self.object_bytes {
             return Err(ObjectVerificationError::ObjectLengthMismatch {
@@ -437,8 +452,16 @@ impl<'de> Visitor<'de> for BoundedChunkDescriptorsVisitor {
 }
 
 pub(crate) fn plan_streamed_manifest(
+    reader: impl Read,
+    profile: &str,
+) -> Result<ChunkManifest, ObjectVerificationError> {
+    plan_streamed_manifest_and_copy(reader, profile, std::io::sink())
+}
+
+fn plan_streamed_manifest_and_copy(
     mut reader: impl Read,
     profile: &str,
+    mut writer: impl Write,
 ) -> Result<ChunkManifest, ObjectVerificationError> {
     let parameters = profile_parameters(profile).ok_or(ManifestViolation::UnknownProfile)?;
     let mask = parameters.average_chunk_bytes - 1;
@@ -458,6 +481,9 @@ pub(crate) fn plan_streamed_manifest(
         if read == 0 {
             break;
         }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(ObjectVerificationError::Writer)?;
         object_bytes = object_bytes
             .checked_add(read as u64)
             .filter(|bytes| *bytes <= MAX_OBJECT_BYTES)
