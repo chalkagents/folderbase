@@ -274,6 +274,7 @@ impl FolderbaseVersionStore {
         }
 
         let prior = load_prior_head(self, &local, &state, plan.current_local_head())?;
+        ensure_prior_bindings_observable(&plan, prior.as_ref())?;
         if active.is_none()
             && live_state_matches_prior(
                 self,
@@ -614,6 +615,47 @@ fn assign_capture_transaction(
         assignments,
         target_tombstones,
     })
+}
+
+fn ensure_prior_bindings_observable(
+    plan: &CapturePlan,
+    prior: Option<&FolderbaseVersion>,
+) -> Result<(), FolderbaseCaptureError> {
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    let live_paths = plan
+        .entries()
+        .iter()
+        .map(|entry| entry.path())
+        .collect::<std::collections::BTreeSet<_>>();
+    for binding in prior.bindings() {
+        if live_paths.contains(binding.path()) {
+            continue;
+        }
+        let hidden_by_ignore = plan
+            .ignored_paths()
+            .iter()
+            .any(|ignored| path_is_same_or_descendant_of(binding.path(), ignored.path()));
+        let hidden_by_exclusion = plan.exclusions().iter().any(|exclusion| {
+            binding.path() == exclusion.path()
+                || (exclusion.kind() == CaptureExclusionKind::NestedFolderbase
+                    && path_is_same_or_descendant_of(binding.path(), exclusion.path()))
+        });
+        if hidden_by_ignore || hidden_by_exclusion {
+            return Err(FolderbaseCaptureError::PriorBindingHidden(PathBuf::from(
+                binding.path(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn path_is_same_or_descendant_of(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn project_target_tombstones(

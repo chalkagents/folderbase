@@ -405,8 +405,8 @@ pub enum FolderbaseCaptureError {
     #[error("the prior Local Head cannot be verified: {0}")]
     InvalidPriorLocalHead(String),
 
-    #[error("this update requires Tombstone production, which is not implemented yet: {0}")]
-    TombstonesRequired(PathBuf),
+    #[error("a prior live Path Binding became hidden by capture policy or an exclusion: {0}")]
+    PriorBindingHidden(PathBuf),
 
     #[error("durable capture transaction is invalid: {0}")]
     InvalidCaptureTransaction(String),
