@@ -235,6 +235,36 @@ fn deletion_that_requires_a_tombstone_is_explicitly_refused_without_head_movemen
 }
 
 #[test]
+fn same_byte_same_path_recreation_never_inherits_the_prior_object_identity() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    fs::write(&path, b"opaque document").expect("document");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let replacement = root.path().join("replacement.docx");
+    fs::write(&replacement, b"opaque document").expect("same-byte replacement");
+    fs::remove_file(&path).expect("remove original identity");
+    fs::rename(&replacement, &path).expect("move replacement onto same path");
+
+    assert!(matches!(
+        store.seal_capture(store.plan_capture().expect("replacement plan")),
+        Err(FolderbaseCaptureError::TombstonesRequired(changed))
+            if changed == Path::new("proposal.docx")
+    ));
+    assert_eq!(
+        store
+            .plan_capture()
+            .expect("prior Head remains")
+            .current_local_head()
+            .expect("Head")
+            .version_id(),
+        genesis.version_id()
+    );
+}
+
+#[test]
 fn sealed_bytes_use_sha256_without_file_format_interpretation() {
     let root = folderbase();
     let bytes = [0_u8, 255, 17, 42, 0, 99];

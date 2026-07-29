@@ -104,6 +104,8 @@ pub(crate) struct CaptureMetadataFingerprint {
     pub(crate) executable: bool,
     pub(crate) device: Option<u64>,
     pub(crate) inode: Option<u64>,
+    #[serde(default)]
+    pub(crate) physical_identity: Option<String>,
 }
 
 impl CaptureMetadataFingerprint {
@@ -128,6 +130,7 @@ impl CaptureMetadataFingerprint {
             executable: is_executable(metadata),
             device,
             inode,
+            physical_identity: physical_identity_from_cap_metadata(metadata),
         }
     }
 
@@ -156,8 +159,58 @@ impl CaptureMetadataFingerprint {
             executable,
             device,
             inode,
+            physical_identity: physical_identity_from_std_metadata(metadata),
         }
     }
+
+    pub(crate) fn from_std_file(file: &fs::File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        let fingerprint = Self::from_std_metadata(&metadata);
+        #[cfg(windows)]
+        {
+            return Ok(fingerprint.with_physical_identity(Some(windows_file_identity(file)?)));
+        }
+        #[cfg(not(windows))]
+        Ok(fingerprint)
+    }
+
+    #[cfg(windows)]
+    fn with_physical_identity(mut self, physical_identity: Option<String>) -> Self {
+        self.physical_identity = physical_identity;
+        self
+    }
+}
+
+#[cfg(unix)]
+fn physical_identity_from_cap_metadata(metadata: &Metadata) -> Option<String> {
+    use cap_std::fs::MetadataExt;
+
+    Some(format!(
+        "unix:{:016x}:{:016x}",
+        metadata.dev(),
+        metadata.ino()
+    ))
+}
+
+#[cfg(not(unix))]
+fn physical_identity_from_cap_metadata(_metadata: &Metadata) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn physical_identity_from_std_metadata(metadata: &fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(format!(
+        "unix:{:016x}:{:016x}",
+        metadata.dev(),
+        metadata.ino()
+    ))
+}
+
+#[cfg(not(unix))]
+fn physical_identity_from_std_metadata(_metadata: &fs::Metadata) -> Option<String> {
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,7 +634,13 @@ impl<'a> CapturePlanner<'a> {
                     bytes: None,
                     executable: None,
                     symlink_target: None,
-                    observed: CaptureMetadataFingerprint::from_cap_metadata(&metadata),
+                    observed: capture_entry_fingerprint(
+                        directory,
+                        &name,
+                        CaptureEntryKind::Directory,
+                        &metadata,
+                        &display_path,
+                    )?,
                 });
                 self.visit_directory(&child, &relative)?;
                 verify_child_identity(directory, &name, &identity, &display_path)?;
@@ -627,7 +686,13 @@ impl<'a> CapturePlanner<'a> {
                 bytes,
                 executable,
                 symlink_target,
-                observed: CaptureMetadataFingerprint::from_cap_metadata(&metadata),
+                observed: capture_entry_fingerprint(
+                    directory,
+                    &name,
+                    kind,
+                    &metadata,
+                    &display_path,
+                )?,
             });
         }
         Ok(())
@@ -716,6 +781,92 @@ fn is_executable(metadata: &Metadata) -> bool {
 #[cfg(windows)]
 fn is_executable(_metadata: &Metadata) -> bool {
     false
+}
+
+#[cfg(unix)]
+pub(crate) fn capture_entry_fingerprint(
+    _directory: &Dir,
+    _name: &OsStr,
+    _kind: CaptureEntryKind,
+    metadata: &Metadata,
+    _display_path: &Path,
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
+    Ok(CaptureMetadataFingerprint::from_cap_metadata(metadata))
+}
+
+#[cfg(windows)]
+pub(crate) fn capture_entry_fingerprint(
+    directory: &Dir,
+    name: &OsStr,
+    kind: CaptureEntryKind,
+    metadata: &Metadata,
+    display_path: &Path,
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
+    let file = match kind {
+        CaptureEntryKind::Directory => directory
+            .open_dir_nofollow(name)
+            .map_err(|source| FolderbaseCaptureError::Io {
+                path: display_path.to_path_buf(),
+                source,
+            })?
+            .into_std_file(),
+        CaptureEntryKind::RegularFile | CaptureEntryKind::Symlink => {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .follow(FollowSymlinks::No)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+            directory
+                .open_with(name, &options)
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: display_path.to_path_buf(),
+                    source,
+                })?
+                .into_std()
+        }
+    };
+    let identity = windows_file_identity(&file).map_err(|source| FolderbaseCaptureError::Io {
+        path: display_path.to_path_buf(),
+        source,
+    })?;
+    Ok(CaptureMetadataFingerprint::from_cap_metadata(metadata)
+        .with_physical_identity(Some(identity)))
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &fs::File) -> io::Result<String> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx},
+    };
+
+    let mut information = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            (&raw mut information).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut encoded = format!(
+        "windows-file-id-128:{:016x}:",
+        information.VolumeSerialNumber
+    );
+    for byte in information.FileId.Identifier {
+        use fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    Ok(encoded)
 }
 
 #[cfg(unix)]

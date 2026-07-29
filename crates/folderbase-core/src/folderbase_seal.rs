@@ -6,8 +6,8 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{File, OpenOptions},
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -23,8 +23,9 @@ use crate::{
     folderbase_capture::{
         CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureLocalHead,
         CaptureMetadataFingerprint, CapturePlan, CapturePlanEntry, FolderbaseCaptureError,
-        FolderbaseVersionStore,
+        FolderbaseVersionStore, capture_entry_fingerprint,
     },
+    folderbase_state::FolderbaseState,
     folderbase_version::{
         Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion, FolderbaseVersionEntries,
         FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding, PathBindingKind,
@@ -44,6 +45,7 @@ const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
 const CAPTURE_IDENTITIES_DIRECTORY: &str = ".folderbase/local/capture-identities";
 const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
 const IO_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_CAPTURE_TRANSACTION_BYTES: u64 = MAX_ENCODED_VERSION_BYTES;
 
 /// Result of sealing or converging on one durable device-local Folderbase Version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,24 +182,16 @@ impl FolderbaseVersionStore {
         let local = LocalVersionStore::open(&self.root_attestation.root)?;
         let _lock = local.acquire_transaction_lock()?;
         local.ensure_store_layout()?;
-        ensure_private_directory_chain(
-            &self.root_attestation.root,
-            Path::new(CAPTURE_TRANSACTIONS_DIRECTORY),
-        )?;
-        ensure_private_directory_chain(
-            &self.root_attestation.root,
-            Path::new(FOLDERBASE_VERSIONS_DIRECTORY),
-        )?;
-        ensure_private_directory_chain(
-            &self.root_attestation.root,
-            Path::new(CAPTURE_IDENTITIES_DIRECTORY),
-        )?;
+        let state = FolderbaseState::open(&self.root_attestation.root)?;
+        state.ensure_private_dir(Path::new(CAPTURE_TRANSACTIONS_DIRECTORY))?;
+        state.ensure_private_dir(Path::new(FOLDERBASE_VERSIONS_DIRECTORY))?;
+        state.ensure_private_dir(Path::new(CAPTURE_IDENTITIES_DIRECTORY))?;
 
         let current_plan = self.plan_capture()?;
         ensure_same_plan(&plan, &current_plan)?;
         let plan_sha256 = capture_plan_sha256(&plan)?;
         let current_head = current_plan.current_local_head().map(JournalHead::from);
-        let mut active = read_active_transaction(&self.root_attestation.root)?;
+        let mut active = read_active_transaction(&state)?;
 
         if let Some(transaction) = active.as_ref() {
             validate_transaction(self, transaction)?;
@@ -216,8 +210,11 @@ impl FolderbaseVersionStore {
                             .to_owned(),
                     ));
                 }
-                finish_committed_transaction(self, &local, transaction)?;
-                remove_active_transaction(&self.root_attestation.root)?;
+                let transaction_prior =
+                    load_transaction_prior(self, &local, transaction.expected_head.as_ref())?;
+                validate_committed_transaction(transaction, &version, transaction_prior.as_ref())?;
+                finish_committed_transaction(self, &local, &state, transaction)?;
+                remove_active_transaction(&state)?;
                 checkpoint(&CaptureCheckpoint::CleanupComplete);
                 active = None;
             } else if transaction.expected_head != current_head {
@@ -226,7 +223,7 @@ impl FolderbaseVersionStore {
                 // The old Head still owns authority. Immutable records already
                 // installed by the abandoned attempt remain safe orphans;
                 // removing only the active intent permits a fresh assignment.
-                remove_active_transaction(&self.root_attestation.root)?;
+                remove_active_transaction(&state)?;
                 active = None;
             }
         }
@@ -248,7 +245,7 @@ impl FolderbaseVersionStore {
             None => {
                 let transaction =
                     assign_capture_transaction(self, &plan, &plan_sha256, prior.as_ref())?;
-                write_active_transaction(&self.root_attestation.root, &transaction)?;
+                write_active_transaction(&state, &transaction)?;
                 checkpoint(&CaptureCheckpoint::JournalDurable);
                 transaction
             }
@@ -261,6 +258,7 @@ impl FolderbaseVersionStore {
                 "active intent does not match the approved CapturePlan".to_owned(),
             ));
         }
+        validate_transaction_against_plan(&plan, &transaction, prior.as_ref())?;
 
         let built = build_and_install_capture(
             self,
@@ -271,11 +269,7 @@ impl FolderbaseVersionStore {
             &mut checkpoint,
         )?;
         checkpoint(&CaptureCheckpoint::ObjectWritesDurable);
-        install_folderbase_version(
-            &self.root_attestation.root,
-            &built.version,
-            &built.version_sha256,
-        )?;
+        install_folderbase_version(&state, &built.version, &built.version_sha256)?;
         let installed =
             read_and_verify_folderbase_version(self, &local, built.version.version_id())?;
         if installed.canonical_digest()? != built.version_sha256 {
@@ -288,7 +282,7 @@ impl FolderbaseVersionStore {
         let final_plan = self.plan_capture()?;
         ensure_same_plan(&plan, &final_plan)?;
         compare_and_swap_local_head(
-            &self.root_attestation.root,
+            &state,
             plan.current_local_head(),
             &LocalHeadRecord {
                 format: "folderbase-local-head-v1".to_owned(),
@@ -303,8 +297,8 @@ impl FolderbaseVersionStore {
         for (projection, content) in &built.regular_projections {
             local.write_capture_object_projection(projection, content)?;
         }
-        write_capture_identities(&self.root_attestation.root, &transaction)?;
-        remove_active_transaction(&self.root_attestation.root)?;
+        write_capture_identities(&state, &transaction)?;
+        remove_active_transaction(&state)?;
         checkpoint(&CaptureCheckpoint::CleanupComplete);
 
         Ok(SealedCapture {
@@ -588,10 +582,7 @@ fn identity_allows_reuse(
     let relative = capture_identity_relative_path(object_id);
     let path = root.join(&relative);
     let Some(encoded) = read_regular_beneath(root, &relative, 64 * 1024)? else {
-        // A verified prior Head is sufficient to bootstrap local physical
-        // identity once. Subsequent captures use the durable device/inode
-        // observation to distinguish same-path recreation.
-        return Ok(true);
+        return Ok(false);
     };
     let record: CaptureIdentityRecord = serde_json::from_slice(&encoded).map_err(|source| {
         FolderbaseCaptureError::InvalidPriorLocalHead(format!(
@@ -609,13 +600,21 @@ fn identity_allows_reuse(
         )));
     }
     match (
+        record.observed.physical_identity.as_deref(),
+        entry.observed().physical_identity.as_deref(),
+    ) {
+        (Some(previous), Some(current)) => return Ok(previous == current),
+        (Some(_), None) | (None, Some(_)) => return Ok(false),
+        (None, None) => {}
+    }
+    match (
         (record.observed.device, record.observed.inode),
         (entry.observed().device, entry.observed().inode),
     ) {
         ((Some(old_device), Some(old_inode)), (Some(device), Some(inode))) => {
             Ok(old_device == device && old_inode == inode)
         }
-        _ => Ok(true),
+        _ => Ok(false),
     }
 }
 
@@ -635,6 +634,24 @@ fn load_prior_head(
     if digest != head.version_sha256() {
         return Err(FolderbaseCaptureError::InvalidPriorLocalHead(
             "Local Head digest does not match the complete Folderbase Version".to_owned(),
+        ));
+    }
+    Ok(Some(version))
+}
+
+fn load_transaction_prior(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    head: Option<&JournalHead>,
+) -> Result<Option<FolderbaseVersion>, FolderbaseCaptureError> {
+    let Some(head) = head else {
+        return Ok(None);
+    };
+    let version = read_and_verify_folderbase_version(store, local, &head.version_id)
+        .map_err(|error| FolderbaseCaptureError::InvalidPriorLocalHead(error.to_string()))?;
+    if version.canonical_digest()? != head.version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidPriorLocalHead(
+            "transaction parent digest does not match its complete Folderbase Version".to_owned(),
         ));
     }
     Ok(Some(version))
@@ -917,32 +934,16 @@ fn capture_root_manifest(
 ) -> Result<ContentDigest, FolderbaseCaptureError> {
     let relative = Path::new(".folderbase/manifest.json");
     let mut file = open_regular_beneath(&store.root_attestation.root, relative)?;
-    let before = file
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: store.root_attestation.root.join(relative),
-            source,
-        })?;
+    let display = store.root_attestation.root.join(relative);
+    let before = fingerprint_std_file(&file, &display)?;
     before_read();
     let content =
         local.install_content_reader(&mut file, &store.root_attestation.root.join(relative))?;
-    let after = file
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: store.root_attestation.root.join(relative),
-            source,
-        })?;
+    let after = fingerprint_std_file(&file, &display)?;
     let reopened = open_regular_beneath(&store.root_attestation.root, relative)?;
-    let reopened_metadata = reopened
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: store.root_attestation.root.join(relative),
-            source,
-        })?;
-    if CaptureMetadataFingerprint::from_std_metadata(&before)
-        != CaptureMetadataFingerprint::from_std_metadata(&after)
-        || CaptureMetadataFingerprint::from_std_metadata(&before)
-            != CaptureMetadataFingerprint::from_std_metadata(&reopened_metadata)
+    let reopened_fingerprint = fingerprint_std_file(&reopened, &display)?;
+    if before != after
+        || before != reopened_fingerprint
         || content.bytes != plan.root_manifest_bytes()
         || content.digest != plan.root_manifest_sha256()
     {
@@ -962,13 +963,8 @@ fn hash_regular_entry(
     let relative = Path::new(entry.path());
     let display = root.join(relative);
     let mut file = open_regular_beneath(root, relative)?;
-    let before = file
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: display.clone(),
-            source,
-        })?;
-    if CaptureMetadataFingerprint::from_std_metadata(&before) != *entry.observed() {
+    let before = fingerprint_std_file(&file, &display)?;
+    if before != *entry.observed() {
         return Err(FolderbaseCaptureError::CaptureStateChanged(
             relative.to_path_buf(),
         ));
@@ -978,21 +974,11 @@ fn hash_regular_entry(
         Some(local) => local.install_content_reader(&mut file, &display)?,
         None => hash_reader(&mut file, &display)?,
     };
-    let after = file
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: display.clone(),
-            source,
-        })?;
+    let after = fingerprint_std_file(&file, &display)?;
     let reopened = open_regular_beneath(root, relative)?;
-    let reopened_metadata = reopened
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: display,
-            source,
-        })?;
-    if CaptureMetadataFingerprint::from_std_metadata(&after) != *entry.observed()
-        || CaptureMetadataFingerprint::from_std_metadata(&reopened_metadata) != *entry.observed()
+    let reopened_fingerprint = fingerprint_std_file(&reopened, &display)?;
+    if after != *entry.observed()
+        || reopened_fingerprint != *entry.observed()
         || content.bytes != entry.bytes().expect("planned regular length")
     {
         return Err(FolderbaseCaptureError::CaptureStateChanged(
@@ -1000,6 +986,16 @@ fn hash_regular_entry(
         ));
     }
     Ok(content)
+}
+
+fn fingerprint_std_file(
+    file: &File,
+    display: &Path,
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
+    CaptureMetadataFingerprint::from_std_file(file).map_err(|source| FolderbaseCaptureError::Io {
+        path: display.to_path_buf(),
+        source,
+    })
 }
 
 fn install_object_version(
@@ -1120,7 +1116,13 @@ fn verify_symlink_entry(
             source,
         })?;
     if !metadata.file_type().is_symlink()
-        || CaptureMetadataFingerprint::from_cap_metadata(&metadata) != *entry.observed()
+        || capture_entry_fingerprint(
+            &parent,
+            &name,
+            CaptureEntryKind::Symlink,
+            &metadata,
+            &root.join(relative),
+        )? != *entry.observed()
         || target != rechecked
         || target.to_str() != entry.symlink_target()
     {
@@ -1199,14 +1201,11 @@ fn read_and_verify_folderbase_version(
 ) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
     validate_capture_version_id(version_id)?;
     let relative = folderbase_version_relative_path(version_id);
-    let encoded = read_regular_beneath(
-        &store.root_attestation.root,
-        &relative,
-        MAX_ENCODED_VERSION_BYTES,
-    )?
-    .ok_or_else(|| {
-        FolderbaseCaptureError::InvalidPriorLocalHead("version is missing".to_owned())
-    })?;
+    let encoded = FolderbaseState::open(&store.root_attestation.root)?
+        .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)?
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidPriorLocalHead("version is missing".to_owned())
+        })?;
     let version = FolderbaseVersion::decode_bounded(encoded.as_slice())?;
     if version.version_id() != version_id
         || version.folderbase_id() != store.root_attestation.folderbase_id
@@ -1280,17 +1279,18 @@ fn verify_version_references(
 }
 
 fn install_folderbase_version(
-    root: &Path,
+    state: &FolderbaseState,
     version: &FolderbaseVersion,
     expected_sha256: &str,
 ) -> Result<(), FolderbaseCaptureError> {
     let mut encoded = Vec::new();
     version.encode_bounded(&mut encoded)?;
     let relative = folderbase_version_relative_path(version.version_id());
-    match write_new_durable(root, &relative, &encoded) {
+    match state.publish_new(&relative, &encoded) {
         Ok(()) => {}
-        Err(FolderbaseCaptureError::LocalStore(FolderbaseError::WouldOverwrite(_))) => {
-            let existing = read_regular_beneath(root, &relative, MAX_ENCODED_VERSION_BYTES)?
+        Err(FolderbaseError::WouldOverwrite(_)) => {
+            let existing = state
+                .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)?
                 .ok_or_else(|| {
                     FolderbaseCaptureError::InvalidCaptureTransaction(
                         "append-only Folderbase Version disappeared".to_owned(),
@@ -1302,10 +1302,11 @@ fn install_folderbase_version(
                 ));
             }
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     }
     let installed = FolderbaseVersion::decode_bounded(
-        read_regular_beneath(root, &relative, MAX_ENCODED_VERSION_BYTES)?
+        state
+            .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)?
             .ok_or_else(|| {
                 FolderbaseCaptureError::InvalidCaptureTransaction(
                     "installed Folderbase Version is missing".to_owned(),
@@ -1380,13 +1381,151 @@ fn validate_transaction(
     Ok(())
 }
 
+fn validate_transaction_against_plan(
+    plan: &CapturePlan,
+    transaction: &CaptureTransaction,
+    prior: Option<&FolderbaseVersion>,
+) -> Result<(), FolderbaseCaptureError> {
+    if transaction.assignments.len() != plan.entries().len() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "journal assignment count does not match the approved CapturePlan".to_owned(),
+        ));
+    }
+    let prior_bindings = prior
+        .map(|version| {
+            version
+                .bindings()
+                .iter()
+                .map(|binding| (binding.path(), binding))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for (entry, assignment) in plan.entries().iter().zip(&transaction.assignments) {
+        if assignment.path != entry.path()
+            || assignment.kind != entry.kind()
+            || assignment.observed != *entry.observed()
+        {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "journal assignment does not exactly match the approved CapturePlan".to_owned(),
+            ));
+        }
+        let prior_binding = prior_bindings.get(entry.path()).copied();
+        match prior_binding {
+            Some(binding)
+                if assignment.reused_object
+                    && binding.kind() == path_binding_kind(entry.kind())
+                    && assignment.object_id == binding.object_id()
+                    && assignment.prior_object_version_id.as_deref()
+                        == binding.object_version_id() => {}
+            None if !assignment.reused_object && assignment.prior_object_version_id.is_none() => {}
+            _ => {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                    "journal identity lineage does not match the verified parent at {}",
+                    entry.path()
+                )));
+            }
+        }
+    }
+    let expected_prior_root = prior.map(|version| version.root_manifest().object_version_id());
+    if transaction.prior_root_manifest_version_id.as_deref() != expected_prior_root {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "journal root-manifest lineage does not match the verified parent".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_committed_transaction(
+    transaction: &CaptureTransaction,
+    committed: &FolderbaseVersion,
+    prior: Option<&FolderbaseVersion>,
+) -> Result<(), FolderbaseCaptureError> {
+    if committed.version_id() != transaction.target_version_id
+        || committed.bindings().len() != transaction.assignments.len()
+    {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "committed Folderbase Version does not match its active journal".to_owned(),
+        ));
+    }
+    let prior_bindings = prior
+        .map(|version| {
+            version
+                .bindings()
+                .iter()
+                .map(|binding| (binding.path(), binding))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for (binding, assignment) in committed.bindings().iter().zip(&transaction.assignments) {
+        if binding.path() != assignment.path
+            || binding.kind() != path_binding_kind(assignment.kind)
+            || binding.object_id() != assignment.object_id
+        {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "committed binding does not match its active journal".to_owned(),
+            ));
+        }
+        let expected_version = match (
+            prior_bindings.get(binding.path()).copied(),
+            assignment.reused_object,
+        ) {
+            (Some(parent), true)
+                if parent.kind() == binding.kind()
+                    && parent.object_id() == assignment.object_id
+                    && parent.object_version_id()
+                        == assignment.prior_object_version_id.as_deref() =>
+            {
+                if binding.object_version_id() == parent.object_version_id() {
+                    assignment.prior_object_version_id.as_deref()
+                } else {
+                    assignment.candidate_object_version_id.as_deref()
+                }
+            }
+            (None, false) if assignment.prior_object_version_id.is_none() => {
+                assignment.candidate_object_version_id.as_deref()
+            }
+            _ => {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                    "committed identity lineage does not match the verified parent at {}",
+                    binding.path()
+                )));
+            }
+        };
+        if binding.object_version_id() != expected_version {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "committed Object Version does not match its journal assignment at {}",
+                binding.path()
+            )));
+        }
+    }
+    let expected_prior_root = prior.map(|version| version.root_manifest().object_version_id());
+    if transaction.prior_root_manifest_version_id.as_deref() != expected_prior_root {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "committed root-manifest lineage does not match the verified parent".to_owned(),
+        ));
+    }
+    let expected_root_version = if committed.root_manifest().object_version_id()
+        == expected_prior_root.unwrap_or_default()
+    {
+        transaction.prior_root_manifest_version_id.as_deref()
+    } else {
+        Some(transaction.root_manifest_candidate_version_id.as_str())
+    };
+    if committed.root_manifest().object_version_id() != expected_root_version.unwrap_or_default() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "committed root-manifest Object Version does not match its journal assignment"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn read_active_transaction(
-    root: &Path,
+    state: &FolderbaseState,
 ) -> Result<Option<CaptureTransaction>, FolderbaseCaptureError> {
-    let Some(encoded) = read_regular_beneath(
-        root,
+    let Some(encoded) = state.read_bounded(
         Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
-        MAX_ENCODED_VERSION_BYTES,
+        MAX_CAPTURE_TRANSACTION_BYTES,
     )?
     else {
         return Ok(None);
@@ -1401,54 +1540,53 @@ fn read_active_transaction(
 }
 
 fn write_active_transaction(
-    root: &Path,
+    state: &FolderbaseState,
     transaction: &CaptureTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
-    let encoded = json_bytes(transaction)?;
-    write_new_durable(root, Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &encoded)
+    let encoded = encode_active_transaction(transaction, MAX_CAPTURE_TRANSACTION_BYTES)?;
+    state
+        .publish_new(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &encoded)
+        .map_err(Into::into)
 }
 
-fn remove_active_transaction(root: &Path) -> Result<(), FolderbaseCaptureError> {
-    let path = root.join(ACTIVE_CAPTURE_TRANSACTION_PATH);
-    match fs::remove_file(&path) {
-        Ok(()) => sync_parent_directory(&path),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(FolderbaseCaptureError::Io { path, source }),
+fn encode_active_transaction(
+    transaction: &CaptureTransaction,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, FolderbaseCaptureError> {
+    let encoded = json_bytes(transaction)?;
+    if encoded.len() as u64 > maximum_bytes {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "active journal exceeds its bounded record limit".to_owned(),
+        ));
     }
+    Ok(encoded)
+}
+
+fn remove_active_transaction(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
+    state
+        .remove_durable(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH))
+        .map_err(Into::into)
 }
 
 fn compare_and_swap_local_head(
-    root: &Path,
+    state: &FolderbaseState,
     expected: Option<&CaptureLocalHead>,
     target: &LocalHeadRecord,
 ) -> Result<(), FolderbaseCaptureError> {
     let expected = expected.map(JournalHead::from);
     let encoded = json_bytes(target)?;
-    let destination = root.join(LOCAL_HEAD_PATH);
-    let parent = destination
-        .parent()
-        .ok_or(FolderbaseCaptureError::PlanStoreMismatch)?;
-    let staged = parent.join(format!(".capture-head-{}.tmp", Uuid::now_v7()));
-    write_staged(&staged, &encoded)?;
-
-    let current = read_head_record(root)?;
+    state.verify_still_attached()?;
+    let current = read_head_record(state)?;
     let current_summary = current.as_ref().map(|head| JournalHead {
         version_id: head.version_id.clone(),
         version_sha256: head.version_sha256.clone(),
     });
     if current_summary != expected {
-        let _ = fs::remove_file(&staged);
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     }
-    if let Err(source) = atomic_replace(&staged, &destination) {
-        let _ = fs::remove_file(&staged);
-        return Err(FolderbaseCaptureError::Io {
-            path: destination,
-            source,
-        });
-    }
-    sync_parent_directory(&destination)?;
-    if read_head_record(root)?.as_ref() != Some(target) {
+    state.replace(Path::new(LOCAL_HEAD_PATH), &encoded)?;
+    state.verify_still_attached()?;
+    if read_head_record(state)?.as_ref() != Some(target) {
         return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
             "Local Head replacement did not verify".to_owned(),
         ));
@@ -1456,12 +1594,11 @@ fn compare_and_swap_local_head(
     Ok(())
 }
 
-fn read_head_record(root: &Path) -> Result<Option<LocalHeadRecord>, FolderbaseCaptureError> {
-    let Some(encoded) = read_regular_beneath(
-        root,
-        Path::new(LOCAL_HEAD_PATH),
-        crate::MAX_LOCAL_HEAD_BYTES,
-    )?
+fn read_head_record(
+    state: &FolderbaseState,
+) -> Result<Option<LocalHeadRecord>, FolderbaseCaptureError> {
+    let Some(encoded) =
+        state.read_bounded(Path::new(LOCAL_HEAD_PATH), crate::MAX_LOCAL_HEAD_BYTES)?
     else {
         return Ok(None);
     };
@@ -1486,6 +1623,7 @@ fn read_head_record(root: &Path) -> Result<Option<LocalHeadRecord>, FolderbaseCa
 fn finish_committed_transaction(
     store: &FolderbaseVersionStore,
     local: &LocalVersionStore,
+    state: &FolderbaseState,
     transaction: &CaptureTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
     let version = read_and_verify_folderbase_version(store, local, &transaction.target_version_id)?;
@@ -1527,29 +1665,24 @@ fn finish_committed_transaction(
             local.write_capture_object_projection(&projection, &content)?;
         }
     }
-    write_capture_identities(&store.root_attestation.root, transaction)
+    write_capture_identities(state, transaction)
 }
 
 fn write_capture_identities(
-    root: &Path,
+    state: &FolderbaseState,
     transaction: &CaptureTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
     for assignment in &transaction.assignments {
-        if current_fingerprint(root, &assignment.path, assignment.kind)?
-            != Some(assignment.observed.clone())
-        {
-            // Head already names an immutable snapshot. A later live edit must
-            // not be falsely attached to the prior stable Object ID.
-            continue;
-        }
+        // This records the identity of the bytes that Head sealed, not a claim
+        // about whatever currently occupies the path. If the live entry was
+        // replaced after Head, the mismatch makes subsequent reuse fail closed.
         let record = CaptureIdentityRecord {
             format: "folderbase-capture-identity-v1".to_owned(),
             object_id: assignment.object_id.clone(),
             kind: assignment.kind,
             observed: assignment.observed.clone(),
         };
-        write_replace_durable(
-            root,
+        state.replace(
             &capture_identity_relative_path(&assignment.object_id),
             &json_bytes(&record)?,
         )?;
@@ -1559,39 +1692,6 @@ fn write_capture_identities(
 
 fn capture_identity_relative_path(object_id: &str) -> PathBuf {
     Path::new(CAPTURE_IDENTITIES_DIRECTORY).join(format!("{object_id}.json"))
-}
-
-fn current_fingerprint(
-    root: &Path,
-    path: &str,
-    kind: CaptureEntryKind,
-) -> Result<Option<CaptureMetadataFingerprint>, FolderbaseCaptureError> {
-    let relative = Path::new(path);
-    let (parent, name) = match open_parent_beneath(root, relative) {
-        Ok(value) => value,
-        Err(FolderbaseCaptureError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    let metadata = match parent.symlink_metadata(&name) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(FolderbaseCaptureError::Io {
-                path: root.join(relative),
-                source,
-            });
-        }
-    };
-    let matches_kind = match kind {
-        CaptureEntryKind::Directory => metadata.is_dir() && !metadata.file_type().is_symlink(),
-        CaptureEntryKind::RegularFile => metadata.is_file() && !metadata.file_type().is_symlink(),
-        CaptureEntryKind::Symlink => metadata.file_type().is_symlink(),
-    };
-    Ok(matches_kind.then(|| CaptureMetadataFingerprint::from_cap_metadata(&metadata)))
 }
 
 fn open_root_capability(root: &Path) -> Result<Dir, FolderbaseCaptureError> {
@@ -1733,131 +1833,6 @@ fn read_regular_beneath(
     Ok(Some(encoded))
 }
 
-fn ensure_private_directory_chain(
-    root: &Path,
-    relative: &Path,
-) -> Result<(), FolderbaseCaptureError> {
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            return Err(FolderbaseCaptureError::PlanStoreMismatch);
-        };
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
-                    "capture state directory is unsafe: {}",
-                    current.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                let mut builder = fs::DirBuilder::new();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-
-                    builder.mode(0o700);
-                }
-                match builder.create(&current) {
-                    Ok(()) => sync_parent_directory(&current)?,
-                    Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(source) => {
-                        return Err(FolderbaseCaptureError::Io {
-                            path: current,
-                            source,
-                        });
-                    }
-                }
-            }
-            Err(source) => {
-                return Err(FolderbaseCaptureError::Io {
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_new_durable(
-    root: &Path,
-    relative: &Path,
-    bytes: &[u8],
-) -> Result<(), FolderbaseCaptureError> {
-    let destination = root.join(relative);
-    let parent = destination
-        .parent()
-        .ok_or(FolderbaseCaptureError::PlanStoreMismatch)?;
-    let staged = parent.join(format!(".capture-{}.tmp", Uuid::now_v7()));
-    write_staged(&staged, bytes)?;
-    match fs::hard_link(&staged, &destination) {
-        Ok(()) => {
-            fs::remove_file(&staged).map_err(|source| FolderbaseCaptureError::Io {
-                path: staged,
-                source,
-            })?;
-            sync_parent_directory(&destination)
-        }
-        Err(source) => {
-            let _ = fs::remove_file(&staged);
-            if source.kind() == std::io::ErrorKind::AlreadyExists {
-                Err(FolderbaseError::WouldOverwrite(destination).into())
-            } else {
-                Err(FolderbaseCaptureError::Io {
-                    path: destination,
-                    source,
-                })
-            }
-        }
-    }
-}
-
-fn write_replace_durable(
-    root: &Path,
-    relative: &Path,
-    bytes: &[u8],
-) -> Result<(), FolderbaseCaptureError> {
-    let destination = root.join(relative);
-    let parent = destination
-        .parent()
-        .ok_or(FolderbaseCaptureError::PlanStoreMismatch)?;
-    let staged = parent.join(format!(".capture-replace-{}.tmp", Uuid::now_v7()));
-    write_staged(&staged, bytes)?;
-    if let Err(source) = atomic_replace(&staged, &destination) {
-        let _ = fs::remove_file(&staged);
-        return Err(FolderbaseCaptureError::Io {
-            path: destination,
-            source,
-        });
-    }
-    sync_parent_directory(&destination)
-}
-
-fn write_staged(path: &Path, bytes: &[u8]) -> Result<(), FolderbaseCaptureError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
 fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, FolderbaseCaptureError> {
     let mut encoded = serde_json::to_vec_pretty(value).map_err(|source| {
         FolderbaseCaptureError::InvalidCaptureTransaction(format!(
@@ -1868,63 +1843,12 @@ fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, FolderbaseCaptureError>
     Ok(encoded)
 }
 
-#[cfg(not(windows))]
-fn atomic_replace(staged: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::rename(staged, destination)
-}
-
-#[cfg(windows)]
-fn atomic_replace(staged: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let staged = staged
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    if unsafe {
-        MoveFileExW(
-            staged.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> Result<(), FolderbaseCaptureError> {
-    let parent = path
-        .parent()
-        .ok_or(FolderbaseCaptureError::PlanStoreMismatch)?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> Result<(), FolderbaseCaptureError> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        fs,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     use tempfile::{TempDir, tempdir};
 
@@ -1948,6 +1872,15 @@ mod tests {
         root
     }
 
+    fn active_transaction(root: &Path) -> Option<CaptureTransaction> {
+        read_active_transaction(&FolderbaseState::open(root).expect("state"))
+            .expect("active intent")
+    }
+
+    fn local_head(root: &Path) -> Option<LocalHeadRecord> {
+        read_head_record(&FolderbaseState::open(root).expect("state")).expect("Local Head")
+    }
+
     #[test]
     fn every_persistence_checkpoint_reopens_and_converges_on_exact_assigned_version() {
         for fault in [
@@ -1969,14 +1902,9 @@ mod tests {
             }));
             assert!(interrupted.is_err(), "fault {fault:?}");
 
-            let assigned = read_active_transaction(root.path())
-                .unwrap()
+            let assigned = active_transaction(root.path())
                 .map(|transaction| transaction.target_version_id)
-                .or_else(|| {
-                    read_head_record(root.path())
-                        .unwrap()
-                        .map(|head| head.version_id)
-                })
+                .or_else(|| local_head(root.path()).map(|head| head.version_id))
                 .expect("durable assigned target");
             drop(store);
             let reopened = FolderbaseVersionStore::open(root.path()).expect("crash reopen");
@@ -1988,8 +1916,8 @@ mod tests {
                 .read_version(retry.version_id())
                 .expect("all referenced bytes verify");
             assert_eq!(verified.canonical_digest().unwrap(), retry.version_sha256());
-            assert!(read_active_transaction(root.path()).unwrap().is_none());
-            let head = read_head_record(root.path()).unwrap().expect("Local Head");
+            assert!(active_transaction(root.path()).is_none());
+            let head = local_head(root.path()).expect("Local Head");
             assert_eq!(head.version_id, assigned);
         }
     }
@@ -2019,10 +1947,8 @@ mod tests {
                 })
             }));
             assert!(interrupted.is_err());
-            let active = read_active_transaction(root.path()).unwrap();
-            let head = read_head_record(root.path())
-                .unwrap()
-                .expect("Head survives");
+            let active = active_transaction(root.path());
+            let head = local_head(root.path()).expect("Head survives");
             if matches!(
                 fault,
                 CaptureCheckpoint::JournalDurable
@@ -2064,7 +1990,7 @@ mod tests {
             FolderbaseCaptureError::CaptureStateChanged(path)
                 if path == Path::new("active.bin")
         ));
-        assert!(read_head_record(root.path()).unwrap().is_none());
+        assert!(local_head(root.path()).is_none());
     }
 
     #[test]
@@ -2080,8 +2006,7 @@ mod tests {
             })
         }));
         assert!(interrupted.is_err());
-        let abandoned = read_active_transaction(root.path())
-            .unwrap()
+        let abandoned = active_transaction(root.path())
             .expect("abandoned intent")
             .target_version_id;
         fs::write(root.path().join("active.bin"), b"newer opaque bytes").expect("new state");
@@ -2089,7 +2014,7 @@ mod tests {
             .seal_capture(store.plan_capture().expect("fresh plan"))
             .expect("fresh capture cleans stale intent");
         assert_ne!(sealed.version_id(), abandoned);
-        assert!(read_active_transaction(root.path()).unwrap().is_none());
+        assert!(active_transaction(root.path()).is_none());
         assert!(
             read_regular_beneath(
                 root.path(),
@@ -2121,11 +2046,8 @@ mod tests {
             .lookup_binding("active.bin")
             .expect("active binding")
             .object_id();
-        fs::remove_file(
-            root.path()
-                .join(capture_identity_relative_path(object_id)),
-        )
-        .expect("remove local identity evidence");
+        fs::remove_file(root.path().join(capture_identity_relative_path(object_id)))
+            .expect("remove local identity evidence");
 
         let error = store
             .seal_capture(store.plan_capture().expect("next plan"))
@@ -2136,10 +2058,7 @@ mod tests {
                 if path == Path::new("active.bin")
         ));
         assert_eq!(
-            read_head_record(root.path())
-                .unwrap()
-                .expect("prior Head")
-                .version_id,
+            local_head(root.path()).expect("prior Head").version_id,
             genesis.version_id()
         );
     }
@@ -2189,16 +2108,15 @@ mod tests {
         }));
         assert!(interrupted.is_err());
 
-        let mut transaction = read_active_transaction(root.path())
-            .unwrap()
-            .expect("active journal");
+        let mut transaction = active_transaction(root.path()).expect("active journal");
         transaction.assignments.pop().expect("trailing assignment");
-        write_replace_durable(
-            root.path(),
-            Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
-            &json_bytes(&transaction).unwrap(),
-        )
-        .expect("tamper journal");
+        FolderbaseState::open(root.path())
+            .expect("state")
+            .replace(
+                Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                &json_bytes(&transaction).unwrap(),
+            )
+            .expect("tamper journal");
 
         let error = store
             .seal_capture(store.plan_capture().expect("same plan"))
@@ -2207,7 +2125,7 @@ mod tests {
             error,
             FolderbaseCaptureError::InvalidCaptureTransaction(_)
         ));
-        assert!(read_head_record(root.path()).unwrap().is_none());
+        assert!(local_head(root.path()).is_none());
     }
 
     #[test]
@@ -2228,21 +2146,20 @@ mod tests {
         }));
         assert!(interrupted.is_err());
 
-        let mut transaction = read_active_transaction(root.path())
-            .unwrap()
-            .expect("active journal");
+        let mut transaction = active_transaction(root.path()).expect("active journal");
         let assignment = transaction
             .assignments
             .iter_mut()
             .find(|assignment| assignment.path == "active.bin")
             .expect("active assignment");
         assignment.object_id = ObjectId::new().to_string();
-        write_replace_durable(
-            root.path(),
-            Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
-            &json_bytes(&transaction).unwrap(),
-        )
-        .expect("tamper journal lineage");
+        FolderbaseState::open(root.path())
+            .expect("state")
+            .replace(
+                Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                &json_bytes(&transaction).unwrap(),
+            )
+            .expect("tamper journal lineage");
 
         let error = store
             .seal_capture(store.plan_capture().expect("same update plan"))
@@ -2252,11 +2169,38 @@ mod tests {
             FolderbaseCaptureError::InvalidCaptureTransaction(_)
         ));
         assert_eq!(
-            read_head_record(root.path())
-                .unwrap()
-                .expect("prior Head")
-                .version_id,
+            local_head(root.path()).expect("prior Head").version_id,
             genesis.version_id()
+        );
+    }
+
+    #[test]
+    fn active_journal_write_and_restart_use_one_explicit_byte_bound() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let transaction = assign_capture_transaction(
+            &store,
+            &plan,
+            &capture_plan_sha256(&plan).expect("plan digest"),
+            None,
+        )
+        .expect("assignment");
+        let encoded = json_bytes(&transaction).expect("journal bytes");
+
+        assert_eq!(
+            encode_active_transaction(&transaction, encoded.len() as u64)
+                .expect("exact bound accepted"),
+            encoded
+        );
+        assert!(matches!(
+            encode_active_transaction(&transaction, encoded.len() as u64 - 1),
+            Err(FolderbaseCaptureError::InvalidCaptureTransaction(message))
+                if message.contains("bounded record limit")
+        ));
+        assert_eq!(
+            MAX_CAPTURE_TRANSACTION_BYTES, MAX_ENCODED_VERSION_BYTES,
+            "writer and restart reader intentionally share one declared bound"
         );
     }
 }

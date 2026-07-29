@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     FolderbaseError, Result,
+    folderbase_state::FolderbaseState,
     workspace::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
         resolve_existing_workspace_file,
@@ -370,11 +371,7 @@ struct FolderbaseIdentity {
 
 impl Drop for StoreTransactionLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let _ = File::unlock(&self.file);
     }
 }
 
@@ -1144,35 +1141,15 @@ impl LocalVersionStore {
     }
 
     pub(crate) fn acquire_transaction_lock(&self) -> Result<StoreTransactionLock> {
-        ensure_directory_chain(&self.root, Path::new(LOCKS_DIRECTORY))?;
+        let state = FolderbaseState::open(&self.root)?;
+        state.ensure_private_dir(Path::new(LOCKS_DIRECTORY))?;
         let lock_path = self.root.join(TRANSACTION_LOCK_PATH);
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        match state.publish_new(Path::new(TRANSACTION_LOCK_PATH), b"") {
+            Ok(()) | Err(FolderbaseError::WouldOverwrite(_)) => {}
+            Err(error) => return Err(error),
         }
-        let file = options
-            .open(&lock_path)
-            .map_err(|source| FolderbaseError::io(&lock_path, source))?;
-        if !file
-            .metadata()
-            .map_err(|source| FolderbaseError::io(&lock_path, source))?
-            .is_file()
-        {
-            return Err(FolderbaseError::UnsafePath(lock_path));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(FolderbaseError::io(
-                    &lock_path,
-                    std::io::Error::last_os_error(),
-                ));
-            }
-        }
+        let file = state.open_lock_file(Path::new(TRANSACTION_LOCK_PATH))?;
+        File::lock(&file).map_err(|source| FolderbaseError::io(&lock_path, source))?;
         Ok(StoreTransactionLock { file })
     }
 
@@ -1292,86 +1269,23 @@ impl LocalVersionStore {
     /// verification.
     pub(crate) fn install_content_reader(
         &self,
-        mut reader: impl Read,
+        reader: impl Read,
         source_label: &Path,
     ) -> Result<ContentDigest> {
-        let blob_directory = self.root.join(BLOBS_DIRECTORY);
-        let staged_path = unique_staged_path(&blob_directory, "capture-blob");
-        let mut staged = open_new(&staged_path)?;
-        let mut hasher = Sha256::new();
-        let mut bytes = 0_u64;
-        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
-        let copy_result = (|| -> Result<()> {
-            loop {
-                let read = reader
-                    .read(&mut buffer)
-                    .map_err(|source| FolderbaseError::io(source_label, source))?;
-                if read == 0 {
-                    break;
-                }
-                staged
-                    .write_all(&buffer[..read])
-                    .map_err(|source| FolderbaseError::io(&staged_path, source))?;
-                hasher.update(&buffer[..read]);
-                bytes = bytes.checked_add(read as u64).ok_or_else(|| {
-                    invalid_record(source_label, "content length exceeds supported range")
-                })?;
-            }
-            staged
-                .sync_all()
-                .map_err(|source| FolderbaseError::io(&staged_path, source))
-        })();
-        drop(staged);
-        if let Err(error) = copy_result {
-            let _ = fs::remove_file(&staged_path);
-            return Err(error);
-        }
-
-        let content = ContentDigest {
+        let published = FolderbaseState::open(&self.root)?.publish_reader_sha256(
+            Path::new(BLOBS_DIRECTORY),
+            reader,
+            source_label,
+        )?;
+        Ok(ContentDigest {
             algorithm: "sha256".to_owned(),
-            digest: digest_hex(hasher.finalize().as_slice()),
-            bytes,
-        };
-        let blob_path = self.blob_path(&content.digest);
-        match install_no_clobber(&staged_path, &blob_path) {
-            Ok(()) => sync_parent_directory(&blob_path)?,
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                fs::remove_file(&staged_path)
-                    .map_err(|remove| FolderbaseError::io(&staged_path, remove))?;
-            }
-            Err(source) => {
-                let _ = fs::remove_file(&staged_path);
-                return Err(FolderbaseError::io(&blob_path, source));
-            }
-        }
-        verify_file_content(&blob_path, &content)?;
-        Ok(content)
+            digest: published.digest,
+            bytes: published.bytes,
+        })
     }
 
     pub(crate) fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
-        let content = ContentDigest {
-            algorithm: "sha256".to_owned(),
-            digest: format!("{:x}", Sha256::digest(bytes)),
-            bytes: bytes.len() as u64,
-        };
-        let blob_path = self.blob_path(&content.digest);
-        match fs::symlink_metadata(&blob_path) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                verify_file_content(&blob_path, &content)?;
-            }
-            Ok(_) => {
-                return Err(invalid_record(
-                    blob_path,
-                    "content-addressed blob is not a regular file",
-                ));
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                write_bytes_new(&blob_path, bytes)?;
-                verify_file_content(&blob_path, &content)?;
-            }
-            Err(source) => return Err(FolderbaseError::io(blob_path, source)),
-        }
-        Ok(content)
+        self.install_content_reader(std::io::Cursor::new(bytes), Path::new("in-memory content"))
     }
 
     pub(crate) fn install_or_verify_version_record(
@@ -1379,7 +1293,9 @@ impl LocalVersionStore {
         record: &LocalVersionRecord,
     ) -> Result<()> {
         let path = self.version_record_path(&record.id);
-        match write_json_new(&path, record) {
+        let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{}.json", record.id));
+        let encoded = json_bytes(&path, record)?;
+        match FolderbaseState::open(&self.root)?.publish_new(&relative, &encoded) {
             Ok(()) => Ok(()),
             Err(FolderbaseError::WouldOverwrite(_)) => {
                 let existing = self.read_version_record(&record.id)?;
@@ -1398,7 +1314,9 @@ impl LocalVersionStore {
 
     fn write_object_projection(&self, record: &LocalObjectRecord) -> Result<()> {
         let path = self.object_record_path(&record.id);
-        write_json_replace(&path, record)
+        let encoded = json_bytes(&path, record)?;
+        FolderbaseState::open(&self.root)?
+            .replace(&self.object_record_relative_path(&record.id), &encoded)
     }
 
     /// Install one derived regular-file object projection after its containing
@@ -1910,12 +1828,17 @@ impl LocalVersionStore {
         let Some(file_system) = filesystem_identity(&metadata) else {
             return Ok(());
         };
-        write_json_replace(
-            &self.path_identity_path(object_id),
+        let path = self.path_identity_path(object_id);
+        let encoded = json_bytes(
+            &path,
             &LocalPathIdentity {
                 object_id: object_id.clone(),
                 file_system,
             },
+        )?;
+        FolderbaseState::open(&self.root)?.replace(
+            &Path::new(PATH_IDENTITIES_DIRECTORY).join(format!("{object_id}.json")),
+            &encoded,
         )
     }
 
@@ -3591,12 +3514,14 @@ fn open_new(path: &Path) -> Result<File> {
 }
 
 fn create_private_directory_durable(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder
         .create(path)
         .map_err(|source| FolderbaseError::io(path, source))?;
@@ -3650,7 +3575,10 @@ fn invalid_record(path: impl Into<PathBuf>, message: impl Into<String>) -> Folde
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        fs::OpenOptions,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     use tempfile::TempDir;
 
@@ -3659,6 +3587,33 @@ mod tests {
         FolderbaseKind, InitializationOptions,
         initialization::{initialize, plan_initialization},
     };
+
+    #[test]
+    fn transaction_lock_is_exclusive_across_independent_handles() {
+        let fixture = tempfile::tempdir().expect("temporary lock store");
+        fs::create_dir_all(fixture.path().join(LOCKS_DIRECTORY)).expect("lock directory");
+        let path = fixture.path().join(TRANSACTION_LOCK_PATH);
+        let first = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .expect("first handle");
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("second handle");
+        File::lock(&first).expect("first exclusive lock");
+        assert!(matches!(
+            File::try_lock(&second).expect_err("second handle must contend"),
+            std::fs::TryLockError::WouldBlock
+        ));
+        File::unlock(&first).expect("unlock");
+        File::lock(&second).expect("second handle acquires after release");
+        File::unlock(&second).expect("final unlock");
+    }
 
     #[test]
     fn every_history_transfer_checkpoint_reopens_and_recovers() {

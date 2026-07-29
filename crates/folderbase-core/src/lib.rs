@@ -10,6 +10,7 @@ mod error;
 mod folder_analysis;
 mod folderbase_capture;
 mod folderbase_seal;
+mod folderbase_state;
 pub mod folderbase_version;
 #[cfg(test)]
 mod folderbase_version_producer_tests;

@@ -863,9 +863,13 @@ impl Read for AcceptedChunkReader<'_> {
 }
 
 fn create_private_dir(parent: &Dir, name: impl AsRef<Path>) -> std::io::Result<()> {
-    let mut builder = DirBuilder::new();
+    let builder = DirBuilder::new();
     #[cfg(unix)]
-    builder.mode(0o700);
+    let builder = {
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
     parent.create_dir_with(name, &builder)
 }
 
