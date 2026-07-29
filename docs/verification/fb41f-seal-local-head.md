@@ -98,6 +98,38 @@ verification. The third RED exposed the same post-metadata growth window in
 exact mutable-state verification. Its GREEN verifier caps allocation and reads
 at the expected state-record length plus one before accepting exact bytes.
 
+The first hosted platform matrix then preserved two platform-specific
+RED/GREEN pairs:
+
+```text
+c9a2342a810afd1b6086496626d4ae357b0d97cf
+test(core): expose Linux O_PATH flush failure
+
+21ed18047f7e109c7cdce62c2d0928bc6fa985e6
+fix(core): fsync Linux state through retained capability
+
+3809827b2a3f4a7e68aeb783fce9cb94fffd55ba
+test(core): expose recursive capture stack overflow
+
+a157261dc19e64f08ac2073515afca3b452a65b5
+fix(core): traverse capture depth with heap frames
+```
+
+Linux Rust gate run `30491758063` exposed `EBADF` while flushing
+`.folderbase/locks`: `cap-primitives` uses `O_PATH` for retained no-follow Linux
+directory capabilities, but `fsync` cannot operate on an `O_PATH` descriptor.
+The GREEN implementation opens `"."` relative to that retained capability with
+read/no-follow authority, verifies the reopened directory has the same physical
+identity, and flushes it without ambient path traversal.
+
+Windows job `90711058447` exposed a native stack overflow in the existing
+129-component depth-refusal regression. A deterministic 256 KiB test thread
+reproduced the same abort locally at the RED commit. The GREEN planner retains
+the same streaming depth-first ordering and post-child identity verification,
+but stores directory iterators and capabilities in explicit heap frames, so the
+129th component returns the typed portable-depth refusal on constant native
+stack.
+
 ## Green behavior
 
 The implementation proves:
@@ -146,6 +178,10 @@ The implementation proves:
 - shared Windows reparse-point rejection for root, state, workspace, and seal
   mutation paths, plus native Windows directory-junction and writable
   directory-flush regressions;
+- capability-relative Linux directory flushing through an ordinary descriptor
+  verified against the retained no-follow `O_PATH` directory identity;
+- constant-native-stack capture traversal with the same 128-component portable
+  depth limit, streaming DFS behavior, and child-identity recheck;
 - least-privilege read-only state and version verification that does not request
   Windows directory write authority;
 - an exclusive cross-platform transaction file-lock contention test;
@@ -169,8 +205,14 @@ cargo test -p folderbase-core --lib folderbase_seal::tests::
 cargo test -p folderbase-core --lib folderbase_state::tests::
 5 passed; 0 failed on macOS
 
+cargo test -p folderbase-core --test folderbase_capture
+16 passed; 0 failed on macOS
+
 cargo test -p folderbase-core --lib local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 1 passed; 0 failed
+
+cargo check -p folderbase-core --lib --target aarch64-unknown-linux-gnu
+passed
 
 cargo check -p folderbase-core --target x86_64-pc-windows-msvc
 passed
@@ -184,6 +226,11 @@ streaming, bounded immutable-blob verification, bounded exact-state
 verification, junction refusal, and writable-capability publication/flush. Its
 read-only version integration regression is also selected there. Their runtime
 result is owned by the checked-in `windows-latest` CI job.
+
+The Linux target has six state tests, including the retained-parent confinement
+regression and the native `O_PATH` directory creation/publication/flush
+regression. Its runtime result is owned by the checked-in Linux Rust quality
+gate.
 
 Full local workspace gate:
 
