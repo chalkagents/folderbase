@@ -2416,6 +2416,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn active_journal_tombstone_tamper_never_changes_the_verified_deletion_target() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete active file");
+        let plan = store.plan_capture().expect("deletion plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("stop after Tombstone journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let mut transaction = active_transaction(root.path()).expect("active Tombstone intent");
+        let original = transaction
+            .target_tombstones
+            .first()
+            .expect("target Tombstone")
+            .clone();
+        transaction.target_tombstones[0] = Tombstone::from_verified_producer(
+            original.path(),
+            ObjectId::new().to_string(),
+            original.deleted_kind(),
+            original.last_object_version_id().map(str::to_owned),
+        );
+        FolderbaseState::open(root.path())
+            .expect("state")
+            .replace(
+                Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                &json_bytes(&transaction).expect("tampered journal"),
+            )
+            .expect("replace active journal");
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+        let error = reopened
+            .seal_capture(reopened.plan_capture().expect("same deletion plan"))
+            .expect_err("tampered target Tombstone must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(message)
+                if message.contains("Tombstones")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("prior Head").version_id,
+            genesis.version_id()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn seal_retains_state_capability_before_any_publication_and_never_writes_through_a_swap() {
