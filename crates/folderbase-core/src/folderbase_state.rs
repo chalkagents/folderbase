@@ -912,6 +912,27 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_state_publication_flushes_nofollow_directory_capabilities() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        state
+            .ensure_private_dir(Path::new(".folderbase/local"))
+            .expect("directory creation and flush");
+        state
+            .publish_new(Path::new(".folderbase/local/proof"), b"durable")
+            .expect("publication and directory flush");
+        state
+            .replace(Path::new(".folderbase/local/proof"), b"replaced")
+            .expect("replacement and directory flush");
+        assert_eq!(
+            fs::read(fixture.path().join(".folderbase/local/proof")).expect("proof"),
+            b"replaced"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn mutating_state_open_rejects_a_directory_junction_root() {
