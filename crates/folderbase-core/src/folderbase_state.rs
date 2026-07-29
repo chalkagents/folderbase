@@ -583,6 +583,16 @@ fn verify_blob_with_hook(
 }
 
 fn verify_exact_file(parent: &Dir, name: &OsStr, expected: &[u8], display: &Path) -> Result<()> {
+    verify_exact_file_with_hook(parent, name, expected, display, || {})
+}
+
+fn verify_exact_file_with_hook(
+    parent: &Dir,
+    name: &OsStr,
+    expected: &[u8],
+    display: &Path,
+    after_metadata: impl FnOnce(),
+) -> Result<()> {
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let mut file = parent
@@ -600,9 +610,18 @@ fn verify_exact_file(parent: &Dir, name: &OsStr, expected: &[u8], display: &Path
             message: "published state record metadata changed".to_owned(),
         });
     }
-    let mut observed = Vec::with_capacity(expected.len());
-    file.read_to_end(&mut observed)
+    after_metadata();
+    let mut observed = Vec::with_capacity(expected.len().min(COPY_BUFFER_BYTES));
+    Read::by_ref(&mut file)
+        .take((expected.len() as u64).saturating_add(1))
+        .read_to_end(&mut observed)
         .map_err(|source| FolderbaseError::io(display, source))?;
+    if observed.len() > expected.len() {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "published state record grew beyond its expected byte length".to_owned(),
+        });
+    }
     if observed != expected {
         return Err(FolderbaseError::InvalidRecord {
             path: display.to_path_buf(),
