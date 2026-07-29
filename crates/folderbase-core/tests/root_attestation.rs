@@ -433,7 +433,8 @@ fn rejects_junction_reparse_points_at_every_folderbase_marker() {
         directory_target.path(),
         &manifest_junction_root
             .path()
-            .join(".folderbase/manifest.json"),
+            .join(".folderbase")
+            .join("manifest.json"),
     );
     fs::write(
         manifest_junction_root.path().join("FOLDERBASE.md"),
