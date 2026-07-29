@@ -20,6 +20,7 @@ mod sync;
 mod template;
 mod template_expansion;
 pub mod transfer_manifest;
+pub mod transfer_receiver;
 pub mod transfer_source;
 mod traversal_policy;
 mod validation;

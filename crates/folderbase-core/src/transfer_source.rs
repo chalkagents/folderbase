@@ -21,14 +21,12 @@ use crate::{
     FolderbaseError, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId, VersionId,
     local_versions::{folderbase_id_from_manifest_bytes, validate_chunk_transfer_receipt_bytes},
     transfer_manifest::{
-        CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, LARGE_PROFILE_V1,
-        MANIFEST_FORMAT_V1, MAX_CHUNK_DESCRIPTORS, MAX_OBJECT_BYTES, ManifestViolation,
-        STANDARD_PROFILE_V1, is_sha256, profile_parameters,
+        ChunkManifest, LARGE_PROFILE_V1, MAX_OBJECT_BYTES, ManifestViolation,
+        ObjectVerificationError, STANDARD_PROFILE_V1, is_sha256, plan_streamed_manifest,
     },
 };
 
-/// Fixed I/O memory used while planning or copying an immutable version.
-pub const TRANSFER_IO_BUFFER_BYTES: usize = 64 * 1024;
+pub use crate::transfer_manifest::TRANSFER_IO_BUFFER_BYTES;
 
 /// The current managed-profile policy switches to `large-v1` at 1 GiB.
 ///
@@ -91,16 +89,6 @@ impl ResolvedProfile {
             Self::StandardV1 => STANDARD_PROFILE_V1,
             Self::LargeV1 => LARGE_PROFILE_V1,
         }
-    }
-
-    fn parameters(self) -> (u64, u64, u64) {
-        let parameters =
-            profile_parameters(self.name()).expect("resolved profiles are manifest v1 profiles");
-        (
-            parameters.minimum_chunk_bytes,
-            parameters.average_chunk_bytes,
-            parameters.maximum_chunk_bytes,
-        )
     }
 }
 
@@ -404,111 +392,28 @@ fn plan_manifest(
 ) -> Result<ChunkManifest, TransferSourceError> {
     blob.seek(SeekFrom::Start(0))
         .map_err(TransferSourceError::Io)?;
-    let (minimum, average, maximum) = profile.parameters();
-    let mask = average - 1;
-    let mut chunks = Vec::new();
-    let mut buffer = [0_u8; TRANSFER_IO_BUFFER_BYTES];
-    let mut object_hasher = Sha256::new();
-    let mut chunk_hasher = Sha256::new();
-    let mut object_bytes = 0_u64;
-    let mut chunk_offset = 0_u64;
-    let mut chunk_bytes = 0_u64;
-    let mut rolling = 0_u64;
-
-    loop {
-        let read = blob.read(&mut buffer).map_err(TransferSourceError::Io)?;
-        if read == 0 {
-            break;
+    let manifest = plan_streamed_manifest(
+        Read::by_ref(blob).take(version.content.bytes.saturating_add(1)),
+        profile.name(),
+    )
+    .map_err(|error| match error {
+        ObjectVerificationError::Reader(source) => TransferSourceError::Io(source),
+        ObjectVerificationError::InvalidManifest(source) => {
+            TransferSourceError::InvalidManifest(source)
         }
-        if object_bytes
-            .checked_add(read as u64)
-            .is_none_or(|bytes| bytes > version.content.bytes)
-        {
-            return Err(TransferSourceError::SourceChanged);
+        ObjectVerificationError::ObjectTooLarge { maximum } => {
+            TransferSourceError::ObjectTooLarge { maximum }
         }
-        object_hasher.update(&buffer[..read]);
-        let mut unhashed_start = 0;
-        for (position, byte) in buffer[..read].iter().enumerate() {
-            rolling = rolling
-                .rotate_left(1)
-                .wrapping_add((*byte as u64).wrapping_mul(0x9e37_79b1));
-            chunk_bytes += 1;
-            object_bytes += 1;
-            let at_content_boundary = chunk_bytes >= minimum && (rolling & mask) == 0;
-            let at_maximum = chunk_bytes >= maximum;
-            if at_content_boundary || at_maximum {
-                chunk_hasher.update(&buffer[unhashed_start..=position]);
-                push_descriptor(
-                    &mut chunks,
-                    chunk_offset,
-                    chunk_bytes,
-                    chunk_hasher.finalize_reset(),
-                )?;
-                chunk_offset += chunk_bytes;
-                chunk_bytes = 0;
-                rolling = 0;
-                unhashed_start = position + 1;
-            }
-        }
-        chunk_hasher.update(&buffer[unhashed_start..read]);
-    }
-    if chunk_bytes > 0 {
-        push_descriptor(
-            &mut chunks,
-            chunk_offset,
-            chunk_bytes,
-            chunk_hasher.finalize(),
-        )?;
-    }
-
-    let object_sha256 = format!("{:x}", object_hasher.finalize());
-    if object_bytes != version.content.bytes || object_sha256 != version.content.digest {
+        ObjectVerificationError::ObjectLengthMismatch { .. }
+        | ObjectVerificationError::ObjectDigestMismatch
+        | ObjectVerificationError::ChunkPlanMismatch => TransferSourceError::SourceChanged,
+    })?;
+    if manifest.object_bytes != version.content.bytes
+        || manifest.object_sha256 != version.content.digest
+    {
         return Err(TransferSourceError::SourceChanged);
     }
-    let manifest = ChunkManifest {
-        format: MANIFEST_FORMAT_V1.to_owned(),
-        algorithm: CHUNKING_ALGORITHM_V1.to_owned(),
-        profile: profile.name().to_owned(),
-        minimum_chunk_bytes: minimum,
-        average_chunk_bytes: average,
-        maximum_chunk_bytes: maximum,
-        object_sha256,
-        object_bytes,
-        chunks,
-    };
-    manifest.validate()?;
     Ok(manifest)
-}
-
-fn push_descriptor(
-    chunks: &mut Vec<ChunkDescriptor>,
-    offset: u64,
-    bytes: u64,
-    digest: impl AsRef<[u8]>,
-) -> Result<(), TransferSourceError> {
-    if chunks.len() >= MAX_CHUNK_DESCRIPTORS {
-        return Err(ManifestViolation::TooManyDescriptors {
-            maximum: MAX_CHUNK_DESCRIPTORS,
-        }
-        .into());
-    }
-    let index = u32::try_from(chunks.len()).expect("manifest descriptor cap fits u32");
-    chunks.push(ChunkDescriptor {
-        index,
-        offset,
-        bytes,
-        sha256: digest_hex(digest.as_ref()),
-    });
-    Ok(())
-}
-
-fn digest_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    encoded
 }
 
 fn open_root_nofollow(path: &Path) -> std::io::Result<fs::File> {

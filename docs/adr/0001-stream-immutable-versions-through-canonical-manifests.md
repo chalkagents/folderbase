@@ -235,6 +235,55 @@ installed chunk when reopening after a process or device restart. Transfer
 checkpoints and temporary chunks are local runtime state, not canonical
 Folderbase history and not authorization.
 
+The receiver implementation fixes these additional v1 details:
+
+1. `transfer_receiver::PersistentTransfer::create()` receives an opened root
+   capability, one normal nonempty child-directory name, and the selected
+   canonical manifest. It derives the manifest digest rather than accepting a
+   redundant expected value. `open()` receives that same capability and child
+   name plus the durable expected digest held by the caller. Absolute paths,
+   separators, dot components, symlinks, and clobbering an existing child are
+   rejected.
+2. A checkpoint contains only `manifest.json` and `chunks/`. The canonical
+   digest is recomputed from the validated manifest and compared with the
+   caller's expected digest on reopen; no second digest file can drift from the
+   manifest. On Unix, directories are created owner-only and files owner
+   read/write only. Reopen fails closed if group or other permissions were
+   later added.
+3. Chunk receipt reads and hashes the complete retry stream before returning
+   either `Accepted` or `AlreadyPresent`. It writes through one private
+   lowercase-hyphenated UUIDv7 staging file, synchronizes that file, installs
+   with a no-clobber link, and synchronizes the chunks directory. A short,
+   long, corrupt, unknown, or conflicting retry returns no acceptance result
+   and never replaces an installed chunk.
+4. Resume enumeration inspects at most the caller's capped page of sequential
+   descriptor indices and returns the next descriptor index as its cursor.
+   Reopen validates every installed in-manifest chunk. It ignores only regular,
+   private staging files with the exact operation-owned UUIDv7 spelling;
+   leading-zero chunk aliases, out-of-range chunks, other UUID versions,
+   unknown entries, directories, and symlinks fail closed. The ambiguous
+   pre-v1 checkpoint shape returns an explicit unsupported-checkpoint error.
+5. Source planning and whole-object verification call the same canonical
+   content-defined chunk planner. Both use one fixed 64 KiB buffer. The verifier
+   reads only the declared object length plus the one byte required to prove
+   exact EOF, then checks byte length, whole-object digest, every deterministic
+   boundary and chunk digest, and the canonical manifest digest before
+   returning `VerifiedObject`.
+
+Checkpoint creation synchronizes the manifest, checkpoint directory, and
+caller-supplied parent capability before returning. A failed create may leave
+an invalid orphan child for explicit inspection or removal; Core does not
+recursively clean an externally named path after failure because concurrent
+state may have appeared there. An opened receiver retains the exact checkpoint
+and chunks directory capabilities, so replacement names are never followed by
+the current process.
+
+This receiver slice deliberately has no destination path or materialization
+method. The next materializer slice must independently define and test its
+destination-root capability, no-follow parent authority, no-clobber atomic
+installation, and parent-directory durability. Receiving verified chunks is
+not authority to install them anywhere.
+
 Core 0.3.0 will add the versioned manifest schema and conformance vectors.
 Core 0.1.0 through 0.2.1 exposed only the
 `chunk_transfer::ChunkManifest` Rust convenience shape; no released CLI, App,
