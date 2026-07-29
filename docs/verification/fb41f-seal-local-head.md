@@ -1,4 +1,4 @@
-# TB-33 byte-verified sealing and Local Head evidence
+# FB-41F byte-verified sealing and Local Head evidence
 
 Date: 2026-07-30
 

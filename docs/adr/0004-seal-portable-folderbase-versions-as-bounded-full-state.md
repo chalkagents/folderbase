@@ -95,7 +95,7 @@ files are metadata-first: a 10 GiB opaque file costs one bounded binding rather
 than loading workspace bytes. A producer must verify every included byte identity
 and Object Version reference before sealing; this pure contract decoder validates
 the sealed representation but does not claim to have observed workspace bytes.
-The filesystem capture transaction is a later TB-33 slice.
+The filesystem capture transaction is a later FB-41F slice.
 
 Chunk manifests remain transfer plans. Their digests never become Object Version
 or Folderbase Version identity and are absent from this closed v1 record. Likewise,

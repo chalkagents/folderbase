@@ -748,7 +748,7 @@ status or a remaining candidate manifest.
 
 ### Proposed local capture, sealing, and Local Head
 
-The first producer-side TB-33 slice remains Proposed in ADR-0005. A
+The first producer-side FB-41F slice remains Proposed in ADR-0005. A
 `FolderbaseVersionStore` can open one attested physical root and return an opaque,
 bounded `CapturePlan` containing filesystem metadata only. The plan binds the
 physical root, effective ordered ignore policy, and optional device-local head.
