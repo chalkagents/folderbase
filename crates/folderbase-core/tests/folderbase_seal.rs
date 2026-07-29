@@ -210,6 +210,31 @@ fn stale_plan_or_concurrent_edit_fails_without_moving_local_head() {
 }
 
 #[test]
+fn deletion_that_requires_a_tombstone_is_explicitly_refused_without_head_movement() {
+    let root = folderbase();
+    fs::write(root.path().join("proposal.docx"), b"opaque document").expect("document");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    fs::remove_file(root.path().join("proposal.docx")).expect("delete live document");
+
+    assert!(matches!(
+        store.seal_capture(store.plan_capture().expect("deletion plan")),
+        Err(FolderbaseCaptureError::TombstonesRequired(path))
+            if path == Path::new("proposal.docx")
+    ));
+    let head = store
+        .plan_capture()
+        .expect("head remains readable")
+        .current_local_head()
+        .expect("prior Head")
+        .version_id()
+        .to_owned();
+    assert_eq!(head, genesis.version_id());
+}
+
+#[test]
 fn sealed_bytes_use_sha256_without_file_format_interpretation() {
     let root = folderbase();
     let bytes = [0_u8, 255, 17, 42, 0, 99];

@@ -48,9 +48,37 @@ an existing `FolderbaseVersion`; a crate-private producer can assemble every v1
 record kind from verified references, but complete validation still runs before
 a value can exist. This does not restore raw public Serde deserialization.
 
-This decision remains Proposed because this slice deliberately does **not**
-implement or claim byte verification, Object ID/Object Version assignment,
-sealing, Local Head mutation, restore, crash recovery, snapshot atomicity,
-database-file consistency, sync, sharing, authorization, or Cloud durability.
-Acceptance requires the later producer transaction and recovery protocol to
-close those gaps.
+The second producer slice consumes an exact `CapturePlan` through
+`FolderbaseVersionStore::seal_capture`. It reads every included regular file as
+opaque bytes through root-relative no-follow capabilities, rechecks planned
+metadata and filesystem identity before and after each read, and installs the
+bytes in the existing content-addressed `LocalVersionStore`. PDF, video, CSV,
+SQLite, Git, office, and unknown formats take the same path. Directory, symlink,
+and executable fidelity remains in the single full-state Folderbase Version.
+
+Before installing an Object Version, Core durably journals every newly assigned
+stable Object ID, candidate Object Version ID, Folderbase Version ID, parent,
+timestamp, plan digest, and expected Local Head. A prior Object or Object Version
+may be reused only after the exact prior Local Head, complete Folderbase Version,
+immutable Object Version record, and content blob verify. Device-local physical
+identity records distinguish a same-inode update from a same-path recreation
+after the first verified binding.
+
+Content blobs, immutable Object Version records, and the complete bounded
+Folderbase Version are installed append-only with temp-file fsync, atomic
+no-clobber publication, and post-install verification. Only then does Core
+compare the observed Local Head and atomically replace it under the shared local
+transaction lock. The active capture journal remains until derived regular-file
+object projections and physical identity records are repaired. A retry after
+interruption at journal, Object Version, Folderbase Version, Local Head, or
+cleanup boundaries converges on the exact journal-assigned version. A stale
+attempt may discard only its intent; verified immutable records remain safe,
+reusable orphans.
+
+This decision remains **Proposed**. This slice does not yet produce Tombstones,
+so deletion, same-path recreation, and kind replacement are refused without
+moving Local Head. It also does not implement full no-clobber restore
+reconstruction, restore crash recovery, filesystem/database snapshot
+coordination, Remote Head publication, sync, sharing, authorization, or Cloud
+durability. Acceptance still requires the Tombstone and restore transactions to
+close the complete capture/restore lifecycle.

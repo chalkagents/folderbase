@@ -730,9 +730,9 @@ fidelity updates, exclusions, and root-manifest changes. A moved Object that als
 changes version or metadata produces both `Moved` and `Updated`. The public type
 cannot be constructed through raw Serde deserialization; the bounded private wire
 decoder and validated crate-private producer boundary are the only construction
-paths. Core can now produce an inert metadata-only Capture Plan, as specified
-below. Content verification and sealing, Local Head persistence, and publication
-remain later transactions.
+paths. Core can now produce an inert metadata-only Capture Plan and consume that
+exact plan in a byte-verified, journaled local sealing transaction, as specified
+below. Remote publication remains a later transaction.
 
 The full Folderbase Version is independent restore state. It is never exposed as a
 Folder Scope share projection because doing so could disclose paths outside the
@@ -746,7 +746,7 @@ reference encoder. The released manifest at
 source-release surface. ADR-0004 is Accepted, and CI rejects either a non-released
 status or a remaining candidate manifest.
 
-### Proposed metadata-only capture planning
+### Proposed local capture, sealing, and Local Head
 
 The first producer-side TB-33 slice remains Proposed in ADR-0005. A
 `FolderbaseVersionStore` can open one attested physical root and return an opaque,
@@ -769,9 +769,27 @@ are rechecked, and streamed traversal enforces the aggregate bound without
 retaining an unbounded directory listing. The capture inventory uses the v1
 portable-path, Unicode collision, depth, entry-count, and object-size limits.
 
-This planning API does not verify content, assign Object identities, seal or
-persist a Folderbase Version, move Local Head, restore files, or provide
-snapshot/database atomicity, sync, sharing, authorization, or Cloud behavior.
+`FolderbaseVersionStore::seal_capture(plan)` first revalidates the complete plan,
+then durably journals every new stable Object ID, candidate Object Version ID,
+Folderbase Version ID, parent, timestamp, and expected Local Head. It may reuse
+identity only from a fully verified prior Local Head binding. All ordinary
+regular files are read as exact opaque bytes through root-relative no-follow
+capabilities and checked against planned metadata and physical identity before
+and after the read.
+
+Core installs content-addressed blobs and immutable Object Version records through
+the existing `LocalVersionStore`. It then constructs the one canonical
+Folderbase Version through the crate-private verified-producer seam, encodes it
+with the bounded encoder, publishes it append-only, and independently verifies
+every referenced durable record. Local Head advances only after those checks,
+through a compare-and-replace under the shared device-local transaction lock.
+The journal makes every persistence boundary retryable with the exact assigned
+IDs and preserves the prior Head until the complete next version is durable.
+
+This remains Proposed because Tombstone-producing deletion/recreation
+transactions and full no-clobber restore/crash recovery are not implemented.
+Database snapshot coordination, Remote Head publication, sync, sharing,
+authorization, and Cloud behavior also remain out of scope.
 
 ## Checkout
 
