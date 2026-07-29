@@ -16,7 +16,7 @@ use same_file::Handle;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{FolderbaseError, Result};
+use crate::{FolderbaseError, Result, root_attestation::metadata_is_link_or_reparse};
 
 const STATE_COMPONENT: &str = ".folderbase";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -55,6 +55,20 @@ impl FolderbaseState {
                 return Err(FolderbaseError::io(root.join(STATE_COMPONENT), source));
             }
         };
+        let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
+        Ok(Self {
+            root: root_cap,
+            state,
+            state_identity,
+            display_root: root.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn open_existing(root: &Path) -> Result<Self> {
+        let root_cap = open_root_nofollow(root)?;
+        let state = root_cap
+            .open_dir_nofollow(STATE_COMPONENT)
+            .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
         Ok(Self {
             root: root_cap,
@@ -244,6 +258,22 @@ impl FolderbaseState {
             &self.display_path(&relative.join(&digest)),
         )?;
         Ok(PublishedBlob { digest, bytes })
+    }
+
+    pub(crate) fn verify_sha256_blob(
+        &self,
+        directory: &Path,
+        digest: &str,
+        bytes: u64,
+    ) -> Result<()> {
+        let relative = state_relative(directory)?;
+        let parent = self.open_dir(&relative)?;
+        verify_blob(
+            &parent,
+            OsStr::new(digest),
+            bytes,
+            &self.display_path(&relative.join(digest)),
+        )
     }
 
     fn publish_new_with_hook(
@@ -503,11 +533,10 @@ fn open_root_nofollow(root: &Path) -> Result<Dir> {
     let file = options
         .open(root)
         .map_err(|source| FolderbaseError::io(root, source))?;
-    if !file
+    let metadata = file
         .metadata()
-        .map_err(|source| FolderbaseError::io(root, source))?
-        .is_dir()
-    {
+        .map_err(|source| FolderbaseError::io(root, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(root.to_path_buf()));
     }
     Ok(Dir::from_std_file(file))
@@ -518,6 +547,12 @@ fn directory_identity(directory: &Dir, display: &Path) -> Result<Handle> {
         .try_clone()
         .map_err(|source| FolderbaseError::io(display, source))?
         .into_std_file();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
     Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
 }
 
@@ -570,5 +605,37 @@ mod tests {
             state.verify_still_attached().is_ok(),
             "the state root remains attached even though one descendant moved"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mutating_state_open_rejects_a_directory_junction_root() {
+        use std::process::Command;
+
+        let fixture = tempdir().expect("fixture");
+        let actual = fixture.path().join("actual");
+        let junction = fixture.path().join("junction");
+        fs::create_dir(&actual).expect("actual root");
+        fs::create_dir(actual.join(".folderbase")).expect("actual state");
+        let output = Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                junction.to_str().expect("junction path"),
+                actual.to_str().expect("actual path"),
+            ])
+            .output()
+            .expect("create junction");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(matches!(
+            FolderbaseState::open_existing(&junction),
+            Err(FolderbaseError::UnsafePath(path)) if path == junction
+        ));
     }
 }

@@ -367,7 +367,7 @@ fn classify_root(root: &Path) -> Result<(), RootAttestationError> {
     Ok(())
 }
 
-fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+pub(crate) fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -384,7 +384,7 @@ fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(any(windows, test))]
-const fn windows_attributes_are_reparse(attributes: u32) -> bool {
+pub(crate) const fn windows_attributes_are_reparse(attributes: u32) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT_VALUE: u32 = 0x0000_0400;
 
     attributes & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0

@@ -271,6 +271,7 @@ impl CaptureIgnoredPath {
 pub struct CaptureLocalHead {
     version_id: String,
     version_sha256: String,
+    transaction_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +282,7 @@ struct LocalHeadWire {
     root_instance_sha256: String,
     version_id: String,
     version_sha256: String,
+    transaction_sha256: String,
 }
 
 impl CaptureLocalHead {
@@ -290,6 +292,10 @@ impl CaptureLocalHead {
 
     pub fn version_sha256(&self) -> &str {
         &self.version_sha256
+    }
+
+    pub(crate) fn transaction_sha256(&self) -> &str {
+        &self.transaction_sha256
     }
 }
 
@@ -1148,9 +1154,12 @@ fn read_local_head(
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
     validate_capture_sha256(&head.version_sha256)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
+    validate_capture_sha256(&head.transaction_sha256)
+        .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
     Ok(Some(CaptureLocalHead {
         version_id: head.version_id,
         version_sha256: head.version_sha256,
+        transaction_sha256: head.transaction_sha256,
     }))
 }
 

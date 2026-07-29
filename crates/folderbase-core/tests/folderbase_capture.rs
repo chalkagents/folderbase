@@ -346,7 +346,8 @@ fn plan_is_bound_to_the_current_optional_device_local_head() {
             "folderbase_id": FOLDERBASE_ID,
             "root_instance_sha256": receipt.root_instance_sha256,
             "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
-            "version_sha256": "a".repeat(64)
+            "version_sha256": "a".repeat(64),
+            "transaction_sha256": "d".repeat(64)
         }))
         .expect("head JSON"),
     )
@@ -377,7 +378,8 @@ fn local_head_never_follows_an_intermediate_state_symlink() {
             "folderbase_id": FOLDERBASE_ID,
             "root_instance_sha256": receipt.root_instance_sha256,
             "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
-            "version_sha256": "c".repeat(64)
+            "version_sha256": "c".repeat(64),
+            "transaction_sha256": "e".repeat(64)
         }))
         .expect("head JSON"),
     )
@@ -598,7 +600,8 @@ fn local_head_from_another_physical_root_is_rejected() {
             "folderbase_id": FOLDERBASE_ID,
             "root_instance_sha256": receipt.root_instance_sha256,
             "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
-            "version_sha256": "b".repeat(64)
+            "version_sha256": "b".repeat(64),
+            "transaction_sha256": "f".repeat(64)
         }))
         .expect("head JSON"),
     )

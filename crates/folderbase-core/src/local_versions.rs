@@ -38,6 +38,7 @@ const TRANSACTIONS_DIRECTORY: &str = ".folderbase/transactions";
 const LOCKS_DIRECTORY: &str = ".folderbase/locks";
 const TRANSACTION_LOCK_PATH: &str = ".folderbase/locks/transactions.lock";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_CAPTURE_PROJECTION_RECORD_BYTES: u64 = 1024 * 1024;
 const PATH_IDENTITIES_DIRECTORY: &str = ".folderbase/local/path-identities";
 const HISTORY_TRANSFER_INTENTS_DIRECTORY: &str = ".folderbase/history-transfers/intents";
 const HISTORY_TRANSFER_OUTGOING_DIRECTORY: &str = ".folderbase/history-transfers/outgoing";
@@ -388,9 +389,7 @@ impl LocalVersionStore {
     /// Reopening a store that already has a transaction directory replays
     /// durable pending work and repairs an interrupted final journal append.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let supplied = root.as_ref();
-        let root = canonical_folderbase_root(supplied)?;
-        let store = Self { root };
+        let store = Self::open_read_only(root)?;
         match fs::symlink_metadata(store.root.join(TRANSACTIONS_DIRECTORY)) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
                 let _lock = store.acquire_transaction_lock()?;
@@ -410,6 +409,14 @@ impl LocalVersionStore {
             }
         }
         Ok(store)
+    }
+
+    /// Open without replaying or publishing state. Capture sealing uses this
+    /// after retaining its own no-follow state capability.
+    pub(crate) fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
+        let supplied = root.as_ref();
+        let root = canonical_folderbase_root(supplied)?;
+        Ok(Self { root })
     }
 
     pub fn root(&self) -> &Path {
@@ -997,6 +1004,26 @@ impl LocalVersionStore {
         Ok(record)
     }
 
+    pub(crate) fn read_capture_object_projection_in(
+        &self,
+        state: &FolderbaseState,
+        object_id: &ObjectId,
+    ) -> Result<Option<LocalObjectRecord>> {
+        let path = self.object_record_path(object_id);
+        object_id.validate(&path)?;
+        let Some(bytes) = state.read_bounded(
+            &self.object_record_relative_path(object_id),
+            MAX_CAPTURE_PROJECTION_RECORD_BYTES,
+        )?
+        else {
+            return Ok(None);
+        };
+        let record: LocalObjectRecord = serde_json::from_slice(&bytes)
+            .map_err(|source| FolderbaseError::json(&path, source))?;
+        self.validate_object_record(object_id, &record, &path)?;
+        Ok(Some(record))
+    }
+
     fn validate_object_record(
         &self,
         object_id: &ObjectId,
@@ -1142,6 +1169,13 @@ impl LocalVersionStore {
 
     pub(crate) fn acquire_transaction_lock(&self) -> Result<StoreTransactionLock> {
         let state = FolderbaseState::open(&self.root)?;
+        self.acquire_transaction_lock_in(&state)
+    }
+
+    pub(crate) fn acquire_transaction_lock_in(
+        &self,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
         state.ensure_private_dir(Path::new(LOCKS_DIRECTORY))?;
         let lock_path = self.root.join(TRANSACTION_LOCK_PATH);
         match state.publish_new(Path::new(TRANSACTION_LOCK_PATH), b"") {
@@ -1272,11 +1306,18 @@ impl LocalVersionStore {
         reader: impl Read,
         source_label: &Path,
     ) -> Result<ContentDigest> {
-        let published = FolderbaseState::open(&self.root)?.publish_reader_sha256(
-            Path::new(BLOBS_DIRECTORY),
-            reader,
-            source_label,
-        )?;
+        let state = FolderbaseState::open(&self.root)?;
+        self.install_content_reader_in(&state, reader, source_label)
+    }
+
+    pub(crate) fn install_content_reader_in(
+        &self,
+        state: &FolderbaseState,
+        reader: impl Read,
+        source_label: &Path,
+    ) -> Result<ContentDigest> {
+        let published =
+            state.publish_reader_sha256(Path::new(BLOBS_DIRECTORY), reader, source_label)?;
         Ok(ContentDigest {
             algorithm: "sha256".to_owned(),
             digest: published.digest,
@@ -1288,18 +1329,41 @@ impl LocalVersionStore {
         self.install_content_reader(std::io::Cursor::new(bytes), Path::new("in-memory content"))
     }
 
+    pub(crate) fn install_content_bytes_in(
+        &self,
+        state: &FolderbaseState,
+        bytes: &[u8],
+    ) -> Result<ContentDigest> {
+        self.install_content_reader_in(
+            state,
+            std::io::Cursor::new(bytes),
+            Path::new("in-memory content"),
+        )
+    }
+
     pub(crate) fn install_or_verify_version_record(
         &self,
+        record: &LocalVersionRecord,
+    ) -> Result<()> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.install_or_verify_version_record_in(&state, record)
+    }
+
+    pub(crate) fn install_or_verify_version_record_in(
+        &self,
+        state: &FolderbaseState,
         record: &LocalVersionRecord,
     ) -> Result<()> {
         let path = self.version_record_path(&record.id);
         let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{}.json", record.id));
         let encoded = json_bytes(&path, record)?;
-        match FolderbaseState::open(&self.root)?.publish_new(&relative, &encoded) {
+        match state.publish_new(&relative, &encoded) {
             Ok(()) => Ok(()),
             Err(FolderbaseError::WouldOverwrite(_)) => {
-                let existing = self.read_version_record(&record.id)?;
-                if existing == *record {
+                let existing = state
+                    .read_bounded(&relative, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?
+                    .ok_or_else(|| invalid_record(&path, "immutable version record disappeared"))?;
+                if existing == encoded {
                     Ok(())
                 } else {
                     Err(invalid_record(
@@ -1313,16 +1377,25 @@ impl LocalVersionStore {
     }
 
     fn write_object_projection(&self, record: &LocalObjectRecord) -> Result<()> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.write_object_projection_in(&state, record)
+    }
+
+    fn write_object_projection_in(
+        &self,
+        state: &FolderbaseState,
+        record: &LocalObjectRecord,
+    ) -> Result<()> {
         let path = self.object_record_path(&record.id);
         let encoded = json_bytes(&path, record)?;
-        FolderbaseState::open(&self.root)?
-            .replace(&self.object_record_relative_path(&record.id), &encoded)
+        state.replace(&self.object_record_relative_path(&record.id), &encoded)
     }
 
     /// Install one derived regular-file object projection after its containing
     /// Folderbase Version has become Local Head.
-    pub(crate) fn write_capture_object_projection(
+    pub(crate) fn write_capture_object_projection_in(
         &self,
+        state: &FolderbaseState,
         record: &LocalObjectRecord,
         expected_materialized_content: &ContentDigest,
     ) -> Result<()> {
@@ -1331,62 +1404,94 @@ impl LocalVersionStore {
             record,
             &self.object_record_path(&record.id),
         )?;
-        self.write_object_projection(record)?;
+        self.write_object_projection_in(state, record)?;
         let materialized = self.root.join(&record.path);
         if verify_file_content(&materialized, expected_materialized_content).is_ok() {
-            self.write_local_file_identity(&record.id, &materialized)?;
+            self.write_local_file_identity_in(state, &record.id, &materialized)?;
         }
         Ok(())
     }
 
     /// Verify a referenced immutable Object Version without consulting a
     /// mutable object projection.
-    pub(crate) fn verify_capture_object_version(
+    pub(crate) fn verify_capture_object_version_in(
         &self,
+        state: &FolderbaseState,
         object_id: &ObjectId,
         version_id: &VersionId,
         expected: &ContentDigest,
     ) -> Result<LocalVersionRecord> {
-        let record = self.read_version_record(version_id)?;
+        let record = self.read_capture_version_record_in(state, version_id)?;
         if record.object_id != *object_id || record.content != *expected {
             return Err(invalid_record(
                 self.version_record_path(version_id),
                 "Object Version does not match the sealed Folderbase Version reference",
             ));
         }
-        verify_file_content(&self.blob_path(&record.content.digest), &record.content)?;
+        state.verify_sha256_blob(
+            Path::new(BLOBS_DIRECTORY),
+            &record.content.digest,
+            record.content.bytes,
+        )?;
         Ok(record)
     }
 
-    pub(crate) fn verify_capture_version_record(
+    pub(crate) fn verify_capture_version_record_in(
         &self,
+        state: &FolderbaseState,
         version_id: &VersionId,
         expected: &ContentDigest,
     ) -> Result<LocalVersionRecord> {
-        let record = self.read_version_record(version_id)?;
+        let record = self.read_capture_version_record_in(state, version_id)?;
         if record.content != *expected {
             return Err(invalid_record(
                 self.version_record_path(version_id),
                 "Object Version bytes do not match the sealed Folderbase Version reference",
             ));
         }
-        verify_file_content(&self.blob_path(&record.content.digest), &record.content)?;
+        state.verify_sha256_blob(
+            Path::new(BLOBS_DIRECTORY),
+            &record.content.digest,
+            record.content.bytes,
+        )?;
         Ok(record)
     }
 
-    pub(crate) fn verify_capture_record_integrity(
+    pub(crate) fn verify_capture_record_integrity_in(
         &self,
+        state: &FolderbaseState,
         object_id: &ObjectId,
         version_id: &VersionId,
     ) -> Result<LocalVersionRecord> {
-        let record = self.read_version_record(version_id)?;
+        let record = self.read_capture_version_record_in(state, version_id)?;
         if record.object_id != *object_id {
             return Err(invalid_record(
                 self.version_record_path(version_id),
                 "Object Version belongs to a different stable Object",
             ));
         }
-        verify_file_content(&self.blob_path(&record.content.digest), &record.content)?;
+        state.verify_sha256_blob(
+            Path::new(BLOBS_DIRECTORY),
+            &record.content.digest,
+            record.content.bytes,
+        )?;
+        Ok(record)
+    }
+
+    fn read_capture_version_record_in(
+        &self,
+        state: &FolderbaseState,
+        version_id: &VersionId,
+    ) -> Result<LocalVersionRecord> {
+        let path = self.version_record_path(version_id);
+        version_id.validate(&path)?;
+        let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{version_id}.json"));
+        let bytes = state
+            .read_bounded(&relative, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?
+            .ok_or_else(|| FolderbaseError::io(&path, std::io::ErrorKind::NotFound.into()))?;
+        let record: LocalVersionRecord = serde_json::from_slice(&bytes)
+            .map_err(|source| FolderbaseError::json(&path, source))?;
+        self.validate_version_record(version_id, &record, &path)?;
         Ok(record)
     }
 
@@ -1821,6 +1926,16 @@ impl LocalVersionStore {
     }
 
     fn write_local_file_identity(&self, object_id: &ObjectId, path: &Path) -> Result<()> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.write_local_file_identity_in(&state, object_id, path)
+    }
+
+    fn write_local_file_identity_in(
+        &self,
+        state: &FolderbaseState,
+        object_id: &ObjectId,
+        path: &Path,
+    ) -> Result<()> {
         let file = open_existing_nofollow(path)?;
         let metadata = file
             .metadata()
@@ -1836,7 +1951,7 @@ impl LocalVersionStore {
                 file_system,
             },
         )?;
-        FolderbaseState::open(&self.root)?.replace(
+        state.replace(
             &Path::new(PATH_IDENTITIES_DIRECTORY).join(format!("{object_id}.json")),
             &encoded,
         )
