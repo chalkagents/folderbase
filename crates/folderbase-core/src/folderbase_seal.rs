@@ -574,18 +574,8 @@ fn assign_capture_transaction(
     let mut assignments = Vec::with_capacity(plan.entries().len());
     for entry in plan.entries() {
         let prior_binding = prior_bindings.get(entry.path()).copied();
-        if prior_binding.is_some_and(|binding| binding.kind() != path_binding_kind(entry.kind())) {
-            return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
-                entry.path(),
-            )));
-        }
         let reused_object =
             prior_binding.is_some_and(|binding| binding.kind() == path_binding_kind(entry.kind()));
-        if prior_binding.is_some() && !reused_object {
-            return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
-                entry.path(),
-            )));
-        }
         let object_id = prior_binding
             .filter(|_| reused_object)
             .map(|binding| binding.object_id().to_owned())
@@ -1726,6 +1716,11 @@ fn validate_transaction_against_plan(
                     && assignment.object_id == binding.object_id()
                     && assignment.prior_object_version_id.as_deref()
                         == binding.object_version_id() => {}
+            Some(binding)
+                if !assignment.reused_object
+                    && binding.kind() != path_binding_kind(entry.kind())
+                    && assignment.object_id != binding.object_id()
+                    && assignment.prior_object_version_id.is_none() => {}
             None if !assignment.reused_object && assignment.prior_object_version_id.is_none() => {}
             _ => {
                 return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
@@ -1803,6 +1798,13 @@ fn validate_committed_transaction(
                 } else {
                     assignment.candidate_object_version_id.as_deref()
                 }
+            }
+            (Some(parent), false)
+                if parent.kind() != binding.kind()
+                    && parent.object_id() != assignment.object_id
+                    && assignment.prior_object_version_id.is_none() =>
+            {
+                assignment.candidate_object_version_id.as_deref()
             }
             (None, false) if assignment.prior_object_version_id.is_none() => {
                 assignment.candidate_object_version_id.as_deref()
