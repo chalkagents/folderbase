@@ -127,7 +127,7 @@ struct CaptureTransaction {
     root_manifest_candidate_version_id: String,
     prior_root_manifest_version_id: Option<String>,
     assignments: Vec<CaptureAssignment>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     target_tombstones: Vec<Tombstone>,
 }
 
@@ -2366,12 +2366,10 @@ mod tests {
                         .expect("active journal");
                     let mut wire: serde_json::Value =
                         serde_json::from_slice(&encoded).expect("journal JSON");
-                    assert_eq!(
-                        wire.as_object_mut()
-                            .expect("journal object")
-                            .remove("target_tombstones"),
-                        Some(serde_json::json!([]))
-                    );
+                    wire.as_object_mut()
+                        .expect("journal object")
+                        .remove("target_tombstones");
+                    assert!(wire.get("target_tombstones").is_none());
                     let legacy_encoded = json_bytes(&wire).expect("legacy journal bytes");
                     state
                         .replace(active_path, &legacy_encoded)
