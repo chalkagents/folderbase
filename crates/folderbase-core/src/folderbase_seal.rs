@@ -61,7 +61,7 @@ pub struct SealedCapture {
 }
 
 /// Result of restoring the exact bytes named by one current-Head Tombstone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RestoredTombstone {
     path: PathBuf,
     object_id: String,
