@@ -319,6 +319,25 @@ impl FolderbaseState {
         )
     }
 
+    #[cfg(test)]
+    fn verify_sha256_blob_with_hook(
+        &self,
+        directory: &Path,
+        digest: &str,
+        bytes: u64,
+        after_metadata: impl FnOnce(),
+    ) -> Result<()> {
+        let relative = state_relative(directory)?;
+        let parent = self.open_dir(&relative)?;
+        verify_blob_with_hook(
+            &parent,
+            OsStr::new(digest),
+            bytes,
+            &self.display_path(&relative.join(digest)),
+            after_metadata,
+        )
+    }
+
     fn publish_new_with_hook(
         &self,
         relative: &Path,
@@ -503,6 +522,16 @@ fn write_staged(parent: &Dir, name: &OsStr, bytes: &[u8], display: &Path) -> Res
 }
 
 fn verify_blob(parent: &Dir, name: &OsStr, bytes: u64, display: &Path) -> Result<()> {
+    verify_blob_with_hook(parent, name, bytes, display, || {})
+}
+
+fn verify_blob_with_hook(
+    parent: &Dir,
+    name: &OsStr,
+    bytes: u64,
+    display: &Path,
+    after_metadata: impl FnOnce(),
+) -> Result<()> {
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let mut file = parent
@@ -517,17 +546,31 @@ fn verify_blob(parent: &Dir, name: &OsStr, bytes: u64, display: &Path) -> Result
             message: "content-addressed blob metadata does not match".to_owned(),
         });
     }
+    after_metadata();
     let mut hasher = Sha256::new();
     let mut observed = 0_u64;
     let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut bounded = Read::by_ref(&mut file).take(bytes.saturating_add(1));
     loop {
-        let read = file
+        let read = bounded
             .read(&mut buffer)
             .map_err(|source| FolderbaseError::io(display, source))?;
         if read == 0 {
             break;
         }
-        observed += read as u64;
+        observed =
+            observed
+                .checked_add(read as u64)
+                .ok_or_else(|| FolderbaseError::InvalidRecord {
+                    path: display.to_path_buf(),
+                    message: "content-addressed blob length exceeds supported range".to_owned(),
+                })?;
+        if observed > bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "content-addressed blob grew beyond its expected byte length".to_owned(),
+            });
+        }
         hasher.update(&buffer[..read]);
     }
     if observed != bytes || format!("{:x}", hasher.finalize()) != name.to_string_lossy() {
