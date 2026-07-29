@@ -4,6 +4,7 @@ use std::{
     path::Path,
     rc::Rc,
     sync::{Arc, Barrier, mpsc},
+    time::Duration,
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -105,6 +106,14 @@ impl Read for BlockingReader {
             self.resume.recv().unwrap();
         }
         self.inner.read(buffer)
+    }
+}
+
+struct PanickingReader;
+
+impl Read for PanickingReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        panic!("simulated receiver crash")
     }
 }
 
@@ -286,17 +295,33 @@ fn replacing_the_verified_staging_path_never_accepts_the_replacement() {
 }
 
 #[test]
-fn rejected_chunk_inputs_leave_inspectable_staging_without_accepted_state() {
+fn rejected_chunk_inputs_do_not_accumulate_staging_or_accepted_state() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
     let manifest = single_chunk_manifest();
     let digest = manifest.canonical_digest().unwrap();
-    let transfer = PersistentTransfer::create(&root, "inbound", manifest).unwrap();
+    drop(PersistentTransfer::create(&root, "inbound", manifest).unwrap());
+    let stale = temporary.path().join(format!(
+        "inbound/chunks/.chunk-{}.part",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::write(&stale, b"crash residue").unwrap();
+    #[cfg(unix)]
+    set_mode(&stale, 0o600);
+    let transfer = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
+    assert!(
+        stale.exists(),
+        "opening alone must not mutate crash-recovery state without the writer lease"
+    );
 
     assert!(matches!(
         transfer.accept_chunk_from(0, Cursor::new(b"short")),
         Err(TransferReceiverError::ChunkLengthMismatch(0))
     ));
+    assert!(
+        !stale.exists(),
+        "the next receipt must reclaim exact stale staging while it owns the lease"
+    );
     assert!(matches!(
         transfer.accept_chunk_from(0, Cursor::new(b"hello folderbase!")),
         Err(TransferReceiverError::ChunkLengthMismatch(0))
@@ -320,23 +345,17 @@ fn rejected_chunk_inputs_leave_inspectable_staging_without_accepted_state() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(
-        retained.len(),
-        3,
-        "each rejected stream is retained for checkpoint inspection"
+        retained,
+        Vec::<String>::new(),
+        "rejected retries must not consume unbounded checkpoint storage"
     );
-    assert!(retained.iter().all(|name| {
-        name.strip_prefix(".chunk-")
-            .and_then(|name| name.strip_suffix(".part"))
-            .and_then(|uuid| uuid::Uuid::parse_str(uuid).ok())
-            .is_some_and(|uuid| uuid.get_version() == Some(uuid::Version::SortRand))
-    }));
     drop(transfer);
 
     let reopened = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
     assert_eq!(
         reopened.missing_chunks(None, 8).unwrap().chunk_indices,
         vec![0],
-        "retained staging must not become accepted state during resume"
+        "rejected staging must not become accepted state during resume"
     );
 }
 
@@ -650,6 +669,19 @@ fn private_checkpoint_modes_are_set_and_revalidated() {
         0o600
     );
     assert_eq!(
+        std::fs::metadata(temporary.path().join("inbound/receiver.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(
+        std::fs::read(temporary.path().join("inbound/receiver.lock"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
         std::fs::metadata(temporary.path().join("inbound/chunks/0.chunk"))
             .unwrap()
             .permissions()
@@ -678,6 +710,11 @@ fn private_checkpoint_modes_are_set_and_revalidated() {
             [0o400, 0o640],
         ),
         (
+            temporary.path().join("inbound/receiver.lock"),
+            0o600,
+            [0o400, 0o640],
+        ),
+        (
             temporary.path().join("inbound/chunks/0.chunk"),
             0o600,
             [0o400, 0o640],
@@ -699,6 +736,66 @@ fn private_checkpoint_modes_are_set_and_revalidated() {
     }
 
     drop(PersistentTransfer::open(&root, "inbound", &digest).unwrap());
+}
+
+#[test]
+fn receiver_lock_is_required_and_unknown_checkpoint_entries_fail_closed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+    let manifest = single_chunk_manifest();
+    let digest = manifest.canonical_digest().unwrap();
+    drop(PersistentTransfer::create(&root, "inbound", manifest).unwrap());
+
+    std::fs::write(temporary.path().join("inbound/unknown"), b"unowned").unwrap();
+    #[cfg(unix)]
+    set_mode(&temporary.path().join("inbound/unknown"), 0o600);
+    assert!(matches!(
+        PersistentTransfer::open(&root, "inbound", &digest),
+        Err(TransferReceiverError::UnrecognizedCheckpointEntry)
+    ));
+    std::fs::remove_file(temporary.path().join("inbound/unknown")).unwrap();
+
+    std::fs::remove_file(temporary.path().join("inbound/receiver.lock")).unwrap();
+    assert!(PersistentTransfer::open(&root, "inbound", &digest).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn receiver_lock_symlinks_and_path_replacements_are_never_trusted() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+    let manifest = single_chunk_manifest();
+    let digest = manifest.canonical_digest().unwrap();
+    let lock_path = temporary.path().join("inbound/receiver.lock");
+    let transfer = PersistentTransfer::create(&root, "inbound", manifest).unwrap();
+
+    std::fs::rename(&lock_path, temporary.path().join("inbound/original.lock")).unwrap();
+    std::fs::write(&lock_path, b"replacement").unwrap();
+    set_mode(&lock_path, 0o600);
+    assert!(matches!(
+        transfer.accept_chunk_from(0, Cursor::new(b"hello folderbase")),
+        Err(TransferReceiverError::CheckpointStateChanged)
+    ));
+    assert_eq!(std::fs::read(&lock_path).unwrap(), b"replacement");
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("inbound/chunks"))
+            .unwrap()
+            .count(),
+        0
+    );
+    drop(transfer);
+
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::remove_file(temporary.path().join("inbound/original.lock")).unwrap();
+    let outside_lock = outside.path().join("receiver.lock");
+    std::fs::write(&outside_lock, b"outside").unwrap();
+    set_mode(&outside_lock, 0o600);
+    symlink(&outside_lock, &lock_path).unwrap();
+    assert!(PersistentTransfer::open(&root, "inbound", &digest).is_err());
+    assert_eq!(std::fs::read(outside_lock).unwrap(), b"outside");
 }
 
 #[test]
@@ -746,8 +843,8 @@ fn concurrent_accepts_install_exactly_one_chunk_without_clobbering() {
         std::fs::read_dir(temporary.path().join("inbound/chunks"))
             .unwrap()
             .count(),
-        9,
-        "accepted and already-present retries retain their private staging entries"
+        1,
+        "accepted and already-present retries leave only the installed chunk"
     );
     drop(transfer);
 
@@ -755,7 +852,116 @@ fn concurrent_accepts_install_exactly_one_chunk_without_clobbering() {
     assert_eq!(
         reopened.missing_chunks(None, 1).unwrap().chunk_indices,
         Vec::<u32>::new(),
-        "bounded resume must ignore retained exact staging entries"
+        "bounded resume must report the installed chunk"
+    );
+}
+
+#[test]
+fn independently_opened_receivers_serialize_chunk_acceptance() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+    let manifest = single_chunk_manifest();
+    let digest = manifest.canonical_digest().unwrap();
+    let first = PersistentTransfer::create(&root, "inbound", manifest).unwrap();
+    let second = PersistentTransfer::open(&root, "inbound", &digest).unwrap();
+    let (first_paused_sender, first_paused_receiver) = mpsc::sync_channel(0);
+    let (first_resume_sender, first_resume_receiver) = mpsc::sync_channel(0);
+    let (second_started_sender, second_started_receiver) = mpsc::sync_channel(0);
+    let (second_read_sender, second_read_receiver) = mpsc::sync_channel(0);
+    let (second_resume_sender, second_resume_receiver) = mpsc::sync_channel(0);
+
+    let first_accept = std::thread::spawn(move || {
+        first.accept_chunk_from(
+            0,
+            BlockingReader {
+                inner: Cursor::new(b"hello folderbase".to_vec()),
+                paused: Some(first_paused_sender),
+                resume: first_resume_receiver,
+            },
+        )
+    });
+    first_paused_receiver.recv().unwrap();
+
+    let second_accept = std::thread::spawn(move || {
+        second_started_sender.send(()).unwrap();
+        second.accept_chunk_from(
+            0,
+            BlockingReader {
+                inner: Cursor::new(b"hello folderbase".to_vec()),
+                paused: Some(second_read_sender),
+                resume: second_resume_receiver,
+            },
+        )
+    });
+    second_started_receiver.recv().unwrap();
+
+    assert!(
+        second_read_receiver
+            .recv_timeout(Duration::from_millis(150))
+            .is_err(),
+        "the second receiver must wait for the checkpoint lease before creating staging or reading"
+    );
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("inbound/chunks"))
+            .unwrap()
+            .count(),
+        1,
+        "only the lease holder may create a staging file"
+    );
+
+    first_resume_sender.send(()).unwrap();
+    assert_eq!(
+        first_accept.join().unwrap().unwrap(),
+        ChunkAcceptance::Accepted
+    );
+    second_read_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    second_resume_sender.send(()).unwrap();
+    assert_eq!(
+        second_accept.join().unwrap().unwrap(),
+        ChunkAcceptance::AlreadyPresent
+    );
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("inbound/chunks"))
+            .unwrap()
+            .count(),
+        1,
+        "accepted bytes remain without retained staging"
+    );
+}
+
+#[test]
+fn a_panicking_receipt_releases_its_lease_and_stale_staging_is_reclaimed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+    let transfer =
+        Arc::new(PersistentTransfer::create(&root, "inbound", single_chunk_manifest()).unwrap());
+    let crashing = {
+        let transfer = Arc::clone(&transfer);
+        std::thread::spawn(move || transfer.accept_chunk_from(0, PanickingReader))
+    };
+    assert!(crashing.join().is_err());
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("inbound/chunks"))
+            .unwrap()
+            .count(),
+        1,
+        "the simulated crash must leave an exact staging entry"
+    );
+
+    assert_eq!(
+        transfer
+            .accept_chunk_from(0, Cursor::new(b"hello folderbase"))
+            .unwrap(),
+        ChunkAcceptance::Accepted
+    );
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("inbound/chunks"))
+            .unwrap()
+            .count(),
+        1,
+        "the next lease holder reclaims crash residue before receiving"
     );
 }
 

@@ -8,6 +8,7 @@ use std::{
     ffi::OsString,
     io::{Read, Write},
     path::{Component, Path},
+    sync::Mutex,
 };
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
@@ -26,6 +27,7 @@ use crate::transfer_manifest::{
 
 const MANIFEST_FILE: &str = "manifest.json";
 const CHUNKS_DIRECTORY: &str = "chunks";
+const RECEIVER_LOCK_FILE: &str = "receiver.lock";
 pub const MAX_MISSING_CHUNKS_PER_PAGE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +102,9 @@ pub enum TransferReceiverError {
 pub struct PersistentTransfer {
     _directory: Dir,
     chunks: Dir,
+    receiver_lock: std::fs::File,
+    receiver_lock_identity: Handle,
+    operation_mutex: Mutex<()>,
     manifest: ChunkManifest,
     manifest_digest: String,
 }
@@ -136,6 +141,7 @@ impl PersistentTransfer {
         (|| {
             create_private_dir(&directory, CHUNKS_DIRECTORY).map_err(TransferReceiverError::Io)?;
             write_private_new(&directory, MANIFEST_FILE, &encoded)?;
+            write_private_new(&directory, RECEIVER_LOCK_FILE, &[])?;
             sync_directory(&directory)?;
             sync_directory(&parent)?;
             Self::from_open_directory(directory, manifest, manifest_digest)
@@ -157,8 +163,8 @@ impl PersistentTransfer {
                 TransferReceiverError::Io(source)
             }
         })?;
-        validate_checkpoint_top_level(&directory)?;
-
+        validate_private_directory(&directory)?;
+        validate_private_regular_file(&directory, MANIFEST_FILE)?;
         let encoded = read_file_bounded(&directory, MANIFEST_FILE, MAX_ENCODED_MANIFEST_BYTES)?;
         let manifest = match ChunkManifest::decode_slice_bounded(&encoded) {
             Ok(manifest) => manifest,
@@ -173,6 +179,7 @@ impl PersistentTransfer {
                 return Err(TransferReceiverError::EncodedManifestTooLarge { maximum_bytes });
             }
         };
+        validate_checkpoint_top_level(&directory)?;
         let actual = manifest.canonical_digest()?;
         if actual != expected_manifest_digest {
             return Err(TransferReceiverError::ManifestDigestMismatch {
@@ -202,6 +209,18 @@ impl PersistentTransfer {
             .get(index as usize)
             .filter(|descriptor| descriptor.index == index)
             .ok_or(TransferReceiverError::UnknownChunk(index))?;
+        let _in_process = self
+            .operation_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _checkpoint_lease = CheckpointLease::acquire(&self.receiver_lock)?;
+        let current_lock = open_named_file_identity(&self._directory, RECEIVER_LOCK_FILE)
+            .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+        if current_lock != self.receiver_lock_identity {
+            return Err(TransferReceiverError::CheckpointStateChanged);
+        }
+        reclaim_stale_staging(&self.chunks)?;
+
         let destination = chunk_file_name(index);
         let staging = format!(".chunk-{}.part", Uuid::now_v7());
         let mut options = OpenOptions::new();
@@ -217,34 +236,46 @@ impl PersistentTransfer {
             .map_err(TransferReceiverError::Io)?;
         let ingestion = copy_exact_chunk(descriptor, &mut reader, &mut staged)
             .and_then(|()| staged.sync_all().map_err(TransferReceiverError::Io));
-        let staging_identity = match ingestion {
-            Ok(()) => Handle::from_file(staged.into_std()).map_err(TransferReceiverError::Io)?,
-            Err(error) => return Err(error),
-        };
-        let current_staging = open_named_file_identity(&self.chunks, &staging)
-            .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
-        if current_staging != staging_identity {
-            return Err(TransferReceiverError::CheckpointStateChanged);
-        }
+        let staging_identity =
+            Handle::from_file(staged.into_std()).map_err(TransferReceiverError::Io)?;
+        let result = ingestion.and_then(|()| {
+            let current_staging = open_named_file_identity(&self.chunks, &staging)
+                .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+            if current_staging != staging_identity {
+                return Err(TransferReceiverError::CheckpointStateChanged);
+            }
 
-        match self.chunks.hard_link(&staging, &self.chunks, &destination) {
-            Ok(()) => {
-                sync_directory(&self.chunks)?;
-                let destination_identity = open_named_file_identity(&self.chunks, &destination)
-                    .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
-                if destination_identity != staging_identity {
-                    return Err(TransferReceiverError::CheckpointStateChanged);
+            match self.chunks.hard_link(&staging, &self.chunks, &destination) {
+                Ok(()) => {
+                    sync_directory(&self.chunks)?;
+                    let destination_identity = open_named_file_identity(&self.chunks, &destination)
+                        .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+                    if destination_identity != staging_identity {
+                        return Err(TransferReceiverError::CheckpointStateChanged);
+                    }
+                    Ok(ChunkAcceptance::Accepted)
                 }
-                Ok(ChunkAcceptance::Accepted)
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let mut existing = open_regular_file_nofollow(&self.chunks, &destination)
+                        .map_err(TransferReceiverError::Io)?;
+                    validate_chunk_reader(descriptor, &mut existing)?;
+                    let existing_identity = Handle::from_file(existing.into_std())
+                        .map_err(TransferReceiverError::Io)?;
+                    let current_destination = open_named_file_identity(&self.chunks, &destination)
+                        .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+                    if current_destination != existing_identity {
+                        return Err(TransferReceiverError::CheckpointStateChanged);
+                    }
+                    sync_directory(&self.chunks)?;
+                    Ok(ChunkAcceptance::AlreadyPresent)
+                }
+                Err(source) => Err(TransferReceiverError::Io(source)),
             }
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut existing = open_regular_file_nofollow(&self.chunks, &destination)
-                    .map_err(TransferReceiverError::Io)?;
-                validate_chunk_reader(descriptor, &mut existing)?;
-                sync_directory(&self.chunks)?;
-                Ok(ChunkAcceptance::AlreadyPresent)
-            }
-            Err(source) => Err(TransferReceiverError::Io(source)),
+        });
+        let cleanup = cleanup_owned_staging(&self.chunks, &staging, &staging_identity);
+        match cleanup {
+            Err(error) => Err(error),
+            Ok(()) => result,
         }
     }
 
@@ -286,10 +317,20 @@ impl PersistentTransfer {
         let chunks = directory
             .open_dir_nofollow(CHUNKS_DIRECTORY)
             .map_err(TransferReceiverError::Io)?;
+        let receiver_lock = open_lock_file_nofollow(&directory)?;
+        let receiver_lock_identity = Handle::from_file(
+            receiver_lock
+                .try_clone()
+                .map_err(TransferReceiverError::Io)?,
+        )
+        .map_err(TransferReceiverError::Io)?;
         validate_chunk_entries_for_manifest(&chunks, &manifest)?;
         let transfer = Self {
             _directory: directory,
             chunks,
+            receiver_lock,
+            receiver_lock_identity,
+            operation_mutex: Mutex::new(()),
             manifest,
             manifest_digest,
         };
@@ -387,6 +428,22 @@ fn open_regular_file_nofollow(
     Ok(file)
 }
 
+fn open_lock_file_nofollow(directory: &Dir) -> Result<std::fs::File, TransferReceiverError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).follow(FollowSymlinks::No);
+    let file = directory
+        .open_with(RECEIVER_LOCK_FILE, &options)
+        .map_err(TransferReceiverError::Io)?;
+    if !file
+        .metadata()
+        .map_err(TransferReceiverError::Io)?
+        .is_file()
+    {
+        return Err(TransferReceiverError::UnrecognizedCheckpointEntry);
+    }
+    Ok(file.into_std())
+}
+
 fn open_named_file_identity(
     directory: &Dir,
     name: impl AsRef<Path>,
@@ -457,22 +514,82 @@ fn chunk_file_name(index: u32) -> String {
     format!("{index}.chunk")
 }
 
+struct CheckpointLease<'a> {
+    file: &'a std::fs::File,
+}
+
+impl<'a> CheckpointLease<'a> {
+    fn acquire(file: &'a std::fs::File) -> Result<Self, TransferReceiverError> {
+        file.lock().map_err(TransferReceiverError::Io)?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for CheckpointLease<'_> {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+fn reclaim_stale_staging(chunks: &Dir) -> Result<(), TransferReceiverError> {
+    for entry in chunks.entries().map_err(TransferReceiverError::Io)? {
+        let entry = entry.map_err(TransferReceiverError::Io)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| TransferReceiverError::UnrecognizedCheckpointEntry)?;
+        if !is_staging_name(&name) {
+            continue;
+        }
+        let metadata = chunks
+            .symlink_metadata(&name)
+            .map_err(TransferReceiverError::Io)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(TransferReceiverError::CheckpointStateChanged);
+        }
+        validate_private_regular_file(chunks, &name)?;
+        let identity = open_named_file_identity(chunks, &name)
+            .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+        cleanup_owned_staging(chunks, &name, &identity)?;
+    }
+    Ok(())
+}
+
+fn cleanup_owned_staging(
+    chunks: &Dir,
+    name: &str,
+    expected: &Handle,
+) -> Result<(), TransferReceiverError> {
+    let current = open_named_file_identity(chunks, name)
+        .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+    if &current != expected {
+        return Err(TransferReceiverError::CheckpointStateChanged);
+    }
+    chunks
+        .remove_file(name)
+        .map_err(TransferReceiverError::Io)?;
+    sync_directory(chunks)
+}
+
 fn validate_checkpoint_top_level(directory: &Dir) -> Result<(), TransferReceiverError> {
     validate_private_directory(directory)?;
     let mut has_manifest = false;
     let mut has_chunks = false;
+    let mut has_receiver_lock = false;
     for entry in directory.entries().map_err(TransferReceiverError::Io)? {
         let entry = entry.map_err(TransferReceiverError::Io)?;
         match entry.file_name().to_str() {
             Some(MANIFEST_FILE) => has_manifest = true,
             Some(CHUNKS_DIRECTORY) => has_chunks = true,
+            Some(RECEIVER_LOCK_FILE) => has_receiver_lock = true,
             _ => return Err(TransferReceiverError::UnrecognizedCheckpointEntry),
         }
     }
-    if !has_manifest || !has_chunks {
+    if !has_manifest || !has_chunks || !has_receiver_lock {
         return Err(TransferReceiverError::InvalidCheckpointManifest);
     }
     validate_private_regular_file(directory, MANIFEST_FILE)?;
+    validate_private_regular_file(directory, RECEIVER_LOCK_FILE)?;
     let chunks = directory
         .open_dir_nofollow(CHUNKS_DIRECTORY)
         .map_err(TransferReceiverError::Io)?;

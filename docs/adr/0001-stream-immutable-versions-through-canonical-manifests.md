@@ -243,12 +243,16 @@ The receiver implementation fixes these additional v1 details:
    name plus the durable expected digest held by the caller. Absolute paths,
    separators, dot components, symlinks, and clobbering an existing child are
    rejected.
-2. A checkpoint contains only `manifest.json` and `chunks/`. The canonical
-   digest is recomputed from the validated manifest and compared with the
-   caller's expected digest on reopen; no second digest file can drift from the
-   manifest. On Unix, directories are created and reopened with exact mode
-   `0700`, while manifest, chunk, and staging files require exact mode `0600`.
-   Reopen fails closed if any owner, group, or other permission bit differs.
+2. A checkpoint contains only `manifest.json`, `receiver.lock`, and `chunks/`.
+   The canonical digest is recomputed from the validated manifest and compared
+   with the caller's expected digest on reopen; no second digest file can drift
+   from the manifest. `receiver.lock` is the checkpoint writer lease, not
+   canonical content. It is created and synchronized with the checkpoint,
+   reopened without following symlinks, and its retained file identity is
+   revalidated whenever the receiver acquires it. On Unix, directories are
+   created and reopened with exact mode `0700`, while the manifest, receiver
+   lock, chunk, and staging files require exact mode `0600`. Reopen fails closed
+   if any owner, group, or other permission bit differs.
 3. Chunk receipt reads and hashes the complete retry stream before returning
    either `Accepted` or `AlreadyPresent`. It writes through one private
    lowercase-hyphenated UUIDv7 staging file, synchronizes that file, installs
@@ -257,12 +261,16 @@ The receiver implementation fixes these additional v1 details:
    name still identifies that file immediately before linking, and proves the
    installed destination identifies it before reporting `Accepted`. An
    identity change fails closed without treating a replacement pathname as
-   operation-owned cleanup. Receiver v1 never removes a pathname during
-   acceptance or error handling because its portable filesystem dependencies
-   cannot atomically bind unlink to an opened identity. Exact private staging
-   entries are retained as ignored runtime state for checkpoint inspection. A
-   short, long, corrupt, unknown, or conflicting retry returns no acceptance
-   result and never replaces an installed chunk.
+   operation-owned cleanup. Each receiver instance serializes receipt in
+   process, and independently opened instances and processes acquire the
+   standard-library exclusive `receiver.lock` lease before inspecting or
+   changing staging state. While holding that lease, a receipt reclaims only
+   exact private regular UUIDv7 staging entries left by a completed or crashed
+   prior receipt. It then identity-checks and removes its own staging entry on
+   every ordinary result, propagating removal and directory-synchronization
+   failures rather than allowing retries to consume unbounded storage. A short,
+   long, corrupt, unknown, or conflicting retry returns no acceptance result
+   and never replaces an installed chunk.
 4. Resume enumeration inspects at most the caller's capped page of sequential
    descriptor indices and returns the next descriptor index as its cursor.
    Reopen validates every installed in-manifest chunk. It ignores only regular,
@@ -277,15 +285,20 @@ The receiver implementation fixes these additional v1 details:
    boundary and chunk digest, and the canonical manifest digest before
    returning `VerifiedObject`.
 
-Checkpoint creation synchronizes the manifest, checkpoint directory, and
-caller-supplied parent capability before returning. A failed create may leave
-an invalid orphan child for explicit inspection or removal; Core does not
-recursively clean an externally named path after failure because concurrent
-state may have appeared there. An opened receiver retains the exact checkpoint
-and chunks directory capabilities, so replacement names are never followed by
-the current process. A later exclusive, identity-bound checkpoint lifecycle
-may remove the whole checkpoint after it has proved ownership and exclusion;
-receiver v1 exposes no per-file cleanup or garbage-collection API.
+Checkpoint creation synchronizes the manifest, receiver lock, checkpoint
+directory, and caller-supplied parent capability before returning. A failed
+create may leave an invalid orphan child for explicit inspection or removal;
+Core does not recursively clean an externally named path after failure because
+concurrent state may have appeared there. An opened receiver retains the exact
+checkpoint and chunks directory capabilities, so replacement names are never
+followed by the current process. The writer contract requires all Folderbase
+receivers for a checkpoint to honor `receiver.lock`; a same-user actor that
+deliberately mutates private checkpoint files while ignoring that lease is
+outside this coordination boundary. Even then, retained staging, destination,
+and lock identities are checked at the operation boundaries and mismatches fail
+closed without following symlinks. Receiver v1 exposes no public per-file
+cleanup or garbage-collection API: bounded stale cleanup is an internal part of
+the next leased receipt.
 
 This receiver slice deliberately has no destination path or materialization
 method. The next materializer slice must independently define and test its
