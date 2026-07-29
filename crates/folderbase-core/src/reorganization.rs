@@ -11,7 +11,7 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    FolderbaseError, ObjectId, Result, VersionId, migration::validate_managed_block_body,
+    FolderbaseError, ObjectId, Result, VersionId, migration::validate_managed_block_body_syntax,
     traversal_policy::is_reserved_workspace_component,
 };
 
@@ -384,7 +384,7 @@ fn validate_draft(draft: &ReorganizationDraft) -> Result<()> {
             draft.profile
         ));
     }
-    validate_identifier(&draft.id, "reorganization id", "reorg_")?;
+    validate_reorganization_id(&draft.id)?;
     validate_folderbase_id(&draft.folderbase_id)?;
     if draft.generation == 0 || draft.generation > MAX_CANONICAL_JSON_INTEGER {
         return invalid_record(
@@ -592,7 +592,8 @@ fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
         } => {
             validate_agent_adapter_path(path, adapter)?;
             validate_digest(expected_sha256)?;
-            validate_managed_block_body(managed_block, Path::new(path))
+            validate_managed_block_body_syntax(managed_block, Path::new(path))?;
+            validate_bounded_text(managed_block)
         }
         ReorganizationOperation::MoveFile {
             source_path,
@@ -1228,11 +1229,17 @@ fn validate_digest(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_identifier(value: &str, label: &str, prefix: &str) -> Result<()> {
-    if !value.starts_with(prefix) {
-        return invalid_record(format!("{label} must begin with {prefix}"));
+fn validate_reorganization_id(value: &str) -> Result<()> {
+    let Some(uuid_text) = value.strip_prefix("reorg_") else {
+        return invalid_record("reorganization identifier is invalid");
+    };
+    let Ok(uuid) = uuid::Uuid::parse_str(uuid_text) else {
+        return invalid_record("reorganization identifier is invalid");
+    };
+    if uuid.hyphenated().to_string() != uuid_text {
+        return invalid_record("reorganization identifier is invalid");
     }
-    validate_token(value, label)
+    Ok(())
 }
 
 fn validate_folderbase_id(value: &str) -> Result<()> {

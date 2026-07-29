@@ -2441,6 +2441,25 @@ fn adapter_merge_preserves_user_text_outside_managed_block() {
 }
 
 #[test]
+fn migration_adapter_body_retains_its_legacy_utf8_byte_limit() {
+    let root = initialized_folderbase_fixture();
+    let error = MigrationPlan::propose_structural(
+        root.path(),
+        vec![MigrationOperation::update_adapter(
+            "AGENTS.md",
+            "é".repeat(1_100_000),
+        )],
+    )
+    .expect_err("legacy migration adapter bodies remain bounded by UTF-8 bytes");
+
+    assert!(
+        error
+            .to_string()
+            .contains("managed adapter body is invalid")
+    );
+}
+
+#[test]
 fn changing_ignore_policy_is_structural() {
     let root = initialized_folderbase_fixture();
     let policy = "node_modules/\n.next/\nDerived/\n";

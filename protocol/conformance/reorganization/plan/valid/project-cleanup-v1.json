@@ -1,7 +1,7 @@
 {
   "protocol_version": "0.3.0",
   "profile": "folderbase-reorganization-plan-v1",
-  "id": "reorg_project_cleanup",
+  "id": "reorg_019f9b75-0000-7000-8000-000000001001",
   "generation": 1,
   "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000002",
   "path_profile": "portable-case-sensitive-v1",
@@ -76,5 +76,5 @@
       "expected_byte_count": 10000000000
     }
   ],
-  "plan_digest": "17151346f77824f00df7c211c448a8ba4217e53512fde785aafd574e980185c8"
+  "plan_digest": "8fabf5479662ed25e177455c692e27ec6649e94a7ee3bb08e6f24a75728e99b2"
 }

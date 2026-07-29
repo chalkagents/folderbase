@@ -40,6 +40,8 @@ an approved Plan is never mutated in place.
 
 The first Plan contract will bind:
 
+- one exact `reorg_<lowercase hyphenated UUID>` identity shared by its Draft and
+  sealed Plan;
 - the Folderbase identity and protocol version;
 - an explicit portable Analysis Scope and its digest;
 - the nested-boundary and ignore/policy snapshot used during analysis;
@@ -108,7 +110,9 @@ The managed-agent-block operation is not a whole-file text replacement. Its
 obsolete noncanonical wrappers. Application delegates to the existing adapter
 merge contract, which adds the canonical
 `<!-- folderbase:begin -->` and `<!-- folderbase:end -->` markers and preserves
-all user-owned text around the one managed block.
+all user-owned text around the one managed block. Its Reorganization record bound
+counts Unicode code points like the public schema; the older Migration adapter
+operation keeps its existing UTF-8 byte bound.
 
 The first contract does not delete filesystem content. A user or agent may use the
 operating system Trash separately, and a later deletion contract may add explicit

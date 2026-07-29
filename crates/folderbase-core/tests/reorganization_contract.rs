@@ -25,7 +25,7 @@ fn a_complete_reorganization_draft_decodes_through_the_public_contract() {
     let draft = br#"{
       "protocol_version": "0.3.0",
       "profile": "folderbase-reorganization-draft-v1",
-      "id": "reorg_project_cleanup",
+      "id": "reorg_019f9b75-0000-7000-8000-000000001001",
       "generation": 1,
       "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000002",
       "path_profile": "portable-case-sensitive-v1",
@@ -80,7 +80,7 @@ fn a_complete_reorganization_draft_decodes_through_the_public_contract() {
 
     let decoded = decode_reorganization_draft_slice(draft).expect("valid draft");
 
-    assert_eq!(decoded.id, "reorg_project_cleanup");
+    assert_eq!(decoded.id, "reorg_019f9b75-0000-7000-8000-000000001001");
     assert_eq!(decoded.operations.len(), 2);
 }
 
@@ -90,10 +90,12 @@ fn a_complete_draft_seals_into_an_immutable_digest_bound_plan() {
         "../../../protocol/conformance/reorganization/draft/valid/project-cleanup-v1.json"
     ))
     .expect("valid draft");
+    let draft_id = draft.id.clone();
 
     let plan = seal_reorganization_draft(draft).expect("complete draft seals");
 
     assert_eq!(plan.profile, "folderbase-reorganization-plan-v1");
+    assert_eq!(plan.id, draft_id);
     assert_eq!(plan.analysis_scope_digest.len(), 64);
     assert_eq!(plan.plan_digest.len(), 64);
 }
@@ -230,6 +232,110 @@ fn public_plan_schema_and_core_reject_loose_folderbase_identities() {
 }
 
 #[test]
+fn draft_and_plan_reject_loose_reorganization_identities() {
+    let draft_schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let draft_validator = jsonschema::draft202012::options()
+        .build(&draft_schema)
+        .expect("compile public Draft schema");
+    let plan_schema = protocol_json("schemas/0.3/reorganization-plan.schema.json");
+    let registry = jsonschema::Registry::new()
+        .add(
+            "https://folderbase.ai/protocol/0.3/reorganization-draft.schema.json",
+            &draft_schema,
+        )
+        .expect("register Draft schema")
+        .prepare()
+        .expect("prepare protocol schema registry");
+    let plan_validator = jsonschema::draft202012::options()
+        .with_registry(&registry)
+        .build(&plan_schema)
+        .expect("compile public Plan schema");
+
+    let draft_relative =
+        "conformance/reorganization/draft/invalid/loose-reorganization-identity.json";
+    let draft = protocol_json(draft_relative);
+    assert!(
+        !draft_validator.is_valid(&draft),
+        "{draft_relative} must be rejected by Draft schema"
+    );
+    let error = decode_reorganization_draft_slice(
+        &serde_json::to_vec(&draft).expect("Draft fixture bytes"),
+    )
+    .expect_err("loose Reorganization identity must be rejected by Core Draft decoding");
+    assert!(error.to_string().contains("reorganization identifier"));
+
+    let plan_relative =
+        "conformance/reorganization/plan/invalid/loose-reorganization-identity.json";
+    let plan = protocol_json(plan_relative);
+    assert!(
+        !plan_validator.is_valid(&plan),
+        "{plan_relative} must be rejected by Plan schema"
+    );
+    let error =
+        decode_reorganization_plan_slice(&serde_json::to_vec(&plan).expect("Plan fixture bytes"))
+            .expect_err("loose Reorganization identity must be rejected by Core Plan decoding");
+    assert!(error.to_string().contains("reorganization identifier"));
+}
+
+#[test]
+fn draft_and_plan_require_the_same_lowercase_hyphenated_uuid_identity_grammar() {
+    let draft_schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let draft_validator = jsonschema::draft202012::options()
+        .build(&draft_schema)
+        .expect("compile public Draft schema");
+    let plan_schema = protocol_json("schemas/0.3/reorganization-plan.schema.json");
+    let registry = jsonschema::Registry::new()
+        .add(
+            "https://folderbase.ai/protocol/0.3/reorganization-draft.schema.json",
+            &draft_schema,
+        )
+        .expect("register Draft schema")
+        .prepare()
+        .expect("prepare protocol schema registry");
+    let plan_validator = jsonschema::draft202012::options()
+        .with_registry(&registry)
+        .build(&plan_schema)
+        .expect("compile public Plan schema");
+
+    for invalid_id in [
+        "reorg_019F9B75-0000-7000-8000-000000001001",
+        "reorg_019f9b75000070008000000000001001",
+    ] {
+        let mut draft =
+            protocol_json("conformance/reorganization/draft/valid/project-cleanup-v1.json");
+        draft["id"] = serde_json::json!(invalid_id);
+        assert!(
+            !draft_validator.is_valid(&draft),
+            "Draft schema must reject noncanonical Reorganization identity {invalid_id}"
+        );
+        let error = decode_reorganization_draft_slice(
+            &serde_json::to_vec(&draft).expect("Draft identity mutation"),
+        )
+        .expect_err("Core Draft decoder must reject a noncanonical Reorganization identity");
+        assert!(
+            error.to_string().contains("reorganization identifier"),
+            "unexpected Draft error for {invalid_id}: {error}"
+        );
+
+        let mut plan =
+            protocol_json("conformance/reorganization/plan/valid/project-cleanup-v1.json");
+        plan["id"] = serde_json::json!(invalid_id);
+        assert!(
+            !plan_validator.is_valid(&plan),
+            "Plan schema must reject noncanonical Reorganization identity {invalid_id}"
+        );
+        let error = decode_reorganization_plan_slice(
+            &serde_json::to_vec(&plan).expect("Plan identity mutation"),
+        )
+        .expect_err("Core Plan decoder must reject a noncanonical Reorganization identity");
+        assert!(
+            error.to_string().contains("reorganization identifier"),
+            "unexpected Plan error for {invalid_id}: {error}"
+        );
+    }
+}
+
+#[test]
 fn canonical_plan_digest_matches_the_independent_node_crypto_vector() {
     let plan_bytes = std::fs::read(
         protocol_root().join("conformance/reorganization/plan/valid/project-cleanup-v1.json"),
@@ -298,6 +404,7 @@ fn all_public_draft_vectors_match_the_schema_and_core_contract() {
         "conformance/reorganization/draft/invalid/authority-field.json",
         "conformance/reorganization/draft/invalid/delete-operation.json",
         "conformance/reorganization/draft/invalid/loose-folderbase-identity.json",
+        "conformance/reorganization/draft/invalid/loose-reorganization-identity.json",
         "conformance/reorganization/draft/invalid/prewrapped-managed-block.json",
         "conformance/reorganization/draft/invalid/relationship-type-grammar.json",
         "conformance/reorganization/draft/invalid/reserved-operation-path.json",
@@ -892,6 +999,29 @@ fn schema_max_length_and_runtime_count_unicode_code_points_the_same_way() {
 
     decode_reorganization_draft_slice(&bytes)
         .expect("runtime must use the same code-point length rule");
+}
+
+#[test]
+fn managed_block_schema_and_core_count_unicode_code_points_the_same_way() {
+    let mut draft =
+        protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+    draft["operations"][3]["managed_block"] = serde_json::json!("é".repeat(1_100_000));
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile public Draft schema");
+    assert!(
+        validator.is_valid(&draft),
+        "1.1M code points are below managedBlockBody maxLength"
+    );
+    let bytes = serde_json::to_vec(&draft).expect("managed-block Unicode fixture");
+    assert!(
+        bytes.len() < MAX_REORGANIZATION_RECORD_BYTES,
+        "fixture stays within the aggregate encoded-record bound"
+    );
+
+    decode_reorganization_draft_slice(&bytes)
+        .expect("Core must use the schema's code-point length rule for managed blocks");
 }
 
 #[test]

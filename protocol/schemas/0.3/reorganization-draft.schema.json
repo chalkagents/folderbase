@@ -24,9 +24,7 @@
       "const": "folderbase-reorganization-draft-v1"
     },
     "id": {
-      "type": "string",
-      "pattern": "^reorg_[A-Za-z0-9_.-]+$",
-      "maxLength": 255
+      "$ref": "#/$defs/reorganizationId"
     },
     "generation": {
       "type": "integer",
@@ -82,6 +80,10 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9_.-]+$",
       "maxLength": 255
+    },
+    "reorganizationId": {
+      "type": "string",
+      "pattern": "^reorg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
     "folderbaseId": {
       "type": "string",

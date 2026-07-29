@@ -19,6 +19,8 @@ required questions are answered. It adds:
 
 Both records use `protocol_version: "0.3.0"`. Unknown protocol, record, path, or
 operation profiles are refused rather than interpreted optimistically.
+Their shared record identity is exactly `reorg_<lowercase hyphenated UUID>`;
+Draft and Plan schemas reference the same definition, and sealing preserves it.
 
 ## Analysis scope
 
@@ -89,6 +91,9 @@ canonicalizing a record. Core also bounds questions, operations, scope entries,
 paths, and embedded UTF-8.
 String and path `maxLength` values count Unicode code points, matching JSON Schema;
 the encoded-record cap separately bounds bytes and memory.
+That rule includes a Reorganization operation's marker-free `managed_block`.
+The older Migration Protocol adapter operation retains its released UTF-8 byte
+limit; the two versioned records do not reinterpret one another.
 Canonical integer fields are limited to `9007199254740991`, the exact common range
 for JSON implementations.
 
@@ -145,8 +150,8 @@ node scripts/verify-reorganization-digest-vector.mjs
 - `protocol/conformance/reorganization/`
 
 The Plan schema references shared definitions by the absolute `$id` of the Draft
-schema, including the exact `folderbase_<UUID>` identity grammar. Validators should
-register both public schemas before compiling the Plan schema. Schema validation
-checks record shape; Core validation additionally checks
-operation closure, question/option uniqueness, path-profile aliases, reserved
-paths, nested boundaries, real Core identities, and both digests.
+schema, including the exact `reorg_<UUID>` and `folderbase_<UUID>` identity
+grammars. Validators should register both public schemas before compiling the
+Plan schema. Schema validation checks record shape; Core validation additionally
+checks operation closure, question/option uniqueness, path-profile aliases,
+reserved paths, nested boundaries, real Core identities, and both digests.

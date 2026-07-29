@@ -1,9 +1,9 @@
 {
   "protocol_version": "0.3.0",
   "profile": "folderbase-reorganization-plan-v1",
-  "id": "reorg_019f9b75-0000-7000-8000-000000001001",
+  "id": "reorg_example",
   "generation": 1,
-  "folderbase_id": "folderbase_example",
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000002",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
