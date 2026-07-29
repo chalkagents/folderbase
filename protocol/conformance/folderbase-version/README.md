@@ -38,7 +38,7 @@ counterexamples cannot be represented by an invalid JSON document.
 
 The canonical binary sequence is specified by
 [`../../../docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md`](../../../docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md).
-Regenerate a candidate digest for review with:
+Regenerate a digest for review with:
 
 ```sh
 node protocol/conformance/folderbase-version/reference-digest.mjs \
@@ -49,6 +49,6 @@ The script calculates evidence only. It does not rewrite sidecars, grant authori
 prove hosted bytes, or seal a Folderbase Version from unverified workspace state.
 
 The repository/tag source archive is the normative cross-language distribution.
-`protocol/releases/0.4/folderbase-version-v1.candidate.json` enumerates the exact
-candidate surface. The Cargo crate contains the Rust runtime implementation only;
-it does not silently claim to contain this schema, corpus, or reference encoder.
+`protocol/releases/0.4/folderbase-version-v1.json` enumerates the exact released
+surface. The Cargo crate contains the Rust runtime implementation only; it does
+not silently claim to contain this schema, corpus, or reference encoder.

@@ -1,6 +1,6 @@
 # Seal portable Folderbase Versions as bounded full state
 
-Status: Proposed
+Status: Accepted
 
 Folderbase needs one provider-neutral state artifact that a local App, independent
 implementation, or future remote agent can validate and restore without replaying
@@ -122,11 +122,11 @@ generator, independent reference encoder, Rust conformance test, and this decisi
 The `folderbase-core` Cargo package is the Rust runtime implementation only and
 declares that boundary in package metadata. We do not duplicate the protocol bundle
 inside the crate or rely on package paths that escape the crate root. A closed
-candidate source-release manifest and verifier keep that separation explicit.
+released source-release manifest and verifier keep that separation explicit.
 Focused conformance and independent digest verification run on Ubuntu, macOS, and
-Windows CI. The later protocol 0.4 release change must replace the candidate
-manifest with a released manifest, change its closed `status` to `released`, and
-change the verifier to require that transition before tagging.
+Windows CI. The protocol 0.4 release manifest has `released` status, and the
+verifier rejects both any other status and a remaining candidate manifest before
+tagging.
 
 ## Canonical digest v1
 
@@ -157,9 +157,23 @@ The remaining sequence is:
 No JSON representation, padding, chunk-manifest digest, provider field, unknown
 field, or canonical digest value enters the sequence.
 
-## Acceptance
+## Acceptance evidence
 
-This decision remains Proposed until the corrected closed JSON Schema, repository
-distribution, independently generated digest sidecars, expanded public corpus, and
-Rust module pass focused conformance, macOS and Windows portability, full workspace,
-packaging, independent vector checks, and an independent final re-review.
+The corrected closed JSON Schema, repository distribution, independently generated
+digest sidecars, expanded public corpus, and Rust module passed focused
+conformance, macOS and Windows portability, full-workspace, packaging, independent
+vector, and independent final-review gates:
+
+- contract PR: [#22](https://github.com/chalkagents/folderbase/pull/22);
+- independent final GO on
+  `ba9349217a1654db6ac8af0fc460c488a2e69903`, with no P0–P2 findings;
+- PR CI:
+  [run 30470638866](https://github.com/chalkagents/folderbase/actions/runs/30470638866);
+- accepted contract merge:
+  `de760987af058740e2d997923f71a56eb01140d2`; and
+- post-main CI:
+  [run 30470974909](https://github.com/chalkagents/folderbase/actions/runs/30470974909).
+
+The v0.4.0 release PR, release merge, annotated tag, public tag proof, and GitHub
+release remain pending. They are publication evidence, not prerequisites for
+accepting the reviewed protocol decision, and must not be claimed until observed.
