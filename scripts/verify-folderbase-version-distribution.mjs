@@ -95,14 +95,82 @@ function walk(directory) {
   });
 }
 const actualConformanceFiles = walk(conformanceRoot).sort();
-const declaredConformanceFiles = release.files
-  .filter((path) => path.startsWith("protocol/conformance/folderbase-version/"))
-  .sort();
-if (
-  JSON.stringify(actualConformanceFiles) !==
-  JSON.stringify(declaredConformanceFiles)
-) {
-  throw new Error("release manifest does not enumerate the exact conformance tree");
+const expectedReleaseFileCount = 32;
+const requiredNonConformanceFiles = [
+  "crates/folderbase-core/src/folderbase_version.rs",
+  "crates/folderbase-core/tests/folderbase_version_conformance.rs",
+  "docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md",
+  "protocol/releases/0.4/folderbase-version-v1.candidate.json",
+  "protocol/schemas/0.4/folderbase-version.schema.json",
+  "scripts/verify-folderbase-version-digest-vectors.mjs",
+  "scripts/verify-folderbase-version-distribution.mjs",
+];
+function validateReleaseInventory(files) {
+  if (files.length !== expectedReleaseFileCount) {
+    throw new Error(
+      `protocol source-release inventory must contain exactly ${expectedReleaseFileCount} files`,
+    );
+  }
+  const declaredConformanceFiles = files
+    .filter((path) =>
+      path.startsWith("protocol/conformance/folderbase-version/"),
+    )
+    .sort();
+  if (
+    JSON.stringify(actualConformanceFiles) !==
+    JSON.stringify(declaredConformanceFiles)
+  ) {
+    throw new Error(
+      "release manifest does not enumerate the exact conformance tree",
+    );
+  }
+  const declaredNonConformanceFiles = files
+    .filter(
+      (path) =>
+        !path.startsWith("protocol/conformance/folderbase-version/"),
+    )
+    .sort();
+  if (
+    JSON.stringify(requiredNonConformanceFiles) !==
+    JSON.stringify(declaredNonConformanceFiles)
+  ) {
+    throw new Error(
+      "release manifest does not enumerate the exact non-conformance contract surface",
+    );
+  }
+}
+validateReleaseInventory(release.files);
+// Every verifier run proves that no required source-release member can be
+// omitted or replaced while leaving the conformance subtree untouched.
+for (const requiredPath of requiredNonConformanceFiles) {
+  const withoutRequiredPath = release.files.filter(
+    (path) => path !== requiredPath,
+  );
+  let omissionRejected = false;
+  try {
+    validateReleaseInventory(withoutRequiredPath);
+  } catch {
+    omissionRejected = true;
+  }
+  if (!omissionRejected) {
+    throw new Error(
+      `release inventory verifier is insensitive to omission: ${requiredPath}`,
+    );
+  }
+  const withReplacementPath = release.files
+    .map((path) => (path === requiredPath ? "README.md" : path))
+    .sort();
+  let replacementRejected = false;
+  try {
+    validateReleaseInventory(withReplacementPath);
+  } catch {
+    replacementRejected = true;
+  }
+  if (!replacementRejected) {
+    throw new Error(
+      `release inventory verifier is insensitive to replacement: ${requiredPath}`,
+    );
+  }
 }
 
 const generator = join(
