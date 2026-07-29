@@ -684,22 +684,28 @@ impl<'a> MaterializationStaging<'a> {
     fn cleanup_inner(&mut self) -> Result<(), TransferReceiverError> {
         let directory_binding = self.validate_directory_binding();
         if !self.object_removed {
-            self.remove_object_with_sync(sync_directory)?;
+            self.remove_object_with(
+                |directory| {
+                    directory
+                        .remove_file(MATERIALIZATION_OBJECT_FILE)
+                        .map_err(TransferReceiverError::Io)
+                },
+                sync_directory,
+            )?;
         }
 
-        let directory = self
-            .directory
-            .take()
-            .ok_or(TransferReceiverError::DestinationStateChanged)?;
-        directory
-            .remove_open_dir()
-            .map_err(TransferReceiverError::Io)?;
+        self.remove_directory_with(|directory| {
+            directory
+                .remove_open_dir()
+                .map_err(TransferReceiverError::Io)
+        })?;
         sync_directory(self.parent)?;
         directory_binding
     }
 
-    fn remove_object_with_sync(
+    fn remove_object_with(
         &mut self,
+        unlink: impl FnOnce(&Dir) -> Result<(), TransferReceiverError>,
         sync: impl FnOnce(&Dir) -> Result<(), TransferReceiverError>,
     ) -> Result<(), TransferReceiverError> {
         {
@@ -713,12 +719,36 @@ impl<'a> MaterializationStaging<'a> {
             if &current_object != expected_object {
                 return Err(TransferReceiverError::DestinationStateChanged);
             }
-            directory
-                .remove_file(MATERIALIZATION_OBJECT_FILE)
-                .map_err(TransferReceiverError::Io)?;
         }
+        // `same_file::Handle` owns an OS handle. Windows denies deletion while
+        // either comparison handle remains open, so relinquish only after the
+        // live name has matched the retained identity.
+        drop(
+            self.object_identity
+                .take()
+                .ok_or(TransferReceiverError::DestinationStateChanged)?,
+        );
+        unlink(self.directory()?)?;
         self.object_removed = true;
         sync(self.directory()?)
+    }
+
+    fn remove_directory_with(
+        &mut self,
+        remove: impl FnOnce(Dir) -> Result<(), TransferReceiverError>,
+    ) -> Result<(), TransferReceiverError> {
+        // `remove_open_dir` consumes its Dir handle, but the independent
+        // identity handle must also be closed first on Windows.
+        drop(
+            self.directory_identity
+                .take()
+                .ok_or(TransferReceiverError::DestinationStateChanged)?,
+        );
+        let directory = self
+            .directory
+            .take()
+            .ok_or(TransferReceiverError::DestinationStateChanged)?;
+        remove(directory)
     }
 
     fn validate_directory_binding(&self) -> Result<(), TransferReceiverError> {
@@ -1251,7 +1281,8 @@ mod tests {
 
     use super::{
         AcceptedChunkReader, CheckpointLease, CheckpointLock, ChunkAcceptance,
-        MaterializationStaging, TransferReceiverError, windows_destination_spelling_is_exact,
+        MATERIALIZATION_OBJECT_FILE, MaterializationStaging, TransferReceiverError,
+        windows_destination_spelling_is_exact,
     };
 
     #[derive(Default)]
@@ -1347,11 +1378,18 @@ mod tests {
         object.sync_all().unwrap();
         drop(object);
 
-        let result = staging.remove_object_with_sync(|_| {
-            Err(TransferReceiverError::Io(io::Error::other(
-                "injected staging directory sync failure",
-            )))
-        });
+        let result = staging.remove_object_with(
+            |directory| {
+                directory
+                    .remove_file(MATERIALIZATION_OBJECT_FILE)
+                    .map_err(TransferReceiverError::Io)
+            },
+            |_| {
+                Err(TransferReceiverError::Io(io::Error::other(
+                    "injected staging directory sync failure",
+                )))
+            },
+        );
 
         assert!(
             matches!(result, Err(TransferReceiverError::Io(ref error))
@@ -1362,6 +1400,69 @@ mod tests {
         assert!(!temporary.path().join(&staging_name).join("object").exists());
         drop(staging);
         assert!(!temporary.path().join(staging_name).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn object_identity_is_relinquished_before_unlink_is_attempted() {
+        use std::io::Write;
+
+        use cap_std::{ambient_authority, fs::Dir};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_root =
+            Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+        let mut staging = MaterializationStaging::create(&destination_root).unwrap();
+        let staging_name = staging.name.clone();
+        let mut object = staging.create_object().unwrap();
+        object.write_all(b"verified original").unwrap();
+        object.sync_all().unwrap();
+        drop(object);
+
+        let result = staging.remove_object_with(
+            |_| {
+                Err(TransferReceiverError::Io(io::Error::other(
+                    "injected unlink failure",
+                )))
+            },
+            |_| panic!("sync must not run after an unlink failure"),
+        );
+
+        assert!(
+            matches!(result, Err(TransferReceiverError::Io(ref error))
+                if error.to_string() == "injected unlink failure"),
+            "{result:?}"
+        );
+        assert!(staging.object_identity.is_none());
+        assert!(!staging.object_removed);
+        assert!(temporary.path().join(staging_name).join("object").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_identity_is_relinquished_before_open_directory_removal_is_attempted() {
+        use cap_std::{ambient_authority, fs::Dir};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_root =
+            Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+        let mut staging = MaterializationStaging::create(&destination_root).unwrap();
+        let staging_name = staging.name.clone();
+
+        let result = staging.remove_directory_with(|_| {
+            Err(TransferReceiverError::Io(io::Error::other(
+                "injected open-directory removal failure",
+            )))
+        });
+
+        assert!(
+            matches!(result, Err(TransferReceiverError::Io(ref error))
+                if error.to_string() == "injected open-directory removal failure"),
+            "{result:?}"
+        );
+        assert!(staging.directory_identity.is_none());
+        assert!(staging.directory.is_none());
+        assert!(temporary.path().join(staging_name).exists());
     }
 
     #[cfg(unix)]

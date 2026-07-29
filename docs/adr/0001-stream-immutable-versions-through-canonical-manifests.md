@@ -309,14 +309,19 @@ The receiver implementation fixes these additional v1 details:
    the retained directory capability rather than the externally visible
    staging pathname. Core proves the destination is the staged inode and
    applies the platform directory-persistence policy. Cleanup removes
-   `object` capability-relative, then consumes the retained open directory
-   with the platform's nonrecursive open-directory removal primitive and
-   synchronizes the destination parent. Under the cooperative
+   `object` capability-relative. It first compares the live name with the
+   retained identity, then relinquishes both identity handles before unlinking
+   so platforms that deny deletion while a handle is open can proceed. It
+   likewise relinquishes the retained directory-identity handle before
+   consuming the open directory with the platform's nonrecursive removal
+   primitive, then synchronizes the destination parent. Under the cooperative
    destination-parent mutation contract, a replacement already present when
-   identity validation runs is neither linked nor removed. Open-directory
-   removal is best-effort and nonrecursive; it is not an atomic security
-   boundary against a deliberate rename after validation. The materializer
-   never scans user folders for stale-looking names.
+   identity validation runs is neither linked nor removed. These post-check
+   transitions intentionally trade an atomic adversarial-rename claim for
+   cross-platform deletion semantics: open-directory removal is best-effort
+   and nonrecursive, not a security boundary against a deliberate rename after
+   validation. The materializer never scans user folders for stale-looking
+   names.
 9. Once the no-clobber link succeeds, a late identity, synchronization,
    staging-cleanup, or lease-release failure never causes Core to delete the
    installed destination. Such a retry observes the existing leaf and refuses
