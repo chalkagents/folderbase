@@ -50,7 +50,7 @@ The root-instance digest v1 is:
 
 ```text
 SHA-256(
-  UTF8("folderbase-root-instance-v1") || 0x00 ||
+  UTF8("folderbase-physical-root-instance-v1") || 0x00 ||
   UTF8(platform_tag) || 0x00 ||
   physical_identity_bytes
 )

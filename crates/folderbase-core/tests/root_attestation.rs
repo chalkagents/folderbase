@@ -34,7 +34,7 @@ fn attests_exact_manifest_bytes_and_one_physical_root_instance() {
     assert_eq!(first.protocol_version, "0.2.0+attestation");
     assert_eq!(
         first.manifest_sha256,
-        "b84f56379f3a14b000b3ff4b2119bb0d71cc7b49edba8119b8794a5d973e1718"
+        "29a1ad6f2d1c5591b35951a39bc38603728527f8be808510f080db1922c3f8be"
     );
     assert_eq!(first.root_instance_sha256.len(), 64);
     assert!(
@@ -44,7 +44,10 @@ fn attests_exact_manifest_bytes_and_one_physical_root_instance() {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     );
     assert_eq!(first, second);
-    assert_eq!(ROOT_INSTANCE_FORMAT_V1, "folderbase-root-instance-v1");
+    assert_eq!(
+        ROOT_INSTANCE_FORMAT_V1,
+        "folderbase-physical-root-instance-v1"
+    );
 
     let physical_copy = root_with_manifest(MANIFEST);
     let copied = attest_folderbase_root(physical_copy.path()).expect("valid copied root");
