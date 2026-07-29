@@ -510,6 +510,32 @@ fn in_scope_paths_fail_closed_when_the_portable_depth_limit_is_exceeded() {
     ));
 }
 
+#[test]
+fn portable_depth_refusal_does_not_depend_on_native_thread_stack_size() {
+    let root = folderbase();
+    let too_deep = std::iter::repeat_n("d", 129).collect::<Vec<_>>().join("/");
+    fs::create_dir_all(root.path().join(&too_deep)).expect("deep tree");
+    let root_path = root.path().to_path_buf();
+
+    let result = std::thread::Builder::new()
+        .name("bounded-capture-depth".to_owned())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            FolderbaseVersionStore::open(&root_path)
+                .expect("open")
+                .plan_capture()
+        })
+        .expect("spawn bounded-stack capture planner")
+        .join()
+        .expect("capture planner must return a typed result without stack overflow");
+
+    assert!(matches!(
+        result,
+        Err(FolderbaseCaptureError::UnsafePortablePath(path))
+            if path.components().count() == 129
+    ));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn in_scope_paths_fail_closed_on_non_utf8_and_portable_case_collisions() {
