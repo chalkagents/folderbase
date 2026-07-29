@@ -57,6 +57,10 @@ symlink root:
 crate-private producer:
   no sibling-accessible constructors for `RootManifest`, `PathBinding`, or the
   closed `FolderbaseVersionParts`
+
+nested-boundary lookup shape:
+  no preindexed boundary ancestor lookup; a maximum-size valid symlink and
+  boundary set could perform roughly 67 million pairwise comparisons
 ```
 
 The initial RED command was also repeated after a clean generated-target failure
@@ -75,6 +79,9 @@ cargo test --package folderbase-core --lib folderbase_version_producer_tests --l
   1 passed
 
 cargo test --package folderbase-core --lib capability_tests --locked
+  1 passed
+
+cargo test --package folderbase-core --lib nested_boundary_index_tests --locked
   1 passed
 
 cargo test --package folderbase-core --test folderbase_capture --locked
@@ -100,6 +107,8 @@ The capture suite proves:
 - a content-unreadable 10 GiB sparse file is planned by length alone;
 - per-object, path-depth, and aggregate-record bounds;
 - exact safe symlink targets and rejection of escape targets;
+- an 8,192-boundary adversarial lookup uses exactly the resolved path's at-most
+  128 component-ancestor probes rather than scanning every boundary;
 - typed nested-boundary, hard-link, FIFO, and other special-node exclusions;
 - fail-closed portable paths, including Linux non-UTF-8 and case collisions; and
 - a closed Local Head from another physical root is rejected.

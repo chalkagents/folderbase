@@ -732,22 +732,19 @@ impl FolderbaseVersion {
             }
         }
 
-        let nested_boundary_set = self
-            .exclusions
-            .iter()
-            .filter(|exclusion| exclusion.kind == ExclusionKind::NestedFolderbase)
-            .map(|exclusion| portable_folded_key(&exclusion.path))
-            .collect::<BTreeSet<_>>();
-        for boundary in &nested_boundary_set {
-            for (separator, _) in boundary.match_indices('/') {
-                if nested_boundary_set.contains(&boundary[..separator]) {
-                    return invalid(format!(
-                        "nested Folderbase boundary overlaps its ancestor: {boundary}"
-                    ));
-                }
+        let nested_boundaries = NestedBoundaryIndex::from_paths(
+            self.exclusions
+                .iter()
+                .filter(|exclusion| exclusion.kind == ExclusionKind::NestedFolderbase)
+                .map(|exclusion| exclusion.path.as_str()),
+        );
+        for boundary in nested_boundaries.iter() {
+            if nested_boundaries.contains_strict_ancestor(boundary) {
+                return invalid(format!(
+                    "nested Folderbase boundary overlaps its ancestor: {boundary}"
+                ));
             }
         }
-        let nested_boundaries = nested_boundary_set.into_iter().collect::<Vec<_>>();
         for binding in &self.bindings {
             reject_nested_descendant(binding.path(), &nested_boundaries)?;
         }
@@ -1513,10 +1510,8 @@ pub(crate) fn validate_capture_symlink_targets<'a>(
     targets: impl IntoIterator<Item = (&'a str, &'a str)>,
     nested_boundaries: &[String],
 ) -> Result<(), &'a str> {
-    let nested_boundaries = nested_boundaries
-        .iter()
-        .map(|path| portable_folded_key(path))
-        .collect::<Vec<_>>();
+    let nested_boundaries =
+        NestedBoundaryIndex::from_paths(nested_boundaries.iter().map(String::as_str));
     for (link_path, target) in targets {
         if validate_symlink_target(link_path, target, &nested_boundaries).is_err() {
             return Err(link_path);
@@ -1626,13 +1621,10 @@ fn bind_object_version<'a>(
 
 fn reject_nested_descendant(
     path: &str,
-    boundaries: &[String],
+    boundaries: &NestedBoundaryIndex,
 ) -> Result<(), FolderbaseVersionError> {
     let path = portable_folded_key(path);
-    if boundaries
-        .iter()
-        .any(|boundary| path.starts_with(&format!("{boundary}/")))
-    {
+    if boundaries.contains_strict_ancestor(&path) {
         return invalid(format!(
             "path enters an excluded nested Folderbase boundary: {path}"
         ));
@@ -1643,7 +1635,7 @@ fn reject_nested_descendant(
 fn validate_symlink_target(
     link_path: &str,
     target: &str,
-    nested_boundaries: &[String],
+    nested_boundaries: &NestedBoundaryIndex,
 ) -> Result<(), FolderbaseVersionError> {
     let bytes = target.as_bytes();
     let drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -1690,13 +1682,69 @@ fn validate_symlink_target(
             return invalid("symlink target enters Folderbase protocol state");
         }
         let folded_resolved = portable_folded_key(&resolved);
-        if nested_boundaries.iter().any(|boundary| {
-            folded_resolved == *boundary || folded_resolved.starts_with(&format!("{boundary}/"))
-        }) {
+        if nested_boundaries.contains_or_ancestor(&folded_resolved) {
             return invalid("symlink target enters a nested Folderbase boundary");
         }
     }
     Ok(())
+}
+
+struct NestedBoundaryIndex {
+    folded: BTreeSet<String>,
+}
+
+impl NestedBoundaryIndex {
+    fn from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            folded: paths.into_iter().map(portable_folded_key).collect(),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &str> {
+        self.folded.iter().map(String::as_str)
+    }
+
+    fn contains_or_ancestor(&self, folded_path: &str) -> bool {
+        self.contains_ancestor_with(folded_path, true, |_| {})
+    }
+
+    fn contains_strict_ancestor(&self, folded_path: &str) -> bool {
+        self.contains_ancestor_with(folded_path, false, |_| {})
+    }
+
+    fn contains_ancestor_with(
+        &self,
+        folded_path: &str,
+        include_exact: bool,
+        mut inspect: impl FnMut(&str),
+    ) -> bool {
+        for (separator, _) in folded_path.match_indices('/') {
+            let ancestor = &folded_path[..separator];
+            inspect(ancestor);
+            if self.folded.contains(ancestor) {
+                return true;
+            }
+        }
+        if include_exact {
+            inspect(folded_path);
+            if self.folded.contains(folded_path) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.folded.len()
+    }
+
+    #[cfg(test)]
+    fn probe_count(&self, folded_path: &str, include_exact: bool) -> usize {
+        let mut probes = 0;
+        let _ = self.contains_ancestor_with(folded_path, include_exact, |_| probes += 1);
+        probes
+    }
 }
 
 fn portable_folded_key(path: &str) -> String {
@@ -1902,4 +1950,26 @@ fn parse_exact_unsigned(encoded: &str) -> Option<u64> {
         }
     }
     normalized.parse().ok()
+}
+
+#[cfg(test)]
+mod nested_boundary_index_tests {
+    use super::*;
+
+    #[test]
+    fn maximum_boundary_set_uses_at_most_path_depth_lookups_per_target() {
+        let boundaries = (0..MAX_VERSION_ENTRIES / 2)
+            .map(|index| format!("boundary-{index:04}"))
+            .collect::<Vec<_>>();
+        let index = NestedBoundaryIndex::from_paths(boundaries.iter().map(String::as_str));
+        let resolved = (0..MAX_PATH_DEPTH)
+            .map(|index| format!("ordinary-{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let folded_resolved = portable_folded_key(&resolved);
+
+        assert_eq!(index.len(), MAX_VERSION_ENTRIES / 2);
+        assert_eq!(index.probe_count(&folded_resolved, true), MAX_PATH_DEPTH);
+        assert!(!index.contains_or_ancestor(&folded_resolved));
+    }
 }
