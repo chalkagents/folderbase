@@ -637,8 +637,8 @@ impl<'a> MaterializationStaging<'a> {
                 self.directory()?
                     .remove_file(MATERIALIZATION_OBJECT_FILE)
                     .map_err(TransferReceiverError::Io)?;
-                sync_directory(self.directory()?)?;
                 self.object_removed = true;
+                sync_directory(self.directory()?)?;
                 Err(error)
             }
         }
