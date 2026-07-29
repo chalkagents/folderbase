@@ -8,6 +8,7 @@ pub mod availability;
 pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
+mod folderbase_capture;
 pub mod folderbase_version;
 pub mod guide_policy;
 mod initialization;
@@ -29,6 +30,12 @@ mod validation;
 mod workspace;
 
 pub use error::{FolderbaseError, InitializationInventoryLimitKind, Result};
+pub use folderbase_capture::{
+    CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureIgnoredPath,
+    CaptureLocalHead, CapturePlan, CapturePlanEntry, CapturePlanExclusion, CapturePlanLimitKind,
+    FolderbaseCaptureError, FolderbaseVersionStore, MAX_CAPTURE_PLAN_RECORDS,
+    MAX_FOLDERBASEIGNORE_BYTES, MAX_LOCAL_HEAD_BYTES,
+};
 pub use initialization::{
     initialize, initialize_with_expected_plan_digest, plan_initialization,
     plan_template_initialization,

@@ -26,6 +26,7 @@ exclude = [
 cap-std.workspace = true
 cap-fs-ext.workspace = true
 chrono.workspace = true
+ignore.workspace = true
 libc.workspace = true
 same-file.workspace = true
 semver.workspace = true

@@ -313,14 +313,16 @@ impl FolderbaseVersion {
     /// method is the only supported JSON encoding path.
     pub fn encode_bounded(&self, mut writer: impl Write) -> Result<(), FolderbaseVersionError> {
         self.validate()?;
-        let encoded = serde_json::to_vec(&FolderbaseVersionWireRef::from(self))?;
-        if encoded.len() as u64 > MAX_ENCODED_VERSION_BYTES {
+        let mut encoded = BoundedJsonBuffer::new(MAX_ENCODED_VERSION_BYTES as usize);
+        let result = serde_json::to_writer(&mut encoded, &FolderbaseVersionWireRef::from(self));
+        if encoded.exceeded {
             return Err(FolderbaseVersionError::EncodedVersionTooLarge {
                 maximum_bytes: MAX_ENCODED_VERSION_BYTES,
             });
         }
+        result?;
         writer
-            .write_all(&encoded)
+            .write_all(&encoded.bytes)
             .map_err(FolderbaseVersionError::EncodingIo)
     }
 
@@ -900,6 +902,45 @@ impl FolderbaseVersion {
     }
 }
 
+struct BoundedJsonBuffer {
+    bytes: Vec<u8>,
+    maximum: usize,
+    exceeded: bool,
+}
+
+impl BoundedJsonBuffer {
+    fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(4096),
+            maximum,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(length) = self.bytes.len().checked_add(bytes.len()) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "Folderbase Version encoded length overflowed",
+            ));
+        };
+        if length > self.maximum {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "Folderbase Version encoded length exceeded its limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 struct FolderbaseVersionWireRef<'a> {
     format: &'a str,
@@ -1246,6 +1287,30 @@ fn validate_strict_path_order<'a>(
         previous = Some(path.as_bytes());
     }
     Ok(())
+}
+
+pub(crate) fn validate_capture_path(path: &str) -> Result<(), FolderbaseVersionError> {
+    validate_portable_path(path).map(|_| ())
+}
+
+pub(crate) fn validate_capture_version_id(value: &str) -> Result<(), FolderbaseVersionError> {
+    validate_prefixed_uuid(value, "fbversion_")
+}
+
+pub(crate) fn validate_capture_sha256(value: &str) -> Result<(), FolderbaseVersionError> {
+    validate_sha256(value)
+}
+
+pub(crate) fn validate_capture_symlink_target(
+    link_path: &str,
+    target: &str,
+    nested_boundaries: &[String],
+) -> Result<(), FolderbaseVersionError> {
+    let nested_boundaries = nested_boundaries
+        .iter()
+        .map(|path| portable_folded_key(path))
+        .collect::<Vec<_>>();
+    validate_symlink_target(link_path, target, &nested_boundaries)
 }
 
 fn validate_portable_path(path: &str) -> Result<PathKeys, FolderbaseVersionError> {
