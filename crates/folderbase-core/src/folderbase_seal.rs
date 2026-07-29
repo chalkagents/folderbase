@@ -2350,6 +2350,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tombstone_capture_reopens_and_converges_at_every_persistence_checkpoint() {
+        for fault in [
+            CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ObjectWritesDurable,
+            CaptureCheckpoint::VersionDurable,
+            CaptureCheckpoint::HeadReplaced,
+            CaptureCheckpoint::CleanupComplete,
+        ] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            let genesis = store
+                .seal_capture(store.plan_capture().expect("genesis plan"))
+                .expect("genesis");
+            let prior = store
+                .read_version(genesis.version_id())
+                .expect("genesis version");
+            let prior_binding = prior.lookup_binding("active.bin").expect("prior binding");
+            let prior_object_id = prior_binding.object_id().to_owned();
+            let prior_object_version_id = prior_binding
+                .object_version_id()
+                .expect("prior Object Version")
+                .to_owned();
+            fs::remove_file(root.path().join("active.bin")).expect("delete active file");
+
+            let plan = store.plan_capture().expect("deletion plan");
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                store.seal_capture_with_hook(plan, |checkpoint| {
+                    if checkpoint == &fault {
+                        panic!("simulated Tombstone termination at {fault:?}");
+                    }
+                })
+            }));
+            assert!(interrupted.is_err(), "fault {fault:?}");
+
+            let assigned = active_transaction(root.path())
+                .map(|transaction| transaction.target_version_id)
+                .or_else(|| local_head(root.path()).map(|head| head.version_id))
+                .expect("durable assigned Tombstone target");
+            drop(store);
+            let reopened = FolderbaseVersionStore::open(root.path()).expect("crash reopen");
+            let retry = reopened
+                .seal_capture(reopened.plan_capture().expect("reopen deletion plan"))
+                .expect("exact Tombstone retry");
+            assert_eq!(retry.version_id(), assigned, "fault {fault:?}");
+            let verified = reopened
+                .read_version(retry.version_id())
+                .expect("Tombstone references verify");
+            assert_eq!(verified.parents(), &[genesis.version_id().to_owned()]);
+            assert!(verified.lookup_binding("active.bin").is_none());
+            assert_eq!(verified.tombstones().len(), 1);
+            let tombstone = &verified.tombstones()[0];
+            assert_eq!(tombstone.path(), "active.bin");
+            assert_eq!(tombstone.object_id(), prior_object_id);
+            assert_eq!(
+                tombstone.last_object_version_id(),
+                Some(prior_object_version_id.as_str())
+            );
+            assert!(active_transaction(root.path()).is_none());
+            assert_eq!(
+                local_head(root.path()).expect("Local Head").version_id,
+                assigned
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn seal_retains_state_capability_before_any_publication_and_never_writes_through_a_swap() {
