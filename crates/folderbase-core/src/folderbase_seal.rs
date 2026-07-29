@@ -1650,6 +1650,15 @@ fn validate_transaction(
     store: &FolderbaseVersionStore,
     transaction: &CaptureTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
+    let aggregate_entries = transaction
+        .assignments
+        .len()
+        .checked_add(transaction.target_tombstones.len())
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(
+                "active journal entry aggregate exceeds the supported range".to_owned(),
+            )
+        })?;
     if transaction.format != CAPTURE_TRANSACTION_FORMAT_V1
         || !transaction.transaction_id.starts_with("fbcapture_")
         || Uuid::parse_str(
@@ -1662,10 +1671,10 @@ fn validate_transaction(
         || transaction.folderbase_id != store.root_attestation.folderbase_id
         || transaction.root_instance_sha256 != store.root_attestation.root_instance_sha256
         || transaction.plan_sha256.len() != 64
-        || transaction.assignments.len() > crate::folderbase_version::MAX_VERSION_ENTRIES
+        || aggregate_entries > crate::folderbase_version::MAX_VERSION_ENTRIES
     {
         return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
-            "active journal metadata is inconsistent".to_owned(),
+            "active journal metadata or entry aggregate is inconsistent".to_owned(),
         ));
     }
     validate_capture_version_id(&transaction.target_version_id)?;
