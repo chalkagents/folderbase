@@ -8,6 +8,7 @@ pub mod availability;
 pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
+pub mod folderbase_version;
 pub mod guide_policy;
 mod initialization;
 mod inspection;

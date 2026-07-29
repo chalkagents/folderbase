@@ -45,6 +45,12 @@ jobs:
       - name: Verify the independent reorganization digest vector
         run: node scripts/verify-reorganization-digest-vector.mjs
 
+      - name: Verify independent Folderbase Version digest vectors
+        run: node scripts/verify-folderbase-version-digest-vectors.mjs
+
+      - name: Verify the Folderbase Version repository distribution
+        run: node scripts/verify-folderbase-version-distribution.mjs
+
       - name: Test
         run: cargo test --workspace --all-features --locked
 
@@ -71,6 +77,12 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Test the public Folderbase Version contract
+        run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
+
+      - name: Verify independent Folderbase Version digest vectors
+        run: node scripts/verify-folderbase-version-digest-vectors.mjs
 
       - name: Test the public receiver contract
         run: cargo test --package folderbase-core --test transfer_receiver --locked

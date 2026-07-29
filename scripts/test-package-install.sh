@@ -17,6 +17,8 @@ export CARGO_TARGET_DIR="$temporary_root/target"
 
 cd "$repository_root"
 
+node scripts/verify-folderbase-version-distribution.mjs
+
 for template in \
   person \
   organization \

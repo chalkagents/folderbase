@@ -13,6 +13,7 @@ keywords = ["agents", "filesystem", "local-first", "knowledge"]
 categories = ["filesystem", "data-structures"]
 exclude = [
   "tests/change_set_conformance.rs",
+  "tests/folderbase_version_conformance.rs",
   "tests/inspection.rs",
   "tests/migration.rs",
   "tests/reorganization_contract.rs",
@@ -40,6 +41,12 @@ walkdir.workspace = true
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true
 windows-sys.workspace = true
+
+[package.metadata.folderbase-protocol]
+contract = "folderbase-version-v1"
+protocol-version = "0.4"
+distribution = "repository-tag-source-archive"
+cargo-package-role = "runtime-implementation-only"
 
 [dev-dependencies]
 jsonschema.workspace = true
