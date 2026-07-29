@@ -84,6 +84,9 @@ jobs:
       - name: Test metadata-only Folderbase capture planning
         run: cargo test --package folderbase-core --test folderbase_capture --locked
 
+      - name: Test Folderbase sealing and Local Head recovery
+        run: cargo test --package folderbase-core --test folderbase_seal --locked
+
       - name: Verify independent Folderbase Version digest vectors
         run: node scripts/verify-folderbase-version-digest-vectors.mjs
 
