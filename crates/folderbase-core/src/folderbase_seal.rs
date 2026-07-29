@@ -297,8 +297,7 @@ impl FolderbaseVersionStore {
         let transaction = match active {
             Some(transaction) => transaction,
             None => {
-                let transaction =
-                    assign_capture_transaction(self, &state, &plan, &plan_sha256, prior.as_ref())?;
+                let transaction = assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
@@ -559,8 +558,6 @@ fn ensure_same_plan(
 }
 
 fn assign_capture_transaction(
-    store: &FolderbaseVersionStore,
-    state: &FolderbaseState,
     plan: &CapturePlan,
     plan_sha256: &str,
     prior: Option<&FolderbaseVersion>,
@@ -582,15 +579,8 @@ fn assign_capture_transaction(
                 entry.path(),
             )));
         }
-        let reused_object = match prior_binding {
-            Some(binding) => identity_allows_reuse(
-                state,
-                &store.root_attestation.root,
-                binding.object_id(),
-                entry,
-            )?,
-            None => false,
-        };
+        let reused_object =
+            prior_binding.is_some_and(|binding| binding.kind() == path_binding_kind(entry.kind()));
         if prior_binding.is_some() && !reused_object {
             return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
                 entry.path(),
@@ -2478,11 +2468,11 @@ mod tests {
             .lookup_binding("active.bin")
             .expect("active binding");
         let object_id = prior.object_id().to_owned();
-        let object_version_id = prior.object_version_id().expect("Object Version").to_owned();
-        fs::remove_file(
-            root.path()
-                .join(capture_identity_relative_path(&object_id)),
-        )
+        let object_version_id = prior
+            .object_version_id()
+            .expect("Object Version")
+            .to_owned();
+        fs::remove_file(root.path().join(capture_identity_relative_path(&object_id)))
             .expect("remove local identity evidence");
 
         let repaired = store
@@ -2492,16 +2482,19 @@ mod tests {
         let current = store
             .read_version(repaired.version_id())
             .expect("repaired version");
-        let current = current.lookup_binding("active.bin").expect("active binding");
+        let current = current
+            .lookup_binding("active.bin")
+            .expect("active binding");
         assert_eq!(current.object_id(), object_id);
         assert_eq!(
             current.object_version_id(),
             Some(object_version_id.as_str())
         );
-        assert!(root
-            .path()
-            .join(capture_identity_relative_path(&object_id))
-            .is_file());
+        assert!(
+            root.path()
+                .join(capture_identity_relative_path(&object_id))
+                .is_file()
+        );
     }
 
     fn assert_same_kind_replacement_after_head_preserves_logical_identity(start: Option<&Barrier>) {
@@ -2793,10 +2786,7 @@ mod tests {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let plan = store.plan_capture().expect("plan");
-        let state = FolderbaseState::open_existing(root.path()).expect("state");
         let transaction = assign_capture_transaction(
-            &store,
-            &state,
             &plan,
             &capture_plan_sha256(&plan).expect("plan digest"),
             None,
