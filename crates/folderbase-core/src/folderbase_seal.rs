@@ -3344,6 +3344,66 @@ mod tests {
         ));
         assert!(!root.path().join("active.bin").exists());
         assert_eq!(head.version_id, deletion.version_id());
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::JournalDurable {
+                    panic!("leave restore journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut transaction = read_active_restore_transaction(&state)
+            .expect("journal")
+            .expect("active");
+        transaction.binding = PathBinding::regular_file_from_verified_producer(
+            transaction.binding.path(),
+            transaction.binding.object_id(),
+            transaction
+                .binding
+                .object_version_id()
+                .expect("Object Version"),
+            transaction.binding.content_sha256().expect("digest"),
+            transaction.binding.bytes().expect("bytes"),
+            !transaction.binding.executable().expect("executable"),
+        );
+        let parent = store.read_version(deletion.version_id()).expect("parent");
+        transaction.target_version_sha256 = restored_version(
+            &store,
+            &parent,
+            &transaction.target_version_id,
+            &transaction.created_at,
+            &transaction.tombstone,
+            &transaction.binding,
+        )
+        .expect("tampered target")
+        .canonical_digest()
+        .expect("tampered digest");
+        state
+            .replace(
+                Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+                &encode_restore_transaction(&transaction).expect("tampered journal"),
+            )
+            .expect("replace journal");
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreTransaction(_))
+        ));
+        assert!(!root.path().join("active.bin").exists());
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
     }
 
     #[test]
