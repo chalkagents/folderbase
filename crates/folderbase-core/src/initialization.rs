@@ -1095,7 +1095,7 @@ fn open_root_capability(root: &Path) -> Result<OpenedRootCapability> {
     if !metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
-    let digest_identity = root_digest_identity(&metadata, root)?;
+    let digest_identity = root_digest_identity(&file, &metadata, root)?;
     let handle = Handle::from_file(
         file.try_clone()
             .map_err(|source| FolderbaseError::io(root, source))?,
@@ -1109,7 +1109,11 @@ fn open_root_capability(root: &Path) -> Result<OpenedRootCapability> {
 }
 
 #[cfg(unix)]
-fn root_digest_identity(metadata: &fs::Metadata, _root: &Path) -> Result<Vec<u8>> {
+fn root_digest_identity(
+    _file: &fs::File,
+    metadata: &fs::Metadata,
+    _root: &Path,
+) -> Result<Vec<u8>> {
     use std::os::unix::fs::MetadataExt;
 
     let mut identity = Vec::with_capacity(16);
@@ -1119,29 +1123,21 @@ fn root_digest_identity(metadata: &fs::Metadata, _root: &Path) -> Result<Vec<u8>
 }
 
 #[cfg(windows)]
-fn root_digest_identity(metadata: &fs::Metadata, root: &Path) -> Result<Vec<u8>> {
-    use std::os::windows::fs::MetadataExt;
-
-    let volume = metadata
-        .volume_serial_number()
-        .ok_or_else(|| FolderbaseError::InvalidRecord {
-            path: root.to_path_buf(),
-            message: "filesystem did not expose a stable volume identity".to_owned(),
-        })?;
-    let file_index = metadata
-        .file_index()
-        .ok_or_else(|| FolderbaseError::InvalidRecord {
-            path: root.to_path_buf(),
-            message: "filesystem did not expose a stable directory identity".to_owned(),
-        })?;
+fn root_digest_identity(file: &fs::File, _metadata: &fs::Metadata, root: &Path) -> Result<Vec<u8>> {
+    let information =
+        winapi_util::file::information(file).map_err(|source| FolderbaseError::io(root, source))?;
     let mut identity = Vec::with_capacity(12);
-    identity.extend_from_slice(&volume.to_be_bytes());
-    identity.extend_from_slice(&file_index.to_be_bytes());
+    identity.extend_from_slice(&(information.volume_serial_number() as u32).to_be_bytes());
+    identity.extend_from_slice(&information.file_index().to_be_bytes());
     Ok(identity)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn root_digest_identity(_metadata: &fs::Metadata, root: &Path) -> Result<Vec<u8>> {
+fn root_digest_identity(
+    _file: &fs::File,
+    _metadata: &fs::Metadata,
+    root: &Path,
+) -> Result<Vec<u8>> {
     Err(FolderbaseError::InvalidRecord {
         path: root.to_path_buf(),
         message: "filesystem does not expose a supported stable root identity".to_owned(),

@@ -537,6 +537,7 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+ "winapi-util",
 ]
 
 [[package]]

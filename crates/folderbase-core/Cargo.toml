@@ -37,6 +37,9 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+
 [dev-dependencies]
 jsonschema.workspace = true
 tempfile.workspace = true
