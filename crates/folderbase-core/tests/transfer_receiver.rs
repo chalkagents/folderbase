@@ -358,6 +358,44 @@ fn chunk_acceptance_is_streamed_exact_and_idempotent() {
 }
 
 #[test]
+fn complete_receiver_materializes_exact_bytes_and_receipt() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temporary.path().join("receiver")).unwrap();
+    std::fs::create_dir(temporary.path().join("destination")).unwrap();
+    let receiver_root =
+        Dir::open_ambient_dir(temporary.path().join("receiver"), ambient_authority()).unwrap();
+    let destination_root =
+        Dir::open_ambient_dir(temporary.path().join("destination"), ambient_authority()).unwrap();
+    let manifest = single_chunk_manifest();
+    let expected_manifest_digest = manifest.canonical_digest().unwrap();
+    let expected_object_digest = manifest.object_sha256.clone();
+    let transfer = PersistentTransfer::create(&receiver_root, "inbound", manifest).unwrap();
+    transfer
+        .accept_chunk_from(0, Cursor::new(b"hello folderbase"))
+        .unwrap();
+
+    let materialized = transfer
+        .materialize_to(&destination_root, "restored.bin")
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(temporary.path().join("destination/restored.bin")).unwrap(),
+        b"hello folderbase"
+    );
+    assert_eq!(
+        materialized.relative_destination,
+        PathBuf::from("restored.bin")
+    );
+    assert_eq!(materialized.object.manifest_format, MANIFEST_FORMAT_V1);
+    assert_eq!(
+        materialized.object.manifest_digest,
+        expected_manifest_digest
+    );
+    assert_eq!(materialized.object.object_sha256, expected_object_digest);
+    assert_eq!(materialized.object.object_bytes, 16);
+}
+
+#[test]
 fn replacing_the_verified_staging_path_never_accepts_the_replacement() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
