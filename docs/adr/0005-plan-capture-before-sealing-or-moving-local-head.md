@@ -88,7 +88,11 @@ and after Head replacement. Exact root and state junctions/reparse points are
 rejected on Windows. Windows state directory capabilities request the write
 authority required by `FlushFileBuffers`, and native CI executes directory
 creation, publication, replacement, and flush through those retained
-capabilities. A state-directory swap can leave only a detached orphan and
+capabilities. Read-only Folderbase Version verification instead retains
+explicitly non-mutating state capabilities, requests only `GENERIC_READ` on
+Windows, and rejects accidental mutation before any filesystem operation.
+Native CI holds directory handles that deny write sharing while verifying a
+complete version. A state-directory swap can leave only a detached orphan and
 cannot redirect publication through a symlink or junction.
 
 The active journal uses bounded streaming JSON encoding and the same explicit

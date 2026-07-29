@@ -47,6 +47,24 @@ The corresponding GREEN implementation is:
 fix(core): bound FB-41F sealing before publication
 ```
 
+The read-only Windows follow-up preserved one more RED/GREEN pair:
+
+```text
+52e82656db4f576067d97a083523ba66ecbe0445
+test(core): require read-only Windows version inspection
+
+d96cdaba2f059008292f32a9945db0430195788b
+fix(core): separate read-only Folderbase state handles
+```
+
+At the RED commit, the focused state test failed to compile because
+`open_existing_read_only` did not exist. The GREEN implementation gives
+verification and mutation distinct retained capability modes, refuses mutation
+through the read-only mode, and uses only `GENERIC_READ` for Windows
+`read_version`. A Windows-only integration regression holds root and state
+directory handles that share reads but deny write access while verifying a
+complete sealed Folderbase Version.
+
 ## Green behavior
 
 The implementation proves:
@@ -91,6 +109,8 @@ The implementation proves:
 - shared Windows reparse-point rejection for root, state, workspace, and seal
   mutation paths, plus native Windows directory-junction and writable
   directory-flush regressions;
+- least-privilege read-only state and version verification that does not request
+  Windows directory write authority;
 - an exclusive cross-platform transaction file-lock contention test;
 - fresh-process recovery at journal, object-write, Folderbase-Version,
   Head-replace, and cleanup checkpoints;
@@ -104,13 +124,13 @@ Focused gates:
 
 ```text
 cargo test -p folderbase-core --test folderbase_seal
-6 passed; 0 failed
+6 passed; 0 failed on macOS; 7 tests are selected on Windows
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
 13 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
-2 passed; 0 failed on macOS
+3 passed; 0 failed on macOS
 
 cargo test -p folderbase-core --lib local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 1 passed; 0 failed
@@ -122,9 +142,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 passed
 ```
 
-The Windows target has three state tests: bounded source streaming, junction
-refusal, and writable-capability publication/flush. Their runtime result is
-owned by the checked-in `windows-latest` CI job.
+The Windows target has four state tests: read-only inspection, bounded source
+streaming, junction refusal, and writable-capability publication/flush. Its
+read-only version integration regression is also selected there. Their runtime
+result is owned by the checked-in `windows-latest` CI job.
 
 Full local workspace gate:
 
