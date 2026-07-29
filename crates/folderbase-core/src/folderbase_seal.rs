@@ -2457,7 +2457,6 @@ mod tests {
                     let captured_identity = CaptureMetadataFingerprint::from_std_file(&captured)
                         .expect("captured fingerprint")
                         .physical_identity;
-                    drop(captured);
                     fs::remove_file(&active_path).expect("remove captured file");
                     fs::write(&active_path, b"same path, replacement identity")
                         .expect("replace captured file");
@@ -2467,6 +2466,7 @@ mod tests {
                             .expect("replacement fingerprint")
                             .physical_identity;
                     replacement_identities = Some((captured_identity, replacement_identity));
+                    drop(captured);
                     panic!("stop before identity projection");
                 }
             })
