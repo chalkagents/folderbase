@@ -273,7 +273,14 @@ impl FolderbaseVersionStore {
 
         let prior = load_prior_head(self, &local, &state, plan.current_local_head())?;
         if active.is_none()
-            && live_state_matches_prior(self, &plan, &local, &state, prior.as_ref())?
+            && live_state_matches_prior(
+                self,
+                &plan,
+                &local,
+                &state,
+                prior.as_ref(),
+                &mut checkpoint,
+            )?
         {
             let head = plan
                 .current_local_head()
@@ -741,6 +748,7 @@ fn live_state_matches_prior(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     prior: Option<&FolderbaseVersion>,
+    checkpoint: &mut impl FnMut(&CaptureCheckpoint),
 ) -> Result<bool, FolderbaseCaptureError> {
     let Some(prior) = prior else {
         return Ok(false);
@@ -772,7 +780,11 @@ fn live_state_matches_prior(
                     &store.root_attestation.root,
                     entry,
                     None::<(&LocalVersionStore, &FolderbaseState)>,
-                    || {},
+                    || {
+                        checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
+                            entry.path().to_owned(),
+                        ));
+                    },
                 )?;
                 if binding.content_sha256() != Some(content.digest.as_str())
                     || binding.bytes() != Some(content.bytes)
@@ -1208,7 +1220,12 @@ fn hash_regular_entry(
                 entry.bytes().expect("planned regular length"),
             )
             .map_err(|source| bounded_source_error(source, relative))?,
-        None => hash_reader(&mut file, &display)?,
+        None => hash_reader(
+            &mut file,
+            &display,
+            entry.bytes().expect("planned regular length"),
+        )
+        .map_err(|source| bounded_source_error(source, relative))?,
     };
     let after = fingerprint_std_file(&file, &display)?;
     let reopened = open_regular_beneath(root, relative)?;
@@ -1398,27 +1415,32 @@ fn exclusion_reason(reason: CaptureExclusionReason) -> ExclusionReason {
 fn hash_reader(
     mut reader: impl Read,
     path: &Path,
-) -> Result<ContentDigest, FolderbaseCaptureError> {
+    maximum_bytes: u64,
+) -> Result<ContentDigest, FolderbaseError> {
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; IO_BUFFER_BYTES];
+    let mut bounded = reader.by_ref().take(maximum_bytes.saturating_add(1));
     loop {
-        let read = reader
+        let read = bounded
             .read(&mut buffer)
-            .map_err(|source| FolderbaseCaptureError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            .map_err(|source| FolderbaseError::io(path, source))?;
         if read == 0 {
             break;
         }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| FolderbaseError::InvalidRecord {
+                path: path.to_path_buf(),
+                message: "content length exceeds supported range".to_owned(),
+            })?;
+        if bytes > maximum_bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: path.to_path_buf(),
+                message: "source grew beyond its approved byte length".to_owned(),
+            });
+        }
         digest.update(&buffer[..read]);
-        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
-            FolderbaseCaptureError::InvalidCaptureTransaction(format!(
-                "content byte count overflowed at {}",
-                path.display()
-            ))
-        })?;
     }
     Ok(ContentDigest {
         algorithm: "sha256".to_owned(),
@@ -2707,14 +2729,19 @@ mod tests {
             })
             .expect_err("repeat capture must reject growth beyond the approved length");
 
-        assert!(grew_source, "repeat verification must expose its byte-read seam");
+        assert!(
+            grew_source,
+            "repeat verification must expose its byte-read seam"
+        );
         assert!(matches!(
             error,
             FolderbaseCaptureError::CaptureStateChanged(path)
                 if path == Path::new("active.bin")
         ));
         assert_eq!(
-            local_head(root.path()).expect("prior Local Head").version_id,
+            local_head(root.path())
+                .expect("prior Local Head")
+                .version_id,
             genesis.version_id()
         );
         assert!(
