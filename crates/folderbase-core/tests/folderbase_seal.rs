@@ -275,8 +275,7 @@ fn restore_tombstone_reinstates_exact_sealed_bytes_metadata_and_local_head() {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .expect("executable fidelity");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable fidelity");
     }
 
     let store = FolderbaseVersionStore::open(root.path()).expect("open");
@@ -331,7 +330,10 @@ fn restore_tombstone_reinstates_exact_sealed_bytes_metadata_and_local_head() {
         current_binding.object_version_id(),
         Some(prior_object_version_id.as_str())
     );
-    assert_eq!(current_binding.content_sha256(), Some(prior_sha256.as_str()));
+    assert_eq!(
+        current_binding.content_sha256(),
+        Some(prior_sha256.as_str())
+    );
     assert_eq!(current_binding.bytes(), Some(exact_bytes.len() as u64));
     assert_eq!(current_binding.executable(), prior_executable);
     assert!(

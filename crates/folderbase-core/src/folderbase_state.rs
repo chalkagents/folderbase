@@ -319,6 +319,157 @@ impl FolderbaseState {
         )
     }
 
+    /// Copy one verified immutable content blob into a private restore stage.
+    ///
+    /// The copy intentionally receives its own inode so applying executable
+    /// fidelity cannot mutate the content-addressed source blob.
+    pub(crate) fn stage_restore_blob(
+        &self,
+        source: &Path,
+        stage: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<()> {
+        let source = state_relative(source)?;
+        let stage = state_relative(stage)?;
+        self.require_mutable(&stage)?;
+        let (source_parent, source_name) = self.open_parent(&source)?;
+        let source_display = self.display_path(&source);
+        let mut read_options = CapOpenOptions::new();
+        read_options.read(true).follow(FollowSymlinks::No);
+        let mut source_file = source_parent
+            .open_with(&source_name, &read_options)
+            .map_err(|source| FolderbaseError::io(&source_display, source))?;
+        verify_open_regular_metadata(&source_file, bytes, &source_display)?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut write_options = CapOpenOptions::new();
+        write_options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            write_options.mode(if executable { 0o700 } else { 0o600 });
+        }
+        match stage_parent.open_with(&stage_name, &write_options) {
+            Ok(mut staged) => {
+                let copy_result = copy_exact_sha256(
+                    &mut source_file,
+                    &mut staged,
+                    bytes,
+                    digest,
+                    &source_display,
+                    &stage_display,
+                )
+                .and_then(|()| {
+                    staged
+                        .sync_all()
+                        .map_err(|source| FolderbaseError::io(&stage_display, source))
+                });
+                drop(staged);
+                if let Err(error) = copy_result {
+                    let _ = stage_parent.remove_file(&stage_name);
+                    return Err(error);
+                }
+                sync_directory(&stage_parent, &stage_display)?;
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(FolderbaseError::io(stage_display, source)),
+        }
+        verify_regular_file(
+            &stage_parent,
+            &stage_name,
+            digest,
+            bytes,
+            executable,
+            &stage_display,
+        )
+    }
+
+    /// Hard-link a retained private stage into an absent workspace path.
+    ///
+    /// An existing destination is accepted only when it is the exact same
+    /// filesystem object as the retained stage. This permits durable retry
+    /// without treating same-byte foreign content as transaction-owned.
+    pub(crate) fn publish_workspace_restore(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<bool> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        verify_regular_file(
+            &stage_parent,
+            &stage_name,
+            digest,
+            bytes,
+            executable,
+            &stage_display,
+        )?;
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let destination_display = self.display_root.join(&destination);
+        match stage_parent.hard_link(&stage_name, &destination_parent, &destination_name) {
+            Ok(()) => {
+                sync_directory(&destination_parent, &destination_display)?;
+                verify_regular_file(
+                    &destination_parent,
+                    &destination_name,
+                    digest,
+                    bytes,
+                    executable,
+                    &destination_display,
+                )?;
+                Ok(true)
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                let stage_identity =
+                    regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
+                let destination_identity = regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )
+                .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+                if stage_identity != destination_identity {
+                    return Err(FolderbaseError::WouldOverwrite(destination_display));
+                }
+                verify_regular_file(
+                    &destination_parent,
+                    &destination_name,
+                    digest,
+                    bytes,
+                    executable,
+                    &self.display_root.join(&destination),
+                )?;
+                Ok(false)
+            }
+            Err(source) => Err(FolderbaseError::io(destination_display, source)),
+        }
+    }
+
+    pub(crate) fn workspace_path_is_absent(&self, relative: &Path) -> Result<bool> {
+        let relative = safe_workspace_relative(relative)?;
+        let (parent, name) = self.open_workspace_parent(&relative)?;
+        match parent.symlink_metadata(&name) {
+            Ok(_) => Ok(false),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(source) => Err(FolderbaseError::io(
+                self.display_root.join(relative),
+                source,
+            )),
+        }
+    }
+
     #[cfg(test)]
     fn verify_sha256_blob_with_hook(
         &self,
@@ -453,6 +604,29 @@ impl FolderbaseState {
         Ok(directory)
     }
 
+    fn open_workspace_parent(&self, relative: &Path) -> Result<(Dir, OsString)> {
+        let name = relative
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(relative.to_path_buf()))?
+            .to_os_string();
+        let mut directory = self
+            .root
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(&self.display_root, source))?;
+        let mut display = self.display_root.clone();
+        if let Some(parent) = relative.parent() {
+            for component in parent.components() {
+                let Component::Normal(component) = component else {
+                    return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
+                };
+                display.push(component);
+                directory = open_directory_nofollow(&directory, component, &display, self.access)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+            }
+        }
+        Ok((directory, name))
+    }
+
     fn require_mutable(&self, relative: &Path) -> Result<()> {
         if self.access == StateAccess::Mutable {
             return Ok(());
@@ -484,6 +658,165 @@ fn state_relative(path: &Path) -> Result<PathBuf> {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }
     Ok(relative)
+}
+
+fn safe_workspace_relative(path: &Path) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() || path.is_absolute() || path.to_str().is_none() {
+        return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+    }
+    let mut safe = PathBuf::new();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+        };
+        if name
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(STATE_COMPONENT))
+        {
+            return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+        }
+        safe.push(name);
+    }
+    Ok(safe)
+}
+
+fn verify_open_regular_metadata(
+    file: &cap_std::fs::File,
+    bytes: u64,
+    display: &Path,
+) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != bytes {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "restore source metadata does not match".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn copy_exact_sha256(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    bytes: u64,
+    digest: &str,
+    source_display: &Path,
+    destination_display: &Path,
+) -> Result<()> {
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut bounded = reader.take(bytes.saturating_add(1));
+    loop {
+        let read = bounded
+            .read(&mut buffer)
+            .map_err(|source| FolderbaseError::io(source_display, source))?;
+        if read == 0 {
+            break;
+        }
+        observed =
+            observed
+                .checked_add(read as u64)
+                .ok_or_else(|| FolderbaseError::InvalidRecord {
+                    path: source_display.to_path_buf(),
+                    message: "restore source length exceeds supported range".to_owned(),
+                })?;
+        if observed > bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: source_display.to_path_buf(),
+                message: "restore source grew beyond its sealed byte length".to_owned(),
+            });
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|source| FolderbaseError::io(destination_display, source))?;
+        hasher.update(&buffer[..read]);
+    }
+    if observed != bytes || format!("{:x}", hasher.finalize()) != digest {
+        return Err(FolderbaseError::InvalidRecord {
+            path: source_display.to_path_buf(),
+            message: "restore source bytes do not match the sealed digest".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<Handle> {
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
+}
+
+fn verify_regular_file(
+    parent: &Dir,
+    name: &OsStr,
+    digest: &str,
+    bytes: u64,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    verify_open_regular_metadata(&file, bytes, display)?;
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt;
+        let observed = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(display, source))?
+            .permissions()
+            .mode()
+            & 0o111
+            != 0;
+        if observed != executable {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "restore executable fidelity does not match".to_owned(),
+            });
+        }
+    }
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut bounded = Read::by_ref(&mut file).take(bytes.saturating_add(1));
+    loop {
+        let read = bounded
+            .read(&mut buffer)
+            .map_err(|source| FolderbaseError::io(display, source))?;
+        if read == 0 {
+            break;
+        }
+        observed += read as u64;
+        if observed > bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "restore file grew beyond its sealed byte length".to_owned(),
+            });
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if observed != bytes || format!("{:x}", hasher.finalize()) != digest {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "restore file bytes do not match the sealed digest".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn private_directory_builder() -> cap_std::fs::DirBuilder {

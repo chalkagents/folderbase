@@ -5,7 +5,7 @@
 //! Local Head are derived, recoverable local state.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -33,7 +33,7 @@ use crate::{
     },
     local_versions::{
         ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
-        ObjectLifecycle, ObjectProvenance, VersionId,
+        ObjectLifecycle, ObjectProvenance, VersionId, safe_content_path,
     },
     root_attestation::metadata_is_link_or_reparse,
 };
@@ -42,6 +42,10 @@ const CAPTURE_TRANSACTION_FORMAT_V1: &str = "folderbase-capture-transaction-v1";
 const CAPTURE_TRANSACTIONS_DIRECTORY: &str = ".folderbase/transactions/folderbase-version-captures";
 const ACTIVE_CAPTURE_TRANSACTION_PATH: &str =
     ".folderbase/transactions/folderbase-version-captures/active.json";
+const RESTORE_TRANSACTION_FORMAT_V1: &str = "folderbase-tombstone-restore-v1";
+const RESTORE_TRANSACTIONS_DIRECTORY: &str = ".folderbase/transactions/folderbase-version-restores";
+const ACTIVE_RESTORE_TRANSACTION_PATH: &str =
+    ".folderbase/transactions/folderbase-version-restores/active.json";
 const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
 const CAPTURE_IDENTITIES_DIRECTORY: &str = ".folderbase/local/capture-identities";
 const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
@@ -54,6 +58,43 @@ pub struct SealedCapture {
     version_id: String,
     version_sha256: String,
     created: bool,
+}
+
+/// Result of restoring the exact bytes named by one current-Head Tombstone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredTombstone {
+    path: PathBuf,
+    object_id: String,
+    object_version_id: String,
+    version_id: String,
+    version_sha256: String,
+    created: bool,
+}
+
+impl RestoredTombstone {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn object_id(&self) -> &str {
+        &self.object_id
+    }
+
+    pub fn object_version_id(&self) -> &str {
+        &self.object_version_id
+    }
+
+    pub fn version_id(&self) -> &str {
+        &self.version_id
+    }
+
+    pub fn version_sha256(&self) -> &str {
+        &self.version_sha256
+    }
+
+    pub fn created(&self) -> bool {
+        self.created
+    }
 }
 
 impl SealedCapture {
@@ -133,6 +174,22 @@ struct CaptureTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RestoreTransaction {
+    format: String,
+    transaction_id: String,
+    folderbase_id: String,
+    root_instance_sha256: String,
+    expected_head: JournalHead,
+    target_version_id: String,
+    target_version_sha256: String,
+    created_at: String,
+    path: String,
+    tombstone: Tombstone,
+    binding: PathBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LocalHeadRecord {
     format: String,
     folderbase_id: String,
@@ -173,6 +230,81 @@ impl FolderbaseVersionStore {
         let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
         let state = FolderbaseState::open_existing_read_only(&self.root_attestation.root)?;
         read_and_verify_folderbase_version(self, &local, &state, version_id)
+    }
+
+    /// Restore the exact ordinary-file bytes named by a Tombstone in the
+    /// current verified Local Head.
+    ///
+    /// Restore is same-path and no-clobber. It creates one new full-state
+    /// Folderbase Version and advances Local Head only after the file and all
+    /// immutable references verify.
+    pub fn restore_tombstone(
+        &self,
+        portable_path: &str,
+    ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+        let path = safe_content_path(Path::new(portable_path))?;
+        let path_string = path
+            .to_str()
+            .expect("safe content paths are UTF-8")
+            .to_owned();
+        let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
+        let state = FolderbaseState::open_existing(&self.root_attestation.root)?;
+        let _lock = local.acquire_transaction_lock_in(&state)?;
+        state.ensure_private_dir(Path::new(RESTORE_TRANSACTIONS_DIRECTORY))?;
+        state.ensure_private_dir(Path::new(FOLDERBASE_VERSIONS_DIRECTORY))?;
+        ensure_no_active_capture(&state)?;
+
+        let active = read_active_restore_transaction(&state)?;
+        let (transaction, created) = match active {
+            Some(transaction) => {
+                validate_restore_transaction(self, &transaction)?;
+                if transaction.path != path_string {
+                    return Err(FolderbaseCaptureError::ConflictingTransaction(
+                        "a different Tombstone restore is pending",
+                    ));
+                }
+                (transaction, false)
+            }
+            None => {
+                if !state.workspace_path_is_absent(&path)? {
+                    return Err(FolderbaseCaptureError::RestoreTargetOccupied(path));
+                }
+                let head =
+                    read_head_record(&state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+                if head.folderbase_id != self.root_attestation.folderbase_id
+                    || head.root_instance_sha256 != self.root_attestation.root_instance_sha256
+                {
+                    return Err(FolderbaseCaptureError::InvalidLocalHead(
+                        "Local Head belongs to a different Folderbase Root".to_owned(),
+                    ));
+                }
+                let current =
+                    read_and_verify_folderbase_version(self, &local, &state, &head.version_id)?;
+                if current.canonical_digest()? != head.version_sha256 {
+                    return Err(FolderbaseCaptureError::InvalidLocalHead(
+                        "Local Head digest does not match its Folderbase Version".to_owned(),
+                    ));
+                }
+                let tombstone = current
+                    .tombstones()
+                    .iter()
+                    .find(|tombstone| tombstone.path() == path_string)
+                    .cloned()
+                    .ok_or_else(|| FolderbaseCaptureError::TombstoneNotFound(path.to_path_buf()))?;
+                if tombstone.deleted_kind() != DeletedKind::RegularFile {
+                    return Err(FolderbaseCaptureError::UnsupportedTombstoneKind(
+                        path.to_path_buf(),
+                    ));
+                }
+                let binding = find_restore_binding(self, &local, &state, &current, &tombstone)?;
+                let transaction =
+                    build_restore_transaction(self, &head, &current, tombstone, binding)?;
+                write_active_restore_transaction(&state, &transaction)?;
+                (transaction, true)
+            }
+        };
+
+        execute_restore_transaction(self, &local, &state, &transaction, created)
     }
 
     fn seal_capture_with_hook(
@@ -219,6 +351,8 @@ impl FolderbaseVersionStore {
             state.ensure_private_dir(Path::new(relative))?;
         }
         state.ensure_private_dir(Path::new(CAPTURE_TRANSACTIONS_DIRECTORY))?;
+        state.ensure_private_dir(Path::new(RESTORE_TRANSACTIONS_DIRECTORY))?;
+        ensure_no_active_restore(&state)?;
         state.ensure_private_dir(Path::new(FOLDERBASE_VERSIONS_DIRECTORY))?;
         state.ensure_private_dir(Path::new(CAPTURE_IDENTITIES_DIRECTORY))?;
 
@@ -380,6 +514,391 @@ impl FolderbaseVersionStore {
             version_sha256: built.version_sha256,
             created: true,
         })
+    }
+}
+
+fn build_restore_transaction(
+    store: &FolderbaseVersionStore,
+    head: &LocalHeadRecord,
+    current: &FolderbaseVersion,
+    tombstone: Tombstone,
+    binding: PathBinding,
+) -> Result<RestoreTransaction, FolderbaseCaptureError> {
+    let transaction_id = format!("fbrestore_{}", Uuid::now_v7());
+    let target_version_id = format!("fbversion_{}", Uuid::now_v7());
+    let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let target = restored_version(
+        store,
+        current,
+        &target_version_id,
+        &created_at,
+        &tombstone,
+        &binding,
+    )?;
+    let transaction = RestoreTransaction {
+        format: RESTORE_TRANSACTION_FORMAT_V1.to_owned(),
+        transaction_id,
+        folderbase_id: store.root_attestation.folderbase_id.clone(),
+        root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
+        expected_head: JournalHead::from(head),
+        target_version_id,
+        target_version_sha256: target.canonical_digest()?,
+        created_at,
+        path: tombstone.path().to_owned(),
+        tombstone,
+        binding,
+    };
+    validate_restore_transaction(store, &transaction)?;
+    // Bound all serialized intent before any journal or workspace mutation.
+    let _ = encode_restore_transaction(&transaction)?;
+    Ok(transaction)
+}
+
+fn restored_version(
+    store: &FolderbaseVersionStore,
+    current: &FolderbaseVersion,
+    target_version_id: &str,
+    created_at: &str,
+    tombstone: &Tombstone,
+    binding: &PathBinding,
+) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
+    if current.folderbase_id() != store.root_attestation.folderbase_id {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore parent belongs to a different Folderbase".to_owned(),
+        ));
+    }
+    let mut bindings = current.bindings().to_vec();
+    bindings.push(binding.clone());
+    bindings.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
+    let tombstones = current
+        .tombstones()
+        .iter()
+        .filter(|candidate| **candidate != *tombstone)
+        .cloned()
+        .collect();
+    let entries = FolderbaseVersionEntries::from_verified_producer(
+        bindings,
+        tombstones,
+        current.exclusions().to_vec(),
+    );
+    Ok(FolderbaseVersion::from_verified_parts(
+        FolderbaseVersionParts::portable_v1_from_verified_producer(
+            store.root_attestation.folderbase_id.clone(),
+            target_version_id.to_owned(),
+            vec![current.version_id().to_owned()],
+            created_at.to_owned(),
+            current.root_manifest().clone(),
+            entries,
+        ),
+    )?)
+}
+
+fn find_restore_binding(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    current: &FolderbaseVersion,
+    tombstone: &Tombstone,
+) -> Result<PathBinding, FolderbaseCaptureError> {
+    let expected_version = tombstone.last_object_version_id().ok_or_else(|| {
+        FolderbaseCaptureError::InvalidRestoreAncestry(
+            "regular-file Tombstone omitted its Object Version".to_owned(),
+        )
+    })?;
+    let mut queue = VecDeque::new();
+    for parent in current.parents() {
+        queue.push_back((
+            parent.clone(),
+            vec![current.version_id().to_owned()],
+            1_usize,
+        ));
+    }
+    let mut expanded = BTreeSet::new();
+    let mut visited = 0_usize;
+    let mut current_depth = 1_usize;
+    let mut candidates = Vec::new();
+    while let Some((version_id, lineage, depth)) = queue.pop_front() {
+        if depth != current_depth && !candidates.is_empty() {
+            return unique_restore_candidate(candidates, tombstone);
+        }
+        current_depth = depth;
+        if lineage.iter().any(|ancestor| ancestor == &version_id) {
+            return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                "cycle reaches {version_id}"
+            )));
+        }
+        if !expanded.insert(version_id.clone()) {
+            continue;
+        }
+        visited += 1;
+        if visited > crate::folderbase_version::MAX_VERSION_ENTRIES {
+            return Err(FolderbaseCaptureError::InvalidRestoreAncestry(
+                "ancestor search exceeded the bounded version limit".to_owned(),
+            ));
+        }
+        let version = read_and_verify_folderbase_version(store, local, state, &version_id)
+            .map_err(|error| {
+                FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                    "ancestor {version_id} could not be verified: {error}"
+                ))
+            })?;
+        if let Some(binding) = version.lookup_binding(tombstone.path()) {
+            if binding.kind() == PathBindingKind::RegularFile
+                && binding.object_id() == tombstone.object_id()
+                && binding.object_version_id() == Some(expected_version)
+            {
+                candidates.push(binding.clone());
+            }
+        }
+        let mut next_lineage = lineage;
+        next_lineage.push(version_id);
+        for parent in version.parents() {
+            if next_lineage.iter().any(|ancestor| ancestor == parent) {
+                return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                    "cycle reaches {parent}"
+                )));
+            }
+            queue.push_back((parent.clone(), next_lineage.clone(), depth + 1));
+        }
+    }
+    if !candidates.is_empty() {
+        return unique_restore_candidate(candidates, tombstone);
+    }
+    Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+        "no verified live ancestor preserves exact fidelity for {}",
+        tombstone.path()
+    )))
+}
+
+fn unique_restore_candidate(
+    candidates: Vec<PathBinding>,
+    tombstone: &Tombstone,
+) -> Result<PathBinding, FolderbaseCaptureError> {
+    let first = candidates
+        .first()
+        .expect("candidate set is known non-empty")
+        .clone();
+    if candidates.iter().any(|candidate| candidate != &first) {
+        return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+            "nearest ancestors disagree about fidelity for {}",
+            tombstone.path()
+        )));
+    }
+    Ok(first)
+}
+
+fn execute_restore_transaction(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    _new_intent: bool,
+) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+    validate_restore_transaction(store, transaction)?;
+    let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+    let current_summary = JournalHead::from(&current_head);
+    let target_summary = JournalHead {
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        transaction_sha256: restore_transaction_sha256(transaction)?,
+    };
+    let created = if current_summary == target_summary {
+        let installed = read_and_verify_folderbase_version(
+            store,
+            local,
+            state,
+            &transaction.target_version_id,
+        )?;
+        if installed.canonical_digest()? != transaction.target_version_sha256 {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "committed target digest changed".to_owned(),
+            ));
+        }
+        finish_restore_materialization(store, local, state, transaction)?;
+        false
+    } else if current_summary == transaction.expected_head {
+        let parent = read_and_verify_folderbase_version(
+            store,
+            local,
+            state,
+            &transaction.expected_head.version_id,
+        )?;
+        if parent.canonical_digest()? != transaction.expected_head.version_sha256 {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore parent digest changed".to_owned(),
+            ));
+        }
+        let target = restored_version(
+            store,
+            &parent,
+            &transaction.target_version_id,
+            &transaction.created_at,
+            &transaction.tombstone,
+            &transaction.binding,
+        )?;
+        if target.canonical_digest()? != transaction.target_version_sha256 {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore target no longer matches its durable journal".to_owned(),
+            ));
+        }
+        stage_and_publish_restore(state, transaction)?;
+        install_folderbase_version(state, &target, &transaction.target_version_sha256)?;
+        let installed = read_and_verify_folderbase_version(
+            store,
+            local,
+            state,
+            &transaction.target_version_id,
+        )?;
+        if installed.canonical_digest()? != transaction.target_version_sha256 {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "installed restore version failed verification".to_owned(),
+            ));
+        }
+        compare_and_swap_restore_head(
+            state,
+            &transaction.expected_head,
+            &LocalHeadRecord {
+                format: "folderbase-local-head-v1".to_owned(),
+                folderbase_id: transaction.folderbase_id.clone(),
+                root_instance_sha256: transaction.root_instance_sha256.clone(),
+                version_id: transaction.target_version_id.clone(),
+                version_sha256: transaction.target_version_sha256.clone(),
+                transaction_sha256: restore_transaction_sha256(transaction)?,
+            },
+        )?;
+        finish_restore_projection(store, local, state, transaction)?;
+        true
+    } else {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    };
+
+    remove_active_restore_transaction(state)?;
+    state.remove_durable(&restore_stage_path(transaction))?;
+    Ok(RestoredTombstone {
+        path: PathBuf::from(&transaction.path),
+        object_id: transaction.binding.object_id().to_owned(),
+        object_version_id: transaction
+            .binding
+            .object_version_id()
+            .expect("validated regular binding")
+            .to_owned(),
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        created,
+    })
+}
+
+fn finish_restore_materialization(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    stage_and_publish_restore(state, transaction)?;
+    finish_restore_projection(store, local, state, transaction)
+}
+
+fn stage_and_publish_restore(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let transaction_directory =
+        Path::new(RESTORE_TRANSACTIONS_DIRECTORY).join(&transaction.transaction_id);
+    state.ensure_private_dir(&transaction_directory)?;
+    let stage = restore_stage_path(transaction);
+    let digest = transaction
+        .binding
+        .content_sha256()
+        .expect("validated regular binding");
+    let bytes = transaction
+        .binding
+        .bytes()
+        .expect("validated regular binding");
+    let executable = transaction
+        .binding
+        .executable()
+        .expect("validated regular binding");
+    let source = Path::new(".folderbase/versions/blobs/sha256").join(digest);
+    state.stage_restore_blob(&source, &stage, digest, bytes, executable)?;
+    state
+        .publish_workspace_restore(
+            &stage,
+            Path::new(&transaction.path),
+            digest,
+            bytes,
+            executable,
+        )
+        .map(|_| ())
+        .map_err(|error| match error {
+            FolderbaseError::WouldOverwrite(path) => {
+                FolderbaseCaptureError::RestoreTargetOccupied(path)
+            }
+            error => FolderbaseCaptureError::LocalStore(error),
+        })
+}
+
+fn finish_restore_projection(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let file = open_regular_beneath(&store.root_attestation.root, Path::new(&transaction.path))?;
+    let observed =
+        fingerprint_std_file(&file, &store.root_attestation.root.join(&transaction.path))?;
+    let assignment = CaptureAssignment {
+        path: transaction.path.clone(),
+        kind: CaptureEntryKind::RegularFile,
+        object_id: transaction.binding.object_id().to_owned(),
+        candidate_object_version_id: transaction.binding.object_version_id().map(str::to_owned),
+        prior_object_version_id: transaction.binding.object_version_id().map(str::to_owned),
+        reused_object: true,
+        observed,
+    };
+    let version_id = VersionId::parse(
+        transaction
+            .binding
+            .object_version_id()
+            .expect("validated regular binding")
+            .to_owned(),
+    )?;
+    if can_project_legacy_object(&transaction.path) {
+        let projection = regular_projection(
+            local,
+            state,
+            &assignment,
+            &version_id,
+            Some(version_id.as_str()),
+            &transaction.created_at,
+        )?;
+        local.write_capture_object_projection_in(state, &projection)?;
+    }
+    let identity = CaptureIdentityRecord {
+        format: "folderbase-capture-identity-v1".to_owned(),
+        object_id: assignment.object_id,
+        kind: assignment.kind,
+        observed: assignment.observed,
+    };
+    state.replace(
+        &capture_identity_relative_path(transaction.binding.object_id()),
+        &json_bytes(&identity)?,
+    )?;
+    Ok(())
+}
+
+fn restore_stage_path(transaction: &RestoreTransaction) -> PathBuf {
+    Path::new(RESTORE_TRANSACTIONS_DIRECTORY)
+        .join(&transaction.transaction_id)
+        .join("content")
+}
+
+impl From<&LocalHeadRecord> for JournalHead {
+    fn from(value: &LocalHeadRecord) -> Self {
+        Self {
+            version_id: value.version_id.clone(),
+            version_sha256: value.version_sha256.clone(),
+            transaction_sha256: value.transaction_sha256.clone(),
+        }
     }
 }
 
@@ -1915,6 +2434,183 @@ fn read_active_transaction(
                 "active journal is invalid JSON: {source}"
             ))
         })
+}
+
+fn ensure_no_active_capture(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
+    if state
+        .read_bounded(
+            Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+            MAX_CAPTURE_TRANSACTION_BYTES,
+        )?
+        .is_some()
+    {
+        return Err(FolderbaseCaptureError::ConflictingTransaction(
+            "a Folderbase Version capture is pending",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_no_active_restore(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
+    if state
+        .read_bounded(
+            Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+            MAX_CAPTURE_TRANSACTION_BYTES,
+        )?
+        .is_some()
+    {
+        return Err(FolderbaseCaptureError::ConflictingTransaction(
+            "a Tombstone restore is pending",
+        ));
+    }
+    Ok(())
+}
+
+fn read_active_restore_transaction(
+    state: &FolderbaseState,
+) -> Result<Option<RestoreTransaction>, FolderbaseCaptureError> {
+    let Some(encoded) = state.read_bounded(
+        Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+        MAX_CAPTURE_TRANSACTION_BYTES,
+    )?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&encoded)
+        .map(Some)
+        .map_err(|source| {
+            FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+                "active restore journal is invalid JSON: {source}"
+            ))
+        })
+}
+
+fn write_active_restore_transaction(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let encoded = encode_restore_transaction(transaction)?;
+    state
+        .publish_new(Path::new(ACTIVE_RESTORE_TRANSACTION_PATH), &encoded)
+        .map_err(Into::into)
+}
+
+fn encode_restore_transaction(
+    transaction: &RestoreTransaction,
+) -> Result<Vec<u8>, FolderbaseCaptureError> {
+    let mut encoded = serde_json::to_vec_pretty(transaction).map_err(|source| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+            "restore journal encoding failed: {source}"
+        ))
+    })?;
+    encoded.push(b'\n');
+    if encoded.len() as u64 > MAX_CAPTURE_TRANSACTION_BYTES {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore journal exceeds its bounded record limit".to_owned(),
+        ));
+    }
+    Ok(encoded)
+}
+
+fn restore_transaction_sha256(
+    transaction: &RestoreTransaction,
+) -> Result<String, FolderbaseCaptureError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(encode_restore_transaction(transaction)?)
+    ))
+}
+
+fn remove_active_restore_transaction(
+    state: &FolderbaseState,
+) -> Result<(), FolderbaseCaptureError> {
+    state
+        .remove_durable(Path::new(ACTIVE_RESTORE_TRANSACTION_PATH))
+        .map_err(Into::into)
+}
+
+fn validate_restore_transaction(
+    store: &FolderbaseVersionStore,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let safe_path = safe_content_path(Path::new(&transaction.path)).map_err(|_| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore path is not an ordinary portable content path".to_owned(),
+        )
+    })?;
+    let valid_hex = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if transaction.format != RESTORE_TRANSACTION_FORMAT_V1
+        || transaction.folderbase_id != store.root_attestation.folderbase_id
+        || transaction.root_instance_sha256 != store.root_attestation.root_instance_sha256
+        || transaction.path != safe_path.to_string_lossy()
+        || !transaction.transaction_id.starts_with("fbrestore_")
+        || Uuid::parse_str(
+            transaction
+                .transaction_id
+                .strip_prefix("fbrestore_")
+                .unwrap_or_default(),
+        )
+        .is_err()
+        || !valid_hex(&transaction.expected_head.version_sha256)
+        || !valid_hex(&transaction.expected_head.transaction_sha256)
+        || !valid_hex(&transaction.target_version_sha256)
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore journal identity or digest fields are invalid".to_owned(),
+        ));
+    }
+    validate_capture_version_id(&transaction.expected_head.version_id)?;
+    validate_capture_version_id(&transaction.target_version_id)?;
+    if transaction.expected_head.version_id == transaction.target_version_id
+        || transaction.tombstone.path() != transaction.path
+        || transaction.binding.path() != transaction.path
+        || transaction.tombstone.deleted_kind() != DeletedKind::RegularFile
+        || transaction.binding.kind() != PathBindingKind::RegularFile
+        || transaction.tombstone.object_id() != transaction.binding.object_id()
+        || transaction.tombstone.last_object_version_id() != transaction.binding.object_version_id()
+        || transaction.binding.content_sha256().is_none()
+        || transaction.binding.bytes().is_none()
+        || transaction.binding.executable().is_none()
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore Tombstone and live binding do not describe one exact ordinary file".to_owned(),
+        ));
+    }
+    ObjectId::parse(transaction.binding.object_id().to_owned())?;
+    VersionId::parse(
+        transaction
+            .binding
+            .object_version_id()
+            .expect("validated regular binding")
+            .to_owned(),
+    )?;
+    Ok(())
+}
+
+fn compare_and_swap_restore_head(
+    state: &FolderbaseState,
+    expected: &JournalHead,
+    target: &LocalHeadRecord,
+) -> Result<(), FolderbaseCaptureError> {
+    let encoded = json_bytes(target)?;
+    state.verify_still_attached()?;
+    let current = read_head_record(state)?.ok_or(FolderbaseCaptureError::LocalHeadChanged)?;
+    if JournalHead::from(&current) != *expected {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    }
+    state.replace(Path::new(LOCAL_HEAD_PATH), &encoded)?;
+    state.verify_still_attached()?;
+    if read_head_record(state)?.as_ref() != Some(target) {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "Local Head replacement did not verify".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn write_active_transaction_with_limit(

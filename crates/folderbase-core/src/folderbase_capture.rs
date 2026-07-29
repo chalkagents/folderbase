@@ -411,6 +411,27 @@ pub enum FolderbaseCaptureError {
     #[error("durable capture transaction is invalid: {0}")]
     InvalidCaptureTransaction(String),
 
+    #[error("no Local Head exists to restore from")]
+    MissingLocalHead,
+
+    #[error("the current Local Head has no Tombstone at: {0}")]
+    TombstoneNotFound(PathBuf),
+
+    #[error("the current Tombstone kind is not supported by v1 restore at: {0}")]
+    UnsupportedTombstoneKind(PathBuf),
+
+    #[error("Tombstone restore ancestry is invalid: {0}")]
+    InvalidRestoreAncestry(String),
+
+    #[error("durable Tombstone restore transaction is invalid: {0}")]
+    InvalidRestoreTransaction(String),
+
+    #[error("Tombstone restore refuses to overwrite the occupied path: {0}")]
+    RestoreTargetOccupied(PathBuf),
+
+    #[error("another Folderbase transaction is active: {0}")]
+    ConflictingTransaction(&'static str),
+
     #[error(transparent)]
     LocalStore(#[from] FolderbaseError),
 
