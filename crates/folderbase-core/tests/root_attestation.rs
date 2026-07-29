@@ -4,6 +4,7 @@ use folderbase_core::{
     FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES, ROOT_INSTANCE_FORMAT_V1,
     RootAttestationError, attest_folderbase_root,
 };
+use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
@@ -25,6 +26,43 @@ fn write_root(root: &Path, manifest: &[u8]) {
     fs::create_dir_all(root.join(".folderbase")).expect("state directory");
     fs::write(root.join(".folderbase/manifest.json"), manifest).expect("manifest");
     fs::write(root.join("FOLDERBASE.md"), "# Folderbase\n").expect("entry");
+}
+
+fn expected_physical_v1_digest(root: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-physical-root-instance-v1\0");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::metadata(root).expect("root metadata");
+        digest.update(b"unix\0");
+        digest.update(metadata.dev().to_be_bytes());
+        digest.update(metadata.ino().to_be_bytes());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+
+        let root_file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(root)
+            .expect("open physical root");
+        let information = winapi_util::file::information(&root_file).expect("root information");
+        digest.update(b"windows\0");
+        digest.update((information.volume_serial_number() as u32).to_be_bytes());
+        digest.update(information.file_index().to_be_bytes());
+    }
+
+    format!("{:x}", digest.finalize())
 }
 
 #[test]
@@ -67,6 +105,45 @@ fn attests_exact_manifest_bytes_and_one_physical_root_instance() {
             .count(),
         1,
         "attestation must not write state"
+    );
+}
+
+#[test]
+fn physical_v1_matches_the_independent_platform_encoding() {
+    let root = root_with_manifest(MANIFEST);
+    let receipt = attest_folderbase_root(root.path()).expect("attested root");
+
+    assert_eq!(
+        receipt.root_instance_sha256,
+        expected_physical_v1_digest(root.path())
+    );
+}
+
+#[test]
+fn physical_v1_survives_rename_but_changes_for_same_path_replacement() {
+    let parent = tempdir().expect("parent");
+    let original = parent.path().join("workspace");
+    write_root(&original, MANIFEST);
+    let before_rename = attest_folderbase_root(&original).expect("original");
+
+    let renamed = parent.path().join("renamed-workspace");
+    fs::rename(&original, &renamed).expect("rename root");
+    let after_rename = attest_folderbase_root(&renamed).expect("renamed");
+    assert_eq!(
+        before_rename.root_instance_sha256,
+        after_rename.root_instance_sha256
+    );
+    assert_ne!(before_rename.root, after_rename.root);
+
+    let displaced = parent.path().join("displaced-workspace");
+    fs::rename(&renamed, &displaced).expect("displace original root");
+    write_root(&renamed, MANIFEST);
+    let replacement = attest_folderbase_root(&renamed).expect("same-path replacement");
+    assert_eq!(replacement.folderbase_id, after_rename.folderbase_id);
+    assert_eq!(replacement.manifest_sha256, after_rename.manifest_sha256);
+    assert_ne!(
+        replacement.root_instance_sha256,
+        after_rename.root_instance_sha256
     );
 }
 
@@ -203,6 +280,73 @@ fn rejects_a_symlink_root_and_linked_markers_by_name() {
         entry_link_root.path().join("FOLDERBASE.md"),
     )
     .expect("entry symlink");
+    assert!(matches!(
+        attest_folderbase_root(entry_link_root.path()),
+        Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::Entry
+        })
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_windows_symlink_and_reparse_markers_without_skipping() {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
+    let target = root_with_manifest(MANIFEST);
+    let links = tempdir().expect("link parent");
+    let root_link = links.path().join("root");
+    symlink_dir(target.path(), &root_link).expect("GitHub Windows runner can create dir symlink");
+    assert!(matches!(
+        attest_folderbase_root(&root_link),
+        Err(RootAttestationError::RootSymlink { root }) if root == root_link
+    ));
+
+    let state_link_root = tempdir().expect("state link root");
+    symlink_dir(
+        target.path().join(".folderbase"),
+        state_link_root.path().join(".folderbase"),
+    )
+    .expect("state directory symlink");
+    fs::write(state_link_root.path().join("FOLDERBASE.md"), b"# Entry\n").expect("entry");
+    assert!(matches!(
+        attest_folderbase_root(state_link_root.path()),
+        Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::StateDirectory
+        })
+    ));
+
+    let manifest_link_root = tempdir().expect("manifest link root");
+    fs::create_dir(manifest_link_root.path().join(".folderbase")).expect("state");
+    symlink_file(
+        target.path().join(".folderbase/manifest.json"),
+        manifest_link_root.path().join(".folderbase/manifest.json"),
+    )
+    .expect("manifest file symlink");
+    fs::write(
+        manifest_link_root.path().join("FOLDERBASE.md"),
+        b"# Entry\n",
+    )
+    .expect("entry");
+    assert!(matches!(
+        attest_folderbase_root(manifest_link_root.path()),
+        Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::Manifest
+        })
+    ));
+
+    let entry_link_root = tempdir().expect("entry link root");
+    fs::create_dir(entry_link_root.path().join(".folderbase")).expect("state");
+    fs::write(
+        entry_link_root.path().join(".folderbase/manifest.json"),
+        MANIFEST,
+    )
+    .expect("manifest");
+    symlink_file(
+        target.path().join("FOLDERBASE.md"),
+        entry_link_root.path().join("FOLDERBASE.md"),
+    )
+    .expect("entry file symlink");
     assert!(matches!(
         attest_folderbase_root(entry_link_root.path()),
         Err(RootAttestationError::MarkerSymlink {
