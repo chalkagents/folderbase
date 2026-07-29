@@ -465,8 +465,11 @@ fn open_named_file_identity(
 
 fn sync_directory(directory: &Dir) -> Result<(), TransferReceiverError> {
     directory
-        .try_clone()
-        .and_then(|clone| clone.into_std_file().sync_all())
+        .open_with(
+            ".",
+            OpenOptions::new().read(true).follow(FollowSymlinks::No),
+        )
+        .and_then(|file| file.into_std().sync_all())
         .map_err(TransferReceiverError::Io)
 }
 
