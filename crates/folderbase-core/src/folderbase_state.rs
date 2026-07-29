@@ -567,7 +567,7 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, io};
 
     use tempfile::tempdir;
 
@@ -607,6 +607,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn source_streaming_stops_at_one_byte_beyond_the_approved_length() {
+        struct CountingReader {
+            read: u64,
+        }
+
+        impl io::Read for CountingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                buffer.fill(b'x');
+                self.read += buffer.len() as u64;
+                Ok(buffer.len())
+            }
+        }
+
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/versions/blobs/sha256"))
+            .expect("blob store");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let mut reader = CountingReader { read: 0 };
+        let error = match state.publish_reader_sha256(
+                Path::new(".folderbase/versions/blobs/sha256"),
+                &mut reader,
+                Path::new("growing-source"),
+                1024,
+            ) {
+            Ok(_) => panic!("growth beyond the approved length must stop"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            FolderbaseError::InvalidRecord { message, .. }
+                if message.contains("grew beyond")
+        ));
+        assert_eq!(reader.read, 1025);
+        assert_eq!(
+            fs::read_dir(fixture.path().join(".folderbase/versions/blobs/sha256"))
+                .expect("blob directory")
+                .count(),
+            0,
+            "failed bounded streams leave no staging or published blob"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn mutating_state_open_rejects_a_directory_junction_root() {
@@ -637,5 +681,26 @@ mod tests {
             FolderbaseState::open_existing(&junction),
             Err(FolderbaseError::UnsafePath(path)) if path == junction
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_state_publication_flushes_writable_directory_capabilities() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        state
+            .ensure_private_dir(Path::new(".folderbase/local"))
+            .expect("directory creation and flush");
+        state
+            .publish_new(Path::new(".folderbase/local/proof"), b"durable")
+            .expect("publication and directory flush");
+        state
+            .replace(Path::new(".folderbase/local/proof"), b"replaced")
+            .expect("replacement and directory flush");
+        assert_eq!(
+            fs::read(fixture.path().join(".folderbase/local/proof")).expect("proof"),
+            b"replaced"
+        );
     }
 }

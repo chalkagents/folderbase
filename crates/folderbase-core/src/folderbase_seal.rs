@@ -2439,4 +2439,33 @@ mod tests {
             "writer and restart reader intentionally share one declared bound"
         );
     }
+
+    #[test]
+    fn future_version_envelope_is_bounded_before_journal_or_immutable_writes() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let error = store
+            .seal_capture_with_hook_and_limits(
+                plan,
+                |_| {},
+                MAX_CAPTURE_TRANSACTION_BYTES,
+                1,
+            )
+            .expect_err("future version envelope must be preflighted");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(message)
+                if message.contains("Folderbase Version envelope")
+        ));
+        assert!(active_transaction(root.path()).is_none());
+        assert!(local_head(root.path()).is_none());
+        assert_eq!(
+            fs::read_dir(root.path().join(".folderbase/versions/blobs/sha256"))
+                .expect("blob directory")
+                .count(),
+            0,
+            "preflight refusal occurs before immutable content writes"
+        );
+    }
 }
