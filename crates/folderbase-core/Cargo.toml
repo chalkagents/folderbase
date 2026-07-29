@@ -17,6 +17,7 @@ exclude = [
   "tests/migration.rs",
   "tests/template_conformance.rs",
   "tests/templates.rs",
+  "tests/transfer_manifest_conformance.rs",
 ]
 
 [dependencies]

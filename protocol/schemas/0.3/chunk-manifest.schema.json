@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.3/chunk-manifest.schema.json",
+  "title": "Folderbase Chunk Manifest v1",
+  "description": "Canonical, provider-neutral transfer plan for one immutable object.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "algorithm",
+    "profile",
+    "minimum_chunk_bytes",
+    "average_chunk_bytes",
+    "maximum_chunk_bytes",
+    "object_sha256",
+    "object_bytes",
+    "chunks"
+  ],
+  "properties": {
+    "format": {
+      "const": "folderbase-chunk-manifest-v1"
+    },
+    "algorithm": {
+      "const": "folderbase-cdc-v1+sha256"
+    },
+    "profile": {
+      "enum": [
+        "standard-v1",
+        "large-v1"
+      ]
+    },
+    "minimum_chunk_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "average_chunk_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "maximum_chunk_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "object_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "object_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1099511627776
+    },
+    "chunks": {
+      "type": "array",
+      "maxItems": 262144,
+      "items": {
+        "$ref": "#/$defs/chunk"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "profile": {
+              "const": "standard-v1"
+            },
+            "minimum_chunk_bytes": {
+              "const": 262144
+            },
+            "average_chunk_bytes": {
+              "const": 1048576
+            },
+            "maximum_chunk_bytes": {
+              "const": 4194304
+            },
+            "chunks": {
+              "items": {
+                "properties": {
+                  "bytes": {
+                    "maximum": 4194304
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "profile": {
+              "const": "large-v1"
+            },
+            "minimum_chunk_bytes": {
+              "const": 4194304
+            },
+            "average_chunk_bytes": {
+              "const": 16777216
+            },
+            "maximum_chunk_bytes": {
+              "const": 67108864
+            },
+            "chunks": {
+              "items": {
+                "properties": {
+                  "bytes": {
+                    "maximum": 67108864
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "object_bytes": {
+            "const": 0
+          }
+        },
+        "required": [
+          "object_bytes"
+        ]
+      },
+      "then": {
+        "properties": {
+          "object_sha256": {
+            "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "chunks": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "chunks": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "chunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "offset",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

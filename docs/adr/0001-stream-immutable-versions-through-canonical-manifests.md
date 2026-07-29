@@ -108,7 +108,7 @@ decision; this Rust API does not silently redefine its current JSON CLI seam.
 
 ## Canonical Chunk Manifest v1
 
-The next Core release will define
+Core 0.3.0 will define
 `folderbase-chunk-manifest-v1` as a versioned public artifact with these
 semantic fields:
 
@@ -126,10 +126,10 @@ profiles:
 
 The profile identifier and exact parameters are part of the manifest rather
 than ambient client configuration, so a different valid configuration cannot
-masquerade as the same transfer plan. The managed first-product 1 TiB object
-limit uses `large-v1`, whose 4 MiB minimum remains within the 262,144-descriptor
-cap even under worst-case boundary selection. Custom configurations are not
-accepted as hosted v1 profiles.
+masquerade as the same transfer plan. Manifest v1 caps one object at 1 TiB and
+uses `large-v1` at that scale. Its 4 MiB minimum remains within the
+262,144-descriptor cap even under worst-case boundary selection. Custom
+configurations are not accepted as hosted v1 profiles.
 
 `ChunkManifest::decode_bounded()` rejects an encoded manifest larger than
 64 MiB before deserialization. String lengths are schema-bounded before they
@@ -140,6 +140,7 @@ become persistent state. `ChunkManifest::validate()` will reject:
 - invalid chunking parameters;
 - anything other than lowercase 64-character SHA-256 values;
 - more than 262,144 chunk descriptors;
+- a whole-object length or descriptor offset greater than 1 TiB;
 - nonsequential indices, gaps, overlaps, zero-length chunks, arithmetic
   overflow, or a descriptor larger than the declared maximum;
 - a nonfinal chunk smaller than the declared minimum;
@@ -152,6 +153,11 @@ memory and retry granularity while allowing the default profile to handle the
 multi-gigabyte objects required by the first product. Callers also bound each
 request's chunk-index batch; a manifest never implies allocating one operation
 per descriptor at once.
+
+Whole-object lengths and descriptor offsets are JSON integers no greater than
+1 TiB. This keeps their exact identity inside the lossless integer range of
+JavaScript and TypeScript clients; implementations must not round JSON numbers
+before producing the canonical digest.
 
 `ChunkManifest::canonical_digest()` will compute SHA-256 over a
 domain-separated binary encoding. It begins with the exact ASCII bytes
@@ -167,7 +173,7 @@ big-endian integer. Each descriptor encodes index as four bytes, offset and
 length as eight bytes each, and digest as its decoded 32 bytes. No padding,
 terminator, JSON representation, or unknown field enters the digest. The
 protocol repository will publish positive and negative conformance vectors
-with the JSON Schema before this decision is accepted or Core 0.2.0 is
+with the JSON Schema before this decision is accepted or Core 0.3.0 is
 released.
 
 Manifest v1 rejects unknown JSON fields (`additionalProperties: false`) instead
@@ -200,13 +206,17 @@ installed chunk when reopening after a process or device restart. Transfer
 checkpoints and temporary chunks are local runtime state, not canonical
 Folderbase history and not authorization.
 
-Core 0.2.0 will add the versioned manifest schema and conformance vectors.
-Core 0.1.0 exposed only a Rust convenience API; no released CLI, App, Cloud, or
-documented user workflow created durable transfer checkpoints. Those
-noncanonical runtime checkpoints are therefore replanned from their immutable
-local version instead of receiving a permanent compatibility decoder.
-Core 0.2.0 fails closed with an explicit unsupported-checkpoint error when it
-encounters the ambiguous v0.1 shape and never emits it.
+Core 0.3.0 will add the versioned manifest schema and conformance vectors.
+Core 0.1.0 through 0.2.1 exposed only the
+`chunk_transfer::ChunkManifest` Rust convenience shape; no released CLI, App,
+Cloud, or documented user workflow created durable transfer checkpoints. That
+legacy type is deprecated as a production transfer contract but retains its
+existing small-buffer behavior while callers migrate. It is not
+`transfer_manifest::ChunkManifest`, and neither decoder accepts the other
+shape. Noncanonical runtime checkpoints are replanned from their immutable
+local version instead of receiving a permanent compatibility decoder. Core
+0.3.0 fails closed with an explicit unsupported-checkpoint error when it
+encounters the ambiguous pre-v1 shape and never emits it.
 
 Future chunk algorithms or manifest encodings receive new identifiers and
 conformance vectors. Existing identifiers never change meaning. A receiver may

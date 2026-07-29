@@ -1,0 +1,18 @@
+{
+  "format": "folderbase-chunk-manifest-v1",
+  "algorithm": "folderbase-cdc-v1+sha256",
+  "profile": "large-v1",
+  "minimum_chunk_bytes": 4194304,
+  "average_chunk_bytes": 16777216,
+  "maximum_chunk_bytes": 67108864,
+  "object_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "object_bytes": 1099511627777,
+  "chunks": [
+    {
+      "index": 0,
+      "offset": 0,
+      "bytes": 1,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
