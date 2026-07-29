@@ -65,6 +65,30 @@ through the read-only mode, and uses only `GENERIC_READ` for Windows
 directory handles that share reads but deny write access while verifying a
 complete sealed Folderbase Version.
 
+The independent threat review preserved two final bounded-read RED/GREEN pairs:
+
+```text
+3a13020ef36953244fa5215c311715fa25e06d01
+test(core): expose unbounded repeat capture reads
+
+d520356d63a80e2b0d9bea395b7d2236f98b6cfd
+fix(core): bound repeat capture verification
+
+1b6f49220ffe53694c87a5d98f255a0d81f81442
+test(core): expose unbounded blob verification
+
+da219cc09105b3468ffac3f2d1ac56063182719d
+fix(core): bound immutable blob verification
+```
+
+The first RED proved that prior-Head/no-op verification did not expose its
+regular-file byte-read seam. The GREEN path now applies the approved length plus
+one limit before deciding that live state matches Local Head. The second RED
+required a deterministic growth seam after immutable-blob metadata inspection.
+The GREEN verifier now reads at most the referenced bytes plus one and rejects
+growth immediately, including during read-only `read_version` reference
+verification.
+
 ## Green behavior
 
 The implementation proves:
@@ -80,9 +104,11 @@ The implementation proves:
   streaming JSON encoding under the same declared writer/restart byte bound;
 - preflight encoding of the complete future Folderbase Version before the
   journal or any immutable object is published;
-- content reads stop after one byte beyond the exact planned length, remove
-  staging, and report the concurrent source change without consuming a growing
-  file to EOF;
+- new-capture and prior-Head/no-op content reads stop after one byte beyond the
+  exact planned length, remove staging where applicable, and report the
+  concurrent source change without consuming a growing file to EOF;
+- immutable-blob verification, including read-only Folderbase Version
+  inspection, stops after one byte beyond the referenced length;
 - Local Head anchoring of the complete capture-journal digest, with
   post-Head journal-observation tamper refusal;
 - exact committed parent and timestamp validation before recovery may project
@@ -127,10 +153,10 @@ cargo test -p folderbase-core --test folderbase_seal
 6 passed; 0 failed on macOS; 7 tests are selected on Windows
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
-13 passed; 0 failed
+14 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
-3 passed; 0 failed on macOS
+4 passed; 0 failed on macOS
 
 cargo test -p folderbase-core --lib local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 1 passed; 0 failed
@@ -142,10 +168,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 passed
 ```
 
-The Windows target has four state tests: read-only inspection, bounded source
-streaming, junction refusal, and writable-capability publication/flush. Its
-read-only version integration regression is also selected there. Their runtime
-result is owned by the checked-in `windows-latest` CI job.
+The Windows target has five state tests: read-only inspection, bounded source
+streaming, bounded immutable-blob verification, junction refusal, and
+writable-capability publication/flush. Its read-only version integration
+regression is also selected there. Their runtime result is owned by the
+checked-in `windows-latest` CI job.
 
 Full local workspace gate:
 
