@@ -111,6 +111,32 @@ fn canonical_manifest_verifies_an_exact_streamed_object() {
 }
 
 #[test]
+fn canonical_empty_object_returns_an_exact_verification_receipt() {
+    let manifest = ChunkManifest {
+        format: MANIFEST_FORMAT_V1.to_owned(),
+        algorithm: CHUNKING_ALGORITHM_V1.to_owned(),
+        profile: STANDARD_PROFILE_V1.to_owned(),
+        minimum_chunk_bytes: 256 * 1024,
+        average_chunk_bytes: 1024 * 1024,
+        maximum_chunk_bytes: 4 * 1024 * 1024,
+        object_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .to_owned(),
+        object_bytes: 0,
+        chunks: Vec::new(),
+    };
+
+    let verified = manifest.verify_object(Cursor::new([])).unwrap();
+
+    assert_eq!(verified.manifest_format, MANIFEST_FORMAT_V1);
+    assert_eq!(
+        verified.manifest_digest,
+        manifest.canonical_digest().unwrap()
+    );
+    assert_eq!(verified.object_sha256, manifest.object_sha256);
+    assert_eq!(verified.object_bytes, 0);
+}
+
+#[test]
 fn receiver_creates_a_capability_rooted_durable_checkpoint() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
@@ -313,9 +339,23 @@ fn reopen_binds_the_expected_digest_and_revalidates_installed_chunks() {
 fn checkpoint_names_are_single_capability_relative_components() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
-    for unsafe_name in ["", ".", "..", "nested/inbound", "/tmp/inbound"] {
+    let digest = single_chunk_manifest().canonical_digest().unwrap();
+    for unsafe_name in [
+        "",
+        ".",
+        "..",
+        "inbound/",
+        "inbound//",
+        "inbound/.",
+        "nested/inbound",
+        "/tmp/inbound",
+    ] {
         assert!(matches!(
             PersistentTransfer::create(&root, Path::new(unsafe_name), single_chunk_manifest()),
+            Err(TransferReceiverError::UnsafeCheckpointPath)
+        ));
+        assert!(matches!(
+            PersistentTransfer::open(&root, Path::new(unsafe_name), &digest),
             Err(TransferReceiverError::UnsafeCheckpointPath)
         ));
     }
@@ -446,8 +486,19 @@ fn reopen_fails_closed_on_manifest_tampering_and_legacy_checkpoints() {
         }"#,
     )
     .unwrap();
+    std::fs::write(
+        legacy.join("chunks/.550e8400-e29b-41d4-a716-446655440000.part"),
+        b"legacy incomplete chunk",
+    )
+    .unwrap();
     #[cfg(unix)]
-    set_mode(&legacy.join("manifest.json"), 0o600);
+    {
+        set_mode(&legacy.join("manifest.json"), 0o600);
+        set_mode(
+            &legacy.join("chunks/.550e8400-e29b-41d4-a716-446655440000.part"),
+            0o600,
+        );
+    }
     assert!(matches!(
         PersistentTransfer::open(&root, "legacy", &"0".repeat(64)),
         Err(TransferReceiverError::UnsupportedLegacyCheckpoint)
@@ -519,11 +570,47 @@ fn private_checkpoint_modes_are_set_and_revalidated() {
         0o600
     );
 
-    set_mode(&temporary.path().join("inbound/manifest.json"), 0o644);
-    assert!(matches!(
-        PersistentTransfer::open(&root, "inbound", &digest),
-        Err(TransferReceiverError::InsecureCheckpointPermissions)
+    let staging = temporary.path().join(format!(
+        "inbound/chunks/.chunk-{}.part",
+        uuid::Uuid::now_v7()
     ));
+    std::fs::write(&staging, b"incomplete").unwrap();
+    set_mode(&staging, 0o600);
+
+    for (path, exact_mode, invalid_modes) in [
+        (temporary.path().join("inbound"), 0o700, [0o500, 0o750]),
+        (
+            temporary.path().join("inbound/chunks"),
+            0o700,
+            [0o500, 0o750],
+        ),
+        (
+            temporary.path().join("inbound/manifest.json"),
+            0o600,
+            [0o400, 0o640],
+        ),
+        (
+            temporary.path().join("inbound/chunks/0.chunk"),
+            0o600,
+            [0o400, 0o640],
+        ),
+        (staging, 0o600, [0o400, 0o640]),
+    ] {
+        for invalid_mode in invalid_modes {
+            set_mode(&path, invalid_mode);
+            assert!(
+                matches!(
+                    PersistentTransfer::open(&root, "inbound", &digest),
+                    Err(TransferReceiverError::InsecureCheckpointPermissions)
+                ),
+                "{} mode {invalid_mode:o} must be rejected",
+                path.display()
+            );
+            set_mode(&path, exact_mode);
+        }
+    }
+
+    drop(PersistentTransfer::open(&root, "inbound", &digest).unwrap());
 }
 
 #[test]

@@ -247,9 +247,9 @@ The receiver implementation fixes these additional v1 details:
 2. A checkpoint contains only `manifest.json` and `chunks/`. The canonical
    digest is recomputed from the validated manifest and compared with the
    caller's expected digest on reopen; no second digest file can drift from the
-   manifest. On Unix, directories are created owner-only and files owner
-   read/write only. Reopen fails closed if group or other permissions were
-   later added.
+   manifest. On Unix, directories are created and reopened with exact mode
+   `0700`, while manifest, chunk, and staging files require exact mode `0600`.
+   Reopen fails closed if any owner, group, or other permission bit differs.
 3. Chunk receipt reads and hashes the complete retry stream before returning
    either `Accepted` or `AlreadyPresent`. It writes through one private
    lowercase-hyphenated UUIDv7 staging file, synchronizes that file, installs

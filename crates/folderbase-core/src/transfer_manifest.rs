@@ -4,9 +4,12 @@
 //! legacy [`crate::chunk_transfer::ChunkManifest`] remains a distinct
 //! small-buffer checkpoint shape and is never decoded here.
 
-use std::io::Read;
+use std::{fmt, io::Read};
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{IgnoredAny, SeqAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 
 pub const MAX_ENCODED_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
@@ -58,6 +61,7 @@ pub struct ChunkManifest {
     pub object_sha256: String,
     #[serde(deserialize_with = "deserialize_object_size")]
     pub object_bytes: u64,
+    #[serde(deserialize_with = "deserialize_bounded_chunks")]
     pub chunks: Vec<ChunkDescriptor>,
 }
 
@@ -183,7 +187,23 @@ impl ChunkManifest {
                 maximum_bytes: MAX_ENCODED_MANIFEST_BYTES,
             });
         }
-        let manifest: Self = serde_json::from_slice(&encoded)?;
+        Self::decode_slice_bounded(&encoded)
+    }
+
+    pub(crate) fn decode_slice_bounded(encoded: &[u8]) -> Result<Self, ManifestError> {
+        if encoded.len() as u64 > MAX_ENCODED_MANIFEST_BYTES {
+            return Err(ManifestError::EncodedManifestTooLarge {
+                maximum_bytes: MAX_ENCODED_MANIFEST_BYTES,
+            });
+        }
+        let descriptor_count: DescriptorCountProbe = serde_json::from_slice(encoded)?;
+        if descriptor_count.chunks.exceeds_maximum {
+            return Err(ManifestViolation::TooManyDescriptors {
+                maximum: MAX_CHUNK_DESCRIPTORS,
+            }
+            .into());
+        }
+        let manifest: Self = serde_json::from_slice(encoded)?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -335,6 +355,84 @@ impl ChunkManifest {
             object_sha256: self.object_sha256.clone(),
             object_bytes: self.object_bytes,
         })
+    }
+}
+
+#[derive(Deserialize)]
+struct DescriptorCountProbe {
+    chunks: DescriptorCount,
+}
+
+struct DescriptorCount {
+    exceeds_maximum: bool,
+}
+
+impl<'de> Deserialize<'de> for DescriptorCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(DescriptorCountVisitor)
+    }
+}
+
+struct DescriptorCountVisitor;
+
+impl<'de> Visitor<'de> for DescriptorCountVisitor {
+    type Value = DescriptorCount;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an array of chunk descriptors")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut count = 0_usize;
+        while sequence.next_element::<IgnoredAny>()?.is_some() {
+            count = count.saturating_add(1);
+        }
+        Ok(DescriptorCount {
+            exceeds_maximum: count > MAX_CHUNK_DESCRIPTORS,
+        })
+    }
+}
+
+fn deserialize_bounded_chunks<'de, D>(deserializer: D) -> Result<Vec<ChunkDescriptor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_seq(BoundedChunkDescriptorsVisitor)
+}
+
+struct BoundedChunkDescriptorsVisitor;
+
+impl<'de> Visitor<'de> for BoundedChunkDescriptorsVisitor {
+    type Value = Vec<ChunkDescriptor>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a bounded array of chunk descriptors")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let initial_capacity = sequence.size_hint().unwrap_or(0).min(MAX_CHUNK_DESCRIPTORS);
+        let mut chunks = Vec::with_capacity(initial_capacity);
+        while chunks.len() < MAX_CHUNK_DESCRIPTORS {
+            match sequence.next_element()? {
+                Some(descriptor) => chunks.push(descriptor),
+                None => return Ok(chunks),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom(format!(
+                "chunk manifest has more than {MAX_CHUNK_DESCRIPTORS} descriptors"
+            )));
+        }
+        Ok(chunks)
     }
 }
 

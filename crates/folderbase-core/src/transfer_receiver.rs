@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use uuid::{Uuid, Version};
 
 use crate::transfer_manifest::{
-    ChunkDescriptor, ChunkManifest, MAX_ENCODED_MANIFEST_BYTES, ManifestViolation,
+    ChunkDescriptor, ChunkManifest, MAX_ENCODED_MANIFEST_BYTES, ManifestError, ManifestViolation,
     TRANSFER_IO_BUFFER_BYTES, is_sha256,
 };
 
@@ -153,17 +153,22 @@ impl PersistentTransfer {
                 TransferReceiverError::Io(source)
             }
         })?;
-        validate_checkpoint_entries(&directory)?;
+        validate_checkpoint_top_level(&directory)?;
 
         let encoded = read_file_bounded(&directory, MANIFEST_FILE, MAX_ENCODED_MANIFEST_BYTES)?;
-        let manifest: ChunkManifest = match serde_json::from_slice(&encoded) {
+        let manifest = match ChunkManifest::decode_slice_bounded(&encoded) {
             Ok(manifest) => manifest,
-            Err(_) if is_legacy_manifest(&encoded) => {
+            Err(ManifestError::InvalidJson(_)) if is_legacy_manifest(&encoded) => {
                 return Err(TransferReceiverError::UnsupportedLegacyCheckpoint);
             }
-            Err(_) => return Err(TransferReceiverError::InvalidCheckpointManifest),
+            Err(ManifestError::InvalidJson(_)) => {
+                return Err(TransferReceiverError::InvalidCheckpointManifest);
+            }
+            Err(ManifestError::InvalidManifest(violation)) => return Err(violation.into()),
+            Err(ManifestError::EncodedManifestTooLarge { maximum_bytes }) => {
+                return Err(TransferReceiverError::EncodedManifestTooLarge { maximum_bytes });
+            }
         };
-        manifest.validate()?;
         let actual = manifest.canonical_digest()?;
         if actual != expected_manifest_digest {
             return Err(TransferReceiverError::ManifestDigestMismatch {
@@ -306,7 +311,7 @@ fn open_parent_nofollow(
     let Some(Component::Normal(name)) = components.next() else {
         return Err(TransferReceiverError::UnsafeCheckpointPath);
     };
-    if components.next().is_some() {
+    if components.next().is_some() || relative.as_os_str() != name {
         return Err(TransferReceiverError::UnsafeCheckpointPath);
     }
     Ok((
@@ -438,7 +443,7 @@ fn chunk_file_name(index: u32) -> String {
     format!("{index}.chunk")
 }
 
-fn validate_checkpoint_entries(directory: &Dir) -> Result<(), TransferReceiverError> {
+fn validate_checkpoint_top_level(directory: &Dir) -> Result<(), TransferReceiverError> {
     validate_private_directory(directory)?;
     let mut has_manifest = false;
     let mut has_chunks = false;
@@ -458,28 +463,7 @@ fn validate_checkpoint_entries(directory: &Dir) -> Result<(), TransferReceiverEr
         .open_dir_nofollow(CHUNKS_DIRECTORY)
         .map_err(TransferReceiverError::Io)?;
     validate_private_directory(&chunks)?;
-    for entry in chunks.entries().map_err(TransferReceiverError::Io)? {
-        let entry = entry.map_err(TransferReceiverError::Io)?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| TransferReceiverError::UnrecognizedCheckpointEntry)?;
-        if !is_installed_chunk_name(&name) && !is_staging_name(&name) {
-            return Err(TransferReceiverError::UnrecognizedCheckpointEntry);
-        }
-        let metadata = chunks
-            .symlink_metadata(&name)
-            .map_err(TransferReceiverError::Io)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(TransferReceiverError::UnrecognizedCheckpointEntry);
-        }
-        validate_private_regular_file(&chunks, &name)?;
-    }
     Ok(())
-}
-
-fn is_installed_chunk_name(name: &str) -> bool {
-    parse_installed_chunk_index(name).is_some()
 }
 
 fn parse_installed_chunk_index(name: &str) -> Option<u32> {
@@ -521,12 +505,20 @@ fn validate_chunk_entries_for_manifest(
     chunks: &Dir,
     manifest: &ChunkManifest,
 ) -> Result<(), TransferReceiverError> {
+    validate_private_directory(chunks)?;
     for entry in chunks.entries().map_err(TransferReceiverError::Io)? {
         let entry = entry.map_err(TransferReceiverError::Io)?;
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| TransferReceiverError::UnrecognizedCheckpointEntry)?;
+        let metadata = chunks
+            .symlink_metadata(&name)
+            .map_err(TransferReceiverError::Io)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(TransferReceiverError::UnrecognizedCheckpointEntry);
+        }
+        validate_private_regular_file(chunks, &name)?;
         if is_staging_name(&name) {
             continue;
         }
@@ -550,8 +542,8 @@ fn validate_private_directory(directory: &Dir) -> Result<(), TransferReceiverErr
         .dir_metadata()
         .map_err(TransferReceiverError::Io)?
         .mode()
-        & 0o077
-        != 0
+        & 0o777
+        != 0o700
     {
         return Err(TransferReceiverError::InsecureCheckpointPermissions);
     }
@@ -572,8 +564,8 @@ fn validate_private_regular_file(
         .symlink_metadata(name)
         .map_err(TransferReceiverError::Io)?
         .mode()
-        & 0o077
-        != 0
+        & 0o777
+        != 0o600
     {
         return Err(TransferReceiverError::InsecureCheckpointPermissions);
     }
