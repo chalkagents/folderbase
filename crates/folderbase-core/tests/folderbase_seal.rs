@@ -266,33 +266,49 @@ fn deletion_seals_a_durable_tombstone_and_advances_local_head() {
 }
 
 #[test]
-fn same_byte_same_path_recreation_never_inherits_the_prior_object_identity() {
+fn same_kind_atomic_replacement_preserves_logical_identity() {
     let root = folderbase();
     let path = root.path().join("proposal.docx");
-    fs::write(&path, b"opaque document").expect("document");
+    fs::write(&path, b"first opaque document").expect("document");
     let store = FolderbaseVersionStore::open(root.path()).expect("open");
     let genesis = store
         .seal_capture(store.plan_capture().expect("genesis plan"))
         .expect("genesis");
+    let prior = store
+        .read_version(genesis.version_id())
+        .expect("genesis version");
+    let prior_binding = prior
+        .lookup_binding("proposal.docx")
+        .expect("prior binding");
+    let prior_object_id = prior_binding.object_id().to_owned();
+    let prior_object_version_id = prior_binding
+        .object_version_id()
+        .expect("prior Object Version")
+        .to_owned();
+
     let replacement = root.path().join("replacement.docx");
-    fs::write(&replacement, b"opaque document").expect("same-byte replacement");
+    fs::write(&replacement, b"second opaque document").expect("replacement");
     fs::remove_file(&path).expect("remove original identity");
     fs::rename(&replacement, &path).expect("move replacement onto same path");
 
-    assert!(matches!(
-        store.seal_capture(store.plan_capture().expect("replacement plan")),
-        Err(FolderbaseCaptureError::TombstonesRequired(changed))
-            if changed == Path::new("proposal.docx")
-    ));
-    assert_eq!(
-        store
-            .plan_capture()
-            .expect("prior Head remains")
-            .current_local_head()
-            .expect("Head")
-            .version_id(),
-        genesis.version_id()
+    let replacement = store
+        .seal_capture(store.plan_capture().expect("replacement plan"))
+        .expect("same-kind atomic replacement");
+    assert!(replacement.created());
+    let current = store
+        .read_version(replacement.version_id())
+        .expect("replacement version");
+    let current_binding = current
+        .lookup_binding("proposal.docx")
+        .expect("current binding");
+    assert_eq!(current_binding.object_id(), prior_object_id);
+    assert_ne!(
+        current_binding
+            .object_version_id()
+            .expect("current Object Version"),
+        prior_object_version_id
     );
+    assert!(current.tombstones().is_empty());
 }
 
 #[test]

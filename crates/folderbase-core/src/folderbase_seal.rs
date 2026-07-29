@@ -2467,35 +2467,44 @@ mod tests {
     }
 
     #[test]
-    fn missing_identity_evidence_never_authorizes_prior_object_reuse() {
+    fn missing_physical_identity_rebuilds_evidence_without_splitting_logical_identity() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let genesis = store
             .seal_capture(store.plan_capture().expect("genesis plan"))
             .expect("genesis");
         let version = store.read_version(genesis.version_id()).expect("version");
-        let object_id = version
+        let prior = version
             .lookup_binding("active.bin")
-            .expect("active binding")
-            .object_id();
-        fs::remove_file(root.path().join(capture_identity_relative_path(object_id)))
+            .expect("active binding");
+        let object_id = prior.object_id().to_owned();
+        let object_version_id = prior.object_version_id().expect("Object Version").to_owned();
+        fs::remove_file(
+            root.path()
+                .join(capture_identity_relative_path(&object_id)),
+        )
             .expect("remove local identity evidence");
 
-        let error = store
+        let repaired = store
             .seal_capture(store.plan_capture().expect("next plan"))
-            .expect_err("missing identity must fail closed");
-        assert!(matches!(
-            error,
-            FolderbaseCaptureError::TombstonesRequired(path)
-                if path == Path::new("active.bin")
-        ));
+            .expect("same-path same-kind continuity");
+        assert!(repaired.created());
+        let current = store
+            .read_version(repaired.version_id())
+            .expect("repaired version");
+        let current = current.lookup_binding("active.bin").expect("active binding");
+        assert_eq!(current.object_id(), object_id);
         assert_eq!(
-            local_head(root.path()).expect("prior Head").version_id,
-            genesis.version_id()
+            current.object_version_id(),
+            Some(object_version_id.as_str())
         );
+        assert!(root
+            .path()
+            .join(capture_identity_relative_path(&object_id))
+            .is_file());
     }
 
-    fn assert_replacement_after_head_requires_a_tombstone(start: Option<&Barrier>) {
+    fn assert_same_kind_replacement_after_head_preserves_logical_identity(start: Option<&Barrier>) {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let plan = store.plan_capture().expect("plan");
@@ -2540,19 +2549,45 @@ mod tests {
         );
 
         let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
-        let error = reopened
+        let captured_head = reopened
+            .plan_capture()
+            .expect("replacement plan")
+            .current_local_head()
+            .expect("captured Head")
+            .version_id()
+            .to_owned();
+        let captured = reopened
+            .read_version(&captured_head)
+            .expect("captured version");
+        let captured_binding = captured
+            .lookup_binding("active.bin")
+            .expect("captured binding");
+        let captured_object_id = captured_binding.object_id().to_owned();
+        let captured_object_version_id = captured_binding
+            .object_version_id()
+            .expect("captured Object Version")
+            .to_owned();
+        let updated = reopened
             .seal_capture(reopened.plan_capture().expect("replacement plan"))
-            .expect_err("replacement needs a tombstone");
-        assert!(matches!(
-            error,
-            FolderbaseCaptureError::TombstonesRequired(path)
-                if path == Path::new("active.bin")
-        ));
+            .expect("same-kind replacement remains the same Knowledge Object");
+        let current = reopened
+            .read_version(updated.version_id())
+            .expect("replacement version");
+        let current_binding = current
+            .lookup_binding("active.bin")
+            .expect("replacement binding");
+        assert_eq!(current.parents(), &[captured_head]);
+        assert_eq!(current_binding.object_id(), captured_object_id);
+        assert_ne!(
+            current_binding.object_version_id(),
+            Some(captured_object_version_id.as_str())
+        );
+        assert!(current.tombstones().is_empty());
     }
 
     #[test]
-    fn replacement_after_head_and_before_identity_projection_requires_a_tombstone() {
-        assert_replacement_after_head_requires_a_tombstone(None);
+    fn replacement_after_head_and_before_identity_projection_preserves_logical_identity() {
+        assert_same_kind_replacement_after_head_preserves_logical_identity(None);
     }
 
     #[test]
@@ -2565,7 +2600,9 @@ mod tests {
                 .map(|_| {
                     let start = Arc::clone(&start);
                     scope.spawn(move || {
-                        assert_replacement_after_head_requires_a_tombstone(Some(&start));
+                        assert_same_kind_replacement_after_head_preserves_logical_identity(Some(
+                            &start,
+                        ));
                     })
                 })
                 .collect::<Vec<_>>();
