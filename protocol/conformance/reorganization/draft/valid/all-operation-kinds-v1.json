@@ -124,7 +124,7 @@
       "path": "AGENTS.md",
       "adapter": "codex",
       "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "content": "<!-- folderbase:managed:start -->\nRead FOLDERBASE.md.\n<!-- folderbase:managed:end -->\n"
+      "managed_block": "Read FOLDERBASE.md.\n"
     },
     {
       "kind": "move_file",

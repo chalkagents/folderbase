@@ -93,7 +93,7 @@ The first Reorganization Plan may use these generic operations:
 - create a directory when absent;
 - create a bounded UTF-8 file when absent;
 - replace a bounded UTF-8 file only with an exact expected-content precondition;
-- update an already-defined managed agent-adapter block;
+- update an already-defined managed agent-adapter block from a marker-free body;
 - move or rename an ordinary file;
 - move a tracked Knowledge Object while preserving its Object ID and version
   history;
@@ -102,6 +102,13 @@ The first Reorganization Plan may use these generic operations:
 
 Large and binary files remain opaque bytes. A plan may move them without loading
 them into model context or claiming format-aware understanding.
+
+The managed-agent-block operation is not a whole-file text replacement. Its
+`managed_block` value must omit all `<!-- folderbase:` marker syntax, including
+obsolete noncanonical wrappers. Application delegates to the existing adapter
+merge contract, which adds the canonical
+`<!-- folderbase:begin -->` and `<!-- folderbase:end -->` markers and preserves
+all user-owned text around the one managed block.
 
 The first contract does not delete filesystem content. A user or agent may use the
 operating system Trash separately, and a later deletion contract may add explicit

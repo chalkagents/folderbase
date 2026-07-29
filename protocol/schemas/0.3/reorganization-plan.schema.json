@@ -36,9 +36,7 @@
       "maximum": 9007199254740991
     },
     "folderbase_id": {
-      "type": "string",
-      "pattern": "^folderbase_[A-Za-z0-9_.-]+$",
-      "maxLength": 255
+      "$ref": "https://folderbase.ai/protocol/0.3/reorganization-draft.schema.json#/$defs/folderbaseId"
     },
     "path_profile": {
       "$ref": "https://folderbase.ai/protocol/0.3/reorganization-draft.schema.json#/$defs/pathProfile"

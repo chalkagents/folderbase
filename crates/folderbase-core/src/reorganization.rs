@@ -11,7 +11,8 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    FolderbaseError, ObjectId, Result, VersionId, traversal_policy::is_reserved_workspace_component,
+    FolderbaseError, ObjectId, Result, VersionId, migration::validate_managed_block_body,
+    traversal_policy::is_reserved_workspace_component,
 };
 
 pub const MAX_REORGANIZATION_RECORD_BYTES: usize = 8 * 1024 * 1024;
@@ -148,7 +149,7 @@ pub enum ReorganizationOperation {
         path: String,
         adapter: String,
         expected_sha256: String,
-        content: String,
+        managed_block: String,
     },
     MoveFile {
         source_path: String,
@@ -587,11 +588,11 @@ fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
             path,
             adapter,
             expected_sha256,
-            content,
+            managed_block,
         } => {
             validate_agent_adapter_path(path, adapter)?;
             validate_digest(expected_sha256)?;
-            validate_bounded_text(content)
+            validate_managed_block_body(managed_block, Path::new(path))
         }
         ReorganizationOperation::MoveFile {
             source_path,

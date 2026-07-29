@@ -134,6 +134,14 @@
         "CLAUDE.md"
       ]
     },
+    "managedBlockBody": {
+      "type": "string",
+      "maxLength": 2097152,
+      "pattern": "^[^\\u0000]*$",
+      "not": {
+        "pattern": "<!-- folderbase:"
+      }
+    },
     "pathProfile": {
       "enum": [
         "portable-case-sensitive-v1",
@@ -578,7 +586,7 @@
             "path",
             "adapter",
             "expected_sha256",
-            "content"
+            "managed_block"
           ],
           "properties": {
             "kind": {
@@ -593,9 +601,8 @@
             "expected_sha256": {
               "$ref": "#/$defs/sha256"
             },
-            "content": {
-              "type": "string",
-              "maxLength": 2097152
+            "managed_block": {
+              "$ref": "#/$defs/managedBlockBody"
             }
           },
           "additionalProperties": false

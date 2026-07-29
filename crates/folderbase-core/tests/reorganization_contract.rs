@@ -201,6 +201,35 @@ fn public_plan_schema_accepts_the_exact_record_produced_by_core() {
 }
 
 #[test]
+fn public_plan_schema_and_core_reject_loose_folderbase_identities() {
+    let schema = protocol_json("schemas/0.3/reorganization-plan.schema.json");
+    let draft_schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let registry = jsonschema::Registry::new()
+        .add(
+            "https://folderbase.ai/protocol/0.3/reorganization-draft.schema.json",
+            &draft_schema,
+        )
+        .expect("register Draft schema")
+        .prepare()
+        .expect("prepare protocol schema registry");
+    let validator = jsonschema::draft202012::options()
+        .with_registry(&registry)
+        .build(&schema)
+        .expect("compile public Plan schema");
+    let relative = "conformance/reorganization/plan/invalid/loose-folderbase-identity.json";
+    let fixture = protocol_json(relative);
+
+    assert!(
+        !validator.is_valid(&fixture),
+        "{relative} must be rejected by Plan schema"
+    );
+    let bytes = serde_json::to_vec(&fixture).expect("fixture bytes");
+    let error = decode_reorganization_plan_slice(&bytes)
+        .expect_err("loose Folderbase identity must be rejected by Core");
+    assert!(error.to_string().contains("folderbase id"));
+}
+
+#[test]
 fn canonical_plan_digest_matches_the_independent_node_crypto_vector() {
     let plan_bytes = std::fs::read(
         protocol_root().join("conformance/reorganization/plan/valid/project-cleanup-v1.json"),
@@ -269,6 +298,7 @@ fn all_public_draft_vectors_match_the_schema_and_core_contract() {
         "conformance/reorganization/draft/invalid/authority-field.json",
         "conformance/reorganization/draft/invalid/delete-operation.json",
         "conformance/reorganization/draft/invalid/loose-folderbase-identity.json",
+        "conformance/reorganization/draft/invalid/prewrapped-managed-block.json",
         "conformance/reorganization/draft/invalid/relationship-type-grammar.json",
         "conformance/reorganization/draft/invalid/reserved-operation-path.json",
         "conformance/reorganization/draft/invalid/unsafe-path.json",
@@ -413,6 +443,50 @@ fn the_closed_v1_operation_set_covers_text_opaque_tracked_and_protocol_changes()
     let draft = decode_reorganization_draft_slice(&bytes).expect("all operations validate");
 
     assert_eq!(draft.operations.len(), 10);
+}
+
+#[test]
+fn managed_agent_updates_carry_a_marker_free_managed_block_body() {
+    let relative = "conformance/reorganization/draft/valid/all-operation-kinds-v1.json";
+    let fixture = protocol_json(relative);
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile public Draft schema");
+
+    assert_eq!(
+        fixture["operations"][3]["managed_block"],
+        "Read FOLDERBASE.md.\n"
+    );
+    assert!(
+        fixture["operations"][3].get("content").is_none(),
+        "managed adapter updates are not whole-file replacements"
+    );
+    assert!(
+        validator.is_valid(&fixture),
+        "marker-free managed-block body must satisfy schema"
+    );
+    decode_reorganization_draft_slice(&serde_json::to_vec(&fixture).expect("fixture bytes"))
+        .expect("marker-free managed-block body must satisfy Core");
+}
+
+#[test]
+fn managed_agent_updates_reject_noncanonical_folderbase_marker_wrappers() {
+    let relative = "conformance/reorganization/draft/invalid/prewrapped-managed-block.json";
+    let fixture = protocol_json(relative);
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile public Draft schema");
+
+    assert!(
+        !validator.is_valid(&fixture),
+        "{relative} must be rejected by schema"
+    );
+    let bytes = serde_json::to_vec(&fixture).expect("fixture bytes");
+    let error = decode_reorganization_draft_slice(&bytes)
+        .expect_err("Core must reject a noncanonical pre-wrapped managed block");
+    assert!(error.to_string().contains("managed adapter body"));
 }
 
 #[test]

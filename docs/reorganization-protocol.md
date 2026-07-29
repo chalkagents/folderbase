@@ -63,7 +63,12 @@ controls Unicode case folding.
 
 Generic create, replace, and move operations cannot enter `.folderbase` or `.git`
 or replace the root entry, adapters, or ignore policy. Managed adapter updates are
-limited to the matching root `AGENTS.md` or `CLAUDE.md`. The four typed Object
+limited to the matching root `AGENTS.md` or `CLAUDE.md`. Their `managed_block`
+payload is only the marker-free body—not a whole adapter file and not a pre-wrapped
+block. Any `<!-- folderbase:` marker syntax in that body is refused, including
+obsolete noncanonical wrappers. Application uses the established
+`<!-- folderbase:begin -->` and `<!-- folderbase:end -->` markers to replace or
+append that block while preserving all surrounding user-owned text. The four typed Object
 operations are the only v1 seam into `.folderbase/objects/<obj_UUID>.json`; they
 bind the real `obj_<UUID>` Object ID, `version_<UUID>` base Version ID, and exact
 record digest. Relationship types follow the Object Protocol lowercase-token
@@ -140,7 +145,8 @@ node scripts/verify-reorganization-digest-vector.mjs
 - `protocol/conformance/reorganization/`
 
 The Plan schema references shared definitions by the absolute `$id` of the Draft
-schema. Validators should register both public schemas before compiling the Plan
-schema. Schema validation checks record shape; Core validation additionally checks
+schema, including the exact `folderbase_<UUID>` identity grammar. Validators should
+register both public schemas before compiling the Plan schema. Schema validation
+checks record shape; Core validation additionally checks
 operation closure, question/option uniqueness, path-profile aliases, reserved
 paths, nested boundaries, real Core identities, and both digests.
