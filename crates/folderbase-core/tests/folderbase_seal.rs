@@ -429,6 +429,74 @@ fn supported_kind_replacements_tombstone_old_identity_and_assign_new_identity() 
 }
 
 #[test]
+fn delete_recreate_delete_keeps_only_the_newest_tombstone_for_the_path() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    fs::write(&path, b"first proposal").expect("first proposal");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let genesis_version = store
+        .read_version(genesis.version_id())
+        .expect("genesis version");
+    let first_binding = genesis_version
+        .lookup_binding("proposal.docx")
+        .expect("first binding");
+    let first_object_id = first_binding.object_id().to_owned();
+
+    fs::remove_file(&path).expect("first deletion");
+    let first_deletion = store
+        .seal_capture(store.plan_capture().expect("first deletion plan"))
+        .expect("first deletion");
+    let first_deleted = store
+        .read_version(first_deletion.version_id())
+        .expect("first Tombstone version");
+    assert_eq!(first_deleted.tombstones().len(), 1);
+    assert_eq!(first_deleted.tombstones()[0].object_id(), first_object_id);
+
+    fs::write(&path, b"replacement proposal").expect("replacement proposal");
+    let recreation = store
+        .seal_capture(store.plan_capture().expect("recreation plan"))
+        .expect("recreation");
+    let recreated = store
+        .read_version(recreation.version_id())
+        .expect("recreated version");
+    let replacement_binding = recreated
+        .lookup_binding("proposal.docx")
+        .expect("replacement binding");
+    let replacement_object_id = replacement_binding.object_id().to_owned();
+    let replacement_object_version_id = replacement_binding
+        .object_version_id()
+        .expect("replacement Object Version")
+        .to_owned();
+    assert_ne!(replacement_object_id, first_object_id);
+    assert_eq!(recreated.tombstones().len(), 1);
+    assert_eq!(recreated.tombstones()[0].object_id(), first_object_id);
+
+    fs::remove_file(&path).expect("second deletion");
+    let second_deletion = store
+        .seal_capture(store.plan_capture().expect("second deletion plan"))
+        .expect("second deletion");
+    let final_version = store
+        .read_version(second_deletion.version_id())
+        .expect("final Tombstone version");
+    assert!(final_version.lookup_binding("proposal.docx").is_none());
+    assert_eq!(final_version.tombstones().len(), 1);
+    let newest = &final_version.tombstones()[0];
+    assert_eq!(newest.path(), "proposal.docx");
+    assert_eq!(newest.object_id(), replacement_object_id);
+    assert_eq!(
+        newest.last_object_version_id(),
+        Some(replacement_object_version_id.as_str())
+    );
+    assert_eq!(
+        final_version.parents(),
+        &[recreation.version_id().to_owned()]
+    );
+}
+
+#[test]
 fn sealed_bytes_use_sha256_without_file_format_interpretation() {
     let root = folderbase();
     let bytes = [0_u8, 255, 17, 42, 0, 99];
