@@ -159,6 +159,12 @@ f510555 test(core): refuse hidden prior bindings
 
 df4296e test(core): bound capture journal entry aggregate
 8783a05 fix(core): bound capture journal entry aggregate
+
+57ecf06 test(core): preserve legacy capture journal digest
+bb05fdb fix(core): preserve legacy empty journal encoding
+
+ca20008 test(core): preserve intent across scope refusal
+ef26b2c fix(core): refuse scope change before intent cleanup
 ```
 
 The first RED observed `TombstonesRequired` for an ordinary captured absence.
@@ -177,6 +183,21 @@ unsupported-node hiding before capture-journal or Head mutation. The aggregate
 RED proved that a journal could separately fit the assignment and Tombstone
 caps while exceeding the one Folderbase Version entry limit. GREEN checks their
 sum before accepting the journal.
+
+The compatibility RED installed legacy pre-Tombstone-field journal bytes after
+Head replacement and anchored their exact digest in Local Head. Deserializing
+the missing field to an empty collection and then serializing the new field
+broke recovery. GREEN keeps the field optional on decode and omits it on encode
+when empty, preserving the exact legacy digest while non-empty Tombstone target
+sets remain explicit.
+
+The interrupted-scope RED left a durable update intent, then introduced each of
+an ignore rule, a nested Folderbase boundary, and an unsupported hard-link
+replacement that hid a prior binding. The typed refusal occurred only after the
+old implementation removed the intent. GREEN verifies the current prior and
+refuses the scope change before stale-intent cleanup. The journal remains
+byte-identical, Local Head remains unchanged, and restoring the exact approved
+ignore-case plan converges on the originally assigned Folderbase Version.
 
 Three additional commits are explicitly regression coverage, not claimed REDs:
 
@@ -240,6 +261,10 @@ The implementation proves:
   `.folderbase/**` non-capture;
 - fail-closed refusal before journal or Head mutation when ignore policy, a
   nested Folderbase, or an unsupported exclusion hides a prior live binding;
+- byte-identical preservation of an existing durable capture intent and its
+  Local Head across that typed scope refusal;
+- post-Head recovery of legacy capture journals that predate the optional
+  Tombstone target field;
 - concurrent/stale metadata rejection without Local Head movement;
 - no-op and crash retry convergence on the exact assigned Folderbase Version;
 - append-only blob, Object Version, and complete Folderbase Version
