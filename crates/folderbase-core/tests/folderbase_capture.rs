@@ -346,7 +346,8 @@ fn plan_is_bound_to_the_current_optional_device_local_head() {
             "folderbase_id": FOLDERBASE_ID,
             "root_instance_sha256": receipt.root_instance_sha256,
             "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
-            "version_sha256": "a".repeat(64)
+            "version_sha256": "a".repeat(64),
+            "transaction_sha256": "d".repeat(64)
         }))
         .expect("head JSON"),
     )
@@ -377,7 +378,8 @@ fn local_head_never_follows_an_intermediate_state_symlink() {
             "folderbase_id": FOLDERBASE_ID,
             "root_instance_sha256": receipt.root_instance_sha256,
             "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
-            "version_sha256": "c".repeat(64)
+            "version_sha256": "c".repeat(64),
+            "transaction_sha256": "e".repeat(64)
         }))
         .expect("head JSON"),
     )
@@ -508,6 +510,32 @@ fn in_scope_paths_fail_closed_when_the_portable_depth_limit_is_exceeded() {
     ));
 }
 
+#[test]
+fn portable_depth_refusal_does_not_depend_on_native_thread_stack_size() {
+    let root = folderbase();
+    let too_deep = std::iter::repeat_n("d", 129).collect::<Vec<_>>().join("/");
+    fs::create_dir_all(root.path().join(&too_deep)).expect("deep tree");
+    let root_path = root.path().to_path_buf();
+
+    let result = std::thread::Builder::new()
+        .name("bounded-capture-depth".to_owned())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            FolderbaseVersionStore::open(&root_path)
+                .expect("open")
+                .plan_capture()
+        })
+        .expect("spawn bounded-stack capture planner")
+        .join()
+        .expect("capture planner must return a typed result without stack overflow");
+
+    assert!(matches!(
+        result,
+        Err(FolderbaseCaptureError::UnsafePortablePath(path))
+            if path.components().count() == 129
+    ));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn in_scope_paths_fail_closed_on_non_utf8_and_portable_case_collisions() {
@@ -598,7 +626,8 @@ fn local_head_from_another_physical_root_is_rejected() {
             "folderbase_id": FOLDERBASE_ID,
             "root_instance_sha256": receipt.root_instance_sha256,
             "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
-            "version_sha256": "b".repeat(64)
+            "version_sha256": "b".repeat(64),
+            "transaction_sha256": "f".repeat(64)
         }))
         .expect("head JSON"),
     )

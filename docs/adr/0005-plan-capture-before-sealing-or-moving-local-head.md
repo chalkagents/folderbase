@@ -16,7 +16,9 @@ The planning seam is `FolderbaseVersionStore::open(root)` followed by
 Folderbase identity, effective ordered ignore-policy digest, and optional
 device-local head observed at `.folderbase/local/head.json`. A Local Head record
 is accepted only when it is closed, bounded, and names the exact Folderbase and
-physical root. It is device-local state, not shared or Cloud authority.
+physical root. It also anchors the SHA-256 digest of the exact capture
+transaction whose complete Folderbase Version it names. It is device-local
+state, not shared or Cloud authority.
 
 Metadata planning treats every regular file identically, including PDFs, videos,
 CSV, SQLite, unknown formats, and Git pack files. It records length and executable
@@ -48,9 +50,84 @@ an existing `FolderbaseVersion`; a crate-private producer can assemble every v1
 record kind from verified references, but complete validation still runs before
 a value can exist. This does not restore raw public Serde deserialization.
 
-This decision remains Proposed because this slice deliberately does **not**
-implement or claim byte verification, Object ID/Object Version assignment,
-sealing, Local Head mutation, restore, crash recovery, snapshot atomicity,
-database-file consistency, sync, sharing, authorization, or Cloud durability.
-Acceptance requires the later producer transaction and recovery protocol to
-close those gaps.
+The second producer slice consumes an exact `CapturePlan` through
+`FolderbaseVersionStore::seal_capture`. It reads every included regular file as
+opaque bytes through root-relative no-follow capabilities, rechecks planned
+metadata and filesystem identity before and after each read, and installs the
+bytes in the existing content-addressed `LocalVersionStore`. PDF, video, CSV,
+SQLite, Git, office, and unknown formats take the same path. Directory, symlink,
+and executable fidelity remains in the single full-state Folderbase Version.
+
+Before installing an Object Version, Core durably journals every newly assigned
+stable Object ID, candidate Object Version ID, Folderbase Version ID, parent,
+timestamp, plan digest, and expected Local Head. A prior Object or Object Version
+may be reused only after the exact prior Local Head, complete Folderbase Version,
+immutable Object Version record, and content blob verify. Device-local physical
+identity records distinguish a same-inode update from a same-path recreation
+after the first verified binding. Missing identity evidence never authorizes
+reuse. Unix records bind device and inode; Windows records bind the volume
+serial number and complete 128-bit File ID obtained from the no-follow handle.
+A replacement after Head publication retains the identity of the sealed entry,
+so the next capture detects the mismatch and refuses until Tombstones exist.
+Capture continuity has one canonical capture-identity projection; the legacy
+workspace path-identity representation is not also written by the capture
+transaction.
+
+Unix device and inode identify one live filesystem object, but they are not a
+globally unique lifetime token: after every handle to an unlinked object closes,
+the filesystem may reuse its inode for a later file. The pre-Tombstone slice
+therefore cannot distinguish a same-path, same-kind delete-and-recreate that
+happens entirely between captures and receives the same device/inode from
+ordinary same-object continuity. The Tombstone lifecycle must close this gap
+with explicit deletion evidence rather than guessing from path metadata. Fault
+fixtures that claim to simulate a live replacement keep the removed object
+handle open until the replacement identity is observed, proving that the two
+objects coexist and cannot alias through immediate inode reuse.
+
+Content blobs, immutable Object Version records, and the complete bounded
+Folderbase Version are installed append-only with temp-file fsync, atomic
+no-clobber publication, and post-install verification. Only then does Core
+compare the observed Local Head and atomically replace it under the shared local
+transaction lock, implemented by the standard cross-platform exclusive file
+lock rather than an in-process mutex. All capture state publication is relative
+to one retained no-follow `.folderbase` directory capability. Sealing opens that
+existing capability and re-attests the inert plan before creating a lock,
+repairing derived state, or publishing any capture record; it does not invoke
+the legacy ambient-path transaction recovery prelude. Data and directory
+handles are flushed, and visible `.folderbase` attachment is verified before
+and after Head replacement. Exact root and state junctions/reparse points are
+rejected on Windows. Windows state directory capabilities request the write
+authority required by `FlushFileBuffers`, and native CI executes directory
+creation, publication, replacement, and flush through those retained
+capabilities. Read-only Folderbase Version verification instead retains
+explicitly non-mutating state capabilities, requests only `GENERIC_READ` on
+Windows, and rejects accidental mutation before any filesystem operation.
+Native CI holds directory handles that deny write sharing while verifying a
+complete version. A state-directory swap can leave only a detached orphan and
+cannot redirect publication through a symlink or junction.
+
+The active journal uses bounded streaming JSON encoding and the same explicit
+byte bound for write and restart read. Before publishing that journal or any
+immutable object, Core constructs and bounded-encodes the complete future
+Folderbase Version envelope. Its assignment count and every path, kind,
+observed identity, reused Object ID, prior Object Version, and root-manifest
+parent are matched exactly to the approved plan and verified prior Head.
+Included content streams are capped at the exact approved length plus one byte:
+a growing source is refused as a concurrent state change and staging is
+removed, instead of reading an attacker-controlled stream to EOF. The active
+capture journal remains until derived regular-file object projections and
+physical identity records are repaired. After Head publication, recovery first
+verifies the Head-anchored digest of the complete journal and requires the
+committed version's parents and timestamp to match that immutable intent before
+journal identity evidence can be projected. A retry after interruption at
+journal, Object Version, Folderbase Version, Local Head, or cleanup boundaries
+converges on the exact journal-assigned version. A stale attempt may discard
+only its intent; verified immutable records remain safe, reusable orphans.
+
+This decision remains **Proposed**. This slice does not yet produce Tombstones,
+so deletion, same-path recreation, and kind replacement are refused without
+moving Local Head. It also does not implement full no-clobber restore
+reconstruction, restore crash recovery, filesystem/database snapshot
+coordination, Remote Head publication, sync, sharing, authorization, or Cloud
+durability. Acceptance still requires the Tombstone and restore transactions to
+close the complete capture/restore lifecycle.

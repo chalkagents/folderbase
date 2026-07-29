@@ -1,4 +1,4 @@
-# TB-33 metadata-only capture planning verification
+# FB-41F metadata-only capture planning verification
 
 This evidence covers only phases 1–3 of the proposed capture transaction:
 controlled Folderbase Version encoding, read-only store/open and Capture Plan

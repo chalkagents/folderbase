@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     FolderbaseError, Result,
+    folderbase_state::FolderbaseState,
     workspace::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
         resolve_existing_workspace_file,
@@ -37,6 +38,7 @@ const TRANSACTIONS_DIRECTORY: &str = ".folderbase/transactions";
 const LOCKS_DIRECTORY: &str = ".folderbase/locks";
 const TRANSACTION_LOCK_PATH: &str = ".folderbase/locks/transactions.lock";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_CAPTURE_PROJECTION_RECORD_BYTES: u64 = 1024 * 1024;
 const PATH_IDENTITIES_DIRECTORY: &str = ".folderbase/local/path-identities";
 const HISTORY_TRANSFER_INTENTS_DIRECTORY: &str = ".folderbase/history-transfers/intents";
 const HISTORY_TRANSFER_OUTGOING_DIRECTORY: &str = ".folderbase/history-transfers/outgoing";
@@ -53,7 +55,7 @@ impl ObjectId {
         &self.0
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(format!("obj_{}", Uuid::now_v7()))
     }
 
@@ -84,7 +86,7 @@ impl VersionId {
         &self.0
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(format!("version_{}", Uuid::now_v7()))
     }
 
@@ -359,7 +361,7 @@ pub(crate) struct VersionedReplaceResult {
     pub content: ContentDigest,
 }
 
-struct StoreTransactionLock {
+pub(crate) struct StoreTransactionLock {
     file: File,
 }
 
@@ -370,11 +372,7 @@ struct FolderbaseIdentity {
 
 impl Drop for StoreTransactionLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let _ = File::unlock(&self.file);
     }
 }
 
@@ -391,9 +389,7 @@ impl LocalVersionStore {
     /// Reopening a store that already has a transaction directory replays
     /// durable pending work and repairs an interrupted final journal append.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let supplied = root.as_ref();
-        let root = canonical_folderbase_root(supplied)?;
-        let store = Self { root };
+        let store = Self::open_read_only(root)?;
         match fs::symlink_metadata(store.root.join(TRANSACTIONS_DIRECTORY)) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
                 let _lock = store.acquire_transaction_lock()?;
@@ -413,6 +409,14 @@ impl LocalVersionStore {
             }
         }
         Ok(store)
+    }
+
+    /// Open without replaying or publishing state. Capture sealing uses this
+    /// after retaining its own no-follow state capability.
+    pub(crate) fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
+        let supplied = root.as_ref();
+        let root = canonical_folderbase_root(supplied)?;
+        Ok(Self { root })
     }
 
     pub fn root(&self) -> &Path {
@@ -1000,6 +1004,26 @@ impl LocalVersionStore {
         Ok(record)
     }
 
+    pub(crate) fn read_capture_object_projection_in(
+        &self,
+        state: &FolderbaseState,
+        object_id: &ObjectId,
+    ) -> Result<Option<LocalObjectRecord>> {
+        let path = self.object_record_path(object_id);
+        object_id.validate(&path)?;
+        let Some(bytes) = state.read_bounded(
+            &self.object_record_relative_path(object_id),
+            MAX_CAPTURE_PROJECTION_RECORD_BYTES,
+        )?
+        else {
+            return Ok(None);
+        };
+        let record: LocalObjectRecord = serde_json::from_slice(&bytes)
+            .map_err(|source| FolderbaseError::json(&path, source))?;
+        self.validate_object_record(object_id, &record, &path)?;
+        Ok(Some(record))
+    }
+
     fn validate_object_record(
         &self,
         object_id: &ObjectId,
@@ -1052,7 +1076,7 @@ impl LocalVersionStore {
         Ok(record)
     }
 
-    fn read_version_record(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
+    pub(crate) fn read_version_record(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
         let path = self.version_record_path(version_id);
         version_id.validate(&path)?;
         let record: LocalVersionRecord = read_json(&path)?;
@@ -1125,7 +1149,7 @@ impl LocalVersionStore {
         Ok(events)
     }
 
-    fn ensure_store_layout(&self) -> Result<()> {
+    pub(crate) fn ensure_store_layout(&self) -> Result<()> {
         for relative in [
             OBJECTS_DIRECTORY,
             VERSION_RECORDS_DIRECTORY,
@@ -1143,36 +1167,23 @@ impl LocalVersionStore {
         Ok(())
     }
 
-    fn acquire_transaction_lock(&self) -> Result<StoreTransactionLock> {
-        ensure_directory_chain(&self.root, Path::new(LOCKS_DIRECTORY))?;
+    pub(crate) fn acquire_transaction_lock(&self) -> Result<StoreTransactionLock> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.acquire_transaction_lock_in(&state)
+    }
+
+    pub(crate) fn acquire_transaction_lock_in(
+        &self,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
+        state.ensure_private_dir(Path::new(LOCKS_DIRECTORY))?;
         let lock_path = self.root.join(TRANSACTION_LOCK_PATH);
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        match state.publish_new(Path::new(TRANSACTION_LOCK_PATH), b"") {
+            Ok(()) | Err(FolderbaseError::WouldOverwrite(_)) => {}
+            Err(error) => return Err(error),
         }
-        let file = options
-            .open(&lock_path)
-            .map_err(|source| FolderbaseError::io(&lock_path, source))?;
-        if !file
-            .metadata()
-            .map_err(|source| FolderbaseError::io(&lock_path, source))?
-            .is_file()
-        {
-            return Err(FolderbaseError::UnsafePath(lock_path));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(FolderbaseError::io(
-                    &lock_path,
-                    std::io::Error::last_os_error(),
-                ));
-            }
-        }
+        let file = state.open_lock_file(Path::new(TRANSACTION_LOCK_PATH))?;
+        File::lock(&file).map_err(|source| FolderbaseError::io(&lock_path, source))?;
         Ok(StoreTransactionLock { file })
     }
 
@@ -1284,39 +1295,86 @@ impl LocalVersionStore {
         Ok(content)
     }
 
-    fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
-        let content = ContentDigest {
-            algorithm: "sha256".to_owned(),
-            digest: format!("{:x}", Sha256::digest(bytes)),
-            bytes: bytes.len() as u64,
-        };
-        let blob_path = self.blob_path(&content.digest);
-        match fs::symlink_metadata(&blob_path) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                verify_file_content(&blob_path, &content)?;
-            }
-            Ok(_) => {
-                return Err(invalid_record(
-                    blob_path,
-                    "content-addressed blob is not a regular file",
-                ));
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                write_bytes_new(&blob_path, bytes)?;
-                verify_file_content(&blob_path, &content)?;
-            }
-            Err(source) => return Err(FolderbaseError::io(blob_path, source)),
-        }
-        Ok(content)
+    /// Install bytes from a capability-opened ordinary file into the existing
+    /// content-addressed blob store.
+    ///
+    /// The capture producer owns source-identity checks before and after this
+    /// call. This method owns only append-only blob installation and
+    /// verification.
+    pub(crate) fn install_content_reader(
+        &self,
+        reader: impl Read,
+        source_label: &Path,
+        maximum_bytes: u64,
+    ) -> Result<ContentDigest> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.install_content_reader_in(&state, reader, source_label, maximum_bytes)
     }
 
-    fn install_or_verify_version_record(&self, record: &LocalVersionRecord) -> Result<()> {
+    pub(crate) fn install_content_reader_in(
+        &self,
+        state: &FolderbaseState,
+        reader: impl Read,
+        source_label: &Path,
+        maximum_bytes: u64,
+    ) -> Result<ContentDigest> {
+        let published = state.publish_reader_sha256(
+            Path::new(BLOBS_DIRECTORY),
+            reader,
+            source_label,
+            maximum_bytes,
+        )?;
+        Ok(ContentDigest {
+            algorithm: "sha256".to_owned(),
+            digest: published.digest,
+            bytes: published.bytes,
+        })
+    }
+
+    pub(crate) fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
+        self.install_content_reader(
+            std::io::Cursor::new(bytes),
+            Path::new("in-memory content"),
+            bytes.len() as u64,
+        )
+    }
+
+    pub(crate) fn install_content_bytes_in(
+        &self,
+        state: &FolderbaseState,
+        bytes: &[u8],
+    ) -> Result<ContentDigest> {
+        self.install_content_reader_in(
+            state,
+            std::io::Cursor::new(bytes),
+            Path::new("in-memory content"),
+            bytes.len() as u64,
+        )
+    }
+
+    pub(crate) fn install_or_verify_version_record(
+        &self,
+        record: &LocalVersionRecord,
+    ) -> Result<()> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.install_or_verify_version_record_in(&state, record)
+    }
+
+    pub(crate) fn install_or_verify_version_record_in(
+        &self,
+        state: &FolderbaseState,
+        record: &LocalVersionRecord,
+    ) -> Result<()> {
         let path = self.version_record_path(&record.id);
-        match write_json_new(&path, record) {
+        let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{}.json", record.id));
+        let encoded = json_bytes(&path, record)?;
+        match state.publish_new(&relative, &encoded) {
             Ok(()) => Ok(()),
             Err(FolderbaseError::WouldOverwrite(_)) => {
-                let existing = self.read_version_record(&record.id)?;
-                if existing == *record {
+                let existing = state
+                    .read_bounded(&relative, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?
+                    .ok_or_else(|| invalid_record(&path, "immutable version record disappeared"))?;
+                if existing == encoded {
                     Ok(())
                 } else {
                     Err(invalid_record(
@@ -1330,8 +1388,117 @@ impl LocalVersionStore {
     }
 
     fn write_object_projection(&self, record: &LocalObjectRecord) -> Result<()> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.write_object_projection_in(&state, record)
+    }
+
+    fn write_object_projection_in(
+        &self,
+        state: &FolderbaseState,
+        record: &LocalObjectRecord,
+    ) -> Result<()> {
         let path = self.object_record_path(&record.id);
-        write_json_replace(&path, record)
+        let encoded = json_bytes(&path, record)?;
+        state.replace(&self.object_record_relative_path(&record.id), &encoded)
+    }
+
+    /// Install one derived regular-file object projection after its containing
+    /// Folderbase Version has become Local Head.
+    pub(crate) fn write_capture_object_projection_in(
+        &self,
+        state: &FolderbaseState,
+        record: &LocalObjectRecord,
+    ) -> Result<()> {
+        self.validate_object_record_membership(
+            &record.id,
+            record,
+            &self.object_record_path(&record.id),
+        )?;
+        self.write_object_projection_in(state, record)?;
+        Ok(())
+    }
+
+    /// Verify a referenced immutable Object Version without consulting a
+    /// mutable object projection.
+    pub(crate) fn verify_capture_object_version_in(
+        &self,
+        state: &FolderbaseState,
+        object_id: &ObjectId,
+        version_id: &VersionId,
+        expected: &ContentDigest,
+    ) -> Result<LocalVersionRecord> {
+        let record = self.read_capture_version_record_in(state, version_id)?;
+        if record.object_id != *object_id || record.content != *expected {
+            return Err(invalid_record(
+                self.version_record_path(version_id),
+                "Object Version does not match the sealed Folderbase Version reference",
+            ));
+        }
+        state.verify_sha256_blob(
+            Path::new(BLOBS_DIRECTORY),
+            &record.content.digest,
+            record.content.bytes,
+        )?;
+        Ok(record)
+    }
+
+    pub(crate) fn verify_capture_version_record_in(
+        &self,
+        state: &FolderbaseState,
+        version_id: &VersionId,
+        expected: &ContentDigest,
+    ) -> Result<LocalVersionRecord> {
+        let record = self.read_capture_version_record_in(state, version_id)?;
+        if record.content != *expected {
+            return Err(invalid_record(
+                self.version_record_path(version_id),
+                "Object Version bytes do not match the sealed Folderbase Version reference",
+            ));
+        }
+        state.verify_sha256_blob(
+            Path::new(BLOBS_DIRECTORY),
+            &record.content.digest,
+            record.content.bytes,
+        )?;
+        Ok(record)
+    }
+
+    pub(crate) fn verify_capture_record_integrity_in(
+        &self,
+        state: &FolderbaseState,
+        object_id: &ObjectId,
+        version_id: &VersionId,
+    ) -> Result<LocalVersionRecord> {
+        let record = self.read_capture_version_record_in(state, version_id)?;
+        if record.object_id != *object_id {
+            return Err(invalid_record(
+                self.version_record_path(version_id),
+                "Object Version belongs to a different stable Object",
+            ));
+        }
+        state.verify_sha256_blob(
+            Path::new(BLOBS_DIRECTORY),
+            &record.content.digest,
+            record.content.bytes,
+        )?;
+        Ok(record)
+    }
+
+    fn read_capture_version_record_in(
+        &self,
+        state: &FolderbaseState,
+        version_id: &VersionId,
+    ) -> Result<LocalVersionRecord> {
+        let path = self.version_record_path(version_id);
+        version_id.validate(&path)?;
+        let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{version_id}.json"));
+        let bytes = state
+            .read_bounded(&relative, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?
+            .ok_or_else(|| FolderbaseError::io(&path, std::io::ErrorKind::NotFound.into()))?;
+        let record: LocalVersionRecord = serde_json::from_slice(&bytes)
+            .map_err(|source| FolderbaseError::json(&path, source))?;
+        self.validate_version_record(version_id, &record, &path)?;
+        Ok(record)
     }
 
     fn install_or_verify_restore(&self, restore: &PendingRestore) -> Result<()> {
@@ -1765,6 +1932,16 @@ impl LocalVersionStore {
     }
 
     fn write_local_file_identity(&self, object_id: &ObjectId, path: &Path) -> Result<()> {
+        let state = FolderbaseState::open(&self.root)?;
+        self.write_local_file_identity_in(&state, object_id, path)
+    }
+
+    fn write_local_file_identity_in(
+        &self,
+        state: &FolderbaseState,
+        object_id: &ObjectId,
+        path: &Path,
+    ) -> Result<()> {
         let file = open_existing_nofollow(path)?;
         let metadata = file
             .metadata()
@@ -1772,12 +1949,17 @@ impl LocalVersionStore {
         let Some(file_system) = filesystem_identity(&metadata) else {
             return Ok(());
         };
-        write_json_replace(
-            &self.path_identity_path(object_id),
+        let path = self.path_identity_path(object_id);
+        let encoded = json_bytes(
+            &path,
             &LocalPathIdentity {
                 object_id: object_id.clone(),
                 file_system,
             },
+        )?;
+        state.replace(
+            &Path::new(PATH_IDENTITIES_DIRECTORY).join(format!("{object_id}.json")),
+            &encoded,
         )
     }
 
@@ -3453,12 +3635,14 @@ fn open_new(path: &Path) -> Result<File> {
 }
 
 fn create_private_directory_durable(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder
         .create(path)
         .map_err(|source| FolderbaseError::io(path, source))?;
@@ -3512,7 +3696,10 @@ fn invalid_record(path: impl Into<PathBuf>, message: impl Into<String>) -> Folde
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        fs::OpenOptions,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     use tempfile::TempDir;
 
@@ -3521,6 +3708,33 @@ mod tests {
         FolderbaseKind, InitializationOptions,
         initialization::{initialize, plan_initialization},
     };
+
+    #[test]
+    fn transaction_lock_is_exclusive_across_independent_handles() {
+        let fixture = tempfile::tempdir().expect("temporary lock store");
+        fs::create_dir_all(fixture.path().join(LOCKS_DIRECTORY)).expect("lock directory");
+        let path = fixture.path().join(TRANSACTION_LOCK_PATH);
+        let first = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .expect("first handle");
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("second handle");
+        File::lock(&first).expect("first exclusive lock");
+        assert!(matches!(
+            File::try_lock(&second).expect_err("second handle must contend"),
+            std::fs::TryLockError::WouldBlock
+        ));
+        File::unlock(&first).expect("unlock");
+        File::lock(&second).expect("second handle acquires after release");
+        File::unlock(&second).expect("final unlock");
+    }
 
     #[test]
     fn every_history_transfer_checkpoint_reopens_and_recovers() {

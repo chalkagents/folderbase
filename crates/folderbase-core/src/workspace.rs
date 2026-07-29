@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 
 use crate::{
     ContentDigest, FolderbaseError, LocalVersionStore, ObjectId, Result, VersionId,
+    root_attestation::metadata_is_link_or_reparse,
     traversal_policy::{
         is_reconstructable_directory, is_reserved_workspace_component as is_reserved_component,
     },
@@ -264,7 +265,7 @@ pub(crate) fn canonical_folderbase_root(root: &Path) -> Result<PathBuf> {
         io::ErrorKind::NotFound => FolderbaseError::InvalidRoot(root.to_path_buf()),
         _ => FolderbaseError::io(root, source),
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
     root.canonicalize()

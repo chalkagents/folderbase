@@ -6,26 +6,26 @@
 
 use std::{
     collections::BTreeMap,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fmt, fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, Metadata, OpenOptions};
+use cap_std::fs::{Dir, DirEntry, Metadata, OpenOptions, ReadDir};
 use ignore::{Match, gitignore::GitignoreBuilder};
 use same_file::Handle;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    FolderbaseRootAttestation, RootAttestationError, attest_folderbase_root,
+    FolderbaseError, FolderbaseRootAttestation, RootAttestationError, attest_folderbase_root,
     folderbase_version::{
-        MAX_OBJECT_BYTES, MAX_VERSION_ENTRIES, validate_capture_path, validate_capture_sha256,
-        validate_capture_symlink_targets, validate_capture_version_id,
+        FolderbaseVersionError, MAX_OBJECT_BYTES, MAX_VERSION_ENTRIES, validate_capture_path,
+        validate_capture_sha256, validate_capture_symlink_targets, validate_capture_version_id,
     },
     traversal_policy::{RECONSTRUCTABLE_DIRECTORIES, is_folderbase_state_component},
 };
@@ -51,7 +51,8 @@ impl fmt::Display for CapturePlanLimitKind {
 }
 
 /// Metadata kind observed for a future live Path Binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureEntryKind {
     Directory,
     RegularFile,
@@ -66,6 +67,7 @@ pub struct CapturePlanEntry {
     bytes: Option<u64>,
     executable: Option<bool>,
     symlink_target: Option<String>,
+    observed: CaptureMetadataFingerprint,
 }
 
 impl CapturePlanEntry {
@@ -88,9 +90,131 @@ impl CapturePlanEntry {
     pub fn symlink_target(&self) -> Option<&str> {
         self.symlink_target.as_deref()
     }
+
+    pub(crate) fn observed(&self) -> &CaptureMetadataFingerprint {
+        &self.observed
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CaptureMetadataFingerprint {
+    pub(crate) bytes: u64,
+    pub(crate) modified_unix_nanos: Option<u128>,
+    pub(crate) readonly: bool,
+    pub(crate) executable: bool,
+    pub(crate) device: Option<u64>,
+    pub(crate) inode: Option<u64>,
+    #[serde(default)]
+    pub(crate) physical_identity: Option<String>,
+}
+
+impl CaptureMetadataFingerprint {
+    pub(crate) fn from_cap_metadata(metadata: &Metadata) -> Self {
+        let modified_unix_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos());
+        #[cfg(unix)]
+        let (device, inode) = {
+            use cap_std::fs::MetadataExt;
+
+            (Some(metadata.dev()), Some(metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let (device, inode) = (None, None);
+        Self {
+            bytes: metadata.len(),
+            modified_unix_nanos,
+            readonly: metadata.permissions().readonly(),
+            executable: is_executable(metadata),
+            device,
+            inode,
+            physical_identity: physical_identity_from_cap_metadata(metadata),
+        }
+    }
+
+    pub(crate) fn from_std_metadata(metadata: &fs::Metadata) -> Self {
+        let modified_unix_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos());
+        #[cfg(unix)]
+        let (device, inode, executable) = {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            (
+                Some(metadata.dev()),
+                Some(metadata.ino()),
+                metadata.permissions().mode() & 0o111 != 0,
+            )
+        };
+        #[cfg(not(unix))]
+        let (device, inode, executable) = (None, None, false);
+        Self {
+            bytes: metadata.len(),
+            modified_unix_nanos,
+            readonly: metadata.permissions().readonly(),
+            executable,
+            device,
+            inode,
+            physical_identity: physical_identity_from_std_metadata(metadata),
+        }
+    }
+
+    pub(crate) fn from_std_file(file: &fs::File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        let fingerprint = Self::from_std_metadata(&metadata);
+        #[cfg(windows)]
+        {
+            return Ok(fingerprint.with_physical_identity(Some(windows_file_identity(file)?)));
+        }
+        #[cfg(not(windows))]
+        Ok(fingerprint)
+    }
+
+    #[cfg(windows)]
+    fn with_physical_identity(mut self, physical_identity: Option<String>) -> Self {
+        self.physical_identity = physical_identity;
+        self
+    }
+}
+
+#[cfg(unix)]
+fn physical_identity_from_cap_metadata(metadata: &Metadata) -> Option<String> {
+    use cap_std::fs::MetadataExt;
+
+    Some(format!(
+        "unix:{:016x}:{:016x}",
+        metadata.dev(),
+        metadata.ino()
+    ))
+}
+
+#[cfg(not(unix))]
+fn physical_identity_from_cap_metadata(_metadata: &Metadata) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn physical_identity_from_std_metadata(metadata: &fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(format!(
+        "unix:{:016x}:{:016x}",
+        metadata.dev(),
+        metadata.ino()
+    ))
+}
+
+#[cfg(not(unix))]
+fn physical_identity_from_std_metadata(_metadata: &fs::Metadata) -> Option<String> {
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureExclusionKind {
     NestedFolderbase,
     HardLink,
@@ -101,7 +225,8 @@ pub enum CaptureExclusionKind {
     OtherSpecial,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CaptureExclusionReason {
     NestedFolderbaseBoundary,
     UnsupportedV1,
@@ -146,6 +271,7 @@ impl CaptureIgnoredPath {
 pub struct CaptureLocalHead {
     version_id: String,
     version_sha256: String,
+    transaction_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +282,7 @@ struct LocalHeadWire {
     root_instance_sha256: String,
     version_id: String,
     version_sha256: String,
+    transaction_sha256: String,
 }
 
 impl CaptureLocalHead {
@@ -165,6 +292,10 @@ impl CaptureLocalHead {
 
     pub fn version_sha256(&self) -> &str {
         &self.version_sha256
+    }
+
+    pub(crate) fn transaction_sha256(&self) -> &str {
+        &self.transaction_sha256
     }
 }
 
@@ -262,6 +393,30 @@ pub enum FolderbaseCaptureError {
     #[error("capture planning state changed while it was being observed")]
     PlanningStateChanged,
 
+    #[error("capture state changed after planning at: {0}")]
+    CaptureStateChanged(PathBuf),
+
+    #[error("capture plan belongs to a different Folderbase Version Store")]
+    PlanStoreMismatch,
+
+    #[error("Local Head changed after capture planning")]
+    LocalHeadChanged,
+
+    #[error("the prior Local Head cannot be verified: {0}")]
+    InvalidPriorLocalHead(String),
+
+    #[error("this update requires Tombstone production, which is not implemented yet: {0}")]
+    TombstonesRequired(PathBuf),
+
+    #[error("durable capture transaction is invalid: {0}")]
+    InvalidCaptureTransaction(String),
+
+    #[error(transparent)]
+    LocalStore(#[from] FolderbaseError),
+
+    #[error(transparent)]
+    FolderbaseVersion(#[from] FolderbaseVersionError),
+
     #[error("capture inventory exceeded the {limit} limit of {maximum} at {path}")]
     InventoryLimitExceeded {
         limit: CapturePlanLimitKind,
@@ -280,7 +435,7 @@ pub enum FolderbaseCaptureError {
 /// Read-only handle for planning Folderbase Version capture.
 #[derive(Debug)]
 pub struct FolderbaseVersionStore {
-    root_attestation: FolderbaseRootAttestation,
+    pub(crate) root_attestation: FolderbaseRootAttestation,
 }
 
 impl FolderbaseVersionStore {
@@ -399,6 +554,25 @@ struct CapturePlanner<'a> {
     path_index: CapturePathIndex,
 }
 
+struct CaptureDirectoryFrame {
+    directory: Dir,
+    entries: ReadDir,
+    relative_parent: PathBuf,
+    completion: Option<CaptureChildVerification>,
+}
+
+struct CaptureChildVerification {
+    name: OsString,
+    identity: Handle,
+    display_path: PathBuf,
+}
+
+struct PendingCaptureDirectory {
+    directory: Dir,
+    relative_parent: PathBuf,
+    verification: CaptureChildVerification,
+}
+
 impl<'a> CapturePlanner<'a> {
     fn new(root: &'a Path, ignore: &'a IgnorePolicy) -> Self {
         Self {
@@ -416,123 +590,191 @@ impl<'a> CapturePlanner<'a> {
         directory: &Dir,
         relative_parent: &Path,
     ) -> Result<(), FolderbaseCaptureError> {
-        let entries = directory
-            .read_dir(".")
-            .map_err(|source| FolderbaseCaptureError::Io {
-                path: self.root.join(relative_parent),
-                source,
-            })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| FolderbaseCaptureError::Io {
-                path: self.root.join(relative_parent),
-                source,
-            })?;
-            let name = entry.file_name();
-            let relative = relative_parent.join(&name);
-            let display_path = self.root.join(&relative);
-            let metadata =
-                directory
-                    .symlink_metadata(&name)
-                    .map_err(|source| FolderbaseCaptureError::Io {
-                        path: display_path.clone(),
-                        source,
-                    })?;
+        let root_directory =
+            directory
+                .try_clone()
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: self.root.join(relative_parent),
+                    source,
+                })?;
+        let mut stack = vec![capture_directory_frame(
+            root_directory,
+            relative_parent.to_path_buf(),
+            self.root,
+            None,
+        )?];
 
-            if name == OsStr::new(".folderbase") {
-                continue;
-            }
-            if is_folderbase_state_component(&name) {
-                return Err(FolderbaseCaptureError::UnsafePortablePath(relative));
-            }
-
-            let required_marker = relative == Path::new(".folderbaseignore")
-                || relative == Path::new("FOLDERBASE.md");
-            if !required_marker
-                && matches!(
-                    self.ignore
-                        .matcher
-                        .matched(self.root.join(&relative), metadata.is_dir()),
-                    Match::Ignore(_)
-                )
-            {
-                self.ensure_capacity(&relative)?;
-                self.ignored_paths.push(CaptureIgnoredPath {
-                    path: portable_relative(&relative)?,
-                });
-                continue;
-            }
-
-            self.ensure_capacity(&relative)?;
-            let path = portable_relative(&relative)?;
-            validate_capture_path(&path)
-                .map_err(|_| FolderbaseCaptureError::UnsafePortablePath(relative.clone()))?;
-            self.path_index.insert(&path)?;
-
-            if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                let (child, identity) = open_stable_child(directory, &name, &display_path)?;
-                if is_nested_folderbase(&child, &display_path)? {
-                    verify_child_identity(directory, &name, &identity, &display_path)?;
-                    self.exclusions.push(CapturePlanExclusion {
-                        path,
-                        kind: CaptureExclusionKind::NestedFolderbase,
-                        reason: CaptureExclusionReason::NestedFolderbaseBoundary,
-                    });
-                    continue;
+        while !stack.is_empty() {
+            let next = stack
+                .last_mut()
+                .expect("non-empty traversal stack")
+                .entries
+                .next();
+            let Some(entry) = next else {
+                let completed = stack.pop().expect("non-empty traversal stack");
+                if let Some(verification) = completed.completion {
+                    let parent = stack
+                        .last()
+                        .ok_or(FolderbaseCaptureError::PlanningStateChanged)?;
+                    verify_child_identity(
+                        &parent.directory,
+                        &verification.name,
+                        &verification.identity,
+                        &verification.display_path,
+                    )?;
                 }
-                self.entries.push(CapturePlanEntry {
-                    path,
-                    kind: CaptureEntryKind::Directory,
-                    bytes: None,
-                    executable: None,
-                    symlink_target: None,
-                });
-                self.visit_directory(&child, &relative)?;
-                verify_child_identity(directory, &name, &identity, &display_path)?;
                 continue;
-            }
-
-            if let Some(kind) = unsupported_entry_kind(directory, &name, &display_path, &metadata)?
-            {
-                if required_marker {
-                    return Err(FolderbaseCaptureError::RequiredMarker(display_path));
-                }
-                self.exclusions.push(CapturePlanExclusion {
-                    path,
-                    kind,
-                    reason: CaptureExclusionReason::UnsupportedV1,
-                });
-                continue;
-            }
-
-            let (kind, bytes, executable, symlink_target) = if metadata.file_type().is_symlink() {
-                let target = read_stable_symlink(directory, &name, &relative, &display_path)?;
-                (CaptureEntryKind::Symlink, None, None, Some(target))
-            } else if metadata.is_file() {
-                if metadata.len() > MAX_OBJECT_BYTES {
-                    return Err(FolderbaseCaptureError::InventoryLimitExceeded {
-                        limit: CapturePlanLimitKind::ObjectBytes,
-                        maximum: MAX_OBJECT_BYTES,
-                        path: relative,
-                    });
-                }
-                (
-                    CaptureEntryKind::RegularFile,
-                    Some(metadata.len()),
-                    Some(is_executable(&metadata)),
-                    None,
-                )
-            } else {
-                return Err(FolderbaseCaptureError::PlanningStateChanged);
             };
-            self.entries.push(CapturePlanEntry {
-                path,
-                kind,
-                bytes,
-                executable,
-                symlink_target,
-            });
+            let entry = entry.map_err(|source| {
+                let relative_parent = &stack
+                    .last()
+                    .expect("non-empty traversal stack")
+                    .relative_parent;
+                FolderbaseCaptureError::Io {
+                    path: self.root.join(relative_parent),
+                    source,
+                }
+            })?;
+            let pending = {
+                let current = stack.last().expect("non-empty traversal stack");
+                self.visit_entry(&current.directory, &current.relative_parent, entry)?
+            };
+            if let Some(pending) = pending {
+                stack.push(capture_directory_frame(
+                    pending.directory,
+                    pending.relative_parent,
+                    self.root,
+                    Some(pending.verification),
+                )?);
+            }
         }
         Ok(())
+    }
+
+    fn visit_entry(
+        &mut self,
+        directory: &Dir,
+        relative_parent: &Path,
+        entry: DirEntry,
+    ) -> Result<Option<PendingCaptureDirectory>, FolderbaseCaptureError> {
+        let name = entry.file_name();
+        let relative = relative_parent.join(&name);
+        let display_path = self.root.join(&relative);
+        let metadata =
+            directory
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: display_path.clone(),
+                    source,
+                })?;
+
+        if name == OsStr::new(".folderbase") {
+            return Ok(None);
+        }
+        if is_folderbase_state_component(&name) {
+            return Err(FolderbaseCaptureError::UnsafePortablePath(relative));
+        }
+
+        let required_marker =
+            relative == Path::new(".folderbaseignore") || relative == Path::new("FOLDERBASE.md");
+        if !required_marker
+            && matches!(
+                self.ignore
+                    .matcher
+                    .matched(self.root.join(&relative), metadata.is_dir()),
+                Match::Ignore(_)
+            )
+        {
+            self.ensure_capacity(&relative)?;
+            self.ignored_paths.push(CaptureIgnoredPath {
+                path: portable_relative(&relative)?,
+            });
+            return Ok(None);
+        }
+
+        self.ensure_capacity(&relative)?;
+        let path = portable_relative(&relative)?;
+        validate_capture_path(&path)
+            .map_err(|_| FolderbaseCaptureError::UnsafePortablePath(relative.clone()))?;
+        self.path_index.insert(&path)?;
+
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let (child, identity) = open_stable_child(directory, &name, &display_path)?;
+            if is_nested_folderbase(&child, &display_path)? {
+                verify_child_identity(directory, &name, &identity, &display_path)?;
+                self.exclusions.push(CapturePlanExclusion {
+                    path,
+                    kind: CaptureExclusionKind::NestedFolderbase,
+                    reason: CaptureExclusionReason::NestedFolderbaseBoundary,
+                });
+                return Ok(None);
+            }
+            self.entries.push(CapturePlanEntry {
+                path,
+                kind: CaptureEntryKind::Directory,
+                bytes: None,
+                executable: None,
+                symlink_target: None,
+                observed: capture_entry_fingerprint(
+                    directory,
+                    &name,
+                    CaptureEntryKind::Directory,
+                    &metadata,
+                    &display_path,
+                )?,
+            });
+            return Ok(Some(PendingCaptureDirectory {
+                directory: child,
+                relative_parent: relative,
+                verification: CaptureChildVerification {
+                    name,
+                    identity,
+                    display_path,
+                },
+            }));
+        }
+
+        if let Some(kind) = unsupported_entry_kind(directory, &name, &display_path, &metadata)? {
+            if required_marker {
+                return Err(FolderbaseCaptureError::RequiredMarker(display_path));
+            }
+            self.exclusions.push(CapturePlanExclusion {
+                path,
+                kind,
+                reason: CaptureExclusionReason::UnsupportedV1,
+            });
+            return Ok(None);
+        }
+
+        let (kind, bytes, executable, symlink_target) = if metadata.file_type().is_symlink() {
+            let target = read_stable_symlink(directory, &name, &relative, &display_path)?;
+            (CaptureEntryKind::Symlink, None, None, Some(target))
+        } else if metadata.is_file() {
+            if metadata.len() > MAX_OBJECT_BYTES {
+                return Err(FolderbaseCaptureError::InventoryLimitExceeded {
+                    limit: CapturePlanLimitKind::ObjectBytes,
+                    maximum: MAX_OBJECT_BYTES,
+                    path: relative,
+                });
+            }
+            (
+                CaptureEntryKind::RegularFile,
+                Some(metadata.len()),
+                Some(is_executable(&metadata)),
+                None,
+            )
+        } else {
+            return Err(FolderbaseCaptureError::PlanningStateChanged);
+        };
+        self.entries.push(CapturePlanEntry {
+            path,
+            kind,
+            bytes,
+            executable,
+            symlink_target,
+            observed: capture_entry_fingerprint(directory, &name, kind, &metadata, &display_path)?,
+        });
+        Ok(None)
     }
 
     fn ensure_capacity(&self, path: &Path) -> Result<(), FolderbaseCaptureError> {
@@ -541,6 +783,26 @@ impl<'a> CapturePlanner<'a> {
             path,
         )
     }
+}
+
+fn capture_directory_frame(
+    directory: Dir,
+    relative_parent: PathBuf,
+    root: &Path,
+    completion: Option<CaptureChildVerification>,
+) -> Result<CaptureDirectoryFrame, FolderbaseCaptureError> {
+    let entries = directory
+        .read_dir(".")
+        .map_err(|source| FolderbaseCaptureError::Io {
+            path: root.join(&relative_parent),
+            source,
+        })?;
+    Ok(CaptureDirectoryFrame {
+        directory,
+        entries,
+        relative_parent,
+        completion,
+    })
 }
 
 struct IgnorePolicy {
@@ -618,6 +880,92 @@ fn is_executable(metadata: &Metadata) -> bool {
 #[cfg(windows)]
 fn is_executable(_metadata: &Metadata) -> bool {
     false
+}
+
+#[cfg(unix)]
+pub(crate) fn capture_entry_fingerprint(
+    _directory: &Dir,
+    _name: &OsStr,
+    _kind: CaptureEntryKind,
+    metadata: &Metadata,
+    _display_path: &Path,
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
+    Ok(CaptureMetadataFingerprint::from_cap_metadata(metadata))
+}
+
+#[cfg(windows)]
+pub(crate) fn capture_entry_fingerprint(
+    directory: &Dir,
+    name: &OsStr,
+    kind: CaptureEntryKind,
+    metadata: &Metadata,
+    display_path: &Path,
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
+    let file = match kind {
+        CaptureEntryKind::Directory => directory
+            .open_dir_nofollow(name)
+            .map_err(|source| FolderbaseCaptureError::Io {
+                path: display_path.to_path_buf(),
+                source,
+            })?
+            .into_std_file(),
+        CaptureEntryKind::RegularFile | CaptureEntryKind::Symlink => {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .follow(FollowSymlinks::No)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+            directory
+                .open_with(name, &options)
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: display_path.to_path_buf(),
+                    source,
+                })?
+                .into_std()
+        }
+    };
+    let identity = windows_file_identity(&file).map_err(|source| FolderbaseCaptureError::Io {
+        path: display_path.to_path_buf(),
+        source,
+    })?;
+    Ok(CaptureMetadataFingerprint::from_cap_metadata(metadata)
+        .with_physical_identity(Some(identity)))
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &fs::File) -> io::Result<String> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx},
+    };
+
+    let mut information = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            (&raw mut information).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut encoded = format!(
+        "windows-file-id-128:{:016x}:",
+        information.VolumeSerialNumber
+    );
+    for byte in information.FileId.Identifier {
+        use fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    Ok(encoded)
 }
 
 #[cfg(unix)]
@@ -899,9 +1247,12 @@ fn read_local_head(
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
     validate_capture_sha256(&head.version_sha256)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
+    validate_capture_sha256(&head.transaction_sha256)
+        .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
     Ok(Some(CaptureLocalHead {
         version_id: head.version_id,
         version_sha256: head.version_sha256,
+        transaction_sha256: head.transaction_sha256,
     }))
 }
 

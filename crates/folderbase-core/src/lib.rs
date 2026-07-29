@@ -9,6 +9,8 @@ pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
 mod folderbase_capture;
+mod folderbase_seal;
+mod folderbase_state;
 pub mod folderbase_version;
 #[cfg(test)]
 mod folderbase_version_producer_tests;
@@ -38,6 +40,8 @@ pub use folderbase_capture::{
     FolderbaseCaptureError, FolderbaseVersionStore, MAX_CAPTURE_PLAN_RECORDS,
     MAX_FOLDERBASEIGNORE_BYTES, MAX_LOCAL_HEAD_BYTES,
 };
+pub use folderbase_seal::SealedCapture;
+pub use folderbase_version::PathBindingKind;
 pub use initialization::{
     initialize, initialize_with_expected_plan_digest, plan_initialization,
     plan_template_initialization,

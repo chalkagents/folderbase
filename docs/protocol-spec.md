@@ -730,9 +730,9 @@ fidelity updates, exclusions, and root-manifest changes. A moved Object that als
 changes version or metadata produces both `Moved` and `Updated`. The public type
 cannot be constructed through raw Serde deserialization; the bounded private wire
 decoder and validated crate-private producer boundary are the only construction
-paths. Core can now produce an inert metadata-only Capture Plan, as specified
-below. Content verification and sealing, Local Head persistence, and publication
-remain later transactions.
+paths. Core can now produce an inert metadata-only Capture Plan and consume that
+exact plan in a byte-verified, journaled local sealing transaction, as specified
+below. Remote publication remains a later transaction.
 
 The full Folderbase Version is independent restore state. It is never exposed as a
 Folder Scope share projection because doing so could disclose paths outside the
@@ -746,9 +746,9 @@ reference encoder. The released manifest at
 source-release surface. ADR-0004 is Accepted, and CI rejects either a non-released
 status or a remaining candidate manifest.
 
-### Proposed metadata-only capture planning
+### Proposed local capture, sealing, and Local Head
 
-The first producer-side TB-33 slice remains Proposed in ADR-0005. A
+The first producer-side FB-41F slice remains Proposed in ADR-0005. A
 `FolderbaseVersionStore` can open one attested physical root and return an opaque,
 bounded `CapturePlan` containing filesystem metadata only. The plan binds the
 physical root, effective ordered ignore policy, and optional device-local head.
@@ -769,9 +769,48 @@ are rechecked, and streamed traversal enforces the aggregate bound without
 retaining an unbounded directory listing. The capture inventory uses the v1
 portable-path, Unicode collision, depth, entry-count, and object-size limits.
 
-This planning API does not verify content, assign Object identities, seal or
-persist a Folderbase Version, move Local Head, restore files, or provide
-snapshot/database atomicity, sync, sharing, authorization, or Cloud behavior.
+`FolderbaseVersionStore::seal_capture(plan)` first revalidates the complete plan,
+then durably journals every new stable Object ID, candidate Object Version ID,
+Folderbase Version ID, parent, timestamp, and expected Local Head. It may reuse
+identity only from a fully verified prior Local Head binding and a matching
+device-local physical-identity record. Missing evidence fails closed. Unix
+bindings use device/inode identity; Windows bindings use the volume serial and
+complete 128-bit File ID from the opened no-follow handle. All ordinary
+regular files are read as exact opaque bytes through root-relative no-follow
+capabilities and checked against planned metadata and physical identity before
+and after the read.
+
+Core installs content-addressed blobs and immutable Object Version records through
+the existing `LocalVersionStore`. It then constructs the one canonical
+Folderbase Version through the crate-private verified-producer seam, encodes it
+with the bounded encoder, publishes it append-only, and independently verifies
+every referenced durable record. A shared capability-confined state publisher
+stages, flushes, publishes, verifies, replaces, and removes capture state
+relative to retained no-follow directory handles. It rejects symlink/junction
+parent swaps; a detached write cannot advance visible Head. Local Head advances
+only after those checks, through a compare-and-replace under a cross-platform
+exclusive device-local file lock. The Local Head also binds the SHA-256 digest
+of the complete capture journal. Recovery after Head publication refuses any
+journal mutation and requires the committed version's exact parents and
+timestamp to match the anchored intent before projecting identity evidence.
+
+Sealing opens the existing retained state capability and re-attests the inert
+plan before any lock, layout, recovery, or capture publication. Capture-specific
+blob, Object Version, Folderbase Version, projection, identity, journal, and Head
+operations reuse that capability rather than re-entering through ambient paths.
+Mutating root openers reject Windows junctions and all other reparse points.
+
+The active journal's writer and restart reader share one explicit bound.
+Assignment cardinality and every planned path/kind/observation plus reused
+Object ID, prior Object Version, root-manifest lineage, and expected Head are
+matched to the approved plan and verified parent before object writes.
+The journal makes every persistence boundary retryable with the exact assigned
+IDs and preserves the prior Head until the complete next version is durable.
+
+This remains Proposed because Tombstone-producing deletion/recreation
+transactions and full no-clobber restore/crash recovery are not implemented.
+Database snapshot coordination, Remote Head publication, sync, sharing,
+authorization, and Cloud behavior also remain out of scope.
 
 ## Checkout
 
