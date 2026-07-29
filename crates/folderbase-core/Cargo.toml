@@ -39,6 +39,7 @@ walkdir.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

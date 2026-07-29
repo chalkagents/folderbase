@@ -424,8 +424,17 @@ fn open_root_nofollow(path: &Path) -> std::io::Result<fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options.open(path)?;
-    if !file.metadata()?.is_dir() {
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(std::io::Error::other("source root is not a directory"));
     }
     Ok(file)
