@@ -723,14 +723,16 @@ recognized by Windows, including names with extensions.
 The record is at most 64 MiB and 16,384 aggregate entries. A 10 GiB file therefore
 appears as bounded metadata, but a producer may seal no Folderbase Version until
 the exact included Object Version references and bytes have been verified. Core's
-first 0.4 module only decodes, validates, digests, and looks up a sealed record;
-it also produces a deterministic typed diff that distinguishes stable-ID moves,
-same-path recreation, deletion/Tombstone evidence, fidelity updates, exclusions,
-and root-manifest changes. A moved Object that also changes version or metadata
-produces both `Moved` and `Updated`. The public type cannot be constructed through
-raw Serde deserialization; the bounded private wire decoder is the only decode
-path. Filesystem capture, Local Head persistence, and publication remain later
-transactions.
+0.4 module decodes, validates, digests, looks up, and performs controlled bounded
+encoding of a sealed record. It also produces a deterministic typed diff that
+distinguishes stable-ID moves, same-path recreation, deletion/Tombstone evidence,
+fidelity updates, exclusions, and root-manifest changes. A moved Object that also
+changes version or metadata produces both `Moved` and `Updated`. The public type
+cannot be constructed through raw Serde deserialization; the bounded private wire
+decoder and validated crate-private producer boundary are the only construction
+paths. Core can now produce an inert metadata-only Capture Plan, as specified
+below. Content verification and sealing, Local Head persistence, and publication
+remain later transactions.
 
 The full Folderbase Version is independent restore state. It is never exposed as a
 Folder Scope share projection because doing so could disclose paths outside the
@@ -743,6 +745,33 @@ reference encoder. The released manifest at
 `protocol/releases/0.4/folderbase-version-v1.json` declares the exact
 source-release surface. ADR-0004 is Accepted, and CI rejects either a non-released
 status or a remaining candidate manifest.
+
+### Proposed metadata-only capture planning
+
+The first producer-side TB-33 slice remains Proposed in ADR-0005. A
+`FolderbaseVersionStore` can open one attested physical root and return an opaque,
+bounded `CapturePlan` containing filesystem metadata only. The plan binds the
+physical root, effective ordered ignore policy, and optional device-local head.
+It is inert and is not a Folderbase Version.
+
+Core reads protocol control bytes needed to interpret the root—the manifest,
+`.folderbaseignore`, and optional `.folderbase/local/head.json`—but does not open
+ordinary file contents while planning. PDFs, videos, CSV, SQLite, Git packs, and
+unknown files are all opaque regular files. Nested Folderbases, hard links, and
+special nodes are typed exclusions; symlinks are not followed.
+
+Core defaults exclude known generated trees before applying ordered user rules.
+Required `.folderbaseignore` and `FOLDERBASE.md` bindings cannot be ignored, and
+`.folderbase/**` cannot enter the ordinary inventory. Definitively excluded
+directories are classified before they are opened. Root-relative no-follow
+directory capabilities prevent ambient-path escape, opened directory identities
+are rechecked, and streamed traversal enforces the aggregate bound without
+retaining an unbounded directory listing. The capture inventory uses the v1
+portable-path, Unicode collision, depth, entry-count, and object-size limits.
+
+This planning API does not verify content, assign Object identities, seal or
+persist a Folderbase Version, move Local Head, restore files, or provide
+snapshot/database atomicity, sync, sharing, authorization, or Cloud behavior.
 
 ## Checkout
 

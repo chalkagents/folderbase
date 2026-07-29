@@ -1,0 +1,8 @@
+*.tmp
+!keep.tmp
+*.log
+!important.log
+important.log
+FOLDERBASE.md
+.folderbaseignore
+!node_modules/

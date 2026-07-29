@@ -33,7 +33,8 @@ not require a Folderbase account.
 - `folderbase-core`: Rust library for inspection, initialization, validation,
   templates, migration, local versions, workspace operations, sharing policy,
   canonical bounded-memory transfer planning/source streaming, canonical
-  Folderbase Version validation/digests, and sync primitives
+  Folderbase Version validation/digests/controlled encoding, read-only
+  metadata capture planning, and sync primitives
 - `folderbase`: reference command-line interface
 - versioned JSON Schemas and conformance fixtures
 - built-in person, organization, customer, engagement, project, temporary, and
@@ -159,6 +160,7 @@ chunk range has been streamed and checked.
 - [Schemas, templates, and conformance vectors](protocol/README.md)
 - [Accepted canonical streaming-transfer decision](docs/adr/0001-stream-immutable-versions-through-canonical-manifests.md)
 - [Accepted bounded full-state Folderbase Version decision](docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md)
+- [Proposed metadata-first capture transaction](docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md)
 
 Protocol `0.x` and crate `0.x` releases are pre-stable. Wire and filesystem
 contracts may change between minor versions until 1.0.

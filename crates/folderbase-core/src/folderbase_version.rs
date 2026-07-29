@@ -7,13 +7,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
-    io::Read,
+    io::{Read, Write},
     marker::PhantomData,
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{
-    Deserialize,
+    Deserialize, Serialize,
     de::{IgnoredAny, SeqAccess, Visitor},
 };
 use sha2::{Digest, Sha256};
@@ -65,9 +65,34 @@ struct FolderbaseVersionWire {
     exclusions: Vec<Exclusion>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Crate-private construction boundary for future verified producers.
+///
+/// Later capture/seal code may prepare these parts only after it has verified
+/// their referenced bytes. Construction still performs the complete protocol
+/// validation before returning a `FolderbaseVersion`.
+pub(crate) struct FolderbaseVersionParts {
+    format: String,
+    protocol_version: String,
+    folderbase_id: String,
+    version_id: String,
+    parents: Vec<String>,
+    created_at: String,
+    path_policy: PathPolicy,
+    root_manifest: RootManifest,
+    bindings: Vec<PathBinding>,
+    tombstones: Vec<Tombstone>,
+    exclusions: Vec<Exclusion>,
+}
+
+pub(crate) struct FolderbaseVersionEntries {
+    bindings: Vec<PathBinding>,
+    tombstones: Vec<Tombstone>,
+    exclusions: Vec<Exclusion>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PathPolicy {
+pub(crate) struct PathPolicy {
     format: String,
     normalization: String,
     normalization_unicode_version: String,
@@ -75,7 +100,7 @@ struct PathPolicy {
     case_folding_unicode_version: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RootManifest {
     path: String,
@@ -91,7 +116,7 @@ pub enum PathBindingKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum PathBinding {
     Directory(DirectoryBinding),
@@ -99,7 +124,7 @@ pub enum PathBinding {
     Symlink(SymlinkBinding),
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectoryBinding {
     path: String,
@@ -108,7 +133,7 @@ pub struct DirectoryBinding {
     kind: DirectoryKind,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RegularFileBinding {
     path: String,
@@ -121,7 +146,7 @@ pub struct RegularFileBinding {
     executable: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymlinkBinding {
     path: String,
@@ -133,37 +158,37 @@ pub struct SymlinkBinding {
     target_safety: SymlinkTargetSafety,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum DirectoryKind {
     Directory,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RegularFileKind {
     RegularFile,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum SymlinkKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum LiveLifecycle {
     Live,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum SymlinkTargetSafety {
     RelativeWithinFolderbase,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Tombstone {
     path: String,
@@ -173,13 +198,13 @@ pub struct Tombstone {
     last_object_version_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum DeletedLifecycle {
     Deleted,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeletedKind {
     Directory,
@@ -187,7 +212,7 @@ pub enum DeletedKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Exclusion {
     path: String,
@@ -195,7 +220,7 @@ pub struct Exclusion {
     reason: ExclusionReason,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExclusionKind {
     NestedFolderbase,
@@ -207,11 +232,172 @@ pub enum ExclusionKind {
     OtherSpecial,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExclusionReason {
     NestedFolderbaseBoundary,
     UnsupportedV1,
+}
+
+// This phase deliberately exposes the producer seam before the later sealing
+// transaction consumes it.
+#[allow(dead_code)]
+impl FolderbaseVersionParts {
+    /// Assemble the closed v1 shape from producer-verified references.
+    ///
+    /// `FolderbaseVersion::from_verified_parts` still enforces every protocol
+    /// invariant before a value can exist.
+    pub(crate) fn portable_v1_from_verified_producer(
+        folderbase_id: impl Into<String>,
+        version_id: impl Into<String>,
+        parents: Vec<String>,
+        created_at: impl Into<String>,
+        root_manifest: RootManifest,
+        entries: FolderbaseVersionEntries,
+    ) -> Self {
+        Self {
+            format: VERSION_FORMAT_V1.to_owned(),
+            protocol_version: "0.4".to_owned(),
+            folderbase_id: folderbase_id.into(),
+            version_id: version_id.into(),
+            parents,
+            created_at: created_at.into(),
+            path_policy: PathPolicy::portable_v1(),
+            root_manifest,
+            bindings: entries.bindings,
+            tombstones: entries.tombstones,
+            exclusions: entries.exclusions,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl FolderbaseVersionEntries {
+    pub(crate) fn from_verified_producer(
+        bindings: Vec<PathBinding>,
+        tombstones: Vec<Tombstone>,
+        exclusions: Vec<Exclusion>,
+    ) -> Self {
+        Self {
+            bindings,
+            tombstones,
+            exclusions,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl PathPolicy {
+    fn portable_v1() -> Self {
+        Self {
+            format: PATH_POLICY_FORMAT_V1.to_owned(),
+            normalization: "NFC".to_owned(),
+            normalization_unicode_version: "17.0.0".to_owned(),
+            case_folding: "full-default".to_owned(),
+            case_folding_unicode_version: "9.0.0".to_owned(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl RootManifest {
+    pub(crate) fn from_verified_producer(
+        object_version_id: impl Into<String>,
+        content_sha256: impl Into<String>,
+        bytes: u64,
+    ) -> Self {
+        Self {
+            path: ".folderbase/manifest.json".to_owned(),
+            object_version_id: object_version_id.into(),
+            content_sha256: content_sha256.into(),
+            bytes: ExactU64(bytes),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl PathBinding {
+    pub(crate) fn directory_from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+    ) -> Self {
+        Self::Directory(DirectoryBinding {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: LiveLifecycle::Live,
+            kind: DirectoryKind::Directory,
+        })
+    }
+
+    pub(crate) fn regular_file_from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        object_version_id: impl Into<String>,
+        content_sha256: impl Into<String>,
+        bytes: u64,
+        executable: bool,
+    ) -> Self {
+        Self::RegularFile(RegularFileBinding {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: LiveLifecycle::Live,
+            kind: RegularFileKind::RegularFile,
+            object_version_id: object_version_id.into(),
+            content_sha256: content_sha256.into(),
+            bytes: ExactU64(bytes),
+            executable,
+        })
+    }
+
+    pub(crate) fn symlink_from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        object_version_id: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        Self::Symlink(SymlinkBinding {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: LiveLifecycle::Live,
+            kind: SymlinkKind::Symlink,
+            object_version_id: object_version_id.into(),
+            target: target.into(),
+            target_safety: SymlinkTargetSafety::RelativeWithinFolderbase,
+        })
+    }
+}
+
+#[allow(dead_code)]
+impl Tombstone {
+    pub(crate) fn from_verified_producer(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        deleted_kind: DeletedKind,
+        last_object_version_id: Option<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            object_id: object_id.into(),
+            lifecycle: DeletedLifecycle::Deleted,
+            deleted_kind,
+            last_object_version_id,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl Exclusion {
+    pub(crate) fn from_verified_producer(
+        path: impl Into<String>,
+        kind: ExclusionKind,
+        reason: ExclusionReason,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +470,9 @@ pub enum FolderbaseVersionError {
     #[error("Folderbase Version is not valid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
 
+    #[error("could not write encoded Folderbase Version: {0}")]
+    EncodingIo(#[source] std::io::Error),
+
     #[error("Folderbase Version violates the protocol: {0}")]
     InvalidVersion(String),
 }
@@ -301,11 +490,65 @@ impl FolderbaseVersion {
                 maximum_bytes: MAX_ENCODED_VERSION_BYTES,
             });
         }
-        let counts: EntryCountProbe = serde_json::from_slice(&encoded)?;
+        Self::decode_verified_slice(&encoded)
+    }
+
+    /// Encode one already-validated Folderbase Version as bounded JSON.
+    ///
+    /// The public value intentionally does not implement `Serialize`; this
+    /// method is the only supported JSON encoding path.
+    pub fn encode_bounded(&self, mut writer: impl Write) -> Result<(), FolderbaseVersionError> {
+        self.validate()?;
+        let mut encoded = BoundedJsonBuffer::new(MAX_ENCODED_VERSION_BYTES as usize);
+        let result = serde_json::to_writer(&mut encoded, &FolderbaseVersionWireRef::from(self));
+        if encoded.exceeded {
+            return Err(FolderbaseVersionError::EncodedVersionTooLarge {
+                maximum_bytes: MAX_ENCODED_VERSION_BYTES,
+            });
+        }
+        result?;
+        writer
+            .write_all(&encoded.bytes)
+            .map_err(FolderbaseVersionError::EncodingIo)
+    }
+
+    /// Construct a validated value from a bounded in-memory representation.
+    ///
+    /// This crate-private seam is reserved for later producer transactions;
+    /// external callers continue to use `decode_bounded`.
+    pub(crate) fn decode_verified_slice(encoded: &[u8]) -> Result<Self, FolderbaseVersionError> {
+        if encoded.len() as u64 > MAX_ENCODED_VERSION_BYTES {
+            return Err(FolderbaseVersionError::EncodedVersionTooLarge {
+                maximum_bytes: MAX_ENCODED_VERSION_BYTES,
+            });
+        }
+        let counts: EntryCountProbe = serde_json::from_slice(encoded)?;
         if counts.total() > MAX_VERSION_ENTRIES {
             return invalid("Folderbase Version entry count exceeds the v1 limit");
         }
-        let version = Self::from(serde_json::from_slice::<FolderbaseVersionWire>(&encoded)?);
+        let parts =
+            FolderbaseVersionParts::from(serde_json::from_slice::<FolderbaseVersionWire>(encoded)?);
+        Self::from_verified_parts(parts)
+    }
+
+    /// Construct one value from producer-verified parts, then independently
+    /// enforce every Folderbase Version invariant.
+    pub(crate) fn from_verified_parts(
+        parts: FolderbaseVersionParts,
+    ) -> Result<Self, FolderbaseVersionError> {
+        let version = Self {
+            format: parts.format,
+            protocol_version: parts.protocol_version,
+            folderbase_id: parts.folderbase_id,
+            version_id: parts.version_id,
+            parents: parts.parents,
+            created_at: parts.created_at,
+            path_policy: parts.path_policy,
+            root_manifest: parts.root_manifest,
+            bindings: parts.bindings,
+            tombstones: parts.tombstones,
+            exclusions: parts.exclusions,
+        };
         version.validate()?;
         Ok(version)
     }
@@ -489,22 +732,19 @@ impl FolderbaseVersion {
             }
         }
 
-        let nested_boundary_set = self
-            .exclusions
-            .iter()
-            .filter(|exclusion| exclusion.kind == ExclusionKind::NestedFolderbase)
-            .map(|exclusion| portable_folded_key(&exclusion.path))
-            .collect::<BTreeSet<_>>();
-        for boundary in &nested_boundary_set {
-            for (separator, _) in boundary.match_indices('/') {
-                if nested_boundary_set.contains(&boundary[..separator]) {
-                    return invalid(format!(
-                        "nested Folderbase boundary overlaps its ancestor: {boundary}"
-                    ));
-                }
+        let nested_boundaries = NestedBoundaryIndex::from_paths(
+            self.exclusions
+                .iter()
+                .filter(|exclusion| exclusion.kind == ExclusionKind::NestedFolderbase)
+                .map(|exclusion| exclusion.path.as_str()),
+        );
+        for boundary in nested_boundaries.iter() {
+            if nested_boundaries.contains_strict_ancestor(boundary) {
+                return invalid(format!(
+                    "nested Folderbase boundary overlaps its ancestor: {boundary}"
+                ));
             }
         }
-        let nested_boundaries = nested_boundary_set.into_iter().collect::<Vec<_>>();
         for binding in &self.bindings {
             reject_nested_descendant(binding.path(), &nested_boundaries)?;
         }
@@ -867,7 +1107,79 @@ impl FolderbaseVersion {
     }
 }
 
-impl From<FolderbaseVersionWire> for FolderbaseVersion {
+struct BoundedJsonBuffer {
+    bytes: Vec<u8>,
+    maximum: usize,
+    exceeded: bool,
+}
+
+impl BoundedJsonBuffer {
+    fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(4096),
+            maximum,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(length) = self.bytes.len().checked_add(bytes.len()) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "Folderbase Version encoded length overflowed",
+            ));
+        };
+        if length > self.maximum {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "Folderbase Version encoded length exceeded its limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct FolderbaseVersionWireRef<'a> {
+    format: &'a str,
+    protocol_version: &'a str,
+    folderbase_id: &'a str,
+    version_id: &'a str,
+    parents: &'a [String],
+    created_at: &'a str,
+    path_policy: &'a PathPolicy,
+    root_manifest: &'a RootManifest,
+    bindings: &'a [PathBinding],
+    tombstones: &'a [Tombstone],
+    exclusions: &'a [Exclusion],
+}
+
+impl<'a> From<&'a FolderbaseVersion> for FolderbaseVersionWireRef<'a> {
+    fn from(version: &'a FolderbaseVersion) -> Self {
+        Self {
+            format: &version.format,
+            protocol_version: &version.protocol_version,
+            folderbase_id: &version.folderbase_id,
+            version_id: &version.version_id,
+            parents: &version.parents,
+            created_at: &version.created_at,
+            path_policy: &version.path_policy,
+            root_manifest: &version.root_manifest,
+            bindings: &version.bindings,
+            tombstones: &version.tombstones,
+            exclusions: &version.exclusions,
+        }
+    }
+}
+
+impl From<FolderbaseVersionWire> for FolderbaseVersionParts {
     fn from(wire: FolderbaseVersionWire) -> Self {
         Self {
             format: wire.format,
@@ -1182,6 +1494,32 @@ fn validate_strict_path_order<'a>(
     Ok(())
 }
 
+pub(crate) fn validate_capture_path(path: &str) -> Result<(), FolderbaseVersionError> {
+    validate_portable_path(path).map(|_| ())
+}
+
+pub(crate) fn validate_capture_version_id(value: &str) -> Result<(), FolderbaseVersionError> {
+    validate_prefixed_uuid(value, "fbversion_")
+}
+
+pub(crate) fn validate_capture_sha256(value: &str) -> Result<(), FolderbaseVersionError> {
+    validate_sha256(value)
+}
+
+pub(crate) fn validate_capture_symlink_targets<'a>(
+    targets: impl IntoIterator<Item = (&'a str, &'a str)>,
+    nested_boundaries: &[String],
+) -> Result<(), &'a str> {
+    let nested_boundaries =
+        NestedBoundaryIndex::from_paths(nested_boundaries.iter().map(String::as_str));
+    for (link_path, target) in targets {
+        if validate_symlink_target(link_path, target, &nested_boundaries).is_err() {
+            return Err(link_path);
+        }
+    }
+    Ok(())
+}
+
 fn validate_portable_path(path: &str) -> Result<PathKeys, FolderbaseVersionError> {
     let bytes = path.as_bytes();
     let drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -1283,13 +1621,10 @@ fn bind_object_version<'a>(
 
 fn reject_nested_descendant(
     path: &str,
-    boundaries: &[String],
+    boundaries: &NestedBoundaryIndex,
 ) -> Result<(), FolderbaseVersionError> {
     let path = portable_folded_key(path);
-    if boundaries
-        .iter()
-        .any(|boundary| path.starts_with(&format!("{boundary}/")))
-    {
+    if boundaries.contains_strict_ancestor(&path) {
         return invalid(format!(
             "path enters an excluded nested Folderbase boundary: {path}"
         ));
@@ -1300,7 +1635,7 @@ fn reject_nested_descendant(
 fn validate_symlink_target(
     link_path: &str,
     target: &str,
-    nested_boundaries: &[String],
+    nested_boundaries: &NestedBoundaryIndex,
 ) -> Result<(), FolderbaseVersionError> {
     let bytes = target.as_bytes();
     let drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -1347,13 +1682,69 @@ fn validate_symlink_target(
             return invalid("symlink target enters Folderbase protocol state");
         }
         let folded_resolved = portable_folded_key(&resolved);
-        if nested_boundaries.iter().any(|boundary| {
-            folded_resolved == *boundary || folded_resolved.starts_with(&format!("{boundary}/"))
-        }) {
+        if nested_boundaries.contains_or_ancestor(&folded_resolved) {
             return invalid("symlink target enters a nested Folderbase boundary");
         }
     }
     Ok(())
+}
+
+struct NestedBoundaryIndex {
+    folded: BTreeSet<String>,
+}
+
+impl NestedBoundaryIndex {
+    fn from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            folded: paths.into_iter().map(portable_folded_key).collect(),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &str> {
+        self.folded.iter().map(String::as_str)
+    }
+
+    fn contains_or_ancestor(&self, folded_path: &str) -> bool {
+        self.contains_ancestor_with(folded_path, true, |_| {})
+    }
+
+    fn contains_strict_ancestor(&self, folded_path: &str) -> bool {
+        self.contains_ancestor_with(folded_path, false, |_| {})
+    }
+
+    fn contains_ancestor_with(
+        &self,
+        folded_path: &str,
+        include_exact: bool,
+        mut inspect: impl FnMut(&str),
+    ) -> bool {
+        for (separator, _) in folded_path.match_indices('/') {
+            let ancestor = &folded_path[..separator];
+            inspect(ancestor);
+            if self.folded.contains(ancestor) {
+                return true;
+            }
+        }
+        if include_exact {
+            inspect(folded_path);
+            if self.folded.contains(folded_path) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.folded.len()
+    }
+
+    #[cfg(test)]
+    fn probe_count(&self, folded_path: &str, include_exact: bool) -> usize {
+        let mut probes = 0;
+        let _ = self.contains_ancestor_with(folded_path, include_exact, |_| probes += 1);
+        probes
+    }
 }
 
 fn portable_folded_key(path: &str) -> String {
@@ -1493,7 +1884,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct ExactU64(u64);
 
 impl<'de> Deserialize<'de> for ExactU64 {
@@ -1559,4 +1950,26 @@ fn parse_exact_unsigned(encoded: &str) -> Option<u64> {
         }
     }
     normalized.parse().ok()
+}
+
+#[cfg(test)]
+mod nested_boundary_index_tests {
+    use super::*;
+
+    #[test]
+    fn maximum_boundary_set_uses_at_most_path_depth_lookups_per_target() {
+        let boundaries = (0..MAX_VERSION_ENTRIES / 2)
+            .map(|index| format!("boundary-{index:04}"))
+            .collect::<Vec<_>>();
+        let index = NestedBoundaryIndex::from_paths(boundaries.iter().map(String::as_str));
+        let resolved = (0..MAX_PATH_DEPTH)
+            .map(|index| format!("ordinary-{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let folded_resolved = portable_folded_key(&resolved);
+
+        assert_eq!(index.len(), MAX_VERSION_ENTRIES / 2);
+        assert_eq!(index.probe_count(&folded_resolved, true), MAX_PATH_DEPTH);
+        assert!(!index.contains_or_ancestor(&folded_resolved));
+    }
 }
