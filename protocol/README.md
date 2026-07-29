@@ -23,6 +23,8 @@ independent of the Folderbase application and hosted services.
   closed-profile Reorganization Protocol 0.3 records. The Plan schema references
   definitions in the Draft schema by its public `$id`; register both with a
   validator.
+- `schemas/0.4/folderbase-version.schema.json` validates the closed,
+  provider-neutral `folderbase-version-v1` bounded full-state artifact.
 - `conformance/` contains valid and invalid compatibility fixtures.
 - `conformance/chunk-manifest/` fixes the valid and invalid manifest shapes;
   its independently generated `.sha256` sidecars fix cross-client canonical
@@ -32,6 +34,9 @@ independent of the Folderbase application and hosted services.
 - `conformance/reorganization/` covers valid Drafts and Plans, every v1
   operation kind, schema negatives, semantic negatives, and the independently
   calculated canonical Plan digest.
+- `conformance/folderbase-version/` fixes valid fidelity/lifecycle state,
+  schema and semantic negatives, Unicode collision policy, and independently
+  generated canonical-digest sidecars.
 - `templates/0.2/project/template.json` is the built-in data-only
   Project package.
 - `templates/project/` is the additive starting point for a new Project
@@ -69,6 +74,21 @@ Chunk Manifest v1 intentionally rejects unknown fields. Semantic conformance
 also validates ordered, contiguous descriptors, exact object length, profile
 bounds, the 1 TiB lossless JSON-integer ceiling, and empty-object identity
 because JSON Schema cannot compare all of those values across array entries.
+
+Folderbase Version v1 also rejects unknown fields. It preserves exact UTF-8 path
+spellings while rejecting exact, NFC, and full-default-case-fold collisions.
+Regular files are opaque bytes with executable fidelity, symlinks are recorded
+without being followed, empty directories are explicit, Tombstones retain
+deletions, and hard links or special nodes are typed exclusions rather than silent
+loss. `.folderbase/manifest.json` is represented only by the reserved
+`root_manifest` Object Version reference; every ordinary `.folderbase/**` binding
+is rejected. `FOLDERBASE.md` and root `.folderbaseignore` remain ordinary visible
+bindings.
+
+The full-state artifact is an independent restore contract, not a scoped share
+projection, authorization record, hosted-presence receipt, or chunk transfer plan.
+A separate future projection artifact must contain only the paths authorized for
+one Folder Scope.
 
 ## Using the Project template
 

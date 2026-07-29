@@ -1,0 +1,30 @@
+{
+  "format": "folderbase-version-v1",
+  "protocol_version": "0.4",
+  "folderbase_id": "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+  "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000017",
+  "parents": [],
+  "created_at": "2026-07-29T00:17:00Z",
+  "path_policy": {
+    "format": "folderbase-portable-path-v1",
+    "normalization": "NFC",
+    "normalization_unicode_version": "17.0.0",
+    "case_folding": "full-default",
+    "case_folding_unicode_version": "9.0.0"
+  },
+  "root_manifest": {
+    "path": ".folderbase/manifest.json",
+    "object_version_id": "version_0198ee40-c333-7ccc-8000-000000000100",
+    "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "bytes": 512
+  },
+  "bindings": [],
+  "tombstones": [],
+  "exclusions": [
+    {
+      "path": "media/copy.mov",
+      "kind": "hard_link",
+      "reason": "nested-folderbase-boundary"
+    }
+  ]
+}

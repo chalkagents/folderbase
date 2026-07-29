@@ -27,6 +27,32 @@ A durably identified item managed by a Folderbase whose identity does not depend
 on its current path.
 _Avoid_: File record, path record
 
+**Object Version**:
+One immutable exact representation of a Knowledge Object, identified by the existing
+object-level `VersionId` namespace.
+_Avoid_: Folderbase Version, file revision
+
+**Path Binding**:
+The current association between one portable path, one stable Knowledge Object, and
+the exact Object Version needed for content-bearing kinds.
+_Avoid_: Filename identity, directory entry
+
+**Folderbase Version**:
+One sealed, portable full-state view of a Folderbase boundary, with its own identity
+distinct from every Object Version.
+_Avoid_: Snapshot file, Object Version
+
+**Local Head**:
+A device-local pointer to the Folderbase Version currently selected for one exact
+Folderbase Root; it is not shared authority or a Cloud head.
+_Avoid_: Remote Head, latest version
+
+**Tombstone**:
+A retained deletion of a Path Binding whose containing Folderbase Version
+establishes the deletion generation so replicas do not silently resurrect removed
+state.
+_Avoid_: Trash item, missing file
+
 **Template**:
 Optional versioned data that proposes starting or additive structure. It records
 provenance but never becomes continuing layout authority.

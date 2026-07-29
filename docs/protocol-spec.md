@@ -685,6 +685,47 @@ bounded transfer operations. Checkout hydration and historical recovery use
 separate authorization flows; a caller cannot turn an arbitrary historical
 version identifier into Live Folder materialization authority.
 
+## Canonical Folderbase Version 0.4
+
+`folderbase-version-v1` is the portable bounded full state of one Folderbase
+boundary. It uses the distinct `fbversion_` identity namespace; the existing
+`version_` namespace remains the Object Version for one immutable Knowledge Object
+representation. Neither identity is a chunk-manifest digest.
+
+The closed record contains the exact Folderbase and Folderbase Version identities,
+parents, creation time, pinned portable-path policy, one reserved exact
+`.folderbase/manifest.json` Object Version reference, sorted live Path Bindings,
+sorted Tombstones, and sorted typed exclusions. The containing Folderbase Version
+itself establishes the deletion generation for every Tombstone, so Tombstones do
+not repeat the containing ID or digest.
+
+Regular files are opaque exact bytes plus executable fidelity. Symlinks retain an
+exact UTF-8 target and are never followed; only lexically contained targets that
+avoid protocol state and nested boundaries conform. Directories are explicit,
+including empty directories. Hard links, FIFOs, sockets, block devices, character
+devices, and other special nodes are typed unsupported exclusions in v1 and must
+never disappear silently.
+
+Paths preserve their exact UTF-8 spelling. The v1 policy rejects traversal,
+absolute and drive paths, backslashes, NUL, Windows-reserved or trailing-dot/space
+components, protocol self-capture, excessive size/depth/count, and exact, NFC, or
+full-default-case-fold collisions. Names are never silently normalized or renamed.
+A nested Folderbase contributes one boundary exclusion and no parent-version
+binding may enter it.
+
+The record is at most 64 MiB and 16,384 aggregate entries. A 10 GiB file therefore
+appears as bounded metadata, but a producer may seal no Folderbase Version until
+the exact included Object Version references and bytes have been verified. Core's
+first 0.4 module only decodes, validates, digests, and looks up a sealed record;
+it also produces a deterministic typed diff that distinguishes stable-ID moves,
+same-path recreation, deletion/Tombstone evidence, fidelity updates, exclusions,
+and root-manifest changes. Filesystem capture, Local Head persistence, and
+publication remain later transactions.
+
+The full Folderbase Version is independent restore state. It is never exposed as a
+Folder Scope share projection because doing so could disclose paths outside the
+grant. A separate projection artifact will bind only authorized content.
+
 ## Checkout
 
 A checkout is an isolated materialization at a known folderbase version.

@@ -45,6 +45,9 @@ jobs:
       - name: Verify the independent reorganization digest vector
         run: node scripts/verify-reorganization-digest-vector.mjs
 
+      - name: Verify independent Folderbase Version digest vectors
+        run: node scripts/verify-folderbase-version-digest-vectors.mjs
+
       - name: Test
         run: cargo test --workspace --all-features --locked
 
