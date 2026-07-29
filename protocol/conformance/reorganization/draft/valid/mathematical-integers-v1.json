@@ -1,0 +1,77 @@
+{
+  "protocol_version": "0.3.0",
+  "profile": "folderbase-reorganization-draft-v1",
+  "id": "reorg_mathematical_integers",
+  "generation": 1e0,
+  "folderbase_id": "folderbase_example",
+  "path_profile": "portable-case-sensitive-v1",
+  "analysis_scope": {
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ignore_policy": {
+      "expectation": "absent",
+      "path": ".folderbaseignore"
+    },
+    "structural_policy": {
+      "expectation": "absent",
+      "path": ".folderbase/policy.json"
+    },
+    "nested_boundaries": [],
+    "operation_closure": [
+      {
+        "expectation": "directory",
+        "path": "Archive"
+      },
+      {
+        "expectation": "absent",
+        "path": "Archive/movie.mov"
+      },
+      {
+        "expectation": "directory",
+        "path": "media"
+      },
+      {
+        "expectation": "file",
+        "path": "media/movie.mov",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "byte_count": 1e1
+      },
+      {
+        "expectation": "directory",
+        "path": ".folderbase"
+      },
+      {
+        "expectation": "directory",
+        "path": ".folderbase/objects"
+      },
+      {
+        "expectation": "file",
+        "path": ".folderbase/objects/object_alpha.json",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "byte_count": 2.0e2
+      }
+    ],
+    "declared_entries": []
+  },
+  "questions": [],
+  "rationale": "Schema-valid mathematical integers decode to the exact canonical integer model.",
+  "operations": [
+    {
+      "kind": "move_file",
+      "source_path": "media/movie.mov",
+      "destination_path": "Archive/movie.mov",
+      "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected_byte_count": 10.0
+    },
+    {
+      "kind": "update_relationship",
+      "object_record_path": ".folderbase/objects/object_alpha.json",
+      "object_id": "object_alpha",
+      "expected_version_id": "version_alpha_3",
+      "relationship_type": "supports",
+      "target_object_id": "object_database",
+      "expected_record_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected_revision": 3.0,
+      "new_revision": 4e0
+    }
+  ]
+}

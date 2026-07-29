@@ -1,0 +1,157 @@
+{
+  "protocol_version": "0.3.0",
+  "profile": "folderbase-reorganization-draft-v1",
+  "id": "reorg_all_operations",
+  "generation": 1,
+  "folderbase_id": "folderbase_example",
+  "path_profile": "portable-case-sensitive-v1",
+  "analysis_scope": {
+    "manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "ignore_policy": {
+      "expectation": "absent",
+      "path": ".folderbaseignore"
+    },
+    "structural_policy": {
+      "expectation": "absent",
+      "path": ".folderbase/policy.json"
+    },
+    "nested_boundaries": [],
+    "operation_closure": [
+      {
+        "expectation": "absent",
+        "path": "Narrative"
+      },
+      {
+        "expectation": "absent",
+        "path": "Narrative/SUMMARY.md"
+      },
+      {
+        "expectation": "file",
+        "path": "README.md",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "byte_count": 100
+      },
+      {
+        "expectation": "file",
+        "path": "AGENTS.md",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "byte_count": 200
+      },
+      {
+        "expectation": "directory",
+        "path": "media"
+      },
+      {
+        "expectation": "file",
+        "path": "media/movie.mov",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "byte_count": 10000000000
+      },
+      {
+        "expectation": "directory",
+        "path": "Archive"
+      },
+      {
+        "expectation": "absent",
+        "path": "Archive/movie.mov"
+      },
+      {
+        "expectation": "tracked_object",
+        "path": "db.sqlite",
+        "object_id": "object_database",
+        "version_id": "version_database_7"
+      },
+      {
+        "expectation": "directory",
+        "path": "Data"
+      },
+      {
+        "expectation": "absent",
+        "path": "Data/db.sqlite"
+      },
+      {
+        "expectation": "directory",
+        "path": ".folderbase"
+      },
+      {
+        "expectation": "directory",
+        "path": ".folderbase/objects"
+      },
+      {
+        "expectation": "file",
+        "path": ".folderbase/objects/object_alpha.json",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "byte_count": 300
+      },
+      {
+        "expectation": "file",
+        "path": ".folderbase/objects/object_beta.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "byte_count": 400
+      }
+    ],
+    "declared_entries": []
+  },
+  "questions": [],
+  "rationale": "Exercise the complete closed operation vocabulary without applying it.",
+  "operations": [
+    {
+      "kind": "create_directory",
+      "path": "Narrative"
+    },
+    {
+      "kind": "create_utf8_file",
+      "path": "Narrative/SUMMARY.md",
+      "content": "# Current narrative\n"
+    },
+    {
+      "kind": "replace_utf8_file",
+      "path": "README.md",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content": "# Updated\n"
+    },
+    {
+      "kind": "update_managed_agent_block",
+      "path": "AGENTS.md",
+      "adapter": "codex",
+      "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "content": "<!-- folderbase:managed:start -->\nRead FOLDERBASE.md.\n<!-- folderbase:managed:end -->\n"
+    },
+    {
+      "kind": "move_file",
+      "source_path": "media/movie.mov",
+      "destination_path": "Archive/movie.mov",
+      "expected_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected_byte_count": 10000000000
+    },
+    {
+      "kind": "move_tracked_object",
+      "source_path": "db.sqlite",
+      "destination_path": "Data/db.sqlite",
+      "object_id": "object_database",
+      "expected_version_id": "version_database_7"
+    },
+    {
+      "kind": "update_relationship",
+      "object_record_path": ".folderbase/objects/object_alpha.json",
+      "object_id": "object_alpha",
+      "expected_version_id": "version_alpha_3",
+      "relationship_type": "supports",
+      "target_object_id": "object_database",
+      "expected_record_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "expected_revision": 3,
+      "new_revision": 4
+    },
+    {
+      "kind": "update_object_lifecycle",
+      "object_record_path": ".folderbase/objects/object_beta.json",
+      "object_id": "object_beta",
+      "expected_version_id": "version_beta_7",
+      "from": "active",
+      "to": "archived",
+      "expected_record_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expected_revision": 7,
+      "new_revision": 8
+    }
+  ]
+}

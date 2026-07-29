@@ -26,7 +26,7 @@ analyze
   -> optionally roll back
 ```
 
-The first contract will define two data-only records:
+Core `0.3.0` will define two data-only records:
 
 - a revisable `folderbase-reorganization-draft-v1` stored under the migration
   record for the work while required questions remain unanswered; and
@@ -231,4 +231,7 @@ This decision remains Proposed until the public repository contains:
 - an App and Organization Skill acceptance journey using the same records.
 
 Implementation should deepen the existing migration module rather than create a
-parallel reorganization state machine.
+parallel reorganization state machine. Core `0.3.0` first publishes the inert
+Draft/Plan data contract, bounded decoding, validation, sealing, and canonical
+digests; filesystem analysis, apply, recovery, and rollback remain later slices
+under this same decision.

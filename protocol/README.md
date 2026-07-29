@@ -19,12 +19,19 @@ independent of the Folderbase application and hosted services.
   0.2 packages.
 - `schemas/0.3/chunk-manifest.schema.json` validates the canonical,
   provider-neutral `folderbase-chunk-manifest-v1` transfer plan.
+- `schemas/0.3/reorganization-{draft,plan}.schema.json` validate the inert,
+  closed-profile Reorganization Protocol 0.3 records. The Plan schema references
+  definitions in the Draft schema by its public `$id`; register both with a
+  validator.
 - `conformance/` contains valid and invalid compatibility fixtures.
 - `conformance/chunk-manifest/` fixes the valid and invalid manifest shapes;
   its independently generated `.sha256` sidecars fix cross-client canonical
   binary digests for small and greater-than-32-bit identities.
 - `conformance/template/valid/digest-vector-0.2.0.{json,sha256}` fixes the
   cross-client canonical package-digest contract.
+- `conformance/reorganization/` covers valid Drafts and Plans, every v1
+  operation kind, schema negatives, semantic negatives, and the independently
+  calculated canonical Plan digest.
 - `templates/0.2/project/template.json` is the built-in data-only
   Project package.
 - `templates/project/` is the additive starting point for a new Project
@@ -48,6 +55,12 @@ upgrade graphs must be forward-only, acyclic, and terminate at the package
 version. Those cross-record rules are covered by the Rust conformance suite.
 Templates may create missing directories or text files only; they cannot
 execute code, overwrite user files, or declare authority.
+
+Reorganization Drafts and Plans are likewise data only and carry no authority.
+Templates are optional provenance, not continuing layout requirements. The v1
+operation set contains no deletion, treats large and binary files as opaque
+movable bytes, and refuses paths at or below nested Folderbase boundaries. See
+[`../docs/reorganization-protocol.md`](../docs/reorganization-protocol.md).
 Question answers are typed as text or boolean. Dynamic text uses only explicit,
 non-recursive `${question-id}` substitutions; renderers never evaluate code or
 read other package-relative or filesystem paths.

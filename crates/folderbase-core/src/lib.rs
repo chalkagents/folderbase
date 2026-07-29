@@ -14,6 +14,7 @@ mod inspection;
 mod local_versions;
 mod migration;
 mod model;
+mod reorganization;
 mod sharing;
 mod sync;
 mod template;
@@ -55,6 +56,15 @@ pub use model::{
     TemplateDescriptor, TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest,
     TemplateQuestion, TemplateRenderPlan, TemplateStructuralChange, TemplateStructuralChangeKind,
     ValidationFinding, ValidationLevel, ValidationReport, ValidationSeverity,
+};
+pub use reorganization::{
+    AnalysisScope, ConsequentialAnswer, ConsequentialAnswerType, ConsequentialQuestion,
+    MAX_CANONICAL_JSON_INTEGER, MAX_REORGANIZATION_RECORD_BYTES, NestedBoundary,
+    ObjectLifecycleState, PathProfile, ReorganizationDraft, ReorganizationOperation,
+    ReorganizationPlan, ScopeEntry, decode_reorganization_draft, decode_reorganization_draft_slice,
+    decode_reorganization_plan, decode_reorganization_plan_slice,
+    reorganization_analysis_scope_sha256, reorganization_plan_sha256, seal_reorganization_draft,
+    validate_reorganization_draft, validate_reorganization_plan,
 };
 pub use sharing::{
     AccessDecision, AccessReason, AccessRequest, FolderbaseRegistration, ShareGrant,
