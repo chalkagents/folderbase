@@ -2174,6 +2174,8 @@ mod tests {
     use std::{
         fs,
         panic::{AssertUnwindSafe, catch_unwind},
+        sync::{Arc, Barrier},
+        thread,
     };
 
     use tempfile::{TempDir, tempdir};
@@ -2437,25 +2439,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replacement_after_head_and_before_identity_projection_requires_a_tombstone() {
+    fn assert_replacement_after_head_requires_a_tombstone(start: Option<&Barrier>) {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let plan = store.plan_capture().expect("plan");
+        if let Some(start) = start {
+            start.wait();
+        }
+        let mut head_replaced_count = 0;
+        let mut replacement_identities = None;
         let interrupted = catch_unwind(AssertUnwindSafe(|| {
             store.seal_capture_with_hook(plan, |checkpoint| {
                 if checkpoint == &CaptureCheckpoint::HeadReplaced {
-                    fs::remove_file(root.path().join("active.bin")).expect("remove captured file");
-                    fs::write(
-                        root.path().join("active.bin"),
-                        b"same path, replacement identity",
-                    )
-                    .expect("replace captured file");
+                    head_replaced_count += 1;
+                    let active_path = root.path().join("active.bin");
+                    let captured = File::open(&active_path).expect("open captured file");
+                    let captured_identity = CaptureMetadataFingerprint::from_std_file(&captured)
+                        .expect("captured fingerprint")
+                        .physical_identity;
+                    drop(captured);
+                    fs::remove_file(&active_path).expect("remove captured file");
+                    fs::write(&active_path, b"same path, replacement identity")
+                        .expect("replace captured file");
+                    let replacement = File::open(&active_path).expect("open replacement file");
+                    let replacement_identity =
+                        CaptureMetadataFingerprint::from_std_file(&replacement)
+                            .expect("replacement fingerprint")
+                            .physical_identity;
+                    replacement_identities = Some((captured_identity, replacement_identity));
                     panic!("stop before identity projection");
                 }
             })
         }));
         assert!(interrupted.is_err());
+        assert_eq!(
+            head_replaced_count, 1,
+            "one per-call fault hook must observe Head replacement exactly once"
+        );
+        let (captured_identity, replacement_identity) =
+            replacement_identities.expect("fault hook records both physical identities");
+        assert_ne!(
+            captured_identity, replacement_identity,
+            "the fault fixture must create a provably different filesystem object"
+        );
 
         let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
         let error = reopened
@@ -2466,6 +2492,31 @@ mod tests {
             FolderbaseCaptureError::TombstonesRequired(path)
                 if path == Path::new("active.bin")
         ));
+    }
+
+    #[test]
+    fn replacement_after_head_and_before_identity_projection_requires_a_tombstone() {
+        assert_replacement_after_head_requires_a_tombstone(None);
+    }
+
+    #[test]
+    fn post_head_replacement_faults_remain_isolated_under_parallel_stress() {
+        const WORKERS: usize = 8;
+
+        let start = Arc::new(Barrier::new(WORKERS));
+        thread::scope(|scope| {
+            let workers = (0..WORKERS)
+                .map(|_| {
+                    let start = Arc::clone(&start);
+                    scope.spawn(move || {
+                        assert_replacement_after_head_requires_a_tombstone(Some(&start));
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().expect("parallel seal worker");
+            }
+        });
     }
 
     #[test]
