@@ -4,8 +4,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
-const MANIFEST_SHA256: &str =
-    "29a1ad6f2d1c5591b35951a39bc38603728527f8be808510f080db1922c3f8be";
+const MANIFEST_SHA256: &str = "29a1ad6f2d1c5591b35951a39bc38603728527f8be808510f080db1922c3f8be";
 const MANIFEST: &[u8] = br#"{
   "protocol_version": "0.2.0+attestation",
   "folderbase": {
@@ -30,7 +29,11 @@ fn valid_root() -> tempfile::TempDir {
 fn attest_json_emits_the_flat_public_receipt() {
     let root = valid_root();
     let assertion = folderbase()
-        .args(["attest", root.path().to_str().expect("UTF-8 root"), "--json"])
+        .args([
+            "attest",
+            root.path().to_str().expect("UTF-8 root"),
+            "--json",
+        ])
         .assert()
         .success()
         .stderr(predicate::str::is_empty());
