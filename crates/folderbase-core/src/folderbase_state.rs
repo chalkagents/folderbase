@@ -10,7 +10,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(not(windows))]
+use cap_fs_ext::DirExt;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use same_file::Handle;
 use sha2::{Digest, Sha256};
@@ -36,7 +38,11 @@ pub(crate) struct FolderbaseState {
 impl FolderbaseState {
     pub(crate) fn open(root: &Path) -> Result<Self> {
         let root_cap = open_root_nofollow(root)?;
-        let state = match root_cap.open_dir_nofollow(STATE_COMPONENT) {
+        let state = match open_directory_nofollow(
+            &root_cap,
+            OsStr::new(STATE_COMPONENT),
+            &root.join(STATE_COMPONENT),
+        ) {
             Ok(state) => state,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 let builder = private_directory_builder();
@@ -47,9 +53,12 @@ impl FolderbaseState {
                         return Err(FolderbaseError::io(root.join(STATE_COMPONENT), source));
                     }
                 }
-                root_cap
-                    .open_dir_nofollow(STATE_COMPONENT)
-                    .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?
+                open_directory_nofollow(
+                    &root_cap,
+                    OsStr::new(STATE_COMPONENT),
+                    &root.join(STATE_COMPONENT),
+                )
+                .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?
             }
             Err(source) => {
                 return Err(FolderbaseError::io(root.join(STATE_COMPONENT), source));
@@ -66,9 +75,12 @@ impl FolderbaseState {
 
     pub(crate) fn open_existing(root: &Path) -> Result<Self> {
         let root_cap = open_root_nofollow(root)?;
-        let state = root_cap
-            .open_dir_nofollow(STATE_COMPONENT)
-            .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?;
+        let state = open_directory_nofollow(
+            &root_cap,
+            OsStr::new(STATE_COMPONENT),
+            &root.join(STATE_COMPONENT),
+        )
+        .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
         Ok(Self {
             root: root_cap,
@@ -89,7 +101,7 @@ impl FolderbaseState {
                 return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
             };
             display.push(name);
-            directory = match directory.open_dir_nofollow(name) {
+            directory = match open_directory_nofollow(&directory, name, &display) {
                 Ok(child) => child,
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                     let builder = private_directory_builder();
@@ -98,8 +110,7 @@ impl FolderbaseState {
                         Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
                         Err(source) => return Err(FolderbaseError::io(&display, source)),
                     }
-                    directory
-                        .open_dir_nofollow(name)
+                    open_directory_nofollow(&directory, name, &display)
                         .map_err(|source| FolderbaseError::io(&display, source))?
                 }
                 Err(source) => return Err(FolderbaseError::io(&display, source)),
@@ -183,6 +194,7 @@ impl FolderbaseState {
         directory: &Path,
         mut reader: impl Read,
         source_label: &Path,
+        maximum_bytes: u64,
     ) -> Result<PublishedBlob> {
         let relative = state_relative(directory)?;
         let parent = self.open_dir(&relative)?;
@@ -205,23 +217,30 @@ impl FolderbaseState {
         let mut bytes = 0_u64;
         let mut buffer = [0_u8; COPY_BUFFER_BYTES];
         let copy_result = (|| -> Result<()> {
+            let mut bounded = reader.by_ref().take(maximum_bytes.saturating_add(1));
             loop {
-                let read = reader
+                let read = bounded
                     .read(&mut buffer)
                     .map_err(|source| FolderbaseError::io(source_label, source))?;
                 if read == 0 {
                     break;
                 }
-                staged
-                    .write_all(&buffer[..read])
-                    .map_err(|source| FolderbaseError::io(&display, source))?;
-                hasher.update(&buffer[..read]);
                 bytes = bytes.checked_add(read as u64).ok_or_else(|| {
                     FolderbaseError::InvalidRecord {
                         path: source_label.to_path_buf(),
                         message: "content length exceeds supported range".to_owned(),
                     }
                 })?;
+                if bytes > maximum_bytes {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: source_label.to_path_buf(),
+                        message: "source grew beyond its approved byte length".to_owned(),
+                    });
+                }
+                staged
+                    .write_all(&buffer[..read])
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+                hasher.update(&buffer[..read]);
             }
             staged
                 .sync_all()
@@ -333,12 +352,12 @@ impl FolderbaseState {
     }
 
     pub(crate) fn verify_still_attached(&self) -> Result<()> {
-        let visible = self
-            .root
-            .open_dir_nofollow(STATE_COMPONENT)
-            .map_err(|source| {
-                FolderbaseError::io(self.display_root.join(STATE_COMPONENT), source)
-            })?;
+        let visible = open_directory_nofollow(
+            &self.root,
+            OsStr::new(STATE_COMPONENT),
+            &self.display_root.join(STATE_COMPONENT),
+        )
+        .map_err(|source| FolderbaseError::io(self.display_root.join(STATE_COMPONENT), source))?;
         let visible_identity =
             directory_identity(&visible, &self.display_root.join(STATE_COMPONENT))?;
         if visible_identity != self.state_identity {
@@ -364,8 +383,7 @@ impl FolderbaseState {
                     return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
                 };
                 display.push(component);
-                directory = directory
-                    .open_dir_nofollow(component)
+                directory = open_directory_nofollow(&directory, component, &display)
                     .map_err(|source| FolderbaseError::io(&display, source))?;
             }
         }
@@ -382,8 +400,7 @@ impl FolderbaseState {
                 return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
             };
             display.push(component);
-            directory = directory
-                .open_dir_nofollow(component)
+            directory = open_directory_nofollow(&directory, component, &display)
                 .map_err(|source| FolderbaseError::io(&display, source))?;
         }
         Ok(directory)
@@ -522,11 +539,13 @@ fn open_root_nofollow(root: &Path) -> Result<Dir> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
             FILE_SHARE_WRITE,
         };
         options
+            .access_mode(GENERIC_READ | GENERIC_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
@@ -538,6 +557,38 @@ fn open_root_nofollow(root: &Path) -> Result<Dir> {
         .map_err(|source| FolderbaseError::io(root, source))?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(root.to_path_buf()));
+    }
+    Ok(Dir::from_std_file(file))
+}
+
+#[cfg(not(windows))]
+fn open_directory_nofollow(parent: &Dir, name: &OsStr, _display: &Path) -> std::io::Result<Dir> {
+    parent.open_dir_nofollow(name)
+}
+
+#[cfg(windows)]
+fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::io::Result<Dir> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .follow(FollowSymlinks::No)
+        .access_mode(GENERIC_READ | GENERIC_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let file = parent.open_with(name, &options)?.into_std();
+    let metadata = file.metadata()?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "unsafe directory capability: {}",
+            display.display()
+        )));
     }
     Ok(Dir::from_std_file(file))
 }
@@ -628,11 +679,11 @@ mod tests {
         let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
         let mut reader = CountingReader { read: 0 };
         let error = match state.publish_reader_sha256(
-                Path::new(".folderbase/versions/blobs/sha256"),
-                &mut reader,
-                Path::new("growing-source"),
-                1024,
-            ) {
+            Path::new(".folderbase/versions/blobs/sha256"),
+            &mut reader,
+            Path::new("growing-source"),
+            1024,
+        ) {
             Ok(_) => panic!("growth beyond the approved length must stop"),
             Err(error) => error,
         };

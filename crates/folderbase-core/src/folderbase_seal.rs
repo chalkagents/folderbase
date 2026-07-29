@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -152,7 +152,7 @@ struct CaptureIdentityRecord {
 struct BuiltCapture {
     version: FolderbaseVersion,
     version_sha256: String,
-    regular_projections: Vec<(LocalObjectRecord, ContentDigest)>,
+    regular_projections: Vec<LocalObjectRecord>,
 }
 
 impl FolderbaseVersionStore {
@@ -176,7 +176,22 @@ impl FolderbaseVersionStore {
     fn seal_capture_with_hook(
         &self,
         plan: CapturePlan,
+        checkpoint: impl FnMut(&CaptureCheckpoint),
+    ) -> Result<SealedCapture, FolderbaseCaptureError> {
+        self.seal_capture_with_hook_and_limits(
+            plan,
+            checkpoint,
+            MAX_CAPTURE_TRANSACTION_BYTES,
+            MAX_ENCODED_VERSION_BYTES,
+        )
+    }
+
+    fn seal_capture_with_hook_and_limits(
+        &self,
+        plan: CapturePlan,
         mut checkpoint: impl FnMut(&CaptureCheckpoint),
+        maximum_transaction_bytes: u64,
+        maximum_version_bytes: u64,
     ) -> Result<SealedCapture, FolderbaseCaptureError> {
         if plan.root() != self.root_attestation.root
             || plan.folderbase_id() != self.root_attestation.folderbase_id
@@ -198,7 +213,6 @@ impl FolderbaseVersionStore {
             ".folderbase/objects",
             ".folderbase/versions/records",
             ".folderbase/versions/blobs/sha256",
-            ".folderbase/local/path-identities",
         ] {
             state.ensure_private_dir(Path::new(relative))?;
         }
@@ -276,7 +290,18 @@ impl FolderbaseVersionStore {
             None => {
                 let transaction =
                     assign_capture_transaction(self, &state, &plan, &plan_sha256, prior.as_ref())?;
-                write_active_transaction(&state, &transaction)?;
+                preflight_capture_envelopes(
+                    &plan,
+                    &transaction,
+                    prior.as_ref(),
+                    maximum_transaction_bytes,
+                    maximum_version_bytes,
+                )?;
+                write_active_transaction_with_limit(
+                    &state,
+                    &transaction,
+                    maximum_transaction_bytes,
+                )?;
                 checkpoint(&CaptureCheckpoint::JournalDurable);
                 transaction
             }
@@ -290,6 +315,13 @@ impl FolderbaseVersionStore {
             ));
         }
         validate_transaction_against_plan(&plan, &transaction, prior.as_ref())?;
+        preflight_capture_envelopes(
+            &plan,
+            &transaction,
+            prior.as_ref(),
+            maximum_transaction_bytes,
+            maximum_version_bytes,
+        )?;
 
         let built = build_and_install_capture(
             self,
@@ -327,8 +359,8 @@ impl FolderbaseVersionStore {
         )?;
         checkpoint(&CaptureCheckpoint::HeadReplaced);
 
-        for (projection, content) in &built.regular_projections {
-            local.write_capture_object_projection_in(&state, projection, content)?;
+        for projection in &built.regular_projections {
+            local.write_capture_object_projection_in(&state, projection)?;
         }
         write_capture_identities(&state, &transaction)?;
         remove_active_transaction(&state)?;
@@ -776,6 +808,128 @@ fn live_state_matches_prior(
     Ok(true)
 }
 
+fn preflight_capture_envelopes(
+    plan: &CapturePlan,
+    transaction: &CaptureTransaction,
+    prior: Option<&FolderbaseVersion>,
+    maximum_transaction_bytes: u64,
+    maximum_version_bytes: u64,
+) -> Result<(), FolderbaseCaptureError> {
+    encode_active_transaction(transaction, maximum_transaction_bytes)?;
+
+    if transaction.assignments.len() != plan.entries().len() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "journal assignment cardinality does not match the CapturePlan".to_owned(),
+        ));
+    }
+
+    let placeholder_sha256 = "0".repeat(64);
+    let mut bindings = Vec::with_capacity(plan.entries().len());
+    for (entry, assignment) in plan.entries().iter().zip(&transaction.assignments) {
+        if assignment.path != entry.path() || assignment.kind != entry.kind() {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "journal assignment does not match the CapturePlan".to_owned(),
+            ));
+        }
+        let binding = match entry.kind() {
+            CaptureEntryKind::Directory => PathBinding::directory_from_verified_producer(
+                entry.path(),
+                assignment.object_id.clone(),
+            ),
+            CaptureEntryKind::RegularFile => PathBinding::regular_file_from_verified_producer(
+                entry.path(),
+                assignment.object_id.clone(),
+                assigned_object_version_id(assignment)?,
+                placeholder_sha256.clone(),
+                entry.bytes().ok_or_else(|| {
+                    FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                        "regular CapturePlan entry has no byte length: {}",
+                        entry.path()
+                    ))
+                })?,
+                entry.executable().unwrap_or(false),
+            ),
+            CaptureEntryKind::Symlink => PathBinding::symlink_from_verified_producer(
+                entry.path(),
+                assignment.object_id.clone(),
+                assigned_object_version_id(assignment)?,
+                entry.symlink_target().ok_or_else(|| {
+                    FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                        "symlink CapturePlan entry has no target: {}",
+                        entry.path()
+                    ))
+                })?,
+            ),
+        };
+        bindings.push(binding);
+    }
+
+    let exclusions = plan
+        .exclusions()
+        .iter()
+        .map(|exclusion| {
+            Exclusion::from_verified_producer(
+                exclusion.path(),
+                exclusion_kind(exclusion.kind()),
+                exclusion_reason(exclusion.reason()),
+            )
+        })
+        .collect();
+    let tombstones = prior
+        .map(|version| version.tombstones().to_vec())
+        .unwrap_or_default();
+    let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
+        plan.folderbase_id(),
+        transaction.target_version_id.clone(),
+        plan.current_local_head()
+            .map(|head| vec![head.version_id().to_owned()])
+            .unwrap_or_default(),
+        transaction.created_at.clone(),
+        RootManifest::from_verified_producer(
+            assigned_root_manifest_version_id(transaction),
+            plan.root_manifest_sha256(),
+            plan.root_manifest_bytes(),
+        ),
+        FolderbaseVersionEntries::from_verified_producer(bindings, tombstones, exclusions),
+    );
+    let version = FolderbaseVersion::from_verified_parts(parts)?;
+    let mut encoded = BoundedJsonWriter::new(maximum_version_bytes);
+    let result = version.encode_bounded(&mut encoded);
+    if encoded.exceeded {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "future Folderbase Version envelope exceeds its bounded record limit".to_owned(),
+        ));
+    }
+    result.map_err(|source| {
+        FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "future Folderbase Version envelope could not be encoded: {source}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn assigned_object_version_id(
+    assignment: &CaptureAssignment,
+) -> Result<String, FolderbaseCaptureError> {
+    assignment
+        .prior_object_version_id
+        .clone()
+        .or_else(|| assignment.candidate_object_version_id.clone())
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "Object Version assignment is missing for {}",
+                assignment.path
+            ))
+        })
+}
+
+fn assigned_root_manifest_version_id(transaction: &CaptureTransaction) -> String {
+    transaction
+        .prior_root_manifest_version_id
+        .clone()
+        .unwrap_or_else(|| transaction.root_manifest_candidate_version_id.clone())
+}
+
 fn build_and_install_capture(
     store: &FolderbaseVersionStore,
     plan: &CapturePlan,
@@ -899,17 +1053,14 @@ fn build_and_install_capture(
                     entry.executable().unwrap_or(false),
                 ));
                 if can_project_legacy_object(entry.path()) {
-                    regular_projections.push((
-                        regular_projection(
-                            local,
-                            state,
-                            assignment,
-                            &object_version_id,
-                            prior_binding.and_then(|binding| binding.object_version_id()),
-                            &transaction.created_at,
-                        )?,
-                        content,
-                    ));
+                    regular_projections.push(regular_projection(
+                        local,
+                        state,
+                        assignment,
+                        &object_version_id,
+                        prior_binding.and_then(|binding| binding.object_version_id()),
+                        &transaction.created_at,
+                    )?);
                 }
             }
             CaptureEntryKind::Symlink => {
@@ -1009,11 +1160,14 @@ fn capture_root_manifest(
     let display = store.root_attestation.root.join(relative);
     let before = fingerprint_std_file(&file, &display)?;
     before_read();
-    let content = local.install_content_reader_in(
-        state,
-        &mut file,
-        &store.root_attestation.root.join(relative),
-    )?;
+    let content = local
+        .install_content_reader_in(
+            state,
+            &mut file,
+            &store.root_attestation.root.join(relative),
+            plan.root_manifest_bytes(),
+        )
+        .map_err(|source| bounded_source_error(source, relative))?;
     let after = fingerprint_std_file(&file, &display)?;
     let reopened = open_regular_beneath(&store.root_attestation.root, relative)?;
     let reopened_fingerprint = fingerprint_std_file(&reopened, &display)?;
@@ -1046,7 +1200,14 @@ fn hash_regular_entry(
     }
     before_read();
     let content = match installer {
-        Some((local, state)) => local.install_content_reader_in(state, &mut file, &display)?,
+        Some((local, state)) => local
+            .install_content_reader_in(
+                state,
+                &mut file,
+                &display,
+                entry.bytes().expect("planned regular length"),
+            )
+            .map_err(|source| bounded_source_error(source, relative))?,
         None => hash_reader(&mut file, &display)?,
     };
     let after = fingerprint_std_file(&file, &display)?;
@@ -1061,6 +1222,17 @@ fn hash_regular_entry(
         ));
     }
     Ok(content)
+}
+
+fn bounded_source_error(error: FolderbaseError, path: &Path) -> FolderbaseCaptureError {
+    match error {
+        FolderbaseError::InvalidRecord { ref message, .. }
+            if message.contains("grew beyond its approved byte length") =>
+        {
+            FolderbaseCaptureError::CaptureStateChanged(path.to_path_buf())
+        }
+        error => FolderbaseCaptureError::LocalStore(error),
+    }
 }
 
 fn fingerprint_std_file(
@@ -1621,11 +1793,12 @@ fn read_active_transaction(
         })
 }
 
-fn write_active_transaction(
+fn write_active_transaction_with_limit(
     state: &FolderbaseState,
     transaction: &CaptureTransaction,
+    maximum_bytes: u64,
 ) -> Result<(), FolderbaseCaptureError> {
-    let encoded = encode_active_transaction(transaction, MAX_CAPTURE_TRANSACTION_BYTES)?;
+    let encoded = encode_active_transaction(transaction, maximum_bytes)?;
     state
         .publish_new(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &encoded)
         .map_err(Into::into)
@@ -1635,13 +1808,59 @@ fn encode_active_transaction(
     transaction: &CaptureTransaction,
     maximum_bytes: u64,
 ) -> Result<Vec<u8>, FolderbaseCaptureError> {
-    let encoded = json_bytes(transaction)?;
-    if encoded.len() as u64 > maximum_bytes {
+    let mut encoded = BoundedJsonWriter::new(maximum_bytes);
+    let result = serde_json::to_writer_pretty(&mut encoded, transaction);
+    if encoded.exceeded {
         return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
             "active journal exceeds its bounded record limit".to_owned(),
         ));
     }
-    Ok(encoded)
+    result.map_err(|source| {
+        FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "capture record encoding failed: {source}"
+        ))
+    })?;
+    encoded.write_all(b"\n").map_err(|_| {
+        FolderbaseCaptureError::InvalidCaptureTransaction(
+            "active journal exceeds its bounded record limit".to_owned(),
+        )
+    })?;
+    Ok(encoded.bytes)
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    maximum_bytes: u64,
+    exceeded: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new(maximum_bytes: u64) -> Self {
+        Self {
+            bytes: Vec::with_capacity(maximum_bytes.min(64 * 1024) as usize),
+            maximum_bytes,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(next_len) = (self.bytes.len() as u64).checked_add(bytes.len() as u64) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded JSON record exceeded"));
+        };
+        if next_len > self.maximum_bytes {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded JSON record exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn remove_active_transaction(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
@@ -1734,11 +1953,6 @@ fn finish_committed_transaction(
         if assignment.kind == CaptureEntryKind::RegularFile
             && can_project_legacy_object(&assignment.path)
         {
-            let content = ContentDigest {
-                algorithm: "sha256".to_owned(),
-                digest: binding.content_sha256().expect("regular digest").to_owned(),
-                bytes: binding.bytes().expect("regular bytes"),
-            };
             let projection = regular_projection(
                 local,
                 state,
@@ -1752,7 +1966,7 @@ fn finish_committed_transaction(
                 assignment.prior_object_version_id.as_deref(),
                 &transaction.created_at,
             )?;
-            local.write_capture_object_projection_in(state, &projection, &content)?;
+            local.write_capture_object_projection_in(state, &projection)?;
         }
     }
     write_capture_identities(state, transaction)
@@ -2446,12 +2660,7 @@ mod tests {
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let plan = store.plan_capture().expect("plan");
         let error = store
-            .seal_capture_with_hook_and_limits(
-                plan,
-                |_| {},
-                MAX_CAPTURE_TRANSACTION_BYTES,
-                1,
-            )
+            .seal_capture_with_hook_and_limits(plan, |_| {}, MAX_CAPTURE_TRANSACTION_BYTES, 1)
             .expect_err("future version envelope must be preflighted");
         assert!(matches!(
             error,

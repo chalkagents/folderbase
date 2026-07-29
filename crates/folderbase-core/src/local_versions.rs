@@ -1305,9 +1305,10 @@ impl LocalVersionStore {
         &self,
         reader: impl Read,
         source_label: &Path,
+        maximum_bytes: u64,
     ) -> Result<ContentDigest> {
         let state = FolderbaseState::open(&self.root)?;
-        self.install_content_reader_in(&state, reader, source_label)
+        self.install_content_reader_in(&state, reader, source_label, maximum_bytes)
     }
 
     pub(crate) fn install_content_reader_in(
@@ -1315,9 +1316,14 @@ impl LocalVersionStore {
         state: &FolderbaseState,
         reader: impl Read,
         source_label: &Path,
+        maximum_bytes: u64,
     ) -> Result<ContentDigest> {
-        let published =
-            state.publish_reader_sha256(Path::new(BLOBS_DIRECTORY), reader, source_label)?;
+        let published = state.publish_reader_sha256(
+            Path::new(BLOBS_DIRECTORY),
+            reader,
+            source_label,
+            maximum_bytes,
+        )?;
         Ok(ContentDigest {
             algorithm: "sha256".to_owned(),
             digest: published.digest,
@@ -1326,7 +1332,11 @@ impl LocalVersionStore {
     }
 
     pub(crate) fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
-        self.install_content_reader(std::io::Cursor::new(bytes), Path::new("in-memory content"))
+        self.install_content_reader(
+            std::io::Cursor::new(bytes),
+            Path::new("in-memory content"),
+            bytes.len() as u64,
+        )
     }
 
     pub(crate) fn install_content_bytes_in(
@@ -1338,6 +1348,7 @@ impl LocalVersionStore {
             state,
             std::io::Cursor::new(bytes),
             Path::new("in-memory content"),
+            bytes.len() as u64,
         )
     }
 
@@ -1397,7 +1408,6 @@ impl LocalVersionStore {
         &self,
         state: &FolderbaseState,
         record: &LocalObjectRecord,
-        expected_materialized_content: &ContentDigest,
     ) -> Result<()> {
         self.validate_object_record_membership(
             &record.id,
@@ -1405,10 +1415,6 @@ impl LocalVersionStore {
             &self.object_record_path(&record.id),
         )?;
         self.write_object_projection_in(state, record)?;
-        let materialized = self.root.join(&record.path);
-        if verify_file_content(&materialized, expected_materialized_content).is_ok() {
-            self.write_local_file_identity_in(state, &record.id, &materialized)?;
-        }
         Ok(())
     }
 
