@@ -783,6 +783,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn read_only_blob_verification_stops_after_concurrent_growth_beyond_expected_bytes() {
+        let fixture = tempdir().expect("fixture");
+        let blob_directory = fixture.path().join(".folderbase/versions/blobs/sha256");
+        fs::create_dir_all(&blob_directory).expect("blob directory");
+        let expected = b"sealed opaque bytes";
+        let digest = format!("{:x}", Sha256::digest(expected));
+        let blob = blob_directory.join(&digest);
+        fs::write(&blob, expected).expect("expected blob");
+        let state =
+            FolderbaseState::open_existing_read_only(fixture.path()).expect("read-only state");
+
+        let error = state
+            .verify_sha256_blob_with_hook(
+                Path::new(".folderbase/versions/blobs/sha256"),
+                &digest,
+                expected.len() as u64,
+                || {
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&blob)
+                        .expect("open blob after metadata check")
+                        .write_all(b"x")
+                        .expect("grow blob beyond its sealed length");
+                },
+            )
+            .expect_err("concurrent blob growth must fail bounded verification");
+
+        assert!(matches!(
+            error,
+            FolderbaseError::InvalidRecord { message, .. }
+                if message.contains("content-addressed blob")
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn mutating_state_open_rejects_a_directory_junction_root() {
