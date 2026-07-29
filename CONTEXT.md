@@ -47,6 +47,12 @@ A device-local pointer to the Folderbase Version currently selected for one exac
 Folderbase Root; it is not shared authority or a Cloud head.
 _Avoid_: Remote Head, latest version
 
+**Capture Plan**:
+An opaque, bounded, device-local inventory of filesystem metadata bound to one
+attested Folderbase Root, its effective ignore policy, and its optional Local Head.
+It is not a sealed Folderbase Version and carries no mutation authority.
+_Avoid_: Snapshot, pending version
+
 **Tombstone**:
 A retained deletion of a Path Binding whose containing Folderbase Version
 establishes the deletion generation so replicas do not silently resurrect removed

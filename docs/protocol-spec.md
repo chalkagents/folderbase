@@ -744,6 +744,30 @@ reference encoder. The released manifest at
 source-release surface. ADR-0004 is Accepted, and CI rejects either a non-released
 status or a remaining candidate manifest.
 
+### Proposed metadata-only capture planning
+
+The first producer-side TB-33 slice remains Proposed in ADR-0005. A
+`FolderbaseVersionStore` can open one attested physical root and return an opaque,
+bounded `CapturePlan` containing filesystem metadata only. The plan binds the
+physical root, effective ordered ignore policy, and optional device-local head.
+It is inert and is not a Folderbase Version.
+
+Core reads protocol control bytes needed to interpret the root—the manifest,
+`.folderbaseignore`, and optional `.folderbase/local/head.json`—but does not open
+ordinary file contents while planning. PDFs, videos, CSV, SQLite, Git packs, and
+unknown files are all opaque regular files. Nested Folderbases, hard links, and
+special nodes are typed exclusions; symlinks are not followed.
+
+Core defaults exclude known generated trees before applying ordered user rules.
+Required `.folderbaseignore` and `FOLDERBASE.md` bindings cannot be ignored, and
+`.folderbase/**` cannot enter the ordinary inventory. Definitively excluded
+directories are not descended. The capture inventory uses the v1 portable-path,
+Unicode collision, depth, entry-count, and object-size limits.
+
+This planning API does not verify content, assign Object identities, seal or
+persist a Folderbase Version, move Local Head, restore files, or provide
+snapshot/database atomicity, sync, sharing, authorization, or Cloud behavior.
+
 ## Checkout
 
 A checkout is an isolated materialization at a known folderbase version.
