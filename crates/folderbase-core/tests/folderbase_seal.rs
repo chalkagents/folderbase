@@ -311,6 +311,51 @@ fn same_kind_atomic_replacement_preserves_logical_identity() {
     assert!(current.tombstones().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn fidelity_only_change_creates_a_new_object_version_under_the_same_object_id() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = folderbase();
+    let path = root.path().join("script.sh");
+    fs::write(&path, b"#!/bin/sh\n").expect("script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("initial mode");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let prior = store
+        .read_version(genesis.version_id())
+        .expect("genesis version");
+    let prior_binding = prior.lookup_binding("script.sh").expect("prior binding");
+    let prior_object_id = prior_binding.object_id().to_owned();
+    let prior_object_version_id = prior_binding
+        .object_version_id()
+        .expect("prior Object Version")
+        .to_owned();
+    assert_eq!(prior_binding.executable(), Some(false));
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    let changed = store
+        .seal_capture(store.plan_capture().expect("fidelity plan"))
+        .expect("fidelity capture");
+    let current = store
+        .read_version(changed.version_id())
+        .expect("fidelity version");
+    let current_binding = current
+        .lookup_binding("script.sh")
+        .expect("current binding");
+    assert_eq!(current_binding.object_id(), prior_object_id);
+    assert_ne!(
+        current_binding
+            .object_version_id()
+            .expect("current Object Version"),
+        prior_object_version_id
+    );
+    assert_eq!(current_binding.executable(), Some(true));
+    assert!(current.tombstones().is_empty());
+}
+
 #[test]
 fn sealed_bytes_use_sha256_without_file_format_interpretation() {
     let root = folderbase();
