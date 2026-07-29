@@ -9,8 +9,9 @@ use cap_std::fs::{Dir, OpenOptions};
 use same_file::Handle;
 use semver::Version;
 use serde::{
-    Deserialize, Deserializer, Serialize,
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{self, MapAccess, SeqAccess, Visitor},
+    ser::SerializeStruct,
 };
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
@@ -55,13 +56,28 @@ impl fmt::Display for FolderbaseRootMarker {
 /// Evidence that one exact path is a well-formed Folderbase root.
 ///
 /// `root` is display context only. It is excluded from both SHA-256 values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderbaseRootAttestation {
     pub root: PathBuf,
     pub folderbase_id: String,
     pub protocol_version: String,
     pub manifest_sha256: String,
     pub root_instance_sha256: String,
+}
+
+impl Serialize for FolderbaseRootAttestation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut receipt = serializer.serialize_struct("FolderbaseRootAttestation", 5)?;
+        receipt.serialize_field("root", self.root.to_string_lossy().as_ref())?;
+        receipt.serialize_field("folderbase_id", &self.folderbase_id)?;
+        receipt.serialize_field("protocol_version", &self.protocol_version)?;
+        receipt.serialize_field("manifest_sha256", &self.manifest_sha256)?;
+        receipt.serialize_field("root_instance_sha256", &self.root_instance_sha256)?;
+        receipt.end()
+    }
 }
 
 /// Failures produced while attesting one exact Folderbase root.
@@ -181,6 +197,22 @@ fn attest_folderbase_root_inner(
         path: root.to_path_buf(),
         source,
     })?;
+    let opened_root_metadata = root_file
+        .metadata()
+        .map_err(|source| RootAttestationError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    if metadata_is_link_or_reparse(&opened_root_metadata) {
+        return Err(RootAttestationError::RootSymlink {
+            root: root.to_path_buf(),
+        });
+    }
+    if !opened_root_metadata.is_dir() {
+        return Err(RootAttestationError::RootNotDirectory {
+            root: root.to_path_buf(),
+        });
+    }
     let root_identity =
         Handle::from_file(
             root_file
@@ -216,19 +248,35 @@ fn attest_folderbase_root_inner(
     let state_dir = root_dir
         .open_dir_nofollow(STATE_DIRECTORY)
         .map_err(|source| marker_open_error(root, FolderbaseRootMarker::StateDirectory, source))?;
-    let state_identity = Handle::from_file(
-        state_dir
-            .try_clone()
+    let state_file = state_dir
+        .try_clone()
+        .map_err(|source| RootAttestationError::Io {
+            path: root.join(STATE_DIRECTORY),
+            source,
+        })?
+        .into_std_file();
+    let opened_state_metadata =
+        state_file
+            .metadata()
             .map_err(|source| RootAttestationError::Io {
                 path: root.join(STATE_DIRECTORY),
                 source,
-            })?
-            .into_std_file(),
-    )
-    .map_err(|source| RootAttestationError::Io {
-        path: root.join(STATE_DIRECTORY),
-        source,
-    })?;
+            })?;
+    if metadata_is_link_or_reparse(&opened_state_metadata) {
+        return Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::StateDirectory,
+        });
+    }
+    if !opened_state_metadata.is_dir() {
+        return Err(RootAttestationError::MarkerWrongType {
+            marker: FolderbaseRootMarker::StateDirectory,
+        });
+    }
+    let state_identity =
+        Handle::from_file(state_file).map_err(|source| RootAttestationError::Io {
+            path: root.join(STATE_DIRECTORY),
+            source,
+        })?;
 
     let mut manifest = open_regular_marker(
         &state_dir,
@@ -306,7 +354,7 @@ fn classify_root(root: &Path) -> Result<(), RootAttestationError> {
             }
         }
     })?;
-    if metadata.file_type().is_symlink() {
+    if metadata_is_link_or_reparse(&metadata) {
         return Err(RootAttestationError::RootSymlink {
             root: root.to_path_buf(),
         });
@@ -317,6 +365,29 @@ fn classify_root(root: &Path) -> Result<(), RootAttestationError> {
         });
     }
     Ok(())
+}
+
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        return windows_attributes_are_reparse(metadata.file_attributes());
+    }
+
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(any(windows, test))]
+const fn windows_attributes_are_reparse(attributes: u32) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT_VALUE: u32 = 0x0000_0400;
+
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0
 }
 
 fn marker_metadata(
@@ -351,12 +422,7 @@ fn open_root_nofollow(path: &Path) -> io::Result<fs::File> {
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
-    let file = options.open(path)?;
-    let metadata = file.metadata()?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(io::Error::other("attestation root is not a directory"));
-    }
-    Ok(file)
+    options.open(path)
 }
 
 fn marker_open_error(
@@ -385,6 +451,28 @@ fn open_regular_marker(
         return Err(RootAttestationError::MarkerSymlink { marker });
     }
     if !metadata.is_file() {
+        if metadata.is_dir() {
+            let opened_directory = directory
+                .open_dir_nofollow(name)
+                .map_err(|source| marker_open_error(root, marker, source))?;
+            let opened_file = opened_directory
+                .try_clone()
+                .map_err(|source| RootAttestationError::Io {
+                    path: root.join(marker.relative_path()),
+                    source,
+                })?
+                .into_std_file();
+            let opened_metadata =
+                opened_file
+                    .metadata()
+                    .map_err(|source| RootAttestationError::Io {
+                        path: root.join(marker.relative_path()),
+                        source,
+                    })?;
+            if metadata_is_link_or_reparse(&opened_metadata) {
+                return Err(RootAttestationError::MarkerSymlink { marker });
+            }
+        }
         return Err(RootAttestationError::MarkerWrongType { marker });
     }
     let mut options = OpenOptions::new();
@@ -397,14 +485,14 @@ fn open_regular_marker(
         path: root.join(marker.relative_path()),
         source,
     })?;
-    if !file
-        .metadata()
-        .map_err(|source| RootAttestationError::Io {
-            path: root.join(marker.relative_path()),
-            source,
-        })?
-        .is_file()
-    {
+    let opened_metadata = file.metadata().map_err(|source| RootAttestationError::Io {
+        path: root.join(marker.relative_path()),
+        source,
+    })?;
+    if metadata_is_link_or_reparse(&opened_metadata) {
+        return Err(RootAttestationError::MarkerSymlink { marker });
+    }
+    if !opened_metadata.is_file() {
         return Err(RootAttestationError::MarkerWrongType { marker });
     }
     let identity =
@@ -450,6 +538,12 @@ fn read_manifest_bounded(
 fn revalidate_root(root: &Path, expected: &Handle) -> Result<Dir, RootAttestationError> {
     let reopened =
         open_root_nofollow(root).map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let metadata = reopened
+        .metadata()
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
     let actual = Handle::from_file(
         reopened
             .try_clone()
@@ -471,13 +565,18 @@ fn revalidate_directory(
     let directory = parent
         .open_dir_nofollow(name)
         .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
-    let actual = Handle::from_file(
-        directory
-            .try_clone()
-            .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?
-            .into_std_file(),
-    )
-    .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let reopened = directory
+        .try_clone()
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?
+        .into_std_file();
+    let metadata = reopened
+        .metadata()
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
+    let actual = Handle::from_file(reopened)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &actual != expected {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
@@ -744,6 +843,13 @@ mod tests {
             assert_eq!(marker.relative_path(), expected);
             assert_eq!(marker.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn windows_reparse_attribute_is_rejected_independently_of_symlink_tag() {
+        assert!(windows_attributes_are_reparse(0x0000_0400));
+        assert!(windows_attributes_are_reparse(0x0000_0410));
+        assert!(!windows_attributes_are_reparse(0x0000_0010));
     }
 
     #[test]

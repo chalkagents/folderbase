@@ -298,6 +298,7 @@ enum ValidationLevelArg {
 enum CliError {
     Folderbase(FolderbaseError),
     RootAttestation(RootAttestationError),
+    OutputSerialization(serde_json::Error),
 }
 
 impl fmt::Display for CliError {
@@ -305,6 +306,9 @@ impl fmt::Display for CliError {
         match self {
             Self::Folderbase(source) => source.fmt(formatter),
             Self::RootAttestation(source) => source.fmt(formatter),
+            Self::OutputSerialization(source) => {
+                write!(formatter, "failed to serialize command output: {source}")
+            }
         }
     }
 }
@@ -314,6 +318,7 @@ impl std::error::Error for CliError {
         match self {
             Self::Folderbase(source) => Some(source),
             Self::RootAttestation(source) => Some(source),
+            Self::OutputSerialization(source) => Some(source),
         }
     }
 }
@@ -347,16 +352,18 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             if json_errors {
-                eprintln!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "error": {
-                            "code": error_code(&error),
-                            "message": error.to_string(),
-                        }
-                    }))
-                    .expect("error envelopes must serialize")
-                );
+                let envelope = serde_json::json!({
+                    "error": {
+                        "code": error_code(&error),
+                        "message": error.to_string(),
+                    }
+                });
+                match serde_json::to_string_pretty(&envelope) {
+                    Ok(encoded) => eprintln!("{encoded}"),
+                    Err(serialization) => {
+                        eprintln!("error: {error} (JSON serialization failed: {serialization})");
+                    }
+                }
             } else {
                 eprintln!("error: {error}");
             }
@@ -370,7 +377,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Inspect { path, json } => {
             let report = inspect(&path)?;
             if json {
-                print_json(&report);
+                print_json(&report)?;
             } else {
                 print_inspection(&report);
             }
@@ -379,7 +386,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Attest { path, json } => {
             let receipt = attest_folderbase_root(path)?;
             if json {
-                print_json(&receipt);
+                print_json(&receipt)?;
             } else {
                 println!("Attested Folderbase root: {}", receipt.root.display());
                 println!("Folderbase ID: {}", receipt.folderbase_id);
@@ -426,7 +433,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
 
             if dry_run {
                 if json {
-                    print_json(&plan);
+                    print_json(&plan)?;
                 } else {
                     print_initialization_plan(&plan);
                 }
@@ -439,7 +446,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     None => initialize(&plan)?,
                 };
                 if json {
-                    print_json(&result);
+                    print_json(&result)?;
                 } else {
                     print_initialization_result(&result);
                 }
@@ -450,7 +457,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Validate { path, level, json } => {
             let report = validate(&path, level.into())?;
             if json {
-                print_json(&report);
+                print_json(&report)?;
             } else {
                 print_validation(&report);
             }
@@ -486,7 +493,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 if json {
-                    print_json(&analysis);
+                    print_json(&analysis)?;
                 } else {
                     print_migration_questions(&analysis);
                 }
@@ -497,14 +504,14 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             if apply {
                 let result = apply_migration(approve_migration(plan)?)?;
                 if json {
-                    print_json(&result);
+                    print_json(&result)?;
                 } else {
                     print_migration_result(&result);
                 }
             } else {
                 let preview = preview_migration(&plan)?;
                 if json {
-                    print_json(&preview);
+                    print_json(&preview)?;
                 } else {
                     print_migration_preview(&preview);
                 }
@@ -516,7 +523,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 TransformCommand::Analyze { path, json } => {
                     let analysis = analyze_migration(path)?;
                     if json {
-                        print_json(&analysis);
+                        print_json(&analysis)?;
                     } else {
                         print_migration_questions(&analysis);
                     }
@@ -538,7 +545,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     let answers = parse_migration_answers_stdin()?;
                     let plan = plan_migration(analysis, answers, destination)?;
                     if json {
-                        print_json(&plan);
+                        print_json(&plan)?;
                     } else {
                         print_migration_preview(&preview_migration(&plan)?);
                     }
@@ -551,7 +558,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     let plan = MigrationPlan::reopen(path, &migration_id)?;
                     let preview = preview_migration(&plan)?;
                     if json {
-                        print_json(&preview);
+                        print_json(&preview)?;
                     } else {
                         print_migration_preview(&preview);
                     }
@@ -565,7 +572,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     drop(approve_migration(plan)?);
                     let approved = MigrationPlan::reopen(path, &migration_id)?;
                     if json {
-                        print_json(&approved);
+                        print_json(&approved)?;
                     } else {
                         println!("Approved transform {}", approved.id);
                     }
@@ -578,7 +585,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     let approved = ApprovedMigration::reopen(&path, &migration_id)?;
                     let result = apply_migration(approved)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_migration_result(&result);
                     }
@@ -590,7 +597,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 } => {
                     let result = MigrationResult::reopen(path, &migration_id)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_migration_result(&result);
                     }
@@ -602,7 +609,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 } => {
                     let result = MigrationResult::recover(path, &migration_id)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_migration_result(&result);
                     }
@@ -623,7 +630,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         MigrationResult::rollback_by_id(path, &migration_id)?
                     };
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_rollback_result(&result);
                     }
@@ -640,7 +647,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 } => {
                     let result = LocalVersionStore::open(folderbase)?.capture_file(path)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         println!(
                             "Captured {} as {} ({})",
@@ -658,7 +665,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     let result = LocalVersionStore::open(folderbase)?
                         .restore_version(&version, destination)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         println!(
                             "Restored {} to {} ({} bytes)",
@@ -671,7 +678,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 VersionCommand::History { folderbase, json } => {
                     let events = LocalVersionStore::open(folderbase)?.journal_events()?;
                     if json {
-                        print_json(&events);
+                        print_json(&events)?;
                     } else if events.is_empty() {
                         println!("No local version history.");
                     } else {
@@ -697,7 +704,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 WorkspaceCommand::List { folderbase, json } => {
                     let listing = list_workspace(folderbase)?;
                     if json {
-                        print_json(&listing);
+                        print_json(&listing)?;
                     } else {
                         for entry in listing.entries {
                             println!("{}\t{:?}", entry.path, entry.kind);
@@ -711,7 +718,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 } => {
                     let document = read_workspace_text(folderbase, path)?;
                     if json {
-                        print_json(&document);
+                        print_json(&document)?;
                     } else {
                         print!("{}", document.content);
                     }
@@ -755,7 +762,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     })?;
                     let result = save_workspace_text(folderbase, path, &expected_sha256, &content)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         println!(
                             "Saved {} as {} ({})",
@@ -769,11 +776,10 @@ fn run(cli: Cli) -> Result<u8, CliError> {
     }
 }
 
-fn print_json(value: &impl serde::Serialize) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("core reports must serialize")
-    );
+fn print_json(value: &impl serde::Serialize) -> Result<(), CliError> {
+    let encoded = serde_json::to_string_pretty(value).map_err(CliError::OutputSerialization)?;
+    println!("{encoded}");
+    Ok(())
 }
 
 fn command_emits_json_errors(command: &Command) -> bool {
@@ -802,6 +808,7 @@ fn error_code(error: &CliError) -> &'static str {
     let error = match error {
         CliError::Folderbase(error) => error,
         CliError::RootAttestation(error) => return error.code(),
+        CliError::OutputSerialization(_) => return "output_serialization",
     };
     match error {
         FolderbaseError::InvalidRoot(_) => "invalid_root",

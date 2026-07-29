@@ -45,6 +45,9 @@ The logical Folderbase tuple is:
 `protocol_version` must parse as SemVer but is not normalized in the receipt.
 Whitespace, key ordering, and every other manifest byte therefore affect
 `manifest_sha256`. The display `root` is excluded from both digests.
+Rust retains `root` as the exact `PathBuf`. JSON renders it explicitly as a
+lossy display string so a valid Unix path containing non-UTF-8 bytes cannot
+panic or make the otherwise portable receipt unserializable.
 
 The root-instance digest v1 is:
 
@@ -72,6 +75,12 @@ directory and both files must be regular files. Core retains and revalidates the
 opened identities before returning the receipt. It never walks to an ancestor
 to find markers. A nested valid root therefore attests independently, while an
 invalid nested folder fails locally even if its parent is valid.
+
+On Windows, every path and opened handle is additionally rejected when
+`FILE_ATTRIBUTE_REPARSE_POINT` is set, regardless of reparse tag. This includes
+non-symlink junctions and other reparse-point types at the exact root, state
+directory, manifest, or entry, both during initial opening and final
+revalidation.
 
 The manifest is limited to 16 MiB. JSON parsing rejects duplicate object keys
 recursively before extracting the minimum required shape. This prevents a
