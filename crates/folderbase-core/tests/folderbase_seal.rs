@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 use folderbase_core::{
     CaptureEntryKind, FolderbaseCaptureError, FolderbaseVersionStore, LocalVersionStore,
     PathBindingKind, VersionId,
+    folderbase_version::DeletedKind,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
@@ -210,28 +211,59 @@ fn stale_plan_or_concurrent_edit_fails_without_moving_local_head() {
 }
 
 #[test]
-fn deletion_that_requires_a_tombstone_is_explicitly_refused_without_head_movement() {
+fn deletion_seals_a_durable_tombstone_and_advances_local_head() {
     let root = folderbase();
     fs::write(root.path().join("proposal.docx"), b"opaque document").expect("document");
     let store = FolderbaseVersionStore::open(root.path()).expect("open");
     let genesis = store
         .seal_capture(store.plan_capture().expect("genesis plan"))
         .expect("genesis");
+    let prior = store
+        .read_version(genesis.version_id())
+        .expect("genesis version");
+    let prior_binding = prior
+        .lookup_binding("proposal.docx")
+        .expect("prior binding");
+    let prior_object_id = prior_binding.object_id().to_owned();
+    let prior_object_version_id = prior_binding
+        .object_version_id()
+        .expect("prior Object Version")
+        .to_owned();
     fs::remove_file(root.path().join("proposal.docx")).expect("delete live document");
 
-    assert!(matches!(
-        store.seal_capture(store.plan_capture().expect("deletion plan")),
-        Err(FolderbaseCaptureError::TombstonesRequired(path))
-            if path == Path::new("proposal.docx")
-    ));
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion capture");
+    assert!(deletion.created());
+    let deleted = store
+        .read_version(deletion.version_id())
+        .expect("Tombstone-bearing version");
+    assert_eq!(deleted.parents(), &[genesis.version_id().to_owned()]);
+    assert!(deleted.lookup_binding("proposal.docx").is_none());
+    assert_eq!(deleted.tombstones().len(), 1);
+    let tombstone = &deleted.tombstones()[0];
+    assert_eq!(tombstone.path(), "proposal.docx");
+    assert_eq!(tombstone.object_id(), prior_object_id);
+    assert_eq!(tombstone.deleted_kind(), DeletedKind::RegularFile);
+    assert_eq!(
+        tombstone.last_object_version_id(),
+        Some(prior_object_version_id.as_str())
+    );
+
     let head = store
         .plan_capture()
-        .expect("head remains readable")
+        .expect("new Head remains readable")
         .current_local_head()
-        .expect("prior Head")
+        .expect("new Head")
         .version_id()
         .to_owned();
-    assert_eq!(head, genesis.version_id());
+    assert_eq!(head, deletion.version_id());
+
+    let retry = store
+        .seal_capture(store.plan_capture().expect("retry plan"))
+        .expect("idempotent Tombstone retry");
+    assert!(!retry.created());
+    assert_eq!(retry.version_id(), deletion.version_id());
 }
 
 #[test]
