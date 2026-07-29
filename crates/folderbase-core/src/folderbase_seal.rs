@@ -2376,8 +2376,7 @@ mod tests {
                         .expect("install legacy journal");
 
                     let mut head = local_head(root.path()).expect("Local Head");
-                    head.transaction_sha256 =
-                        format!("{:x}", Sha256::digest(&legacy_encoded));
+                    head.transaction_sha256 = format!("{:x}", Sha256::digest(&legacy_encoded));
                     state
                         .replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&head).unwrap())
                         .expect("bind Head to legacy journal");
@@ -2395,6 +2394,143 @@ mod tests {
         assert_eq!(retry.version_id(), assigned);
         assert!(reopened.read_version(retry.version_id()).is_ok());
         assert!(active_transaction(root.path()).is_none());
+    }
+
+    fn interrupt_update_after_journal(
+        root: &Path,
+        store: &FolderbaseVersionStore,
+    ) -> (Vec<u8>, String) {
+        fs::write(root.join("pending.bin"), b"pending update").expect("pending update");
+        let plan = store.plan_capture().expect("update plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("stop after active journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let transaction = active_transaction(root).expect("active intent");
+        let encoded = fs::read(root.join(ACTIVE_CAPTURE_TRANSACTION_PATH))
+            .expect("exact active journal bytes");
+        (encoded, transaction.target_version_id)
+    }
+
+    fn assert_hidden_retry_preserves_active_intent(
+        root: &Path,
+        store: &FolderbaseVersionStore,
+        journal_before: &[u8],
+        hidden_path: &Path,
+    ) {
+        let head_before = fs::read(root.join(LOCAL_HEAD_PATH)).expect("prior Head");
+        let error = store
+            .seal_capture(store.plan_capture().expect("scope-change plan"))
+            .expect_err("hidden prior binding must be refused");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::PriorBindingHidden(path) if path == hidden_path
+        ));
+        assert_eq!(
+            fs::read(root.join(ACTIVE_CAPTURE_TRANSACTION_PATH)).expect("preserved active intent"),
+            journal_before
+        );
+        assert_eq!(
+            fs::read(root.join(LOCAL_HEAD_PATH)).expect("unchanged prior Head"),
+            head_before
+        );
+    }
+
+    #[test]
+    fn newly_ignored_path_preserves_stale_active_intent_before_refusal() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let ignore_path = root.path().join(".folderbaseignore");
+        let original_modified = fs::metadata(&ignore_path)
+            .expect("ignore metadata")
+            .modified()
+            .expect("ignore modified time");
+        let (journal, assigned) = interrupt_update_after_journal(root.path(), &store);
+
+        fs::write(&ignore_path, "active.bin\n").expect("hide prior binding");
+        assert_hidden_retry_preserves_active_intent(
+            root.path(),
+            &store,
+            &journal,
+            Path::new("active.bin"),
+        );
+
+        fs::write(&ignore_path, "").expect("restore ignore policy");
+        File::options()
+            .write(true)
+            .open(&ignore_path)
+            .expect("open restored policy")
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .expect("restore approved plan time");
+        let retry = store
+            .seal_capture(store.plan_capture().expect("restored update plan"))
+            .expect("preserved intent remains recoverable");
+        assert_eq!(retry.version_id(), assigned);
+        assert!(active_transaction(root.path()).is_none());
+    }
+
+    #[test]
+    fn new_nested_boundary_preserves_stale_active_intent_before_refusal() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("client")).expect("client");
+        fs::write(root.path().join("client/notes.md"), "client notes").expect("client notes");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let (journal, _) = interrupt_update_after_journal(root.path(), &store);
+
+        fs::create_dir(root.path().join("client/.folderbase")).expect("nested state");
+        fs::write(
+            root.path().join("client/.folderbase/manifest.json"),
+            br#"{
+  "protocol_version": "0.4.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
+  }
+}
+"#,
+        )
+        .expect("nested manifest");
+        fs::write(
+            root.path().join("client/FOLDERBASE.md"),
+            "# Nested Folderbase\n",
+        )
+        .expect("nested entry");
+        assert_hidden_retry_preserves_active_intent(
+            root.path(),
+            &store,
+            &journal,
+            Path::new("client"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_replacement_preserves_stale_active_intent_before_refusal() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let (journal, _) = interrupt_update_after_journal(root.path(), &store);
+
+        let original = root.path().join("original-active.bin");
+        fs::rename(root.path().join("active.bin"), &original).expect("retain original inode");
+        fs::hard_link(&original, root.path().join("active.bin")).expect("unsupported hard link");
+        assert_hidden_retry_preserves_active_intent(
+            root.path(),
+            &store,
+            &journal,
+            Path::new("active.bin"),
+        );
     }
 
     #[test]
