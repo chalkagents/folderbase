@@ -90,6 +90,18 @@ projection, authorization record, hosted-presence receipt, or chunk transfer pla
 A separate future projection artifact must contain only the paths authorized for
 one Folder Scope.
 
+`FOLDERBASE.md` and `.folderbaseignore` are both required live regular-file
+bindings in every restorable Folderbase Version. The source repository/tag is the
+normative cross-language protocol bundle. The `folderbase-core` crate is the Rust
+runtime implementation and intentionally does not duplicate workspace-level
+schemas, fixtures, or the independent reference encoder. The closed candidate
+release manifest is
+`releases/0.4/folderbase-version-v1.candidate.json`; CI verifies its exact declared
+surface before testing Cargo packages. The eventual protocol 0.4 release PR must
+replace the candidate manifest with a released manifest, change `status` from
+`candidate` to `released`, and update the verifier to require that state; publishing
+a tag without that tested transition is not a protocol release.
+
 ## Using the Project template
 
 Copy the contents of `templates/project/` into a folder through an

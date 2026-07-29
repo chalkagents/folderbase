@@ -31,9 +31,24 @@ pub const MAX_PATH_BYTES: usize = 4_096;
 pub const MAX_PATH_COMPONENT_BYTES: usize = 255;
 pub const MAX_PATH_DEPTH: usize = 128;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct FolderbaseVersion {
+    format: String,
+    protocol_version: String,
+    folderbase_id: String,
+    version_id: String,
+    parents: Vec<String>,
+    created_at: String,
+    path_policy: PathPolicy,
+    root_manifest: RootManifest,
+    bindings: Vec<PathBinding>,
+    tombstones: Vec<Tombstone>,
+    exclusions: Vec<Exclusion>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FolderbaseVersionWire {
     format: String,
     protocol_version: String,
     folderbase_id: String,
@@ -290,7 +305,7 @@ impl FolderbaseVersion {
         if counts.total() > MAX_VERSION_ENTRIES {
             return invalid("Folderbase Version entry count exceeds the v1 limit");
         }
-        let version: Self = serde_json::from_slice(&encoded)?;
+        let version = Self::from(serde_json::from_slice::<FolderbaseVersionWire>(&encoded)?);
         version.validate()?;
         Ok(version)
     }
@@ -409,6 +424,15 @@ impl FolderbaseVersion {
                 }
             }
         }
+        for required_path in [".folderbaseignore", "FOLDERBASE.md"] {
+            if !self.bindings.iter().any(|binding| {
+                binding.path() == required_path && matches!(binding, PathBinding::RegularFile(_))
+            }) {
+                return invalid(format!(
+                    "{required_path} must be a live regular-file Path Binding"
+                ));
+            }
+        }
 
         for exclusion in &self.exclusions {
             let keys = validate_portable_path(&exclusion.path)?;
@@ -465,12 +489,22 @@ impl FolderbaseVersion {
             }
         }
 
-        let nested_boundaries = self
+        let nested_boundary_set = self
             .exclusions
             .iter()
             .filter(|exclusion| exclusion.kind == ExclusionKind::NestedFolderbase)
             .map(|exclusion| portable_folded_key(&exclusion.path))
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
+        for boundary in &nested_boundary_set {
+            for (separator, _) in boundary.match_indices('/') {
+                if nested_boundary_set.contains(&boundary[..separator]) {
+                    return invalid(format!(
+                        "nested Folderbase boundary overlaps its ancestor: {boundary}"
+                    ));
+                }
+            }
+        }
+        let nested_boundaries = nested_boundary_set.into_iter().collect::<Vec<_>>();
         for binding in &self.bindings {
             reject_nested_descendant(binding.path(), &nested_boundaries)?;
         }
@@ -666,6 +700,14 @@ impl FolderbaseVersion {
                     from_path: previous.path().to_owned(),
                     to_path: current.path().to_owned(),
                 });
+                if !previous.state_eq_ignoring_path(current) {
+                    changes.push(FolderbaseVersionChange::Updated {
+                        path: current.path().to_owned(),
+                        object_id: (*object_id).to_owned(),
+                        previous_object_version_id: previous.object_version_id().map(str::to_owned),
+                        object_version_id: current.object_version_id().map(str::to_owned),
+                    });
+                }
             }
         }
 
@@ -825,6 +867,24 @@ impl FolderbaseVersion {
     }
 }
 
+impl From<FolderbaseVersionWire> for FolderbaseVersion {
+    fn from(wire: FolderbaseVersionWire) -> Self {
+        Self {
+            format: wire.format,
+            protocol_version: wire.protocol_version,
+            folderbase_id: wire.folderbase_id,
+            version_id: wire.version_id,
+            parents: wire.parents,
+            created_at: wire.created_at,
+            path_policy: wire.path_policy,
+            root_manifest: wire.root_manifest,
+            bindings: wire.bindings,
+            tombstones: wire.tombstones,
+            exclusions: wire.exclusions,
+        }
+    }
+}
+
 impl PathBinding {
     pub fn path(&self) -> &str {
         match self {
@@ -883,6 +943,34 @@ impl PathBinding {
         match self {
             Self::RegularFile(binding) => Some(&binding.content_sha256),
             _ => None,
+        }
+    }
+
+    fn state_eq_ignoring_path(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Directory(previous), Self::Directory(current)) => {
+                previous.object_id == current.object_id
+                    && previous.lifecycle == current.lifecycle
+                    && previous.kind == current.kind
+            }
+            (Self::RegularFile(previous), Self::RegularFile(current)) => {
+                previous.object_id == current.object_id
+                    && previous.lifecycle == current.lifecycle
+                    && previous.kind == current.kind
+                    && previous.object_version_id == current.object_version_id
+                    && previous.content_sha256 == current.content_sha256
+                    && previous.bytes == current.bytes
+                    && previous.executable == current.executable
+            }
+            (Self::Symlink(previous), Self::Symlink(current)) => {
+                previous.object_id == current.object_id
+                    && previous.lifecycle == current.lifecycle
+                    && previous.kind == current.kind
+                    && previous.object_version_id == current.object_version_id
+                    && previous.target == current.target
+                    && previous.target_safety == current.target_safety
+            }
+            _ => false,
         }
     }
 }
@@ -1139,8 +1227,9 @@ fn validate_portable_component(component: &str) -> Result<(), FolderbaseVersionE
         return invalid(format!("unsafe portable path component: {component}"));
     }
     let stem = component.split('.').next().unwrap_or(component);
+    let uppercase_stem = stem.to_ascii_uppercase();
     let reserved = matches!(
-        stem.to_ascii_uppercase().as_str(),
+        uppercase_stem.as_str(),
         "CON"
             | "PRN"
             | "AUX"
@@ -1163,6 +1252,12 @@ fn validate_portable_component(component: &str) -> Result<(), FolderbaseVersionE
             | "LPT7"
             | "LPT8"
             | "LPT9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
     );
     if reserved {
         return invalid(format!(

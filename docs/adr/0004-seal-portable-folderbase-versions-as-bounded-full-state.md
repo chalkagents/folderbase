@@ -1,6 +1,6 @@
 # Seal portable Folderbase Versions as bounded full state
 
-Status: Accepted
+Status: Proposed
 
 Folderbase needs one provider-neutral state artifact that a local App, independent
 implementation, or future remote agent can validate and restore without replaying
@@ -44,6 +44,11 @@ The artifact contains:
 - retained Tombstones sorted by exact UTF-8 path bytes; and
 - typed exclusions sorted by exact UTF-8 path bytes.
 
+The live binding set always contains `.folderbaseignore` and `FOLDERBASE.md` as
+regular files. Both are protocol-mandatory for a valid restored Folderbase. The
+schema therefore requires at least two bindings, while semantic validation proves
+their exact paths and kinds; array cardinality alone cannot express that condition.
+
 Every live binding has one stable Object ID and explicit `live` lifecycle.
 Regular opaque files bind the exact existing object-level `VersionId`, byte length,
 whole-object SHA-256, and executable bit. Symlinks bind an Object Version and exact
@@ -72,9 +77,12 @@ Portable paths preserve exact UTF-8 spelling and are never normalized or renamed
 Validation rejects empty components, dot and traversal components, absolute paths,
 backslashes, drive prefixes, NUL, Windows-reserved names, trailing dot or space,
 components over 255 UTF-8 bytes, paths over 4096 UTF-8 bytes, depth over 128, and
-exact, NFC, or full-case-fold collisions. `.folderbase` and every descendant are
-always rejected. A declared nested Folderbase is represented by one exclusion and
-no binding, tombstone, or other exclusion may enter that boundary.
+exact, NFC, or full-case-fold collisions. Windows-reserved names include ASCII
+`COM1`–`COM9` and `LPT1`–`LPT9` plus the Windows-recognized superscript forms
+`COM¹`–`COM³` and `LPT¹`–`LPT³`, with or without extensions. `.folderbase` and
+every descendant are always rejected. A declared nested Folderbase is represented
+by one exclusion; nested-boundary exclusions cannot overlap, and no binding,
+tombstone, or other exclusion may enter a boundary.
 
 The two derived collision keys are exactly `NFC(path)` and
 `NFC(full-default-case-fold(NFC(path)))`. They are rejection keys only: neither
@@ -98,9 +106,27 @@ Core exposes a pure `folderbase_version` module for bounded decode, semantic
 validation, canonical digest, deterministic exact-path lookup, and deterministic
 typed state diff. Diff distinguishes stable-ID moves, same-path recreation, updates,
 adds, deletes with or without the expected Tombstone, Tombstone-set changes,
-exclusion-set changes, and root-manifest changes. It contains no filesystem capture,
-Cloud, provider, authentication, authorization, Local Head persistence, or Remote
-Head behavior.
+exclusion-set changes, and root-manifest changes. When one stable Object ID moves
+and its Object Version or metadata also changes, diff emits both `Moved` and
+`Updated`; neither fact masks the other. It contains no filesystem capture, Cloud,
+provider, authentication, authorization, Local Head persistence, or Remote Head
+behavior.
+
+`FolderbaseVersion` itself is not publicly deserializable. Every public construction
+path goes through `decode_bounded`, whose private wire record applies the encoded,
+per-array, and aggregate limits before a validated public value can exist.
+
+The repository/tag source archive is the normative cross-language protocol bundle:
+it contains the schema, public valid and invalid corpus, runtime limit-vector
+generator, independent reference encoder, Rust conformance test, and this decision.
+The `folderbase-core` Cargo package is the Rust runtime implementation only and
+declares that boundary in package metadata. We do not duplicate the protocol bundle
+inside the crate or rely on package paths that escape the crate root. A closed
+candidate source-release manifest and verifier keep that separation explicit.
+Focused conformance and independent digest verification run on Ubuntu, macOS, and
+Windows CI. The later protocol 0.4 release change must replace the candidate
+manifest with a released manifest, change its closed `status` to `released`, and
+change the verifier to require that transition before tagging.
 
 ## Canonical digest v1
 
@@ -133,6 +159,7 @@ field, or canonical digest value enters the sequence.
 
 ## Acceptance
 
-This decision is Accepted because the closed JSON Schema, independently generated
-digest sidecars, valid and invalid public fixtures, and Rust module pass focused
-conformance, full workspace, packaging, and independent vector checks.
+This decision remains Proposed until the corrected closed JSON Schema, repository
+distribution, independently generated digest sidecars, expanded public corpus, and
+Rust module pass focused conformance, macOS and Windows portability, full workspace,
+packaging, independent vector checks, and an independent final re-review.

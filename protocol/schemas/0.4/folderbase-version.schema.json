@@ -52,6 +52,7 @@
     },
     "bindings": {
       "type": "array",
+      "minItems": 2,
       "maxItems": 16384,
       "items": {
         "oneOf": [

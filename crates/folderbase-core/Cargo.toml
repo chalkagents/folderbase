@@ -42,6 +42,12 @@ walkdir.workspace = true
 winapi-util.workspace = true
 windows-sys.workspace = true
 
+[package.metadata.folderbase-protocol]
+contract = "folderbase-version-v1"
+protocol-version = "0.4"
+distribution = "repository-tag-source-archive"
+cargo-package-role = "runtime-implementation-only"
+
 [dev-dependencies]
 jsonschema.workspace = true
 tempfile.workspace = true

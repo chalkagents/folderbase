@@ -14,7 +14,7 @@ const vectorRoot = join(
 );
 const reference = join(vectorRoot, "reference-digest.mjs");
 
-for (const stem of ["empty-v1", "fidelity-and-lifecycle-v1"]) {
+for (const stem of ["minimal-restorable-v1", "fidelity-and-lifecycle-v1"]) {
   const json = join(vectorRoot, "valid", `${stem}.json`);
   const expected = readFileSync(
     join(vectorRoot, "valid", `${stem}.sha256`),

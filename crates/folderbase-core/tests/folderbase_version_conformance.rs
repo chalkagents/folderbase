@@ -12,6 +12,21 @@ use serde_json::Value;
 
 const VERSION_SCHEMA: &str = "schemas/0.4/folderbase-version.schema.json";
 
+trait AmbiguousIfDeserialize<A> {
+    fn marker() {}
+}
+
+impl<T: ?Sized> AmbiguousIfDeserialize<()> for T {}
+
+struct ImplementsDeserialize;
+
+impl<T> AmbiguousIfDeserialize<ImplementsDeserialize> for T where T: for<'de> serde::Deserialize<'de>
+{}
+
+const _: fn() = || {
+    let _ = <FolderbaseVersion as AmbiguousIfDeserialize<_>>::marker;
+};
+
 fn protocol_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol")
 }
@@ -61,9 +76,9 @@ fn read_json(relative: &str) -> Value {
 }
 
 #[test]
-fn bounded_decoder_accepts_the_minimal_public_version() {
-    let version =
-        decode_fixture("conformance/folderbase-version/valid/empty-v1.json").expect("valid v1");
+fn bounded_decoder_accepts_the_minimal_restorable_public_version() {
+    let version = decode_fixture("conformance/folderbase-version/valid/minimal-restorable-v1.json")
+        .expect("valid v1");
 
     assert_eq!(
         version.version_id(),
@@ -74,7 +89,21 @@ fn bounded_decoder_accepts_the_minimal_public_version() {
         "version_0198ee40-c333-7ccc-8000-000000000100"
     );
     assert_eq!(version.root_manifest().bytes(), 512);
-    assert_eq!(version.binding_count(), 0);
+    assert_eq!(version.binding_count(), 2);
+    assert_eq!(
+        version
+            .lookup_binding(".folderbaseignore")
+            .expect("required ignore policy")
+            .kind(),
+        PathBindingKind::RegularFile
+    );
+    assert_eq!(
+        version
+            .lookup_binding("FOLDERBASE.md")
+            .expect("required agent entry")
+            .kind(),
+        PathBindingKind::RegularFile
+    );
 }
 
 #[test]
@@ -91,7 +120,7 @@ fn public_schema_is_closed_draft_2020_12_and_accepts_the_minimal_vector() {
     );
     assert_eq!(schema["additionalProperties"], false);
     assert!(validator.is_valid(&read_json(
-        "conformance/folderbase-version/valid/empty-v1.json"
+        "conformance/folderbase-version/valid/minimal-restorable-v1.json"
     )));
     assert!(validator.is_valid(&read_json(
         "conformance/folderbase-version/valid/fidelity-and-lifecycle-v1.json"
@@ -165,6 +194,8 @@ fn schema_rejects_closed_shape_and_fidelity_mismatches() {
 
     for relative in [
         "conformance/folderbase-version/invalid/unknown-top-level-field.json",
+        "conformance/folderbase-version/invalid/missing-folderbase-entry.json",
+        "conformance/folderbase-version/invalid/missing-folderbaseignore.json",
         "conformance/folderbase-version/invalid/self-capture.json",
         "conformance/folderbase-version/invalid/unsupported-exclusion-reason.json",
     ] {
@@ -190,26 +221,87 @@ fn schema_rejects_closed_shape_and_fidelity_mismatches() {
 
 #[test]
 fn semantic_decoder_rejects_order_collisions_boundaries_symlink_escape_and_identity_reuse() {
-    for relative in [
-        "conformance/folderbase-version/invalid/unsorted-bindings.json",
-        "conformance/folderbase-version/invalid/nfc-collision.json",
-        "conformance/folderbase-version/invalid/casefold-collision.json",
-        "conformance/folderbase-version/invalid/self-capture.json",
-        "conformance/folderbase-version/invalid/nested-boundary-descendant.json",
-        "conformance/folderbase-version/invalid/unsafe-symlink-target.json",
-        "conformance/folderbase-version/invalid/same-object-recreation.json",
-        "conformance/folderbase-version/invalid/unsupported-exclusion-reason.json",
+    for (relative, expected_error) in [
+        (
+            "conformance/folderbase-version/invalid/unsorted-bindings.json",
+            "strictly sorted",
+        ),
+        (
+            "conformance/folderbase-version/invalid/nfc-collision.json",
+            "NFC normalization",
+        ),
+        (
+            "conformance/folderbase-version/invalid/casefold-collision.json",
+            "case folding",
+        ),
+        (
+            "conformance/folderbase-version/invalid/nfc-unicode17-combining-collision.json",
+            "NFC normalization",
+        ),
+        (
+            "conformance/folderbase-version/invalid/casefold-unicode9-osage-collision.json",
+            "case folding",
+        ),
+        (
+            "conformance/folderbase-version/invalid/missing-folderbase-entry.json",
+            "FOLDERBASE.md must",
+        ),
+        (
+            "conformance/folderbase-version/invalid/missing-folderbaseignore.json",
+            ".folderbaseignore must",
+        ),
+        (
+            "conformance/folderbase-version/invalid/object-version-owner-collision.json",
+            "different Object IDs",
+        ),
+        (
+            "conformance/folderbase-version/invalid/root-object-version-reuse.json",
+            "different Object IDs",
+        ),
+        (
+            "conformance/folderbase-version/invalid/self-capture.json",
+            "unsafe portable path component",
+        ),
+        (
+            "conformance/folderbase-version/invalid/self-parent.json",
+            "own parent",
+        ),
+        (
+            "conformance/folderbase-version/invalid/nested-boundary-descendant.json",
+            "enters an excluded nested",
+        ),
+        (
+            "conformance/folderbase-version/invalid/nested-boundary-overlap.json",
+            "overlaps its ancestor",
+        ),
+        (
+            "conformance/folderbase-version/invalid/unsafe-symlink-target.json",
+            "escapes the Folderbase root",
+        ),
+        (
+            "conformance/folderbase-version/invalid/same-object-recreation.json",
+            "same-path recreation",
+        ),
+        (
+            "conformance/folderbase-version/invalid/unsupported-exclusion-reason.json",
+            "kind and reason do not match",
+        ),
+        (
+            "conformance/folderbase-version/invalid/windows-dos-superscript-device.json",
+            "Windows-reserved",
+        ),
     ] {
+        let error = decode_fixture(relative).expect_err("invalid vector must be rejected");
         assert!(
-            decode_fixture(relative).is_err(),
-            "{relative} must be rejected"
+            error.contains(expected_error),
+            "{relative} reported {error:?}, expected {expected_error:?}"
         );
     }
 }
 
 #[test]
 fn decoder_rejects_hostile_and_nonportable_path_spellings_without_renaming() {
-    let base = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let base = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     let hostile_paths = [
         ".".to_owned(),
         "../outside".to_owned(),
@@ -222,6 +314,12 @@ fn decoder_rejects_hostile_and_nonportable_path_spellings_without_renaming() {
         "control\u{1}".to_owned(),
         "CON".to_owned(),
         "aux.txt".to_owned(),
+        "COM¹".to_owned(),
+        "com².log".to_owned(),
+        "CoM³.data".to_owned(),
+        "LPT¹".to_owned(),
+        "lpt².txt".to_owned(),
+        "LpT³.archive".to_owned(),
         "trailing-dot.".to_owned(),
         "trailing-space ".to_owned(),
         "x".repeat(MAX_PATH_COMPONENT_BYTES + 1),
@@ -233,7 +331,16 @@ fn decoder_rejects_hostile_and_nonportable_path_spellings_without_renaming() {
 
     for (index, path) in hostile_paths.into_iter().enumerate() {
         let mut version = base.clone();
-        version["bindings"] = Value::Array(vec![directory_binding(path.clone(), 200 + index)]);
+        let mut bindings = base["bindings"].as_array().unwrap().clone();
+        bindings.push(directory_binding(path.clone(), 200 + index));
+        bindings.sort_by(|left, right| {
+            left["path"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .cmp(right["path"].as_str().unwrap().as_bytes())
+        });
+        version["bindings"] = Value::Array(bindings);
         assert!(
             decode_value(&version).is_err(),
             "hostile path must be rejected exactly: {path:?}"
@@ -243,7 +350,7 @@ fn decoder_rejects_hostile_and_nonportable_path_spellings_without_renaming() {
 
 #[test]
 fn decoder_enforces_aggregate_entry_and_encoded_representation_bounds() {
-    let mut version = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let mut version = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     version["bindings"] = Value::Array(
         (0..=MAX_VERSION_ENTRIES)
             .map(|index| directory_binding(format!("p{index:05}"), 1_000 + index))
@@ -253,6 +360,41 @@ fn decoder_enforces_aggregate_entry_and_encoded_representation_bounds() {
         decode_value(&version)
             .unwrap_err()
             .contains("entry count exceeds")
+    );
+
+    let mut split = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
+    let mut split_bindings = split["bindings"].as_array().unwrap().clone();
+    split_bindings.extend(
+        (0..8_191).map(|index| directory_binding(format!("b{index:05}"), 0x10_000 + index)),
+    );
+    split["bindings"] = Value::Array(split_bindings);
+    split["tombstones"] = Value::Array(
+        (0..8_192)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("t{index:05}"),
+                    "object_id": format!(
+                        "obj_0198ee40-b222-7bbb-8000-{:012x}",
+                        0x20_000 + index
+                    ),
+                    "lifecycle": "deleted",
+                    "deleted_kind": "directory",
+                    "last_object_version_id": null
+                })
+            })
+            .collect(),
+    );
+    assert_eq!(
+        split["bindings"].as_array().unwrap().len(),
+        8_193,
+        "each split array stays below the per-array schema cap"
+    );
+    assert_eq!(split["tombstones"].as_array().unwrap().len(), 8_192);
+    assert!(
+        decode_value(&split)
+            .unwrap_err()
+            .contains("entry count exceeds"),
+        "the aggregate cap must be enforced before fully decoding split arrays"
     );
 
     let oversized = std::io::repeat(b' ').take(MAX_ENCODED_VERSION_BYTES + 1);
@@ -265,8 +407,74 @@ fn decoder_enforces_aggregate_entry_and_encoded_representation_bounds() {
 }
 
 #[test]
+fn schema_and_runtime_enforce_distinct_character_and_utf8_path_limits() {
+    let schema = read_json(VERSION_SCHEMA);
+    let validator = jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .expect("compile canonical Folderbase Version schema");
+    let base = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
+
+    let with_path = |path: String, suffix: usize| {
+        let mut version = base.clone();
+        let mut bindings = base["bindings"].as_array().unwrap().clone();
+        bindings.push(directory_binding(path, suffix));
+        bindings.sort_by(|left, right| {
+            left["path"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .cmp(right["path"].as_str().unwrap().as_bytes())
+        });
+        version["bindings"] = Value::Array(bindings);
+        version
+    };
+
+    let exact_component = with_path("x".repeat(MAX_PATH_COMPONENT_BYTES), 0x501);
+    assert!(validator.is_valid(&exact_component));
+    assert!(decode_value(&exact_component).is_ok());
+
+    let unicode_component_over_bytes = with_path("é".repeat(128), 0x502);
+    assert!(
+        validator.is_valid(&unicode_component_over_bytes),
+        "schema maxLength counts Unicode code points"
+    );
+    assert!(
+        decode_value(&unicode_component_over_bytes).is_err(),
+        "runtime component cap counts exact UTF-8 bytes"
+    );
+
+    let exact_path = std::iter::repeat_n("é".repeat(120), 17)
+        .collect::<Vec<_>>()
+        .join("/");
+    assert_eq!(exact_path.len(), MAX_PATH_BYTES);
+    let exact_path = with_path(exact_path, 0x503);
+    assert!(validator.is_valid(&exact_path));
+    assert!(decode_value(&exact_path).is_ok());
+
+    let mut path_over_bytes = std::iter::repeat_n("é".repeat(120), 17).collect::<Vec<_>>();
+    path_over_bytes.last_mut().unwrap().push('x');
+    let path_over_bytes = with_path(path_over_bytes.join("/"), 0x504);
+    assert!(validator.is_valid(&path_over_bytes));
+    assert!(decode_value(&path_over_bytes).is_err());
+
+    let depth_over_runtime = with_path(
+        std::iter::repeat_n("d", MAX_PATH_DEPTH + 1)
+            .collect::<Vec<_>>()
+            .join("/"),
+        0x505,
+    );
+    assert!(validator.is_valid(&depth_over_runtime));
+    assert!(decode_value(&depth_over_runtime).is_err());
+
+    let schema_over_characters = with_path("x".repeat(MAX_PATH_BYTES + 1), 0x506);
+    assert!(!validator.is_valid(&schema_over_characters));
+    assert!(decode_value(&schema_over_characters).is_err());
+}
+
+#[test]
 fn root_manifest_is_the_only_reserved_state_reference_and_is_not_a_binding() {
-    let version = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let version = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     assert_eq!(
         version["root_manifest"]["path"],
         ".folderbase/manifest.json"
@@ -289,20 +497,46 @@ fn root_manifest_is_the_only_reserved_state_reference_and_is_not_a_binding() {
     chunk_identity["root_manifest"]["chunk_manifest_sha256"] = Value::String("a".repeat(64));
     assert!(decode_value(&chunk_identity).is_err());
 
-    let mut object_namespace = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let mut object_namespace =
+        read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     object_namespace["version_id"] =
         Value::String("version_0198ee40-a111-7aaa-8000-000000000001".to_owned());
     assert!(decode_value(&object_namespace).is_err());
 
-    let mut folderbase_namespace = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let mut folderbase_namespace =
+        read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     folderbase_namespace["root_manifest"]["object_version_id"] =
         Value::String("fbversion_0198ee40-c333-7ccc-8000-000000000100".to_owned());
     assert!(decode_value(&folderbase_namespace).is_err());
 }
 
 #[test]
+fn decoder_requires_both_visible_root_markers_as_regular_file_bindings() {
+    let base = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
+
+    for required_path in [".folderbaseignore", "FOLDERBASE.md"] {
+        let mut missing = base.clone();
+        missing["bindings"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|binding| binding["path"] != required_path);
+        assert!(
+            decode_value(&missing).is_err(),
+            "{required_path} must be required for a restorable Folderbase"
+        );
+    }
+
+    let mut wrong_kind = base;
+    wrong_kind["bindings"][1] = directory_binding("FOLDERBASE.md".to_owned(), 0x404);
+    assert!(
+        decode_value(&wrong_kind).is_err(),
+        "FOLDERBASE.md must restore as an opaque regular file"
+    );
+}
+
+#[test]
 fn canonical_digests_match_independently_generated_public_sidecars() {
-    for stem in ["empty-v1", "fidelity-and-lifecycle-v1"] {
+    for stem in ["minimal-restorable-v1", "fidelity-and-lifecycle-v1"] {
         let relative = format!("conformance/folderbase-version/valid/{stem}");
         let version = decode_fixture(&format!("{relative}.json")).expect("valid digest vector");
         let expected = fs::read_to_string(protocol_root().join(format!("{relative}.sha256")))
@@ -334,8 +568,10 @@ fn exact_integral_json_number_spellings_preserve_identity_and_fractions_fail() {
 
 #[test]
 fn deterministic_diff_distinguishes_move_recreation_deletion_and_tombstone_state() {
-    let mut old = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let mut old = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     old["bindings"] = Value::Array(vec![
+        regular_file_binding(".folderbaseignore", 0x101, 0x101),
+        regular_file_binding("FOLDERBASE.md", 0x102, 0x102),
         regular_file_binding("a.md", 0x1001, 0x2001),
         regular_file_binding("delete.md", 0x1002, 0x2002),
         regular_file_binding("move.md", 0x1003, 0x2003),
@@ -348,15 +584,17 @@ fn deterministic_diff_distinguishes_move_recreation_deletion_and_tombstone_state
     })]);
     let old = decode_value(&old).unwrap();
 
-    let mut new = read_json("conformance/folderbase-version/valid/empty-v1.json");
+    let mut new = read_json("conformance/folderbase-version/valid/minimal-restorable-v1.json");
     new["version_id"] = Value::String("fbversion_0198ee40-a111-7aaa-8000-000000000099".to_owned());
     new["parents"] = Value::Array(vec![Value::String(old.version_id().to_owned())]);
     new["root_manifest"]["object_version_id"] =
-        Value::String("version_0198ee40-c333-7ccc-8000-000000000101".to_owned());
+        Value::String("version_0198ee40-c333-7ccc-8000-000000000900".to_owned());
     new["root_manifest"]["content_sha256"] = Value::String("1".repeat(64));
     new["bindings"] = Value::Array(vec![
+        regular_file_binding(".folderbaseignore", 0x101, 0x101),
+        regular_file_binding("FOLDERBASE.md", 0x102, 0x102),
         regular_file_binding("a.md", 0x1005, 0x2005),
-        regular_file_binding("moved.md", 0x1003, 0x2003),
+        regular_file_binding("moved.md", 0x1003, 0x2006),
         directory_binding("stable".to_owned(), 0x1004),
     ]);
     new["tombstones"] = Value::Array(vec![
@@ -401,6 +639,18 @@ fn deterministic_diff_distinguishes_move_recreation_deletion_and_tombstone_state
         } if object_id.ends_with("001003")
             && from_path == "move.md"
             && to_path == "moved.md"
+    )));
+    assert!(first.changes().iter().any(|change| matches!(
+        change,
+        FolderbaseVersionChange::Updated {
+            path,
+            object_id,
+            previous_object_version_id: Some(previous),
+            object_version_id: Some(current),
+        } if path == "moved.md"
+            && object_id.ends_with("001003")
+            && previous.ends_with("002003")
+            && current.ends_with("002006")
     )));
     assert!(first.changes().iter().any(|change| matches!(
         change,

@@ -20,6 +20,26 @@
   },
   "bindings": [
     {
+      "path": ".folderbaseignore",
+      "object_id": "obj_0198ee40-b222-7bbb-8000-000000000101",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_0198ee40-c333-7ccc-8000-000000000101",
+      "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 64,
+      "executable": false
+    },
+    {
+      "path": "FOLDERBASE.md",
+      "object_id": "obj_0198ee40-b222-7bbb-8000-000000000102",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_0198ee40-c333-7ccc-8000-000000000102",
+      "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 128,
+      "executable": false
+    },
+    {
       "path": "STRASSE",
       "object_id": "obj_0198ee40-b222-7bbb-8000-000000000021",
       "lifecycle": "live",

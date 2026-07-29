@@ -2,7 +2,7 @@
   "format": "folderbase-version-v1",
   "protocol_version": "0.4",
   "folderbase_id": "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
-  "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000001",
+  "version_id": "fbversion_0198ee40-a111-7aaa-8000-000000000023",
   "parents": [],
   "created_at": "2026-07-29T00:00:00Z",
   "path_policy": {
@@ -18,7 +18,18 @@
     "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "bytes": 512
   },
-  "bindings": [],
+  "bindings": [
+    {
+      "path": "FOLDERBASE.md",
+      "object_id": "obj_0198ee40-b222-7bbb-8000-000000000102",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_0198ee40-c333-7ccc-8000-000000000102",
+      "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 128,
+      "executable": false
+    }
+  ],
   "tombstones": [],
   "exclusions": []
 }
