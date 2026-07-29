@@ -357,6 +357,78 @@ fn fidelity_only_change_creates_a_new_object_version_under_the_same_object_id() 
 }
 
 #[test]
+fn supported_kind_replacements_tombstone_old_identity_and_assign_new_identity() {
+    fn create_regular(path: &Path) {
+        fs::write(path, b"opaque file").expect("regular file");
+    }
+
+    fn replace_regular_with_directory(path: &Path) {
+        fs::remove_file(path).expect("remove regular file");
+        fs::create_dir(path).expect("replacement directory");
+    }
+
+    fn create_directory(path: &Path) {
+        fs::create_dir(path).expect("directory");
+    }
+
+    fn replace_directory_with_regular(path: &Path) {
+        fs::remove_dir(path).expect("remove directory");
+        fs::write(path, b"replacement file").expect("replacement regular file");
+    }
+
+    for (create_initial, replace, deleted_kind, current_kind) in [
+        (
+            create_regular as fn(&Path),
+            replace_regular_with_directory as fn(&Path),
+            DeletedKind::RegularFile,
+            PathBindingKind::Directory,
+        ),
+        (
+            create_directory,
+            replace_directory_with_regular,
+            DeletedKind::Directory,
+            PathBindingKind::RegularFile,
+        ),
+    ] {
+        let root = folderbase();
+        let path = root.path().join("kind-switch");
+        create_initial(&path);
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let prior = store
+            .read_version(genesis.version_id())
+            .expect("genesis version");
+        let prior_binding = prior.lookup_binding("kind-switch").expect("prior binding");
+        let prior_object_id = prior_binding.object_id().to_owned();
+        let prior_object_version_id = prior_binding.object_version_id().map(str::to_owned);
+
+        replace(&path);
+        let replacement = store
+            .seal_capture(store.plan_capture().expect("replacement plan"))
+            .expect("kind replacement");
+        let current = store
+            .read_version(replacement.version_id())
+            .expect("replacement version");
+        let current_binding = current
+            .lookup_binding("kind-switch")
+            .expect("replacement binding");
+        assert_eq!(current_binding.kind(), current_kind);
+        assert_ne!(current_binding.object_id(), prior_object_id);
+        assert_eq!(current.tombstones().len(), 1);
+        let tombstone = &current.tombstones()[0];
+        assert_eq!(tombstone.path(), "kind-switch");
+        assert_eq!(tombstone.object_id(), prior_object_id);
+        assert_eq!(tombstone.deleted_kind(), deleted_kind);
+        assert_eq!(
+            tombstone.last_object_version_id(),
+            prior_object_version_id.as_deref()
+        );
+    }
+}
+
+#[test]
 fn sealed_bytes_use_sha256_without_file_format_interpretation() {
     let root = folderbase();
     let bytes = [0_u8, 255, 17, 42, 0, 99];
