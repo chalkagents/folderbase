@@ -123,6 +123,17 @@ enum CaptureCheckpoint {
     CleanupComplete,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RestoreCheckpoint {
+    JournalDurable,
+    StageDurable,
+    TargetPublished,
+    VersionDurable,
+    HeadReplaced,
+    ProjectionDurable,
+    CleanupComplete,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JournalHead {
@@ -242,6 +253,14 @@ impl FolderbaseVersionStore {
         &self,
         portable_path: &str,
     ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+        self.restore_tombstone_with_hook(portable_path, |_| {})
+    }
+
+    fn restore_tombstone_with_hook(
+        &self,
+        portable_path: &str,
+        mut checkpoint: impl FnMut(&RestoreCheckpoint),
+    ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
         let path = safe_content_path(Path::new(portable_path))?;
         let path_string = path
             .to_str()
@@ -300,11 +319,12 @@ impl FolderbaseVersionStore {
                 let transaction =
                     build_restore_transaction(self, &head, &current, tombstone, binding)?;
                 write_active_restore_transaction(&state, &transaction)?;
+                checkpoint(&RestoreCheckpoint::JournalDurable);
                 (transaction, true)
             }
         };
 
-        execute_restore_transaction(self, &local, &state, &transaction, created)
+        execute_restore_transaction(self, &local, &state, &transaction, created, &mut checkpoint)
     }
 
     fn seal_capture_with_hook(
@@ -693,6 +713,7 @@ fn execute_restore_transaction(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
     _new_intent: bool,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
     validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
@@ -714,7 +735,7 @@ fn execute_restore_transaction(
                 "committed target digest changed".to_owned(),
             ));
         }
-        finish_restore_materialization(store, local, state, transaction)?;
+        finish_restore_materialization(store, local, state, transaction, checkpoint)?;
         false
     } else if current_summary == transaction.expected_head {
         let parent = read_and_verify_folderbase_version(
@@ -741,7 +762,7 @@ fn execute_restore_transaction(
                 "restore target no longer matches its durable journal".to_owned(),
             ));
         }
-        stage_and_publish_restore(state, transaction)?;
+        stage_and_publish_restore(state, transaction, checkpoint)?;
         install_folderbase_version(state, &target, &transaction.target_version_sha256)?;
         let installed = read_and_verify_folderbase_version(
             store,
@@ -754,6 +775,7 @@ fn execute_restore_transaction(
                 "installed restore version failed verification".to_owned(),
             ));
         }
+        checkpoint(&RestoreCheckpoint::VersionDurable);
         compare_and_swap_restore_head(
             state,
             &transaction.expected_head,
@@ -766,7 +788,9 @@ fn execute_restore_transaction(
                 transaction_sha256: restore_transaction_sha256(transaction)?,
             },
         )?;
+        checkpoint(&RestoreCheckpoint::HeadReplaced);
         finish_restore_projection(store, local, state, transaction)?;
+        checkpoint(&RestoreCheckpoint::ProjectionDurable);
         true
     } else {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
@@ -774,6 +798,7 @@ fn execute_restore_transaction(
 
     remove_active_restore_transaction(state)?;
     state.remove_durable(&restore_stage_path(transaction))?;
+    checkpoint(&RestoreCheckpoint::CleanupComplete);
     Ok(RestoredTombstone {
         path: PathBuf::from(&transaction.path),
         object_id: transaction.binding.object_id().to_owned(),
@@ -793,14 +818,27 @@ fn finish_restore_materialization(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
-    stage_and_publish_restore(state, transaction)?;
-    finish_restore_projection(store, local, state, transaction)
+    stage_and_publish_restore(state, transaction, checkpoint)?;
+    let installed =
+        read_and_verify_folderbase_version(store, local, state, &transaction.target_version_id)?;
+    if installed.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "committed restore version failed verification".to_owned(),
+        ));
+    }
+    checkpoint(&RestoreCheckpoint::VersionDurable);
+    checkpoint(&RestoreCheckpoint::HeadReplaced);
+    finish_restore_projection(store, local, state, transaction)?;
+    checkpoint(&RestoreCheckpoint::ProjectionDurable);
+    Ok(())
 }
 
 fn stage_and_publish_restore(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     let transaction_directory =
         Path::new(RESTORE_TRANSACTIONS_DIRECTORY).join(&transaction.transaction_id);
@@ -820,7 +858,8 @@ fn stage_and_publish_restore(
         .expect("validated regular binding");
     let source = Path::new(".folderbase/versions/blobs/sha256").join(digest);
     state.stage_restore_blob(&source, &stage, digest, bytes, executable)?;
-    state
+    checkpoint(&RestoreCheckpoint::StageDurable);
+    let result = state
         .publish_workspace_restore(
             &stage,
             Path::new(&transaction.path),
@@ -834,7 +873,11 @@ fn stage_and_publish_restore(
                 FolderbaseCaptureError::RestoreTargetOccupied(path)
             }
             error => FolderbaseCaptureError::LocalStore(error),
-        })
+        });
+    if result.is_ok() {
+        checkpoint(&RestoreCheckpoint::TargetPublished);
+    }
+    result
 }
 
 fn finish_restore_projection(
@@ -3071,6 +3114,53 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn same_byte_foreign_target_after_staging_is_never_adopted_as_restore_owned() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+
+        let error = store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::StageDurable {
+                    fs::write(root.path().join("active.bin"), b"first opaque bytes")
+                        .expect("same-byte foreign competitor");
+                }
+            })
+            .expect_err("same-byte foreign target must not be transaction-owned");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::RestoreTargetOccupied(path)
+                if path.ends_with("active.bin")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+        assert!(
+            read_active_restore_transaction(&FolderbaseState::open(root.path()).expect("state"))
+                .expect("active restore")
+                .is_some(),
+            "durable intent and retained stage remain available for diagnosis/retry"
+        );
+        assert!(matches!(
+            FolderbaseVersionStore::open(root.path())
+                .expect("reopen")
+                .restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(_))
+        ));
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("foreign bytes preserved"),
+            b"first opaque bytes"
+        );
     }
 
     #[test]
