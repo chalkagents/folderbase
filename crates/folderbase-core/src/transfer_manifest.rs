@@ -18,6 +18,29 @@ pub const STANDARD_PROFILE_V1: &str = "standard-v1";
 pub const LARGE_PROFILE_V1: &str = "large-v1";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProfileParameters {
+    pub minimum_chunk_bytes: u64,
+    pub average_chunk_bytes: u64,
+    pub maximum_chunk_bytes: u64,
+}
+
+pub(crate) fn profile_parameters(profile: &str) -> Option<ProfileParameters> {
+    match profile {
+        STANDARD_PROFILE_V1 => Some(ProfileParameters {
+            minimum_chunk_bytes: 256 * 1024,
+            average_chunk_bytes: 1024 * 1024,
+            maximum_chunk_bytes: 4 * 1024 * 1024,
+        }),
+        LARGE_PROFILE_V1 => Some(ProfileParameters {
+            minimum_chunk_bytes: 4 * 1024 * 1024,
+            average_chunk_bytes: 16 * 1024 * 1024,
+            maximum_chunk_bytes: 64 * 1024 * 1024,
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChunkManifest {
@@ -140,17 +163,17 @@ impl ChunkManifest {
         if self.algorithm != CHUNKING_ALGORITHM_V1 {
             return Err(ManifestViolation::UnknownAlgorithm);
         }
-        let expected = match self.profile.as_str() {
-            STANDARD_PROFILE_V1 => (256 * 1024, 1024 * 1024, 4 * 1024 * 1024),
-            LARGE_PROFILE_V1 => (4 * 1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024),
-            _ => return Err(ManifestViolation::UnknownProfile),
-        };
+        let expected =
+            profile_parameters(&self.profile).ok_or(ManifestViolation::UnknownProfile)?;
         if (
             self.minimum_chunk_bytes,
             self.average_chunk_bytes,
             self.maximum_chunk_bytes,
-        ) != expected
-        {
+        ) != (
+            expected.minimum_chunk_bytes,
+            expected.average_chunk_bytes,
+            expected.maximum_chunk_bytes,
+        ) {
             return Err(ManifestViolation::ProfileParameterMismatch);
         }
         if !is_sha256(&self.object_sha256) {
@@ -250,7 +273,7 @@ impl ChunkManifest {
     }
 }
 
-fn is_sha256(value: &str) -> bool {
+pub(crate) fn is_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

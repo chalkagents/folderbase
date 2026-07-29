@@ -19,6 +19,7 @@ mod sync;
 mod template;
 mod template_expansion;
 pub mod transfer_manifest;
+pub mod transfer_source;
 mod traversal_policy;
 mod validation;
 mod workspace;
@@ -68,6 +69,10 @@ pub use template::{
 };
 pub use template_expansion::{
     apply_template_expansion, plan_template_expansion, template_application_history,
+};
+pub use transfer_source::{
+    ChunkTransferProfile, ChunkTransferSource, MANAGED_LARGE_PROFILE_THRESHOLD_BYTES,
+    TRANSFER_IO_BUFFER_BYTES, TransferSourceError, VerifiedChunk,
 };
 pub use validation::validate;
 pub use workspace::{

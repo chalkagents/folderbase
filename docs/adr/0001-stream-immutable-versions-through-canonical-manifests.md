@@ -48,6 +48,13 @@ PersistentTransfer::materialize_to(root_capability, relative_destination)
   -> VerifiedMaterialization
 ```
 
+The source-side Core API also provides
+`LocalVersionStore::reopen_chunk_transfer(version_id, profile,
+expected_manifest_digest)` for interruption recovery. It regenerates the
+canonical plan from the exact immutable version and returns no source when the
+durable expected digest differs. This prevents a caller from silently resuming
+chunk requests against another profile or plan.
+
 Planning always reads the immutable content-addressed blob named by the exact
 `LocalVersionRecord`; it never reads the mutable workspace path. Copying a
 chunk uses an opaque `ChunkTransferSource` that binds the exact version,
@@ -79,6 +86,16 @@ be serialized for diagnostics or a local checkpoint, but are not authorization,
 hosted-presence receipts, Folderbase history, or readiness claims. A hosted
 service trusts only a result produced inside its current trusted verifier from
 the bytes it observed; it never accepts a caller-submitted result as proof.
+
+Source planning and copying use a fixed 64 KiB I/O buffer. Version and object
+records are decoded through fixed encoded-size caps, while descriptor state is
+bounded by the manifest's public descriptor cap. The source retains open
+identities for the Folderbase root, immutable version record, and blob; it
+revalidates those identities, the current nested-boundary authority, and the
+exact version membership before and after each chunk copy. Replacing the root,
+record, blob, or a protected internal directory with a symlink fails closed.
+Changing the ordinary workspace file does not change the opened immutable
+version.
 
 Receiving streams into a unique private staging file while computing the
 expected digest and length. A complete chunk is installed with no-clobber
@@ -133,6 +150,11 @@ for any conforming object up to 1 TiB and does not define or infer a profile
 switch threshold. The large profile's 4 MiB minimum remains within the
 262,144-descriptor cap even under worst-case boundary selection. Custom
 configurations are not accepted as hosted v1 profiles.
+
+The Rust source planner's current managed policy selects `large-v1` at 1 GiB
+and above. That exported implementation threshold is deterministic metadata
+policy, may evolve with a future protocol/client release, and does not alter
+the validation rule above. Callers can always request either exact v1 profile.
 
 `ChunkManifest::decode_bounded()` rejects an encoded manifest larger than
 64 MiB before deserialization. String lengths are schema-bounded before they
@@ -241,9 +263,18 @@ Both independent review axes reported no findings after remediation. Hosted PR
 CI run `30423502912` and post-merge `main` run `30423673665` passed the Rust
 quality gate, including formatting, strict linting, locked workspace tests,
 public-surface checks, extracted package verification, offline CLI installation,
-and out-of-checkout initialization. This accepts the manifest contract only;
-the source, receiver, verifier, and capability-rooted materializer remain the
-separate implementation slices described above.
+and out-of-checkout initialization. At acceptance, this evidence covered the
+manifest contract only; the source, receiver, verifier, and capability-rooted
+materializer remained separate implementation slices.
+
+The subsequent source slice implements the immutable `LocalVersionStore`
+planner and exact chunk-copy seam. Its candidate evidence includes nine
+source-specific public-seam tests, the independent canonical digest vector,
+the complete locked workspace suite, strict formatting and linting, public
+eclipse and CI-policy checks, extracted-package verification, and offline CLI
+installation. Independent review and hosted CI remain merge gates for that
+slice. The receiver, whole-object verifier, and capability-rooted materializer
+remain unimplemented by the source slice.
 
 ## Explicit deferrals
 
