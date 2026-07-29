@@ -2108,4 +2108,155 @@ mod tests {
             "verified content-addressed orphans are safe and reusable"
         );
     }
+
+    #[test]
+    fn missing_identity_evidence_never_authorizes_prior_object_reuse() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let version = store.read_version(genesis.version_id()).expect("version");
+        let object_id = version
+            .lookup_binding("active.bin")
+            .expect("active binding")
+            .object_id();
+        fs::remove_file(
+            root.path()
+                .join(capture_identity_relative_path(object_id)),
+        )
+        .expect("remove local identity evidence");
+
+        let error = store
+            .seal_capture(store.plan_capture().expect("next plan"))
+            .expect_err("missing identity must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::TombstonesRequired(path)
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            read_head_record(root.path())
+                .unwrap()
+                .expect("prior Head")
+                .version_id,
+            genesis.version_id()
+        );
+    }
+
+    #[test]
+    fn replacement_after_head_and_before_identity_projection_requires_a_tombstone() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::HeadReplaced {
+                    fs::remove_file(root.path().join("active.bin")).expect("remove captured file");
+                    fs::write(
+                        root.path().join("active.bin"),
+                        b"same path, replacement identity",
+                    )
+                    .expect("replace captured file");
+                    panic!("stop before identity projection");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+        let error = reopened
+            .seal_capture(reopened.plan_capture().expect("replacement plan"))
+            .expect_err("replacement needs a tombstone");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::TombstonesRequired(path)
+                if path == Path::new("active.bin")
+        ));
+    }
+
+    #[test]
+    fn truncated_active_journal_cannot_seal_a_subset_of_the_plan() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("stop after journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let mut transaction = read_active_transaction(root.path())
+            .unwrap()
+            .expect("active journal");
+        transaction.assignments.pop().expect("trailing assignment");
+        write_replace_durable(
+            root.path(),
+            Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+            &json_bytes(&transaction).unwrap(),
+        )
+        .expect("tamper journal");
+
+        let error = store
+            .seal_capture(store.plan_capture().expect("same plan"))
+            .expect_err("subset journal must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(_)
+        ));
+        assert!(read_head_record(root.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn tampered_reused_assignment_cannot_rewrite_prior_identity_lineage() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        fs::write(root.path().join("active.bin"), b"same object, new bytes").expect("edit");
+        let plan = store.plan_capture().expect("update plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("stop after journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let mut transaction = read_active_transaction(root.path())
+            .unwrap()
+            .expect("active journal");
+        let assignment = transaction
+            .assignments
+            .iter_mut()
+            .find(|assignment| assignment.path == "active.bin")
+            .expect("active assignment");
+        assignment.object_id = ObjectId::new().to_string();
+        write_replace_durable(
+            root.path(),
+            Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+            &json_bytes(&transaction).unwrap(),
+        )
+        .expect("tamper journal lineage");
+
+        let error = store
+            .seal_capture(store.plan_capture().expect("same update plan"))
+            .expect_err("lineage rewrite must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(_)
+        ));
+        assert_eq!(
+            read_head_record(root.path())
+                .unwrap()
+                .expect("prior Head")
+                .version_id,
+            genesis.version_id()
+        );
+    }
 }
