@@ -17,7 +17,12 @@ independent of the Folderbase application and hosted services.
   provenance while preserving unknown manifest fields.
 - `schemas/0.2/template.schema.json` validates transparent Template Protocol
   0.2 packages.
+- `schemas/0.3/chunk-manifest.schema.json` validates the canonical,
+  provider-neutral `folderbase-chunk-manifest-v1` transfer plan.
 - `conformance/` contains valid and invalid compatibility fixtures.
+- `conformance/chunk-manifest/` fixes the valid and invalid manifest shapes;
+  its independently generated `.sha256` sidecars fix cross-client canonical
+  binary digests for small and greater-than-32-bit identities.
 - `conformance/template/valid/digest-vector-0.2.0.{json,sha256}` fixes the
   cross-client canonical package-digest contract.
 - `templates/0.2/project/template.json` is the built-in data-only
@@ -46,6 +51,11 @@ execute code, overwrite user files, or declare authority.
 Question answers are typed as text or boolean. Dynamic text uses only explicit,
 non-recursive `${question-id}` substitutions; renderers never evaluate code or
 read other package-relative or filesystem paths.
+
+Chunk Manifest v1 intentionally rejects unknown fields. Semantic conformance
+also validates ordered, contiguous descriptors, exact object length, profile
+bounds, the 1 TiB lossless JSON-integer ceiling, and empty-object identity
+because JSON Schema cannot compare all of those values across array entries.
 
 ## Using the Project template
 

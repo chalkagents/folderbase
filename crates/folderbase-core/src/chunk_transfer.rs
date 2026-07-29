@@ -39,6 +39,11 @@ impl ChunkingConfig {
     }
 }
 
+/// Legacy small-buffer checkpoint shape retained for existing Rust callers.
+///
+/// New portable transfers use
+/// [`crate::transfer_manifest::ChunkManifest`]. The two JSON shapes are
+/// intentionally distinct and are never decoded as one another.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkManifest {
     pub algorithm: String,
