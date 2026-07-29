@@ -1,6 +1,6 @@
 {
   "format": "folderbase-protocol-source-release-v1",
-  "status": "candidate",
+  "status": "released",
   "protocol_version": "0.4",
   "contract": "folderbase-version-v1",
   "distribution": "repository-tag-source-archive",
@@ -35,7 +35,7 @@
     "protocol/conformance/folderbase-version/valid/fidelity-and-lifecycle-v1.sha256",
     "protocol/conformance/folderbase-version/valid/minimal-restorable-v1.json",
     "protocol/conformance/folderbase-version/valid/minimal-restorable-v1.sha256",
-    "protocol/releases/0.4/folderbase-version-v1.candidate.json",
+    "protocol/releases/0.4/folderbase-version-v1.json",
     "protocol/schemas/0.4/folderbase-version.schema.json",
     "scripts/verify-folderbase-version-digest-vectors.mjs",
     "scripts/verify-folderbase-version-distribution.mjs"
