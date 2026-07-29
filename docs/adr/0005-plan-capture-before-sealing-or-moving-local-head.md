@@ -73,6 +73,17 @@ Capture continuity has one canonical capture-identity projection; the legacy
 workspace path-identity representation is not also written by the capture
 transaction.
 
+Unix device and inode identify one live filesystem object, but they are not a
+globally unique lifetime token: after every handle to an unlinked object closes,
+the filesystem may reuse its inode for a later file. The pre-Tombstone slice
+therefore cannot distinguish a same-path, same-kind delete-and-recreate that
+happens entirely between captures and receives the same device/inode from
+ordinary same-object continuity. The Tombstone lifecycle must close this gap
+with explicit deletion evidence rather than guessing from path metadata. Fault
+fixtures that claim to simulate a live replacement keep the removed object
+handle open until the replacement identity is observed, proving that the two
+objects coexist and cannot alias through immediate inode reuse.
+
 Content blobs, immutable Object Version records, and the complete bounded
 Folderbase Version are installed append-only with temp-file fsync, atomic
 no-clobber publication, and post-install verification. Only then does Core

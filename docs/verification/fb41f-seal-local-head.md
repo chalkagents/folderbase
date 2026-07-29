@@ -193,6 +193,46 @@ The implementation proves:
 - explicit no-write refusal when a deletion requires an unimplemented
   Tombstone.
 
+## Hosted Linux replacement-fixture hardening
+
+PR #26 run `30492952060`, Linux job `90715021561`, exposed a deterministic
+test-fixture ambiguity in
+`replacement_after_head_and_before_identity_projection_requires_a_tombstone`.
+The `HeadReplaced` hook ran and replaced `active.bin`, but the fixture closed
+the removed file before recreating the path. Linux immediately reused its
+device/inode, so the alleged replacement had the same physical identity and the
+next capture correctly treated it as continuity under the evidence it received.
+No process-global fault injector exists: each seal owns its callback closure.
+
+The test-only RED commit is:
+
+```text
+db03f05 test(core): expose Linux replacement identity alias
+```
+
+It synchronizes eight independent Folderbase Roots, verifies each per-call hook
+observes exactly one Head replacement, and requires the two open-file
+fingerprints to differ. The native Linux stress loop was RED in all 20 runs,
+with the exact device/inode alias printed by the failing assertion.
+
+The GREEN commit is:
+
+```text
+ce80793 fix(core): retain replaced file during seal fault test
+```
+
+The fixture now retains the removed file handle until the replacement handle
+and fingerprint exist. The two objects therefore coexist and Linux cannot
+recycle the removed inode while constructing the fault. The native Linux
+eight-worker test was GREEN in all 20 runs, the original hosted test passed,
+and all 15 seal unit tests passed together with eight test threads.
+
+ADR-0005 records the remaining protocol boundary: Unix device/inode is a live
+object identity, not a globally unique lifetime token. A same-path, same-kind
+delete-and-recreate that occurs entirely between captures and receives a reused
+inode requires explicit deletion evidence from the future Tombstone lifecycle;
+this narrowly scoped CI repair does not redefine cross-capture logical identity.
+
 Focused gates:
 
 ```text
@@ -200,7 +240,7 @@ cargo test -p folderbase-core --test folderbase_seal
 6 passed; 0 failed on macOS; 7 tests are selected on Windows
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
-14 passed; 0 failed
+15 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
 5 passed; 0 failed on macOS
@@ -235,7 +275,8 @@ gate.
 Full local workspace gate:
 
 ```text
-cargo test --workspace
+CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' \
+  cargo test --workspace --all-features --locked -- --test-threads=1
 passed
 ```
 
