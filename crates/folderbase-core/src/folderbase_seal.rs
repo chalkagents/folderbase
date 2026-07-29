@@ -265,6 +265,9 @@ impl FolderbaseVersionStore {
             } else if transaction.expected_head != current_head {
                 return Err(FolderbaseCaptureError::LocalHeadChanged);
             } else if transaction.plan_sha256 != plan_sha256 {
+                let prior =
+                    load_prior_head(self, &local, &state, plan.current_local_head())?;
+                ensure_prior_bindings_observable(&plan, prior.as_ref())?;
                 // The old Head still owns authority. Immutable records already
                 // installed by the abandoned attempt remain safe orphans;
                 // removing only the active intent permits a fresh assignment.
