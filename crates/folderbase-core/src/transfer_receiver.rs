@@ -463,6 +463,7 @@ fn open_named_file_identity(
     Handle::from_file(file.into_std()).map_err(TransferReceiverError::Io)
 }
 
+#[cfg(unix)]
 fn sync_directory(directory: &Dir) -> Result<(), TransferReceiverError> {
     directory
         .open_with(
@@ -471,6 +472,13 @@ fn sync_directory(directory: &Dir) -> Result<(), TransferReceiverError> {
         )
         .and_then(|file| file.into_std().sync_all())
         .map_err(TransferReceiverError::Io)
+}
+
+#[cfg(windows)]
+fn sync_directory(_directory: &Dir) -> Result<(), TransferReceiverError> {
+    // Windows exposes no documented equivalent of POSIX directory fsync.
+    // Every staged regular file is still flushed before its no-clobber install.
+    Ok(())
 }
 
 fn validate_expected_digest(digest: &str) -> Result<(), TransferReceiverError> {

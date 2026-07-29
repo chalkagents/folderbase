@@ -300,6 +300,19 @@ closed without following symlinks. Receiver v1 exposes no public per-file
 cleanup or garbage-collection API: bounded stale cleanup is an internal part of
 the next leased receipt.
 
+Directory-entry durability follows the strongest documented primitive on each
+supported platform. Unix implementations reopen `.` beneath the retained
+capability without following symlinks and synchronize that real directory
+descriptor; this avoids attempting to synchronize Linux `O_PATH` capability
+handles. Windows synchronizes every staged regular file before no-clobber
+installation, but does not claim a POSIX-style directory `fsync`: Windows
+documents no equivalent directory-entry flush and `FlushFileBuffers` requires a
+writable file handle. Receiver success on Windows therefore proves verified
+file content and atomic installation, while power-loss persistence of the
+directory entry follows the filesystem's platform behavior. macOS and Windows
+run the public receiver suite in hosted CI so this intentional difference
+cannot silently become a nonfunctional receiver.
+
 This receiver slice deliberately has no destination path or materialization
 method. The next materializer slice must independently define and test its
 destination-root capability, no-follow parent authority, no-clobber atomic
