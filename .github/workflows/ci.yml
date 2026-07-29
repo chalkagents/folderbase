@@ -51,8 +51,8 @@ jobs:
       - name: Verify packages and installed CLI
         run: scripts/test-package-install.sh
 
-  receiver-platforms:
-    name: Receiver platform gate (${{ matrix.os }})
+  core-platforms:
+    name: Core platform gate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -74,3 +74,9 @@ jobs:
 
       - name: Test the public receiver contract
         run: cargo test --package folderbase-core --test transfer_receiver --locked
+
+      - name: Test the public root-attestation contract
+        run: cargo test --package folderbase-core --test root_attestation --locked
+
+      - name: Test the root-attestation CLI contract
+        run: cargo test --package folderbase-cli --test attest --locked

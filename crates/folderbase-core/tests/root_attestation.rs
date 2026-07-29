@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, path::Path};
 
 use folderbase_core::{
     FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES, ROOT_INSTANCE_FORMAT_V1,
@@ -17,10 +17,14 @@ const MANIFEST: &[u8] = br#"{
 
 fn root_with_manifest(manifest: &[u8]) -> TempDir {
     let root = tempdir().expect("temporary root");
-    fs::create_dir(root.path().join(".folderbase")).expect("state directory");
-    fs::write(root.path().join(".folderbase/manifest.json"), manifest).expect("manifest");
-    fs::write(root.path().join("FOLDERBASE.md"), "# Folderbase\n").expect("entry");
+    write_root(root.path(), manifest);
     root
+}
+
+fn write_root(root: &Path, manifest: &[u8]) {
+    fs::create_dir_all(root.join(".folderbase")).expect("state directory");
+    fs::write(root.join(".folderbase/manifest.json"), manifest).expect("manifest");
+    fs::write(root.join("FOLDERBASE.md"), "# Folderbase\n").expect("entry");
 }
 
 #[test]
@@ -155,8 +159,11 @@ fn rejects_a_symlink_root_and_linked_markers_by_name() {
     ));
 
     let state_link_root = tempdir().expect("state link root");
-    symlink(target.path().join(".folderbase"), state_link_root.path().join(".folderbase"))
-        .expect("state symlink");
+    symlink(
+        target.path().join(".folderbase"),
+        state_link_root.path().join(".folderbase"),
+    )
+    .expect("state symlink");
     fs::write(state_link_root.path().join("FOLDERBASE.md"), b"# Entry\n").expect("entry");
     assert!(matches!(
         attest_folderbase_root(state_link_root.path()),
@@ -172,7 +179,11 @@ fn rejects_a_symlink_root_and_linked_markers_by_name() {
         manifest_link_root.path().join(".folderbase/manifest.json"),
     )
     .expect("manifest symlink");
-    fs::write(manifest_link_root.path().join("FOLDERBASE.md"), b"# Entry\n").expect("entry");
+    fs::write(
+        manifest_link_root.path().join("FOLDERBASE.md"),
+        b"# Entry\n",
+    )
+    .expect("entry");
     assert!(matches!(
         attest_folderbase_root(manifest_link_root.path()),
         Err(RootAttestationError::MarkerSymlink {
@@ -322,4 +333,79 @@ fn applies_the_public_manifest_byte_bound_before_json_parsing() {
             maximum_bytes: MAX_FOLDERBASE_MANIFEST_BYTES
         })
     ));
+}
+
+#[test]
+fn rejects_malformed_json_noncanonical_ids_and_invalid_semver() {
+    let malformed = root_with_manifest(br#"{"protocol_version":"0.2.0""#);
+    assert!(matches!(
+        attest_folderbase_root(malformed.path()),
+        Err(RootAttestationError::ManifestInvalidJson)
+    ));
+
+    let invalid_ids = [
+        "019f9b75-4f42-7f65-a012-2bfecdd8c473",
+        "folderbase_019F9B75-4F42-7F65-A012-2BFECDD8C473",
+        "folderbase_019f9b754f427f65a0122bfecdd8c473",
+        "folderbase_not-a-uuid",
+    ];
+    for id in invalid_ids {
+        let manifest = format!(r#"{{"protocol_version":"0.2.0","folderbase":{{"id":"{id}"}}}}"#);
+        let root = root_with_manifest(manifest.as_bytes());
+        assert!(matches!(
+            attest_folderbase_root(root.path()),
+            Err(RootAttestationError::InvalidFolderbaseId)
+        ));
+    }
+
+    for version in ["v0.2.0", "0.2", "01.2.3", "later"] {
+        let manifest = format!(
+            r#"{{"protocol_version":"{version}","folderbase":{{"id":"{FOLDERBASE_ID}"}}}}"#
+        );
+        let root = root_with_manifest(manifest.as_bytes());
+        assert!(matches!(
+            attest_folderbase_root(root.path()),
+            Err(RootAttestationError::InvalidProtocolVersion)
+        ));
+    }
+}
+
+#[test]
+fn exact_maximum_manifest_is_accepted_and_hashed_as_raw_bytes() {
+    let mut manifest = MANIFEST.to_vec();
+    manifest.resize(MAX_FOLDERBASE_MANIFEST_BYTES as usize, b' ');
+    let root = root_with_manifest(&manifest);
+
+    let attestation = attest_folderbase_root(root.path()).expect("exact maximum is allowed");
+    assert_eq!(attestation.manifest_sha256.len(), 64);
+}
+
+#[test]
+fn nested_roots_attest_independently_and_never_fall_back_to_an_ancestor() {
+    let parent = root_with_manifest(MANIFEST);
+    let valid_child = parent.path().join("Clients/Prosperna/Okada");
+    write_root(&valid_child, MANIFEST);
+
+    let parent_receipt = attest_folderbase_root(parent.path()).expect("valid parent");
+    let child_receipt = attest_folderbase_root(&valid_child).expect("valid exact child");
+    assert_eq!(parent_receipt.folderbase_id, child_receipt.folderbase_id);
+    assert_ne!(
+        parent_receipt.root_instance_sha256,
+        child_receipt.root_instance_sha256
+    );
+    assert_eq!(child_receipt.root, valid_child);
+
+    let invalid_child = parent.path().join("Clients/Prosperna/Broken");
+    fs::create_dir_all(invalid_child.join(".folderbase")).expect("partial child marker");
+    fs::write(invalid_child.join("FOLDERBASE.md"), b"# Broken\n").expect("partial child entry");
+    assert!(matches!(
+        attest_folderbase_root(&invalid_child),
+        Err(RootAttestationError::MarkerMissing {
+            marker: FolderbaseRootMarker::Manifest
+        })
+    ));
+    assert!(
+        attest_folderbase_root(parent.path()).is_ok(),
+        "the invalid child does not invalidate or substitute its parent"
+    );
 }
