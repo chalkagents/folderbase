@@ -362,6 +362,217 @@ fn restore_tombstone_reinstates_exact_sealed_bytes_metadata_and_local_head() {
 }
 
 #[test]
+fn restore_refuses_every_existing_target_without_mutating_history_or_intent() {
+    let root = folderbase();
+    for (path, bytes) in [
+        ("same.bin", b"same".as_slice()),
+        ("different.bin", b"sealed".as_slice()),
+        ("occupied-dir", b"was a file".as_slice()),
+    ] {
+        fs::write(root.path().join(path), bytes).expect("live file");
+    }
+    #[cfg(unix)]
+    for (path, bytes) in [
+        ("occupied-link", b"was a link target".as_slice()),
+        ("dangling-link", b"was a dangling link".as_slice()),
+    ] {
+        fs::write(root.path().join(path), bytes).expect("live file");
+    }
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    for path in ["same.bin", "different.bin", "occupied-dir"] {
+        fs::remove_file(root.path().join(path)).expect("delete");
+    }
+    #[cfg(unix)]
+    for path in ["occupied-link", "dangling-link"] {
+        fs::remove_file(root.path().join(path)).expect("delete");
+    }
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+
+    fs::write(root.path().join("same.bin"), b"same").expect("same-byte foreign file");
+    fs::write(root.path().join("different.bin"), b"foreign").expect("different foreign file");
+    fs::create_dir(root.path().join("occupied-dir")).expect("foreign directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        symlink("same.bin", root.path().join("occupied-link")).expect("foreign symlink");
+        symlink("missing.bin", root.path().join("dangling-link"))
+            .expect("foreign dangling symlink");
+    }
+
+    let head_path = root.path().join(".folderbase/local/head.json");
+    let head_before = fs::read(&head_path).expect("Head");
+    let versions = root.path().join(".folderbase/versions/folderbase");
+    let version_count_before = fs::read_dir(&versions).expect("versions").count();
+    let mut targets = vec![
+        ("same.bin", "same-byte foreign file"),
+        ("different.bin", "different foreign file"),
+        ("occupied-dir", "foreign directory"),
+    ];
+    #[cfg(unix)]
+    targets.extend([
+        ("occupied-link", "foreign symlink"),
+        ("dangling-link", "foreign dangling symlink"),
+    ]);
+    for (path, label) in targets {
+        assert!(matches!(
+            store.restore_tombstone(path),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(ref occupied))
+                if occupied.ends_with(path)
+        ));
+        assert_eq!(
+            fs::read(&head_path).expect("unchanged Head"),
+            head_before,
+            "{label}"
+        );
+        assert_eq!(
+            fs::read_dir(&versions).expect("versions").count(),
+            version_count_before,
+            "{label}"
+        );
+        assert!(
+            !root
+                .path()
+                .join(".folderbase/transactions/folderbase-version-restores/active.json")
+                .exists(),
+            "{label}"
+        );
+    }
+    assert_eq!(fs::read(root.path().join("same.bin")).unwrap(), b"same");
+    assert_eq!(
+        fs::read(root.path().join("different.bin")).unwrap(),
+        b"foreign"
+    );
+    assert!(root.path().join("occupied-dir").is_dir());
+    assert_eq!(
+        store
+            .read_version(deletion.version_id())
+            .expect("immutable deletion version")
+            .tombstones()
+            .len(),
+        if cfg!(unix) { 5 } else { 3 }
+    );
+}
+
+#[test]
+fn carried_tombstone_restores_from_nearest_verified_live_ancestor_only() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    fs::write(&path, b"approved exact proposal").expect("proposal");
+    fs::write(root.path().join("activity.md"), b"first").expect("activity");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let original = store
+        .read_version(genesis.version_id())
+        .expect("genesis")
+        .lookup_binding("proposal.docx")
+        .expect("proposal")
+        .clone();
+    fs::remove_file(&path).expect("delete proposal");
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    fs::write(root.path().join("activity.md"), b"second").expect("unrelated update");
+    let carried = store
+        .seal_capture(store.plan_capture().expect("carried plan"))
+        .expect("carried Tombstone");
+    assert_eq!(
+        store
+            .read_version(carried.version_id())
+            .unwrap()
+            .tombstones()
+            .len(),
+        1
+    );
+
+    let restored = store
+        .restore_tombstone("proposal.docx")
+        .expect("restore across carried Tombstone");
+    let current = store.read_version(restored.version_id()).unwrap();
+    assert_eq!(current.parents(), &[carried.version_id().to_owned()]);
+    assert_eq!(
+        current.lookup_binding("proposal.docx"),
+        Some(&original),
+        "restore must recover exact Object Version and fidelity from genesis, not fabricate it from the Tombstone"
+    );
+    assert_eq!(fs::read(path).unwrap(), b"approved exact proposal");
+    assert_eq!(
+        store
+            .read_version(deletion.version_id())
+            .unwrap()
+            .tombstones()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn restore_removes_only_the_selected_tombstone_and_rejects_reserved_state() {
+    let root = folderbase();
+    fs::write(root.path().join("one.bin"), b"one").expect("one");
+    fs::write(root.path().join("two.bin"), b"two").expect("two");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    fs::remove_file(root.path().join("one.bin")).expect("delete one");
+    fs::remove_file(root.path().join("two.bin")).expect("delete two");
+    store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+
+    assert!(
+        store
+            .restore_tombstone(".folderbase/manifest.json")
+            .is_err()
+    );
+    let restored = store.restore_tombstone("one.bin").expect("restore one");
+    let current = store.read_version(restored.version_id()).unwrap();
+    assert!(current.lookup_binding("one.bin").is_some());
+    assert!(current.lookup_binding("two.bin").is_none());
+    assert_eq!(current.tombstones().len(), 1);
+    assert_eq!(current.tombstones()[0].path(), "two.bin");
+}
+
+#[test]
+fn v1_restore_refuses_directory_tombstones_without_mutation() {
+    let root = folderbase();
+    fs::create_dir(root.path().join("archive")).expect("archive");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    fs::remove_dir(root.path().join("archive")).expect("delete archive");
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    let head_path = root.path().join(".folderbase/local/head.json");
+    let before = fs::read(&head_path).unwrap();
+
+    assert!(matches!(
+        store.restore_tombstone("archive"),
+        Err(FolderbaseCaptureError::UnsupportedTombstoneKind(path))
+            if path == Path::new("archive")
+    ));
+    assert_eq!(fs::read(head_path).unwrap(), before);
+    assert_eq!(
+        store
+            .read_version(deletion.version_id())
+            .unwrap()
+            .tombstones()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn same_kind_atomic_replacement_preserves_logical_identity() {
     let root = folderbase();
     let path = root.path().join("proposal.docx");

@@ -3008,6 +3008,72 @@ mod tests {
     }
 
     #[test]
+    fn tombstone_restore_reopens_and_converges_at_every_persistence_checkpoint() {
+        for fault in [
+            RestoreCheckpoint::JournalDurable,
+            RestoreCheckpoint::StageDurable,
+            RestoreCheckpoint::TargetPublished,
+            RestoreCheckpoint::VersionDurable,
+            RestoreCheckpoint::HeadReplaced,
+            RestoreCheckpoint::ProjectionDurable,
+            RestoreCheckpoint::CleanupComplete,
+        ] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            fs::remove_file(root.path().join("active.bin")).expect("delete");
+            let deletion = store
+                .seal_capture(store.plan_capture().expect("deletion"))
+                .expect("deletion");
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                    if checkpoint == &fault {
+                        panic!("simulated restore termination at {fault:?}");
+                    }
+                })
+            }));
+            assert!(interrupted.is_err(), "fault {fault:?}");
+            drop(store);
+
+            let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+            let restored = if fault == RestoreCheckpoint::CleanupComplete {
+                let head = local_head(root.path()).expect("completed Head");
+                assert_ne!(head.version_id, deletion.version_id());
+                reopened.read_version(&head.version_id).expect("completed")
+            } else {
+                let retry = reopened
+                    .restore_tombstone("active.bin")
+                    .expect("durable retry");
+                assert!(retry.created() || fault >= RestoreCheckpoint::HeadReplaced);
+                reopened
+                    .read_version(retry.version_id())
+                    .expect("restored version")
+            };
+            assert_eq!(restored.parents(), &[deletion.version_id().to_owned()]);
+            assert_eq!(
+                fs::read(root.path().join("active.bin")).expect("restored bytes"),
+                b"first opaque bytes"
+            );
+            assert!(restored.lookup_binding("active.bin").is_some());
+            assert!(
+                restored
+                    .tombstones()
+                    .iter()
+                    .all(|tombstone| tombstone.path() != "active.bin")
+            );
+            assert!(
+                read_active_restore_transaction(
+                    &FolderbaseState::open(root.path()).expect("state")
+                )
+                .expect("active restore")
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn every_persistence_checkpoint_reopens_and_converges_on_exact_assigned_version() {
         for fault in [
             CaptureCheckpoint::JournalDurable,
