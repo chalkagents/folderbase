@@ -12,6 +12,10 @@ The work started from the public Core v0.4.0 tag target:
 7160017612c9f557803c74031f1715c516935f6c
 ```
 
+After implementation, the branch was rebased onto the proof-only `origin/main`
+commit `7f873d1c4fef43d9fb9a1a1385a2f5c314119b75`. That commit records the public
+Core v0.4.0 proof and does not change the product baseline.
+
 ## RED evidence
 
 Each public seam failed before its implementation:
