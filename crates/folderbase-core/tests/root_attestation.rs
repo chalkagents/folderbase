@@ -95,8 +95,30 @@ fn rejects_duplicate_object_keys_at_every_json_depth() {
         let root = root_with_manifest(manifest);
         assert!(matches!(
             attest_folderbase_root(root.path()),
-            Err(RootAttestationError::DuplicateManifestKey)
+            Err(RootAttestationError::ManifestDuplicateField)
         ));
+    }
+}
+
+#[test]
+fn exposes_stable_kiss_error_names_and_codes() {
+    let cases = [
+        (
+            RootAttestationError::ManifestInvalidJson,
+            "manifest_invalid_json",
+        ),
+        (
+            RootAttestationError::ManifestDuplicateField,
+            "manifest_duplicate_field",
+        ),
+        (
+            RootAttestationError::RootChangedDuringAttestation,
+            "root_changed_during_attestation",
+        ),
+    ];
+
+    for (error, expected) in cases {
+        assert_eq!(error.code(), expected);
     }
 }
 
