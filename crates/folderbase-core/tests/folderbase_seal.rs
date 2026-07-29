@@ -496,6 +496,135 @@ fn delete_recreate_delete_keeps_only_the_newest_tombstone_for_the_path() {
     );
 }
 
+fn assert_hidden_prior_path_is_refused_without_capture_mutation(
+    root: &Path,
+    store: &FolderbaseVersionStore,
+    genesis_version_id: &str,
+    expected_path: &Path,
+) {
+    let head_path = root.join(".folderbase/local/head.json");
+    let head_before = fs::read(&head_path).expect("prior Head bytes");
+    let versions = root.join(".folderbase/versions/folderbase");
+    let version_count_before = fs::read_dir(&versions)
+        .expect("Folderbase Versions")
+        .count();
+
+    let error = store
+        .seal_capture(store.plan_capture().expect("scope-change plan"))
+        .expect_err("hidden prior binding must be refused");
+    assert!(
+        matches!(
+            &error,
+            FolderbaseCaptureError::PriorBindingHidden(path)
+                if path == expected_path
+        ),
+        "unexpected scope-change error: {error:?}"
+    );
+    assert_eq!(
+        fs::read(&head_path).expect("Head remains readable"),
+        head_before
+    );
+    assert_eq!(
+        fs::read_dir(&versions)
+            .expect("Folderbase Versions")
+            .count(),
+        version_count_before
+    );
+    assert!(
+        !root
+            .join(".folderbase/transactions/folderbase-version-captures/active.json")
+            .exists()
+    );
+    assert_eq!(
+        store
+            .plan_capture()
+            .expect("prior Head remains valid")
+            .current_local_head()
+            .expect("prior Head")
+            .version_id(),
+        genesis_version_id
+    );
+}
+
+#[test]
+fn newly_ignored_prior_path_is_refused_before_journal_or_head_mutation() {
+    let root = folderbase();
+    fs::create_dir(root.path().join("private")).expect("private directory");
+    fs::write(root.path().join("private/notes.md"), "private").expect("private notes");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+
+    fs::write(
+        root.path().join(".folderbaseignore"),
+        "node_modules/\nprivate/\n",
+    )
+    .expect("hide prior path");
+    assert_hidden_prior_path_is_refused_without_capture_mutation(
+        root.path(),
+        &store,
+        genesis.version_id(),
+        Path::new("private"),
+    );
+}
+
+#[test]
+fn new_nested_folderbase_hiding_prior_content_is_refused_before_mutation() {
+    let root = folderbase();
+    fs::create_dir(root.path().join("client")).expect("client directory");
+    fs::write(root.path().join("client/notes.md"), "client notes").expect("client notes");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+
+    fs::create_dir(root.path().join("client/.folderbase")).expect("nested state");
+    fs::write(
+        root.path().join("client/.folderbase/manifest.json"),
+        br#"{
+  "protocol_version": "0.4.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
+  }
+}
+"#,
+    )
+    .expect("nested manifest");
+    fs::write(
+        root.path().join("client/FOLDERBASE.md"),
+        "# Nested Folderbase\n",
+    )
+    .expect("nested entry");
+    assert_hidden_prior_path_is_refused_without_capture_mutation(
+        root.path(),
+        &store,
+        genesis.version_id(),
+        Path::new("client"),
+    );
+}
+
+#[test]
+fn unsupported_node_hiding_a_prior_binding_is_refused_before_mutation() {
+    let root = folderbase();
+    fs::write(root.path().join("asset.bin"), b"first asset").expect("asset");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+
+    let anchor = root.path().join("anchor.bin");
+    fs::write(&anchor, b"replacement asset").expect("anchor");
+    fs::remove_file(root.path().join("asset.bin")).expect("remove prior asset");
+    fs::hard_link(&anchor, root.path().join("asset.bin")).expect("unsupported hard link");
+    assert_hidden_prior_path_is_refused_without_capture_mutation(
+        root.path(),
+        &store,
+        genesis.version_id(),
+        Path::new("asset.bin"),
+    );
+}
+
 #[test]
 fn sealed_bytes_use_sha256_without_file_format_interpretation() {
     let root = folderbase();
