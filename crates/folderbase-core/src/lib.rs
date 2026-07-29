@@ -15,6 +15,7 @@ mod local_versions;
 mod migration;
 mod model;
 mod reorganization;
+mod root_attestation;
 mod sharing;
 mod sync;
 mod template;
@@ -66,6 +67,10 @@ pub use reorganization::{
     decode_reorganization_plan, decode_reorganization_plan_slice,
     reorganization_analysis_scope_sha256, reorganization_plan_sha256, seal_reorganization_draft,
     validate_reorganization_draft, validate_reorganization_plan,
+};
+pub use root_attestation::{
+    FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_ROOT_MANIFEST_BYTES,
+    ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
 };
 pub use sharing::{
     AccessDecision, AccessReason, AccessRequest, FolderbaseRegistration, ShareGrant,

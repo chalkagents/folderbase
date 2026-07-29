@@ -1,8 +1,6 @@
 use std::fs;
 
-use folderbase_core::{
-    ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
-};
+use folderbase_core::{ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root};
 use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
