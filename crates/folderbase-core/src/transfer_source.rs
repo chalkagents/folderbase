@@ -428,9 +428,12 @@ fn open_root_nofollow(path: &Path) -> std::io::Result<fs::File> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
-        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
