@@ -5,6 +5,7 @@
 //! It never reads the mutable workspace path recorded for the object.
 
 use std::{
+    ffi::{OsStr, OsString},
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path},
@@ -18,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     FolderbaseError, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId, VersionId,
+    local_versions::{folderbase_id_from_manifest_bytes, validate_chunk_transfer_receipt_bytes},
     transfer_manifest::{
         CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, LARGE_PROFILE_V1,
         MANIFEST_FORMAT_V1, MAX_CHUNK_DESCRIPTORS, MAX_OBJECT_BYTES, ManifestViolation,
@@ -36,6 +38,9 @@ pub const TRANSFER_IO_BUFFER_BYTES: usize = 64 * 1024;
 pub const MANAGED_LARGE_PROFILE_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_VERSION_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_OBJECT_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_TRANSFER_AUTHORITY_RECORD_BYTES: u64 = 1024 * 1024;
+const FOLDERBASE_MANIFEST_PATH: &str = ".folderbase/manifest.json";
+const OUTGOING_TRANSFER_AUTHORITY_DIRECTORY: &str = ".folderbase/history-transfers/outgoing";
 
 /// Selects one of the two exact public v1 profiles or Core's managed policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,25 +527,12 @@ fn open_root_nofollow(path: &Path) -> std::io::Result<fs::File> {
 }
 
 fn open_file_nofollow(root: &Dir, relative: &Path) -> std::io::Result<fs::File> {
-    let name = relative
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("source path has no file name"))?;
-    let mut current = root.try_clone()?;
-    if let Some(parent) = relative.parent() {
-        for component in parent.components() {
-            let Component::Normal(component) = component else {
-                return Err(std::io::Error::other("source path is not relative"));
-            };
-            current = current.open_dir_nofollow(component)?;
-        }
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let file = current.open_with(name, &options)?.into_std();
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("source is not a regular file"));
-    }
-    Ok(file)
+    open_optional_file_nofollow_io(root, relative)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "required source file is absent",
+        )
+    })
 }
 
 fn read_bound_records(
@@ -558,8 +550,214 @@ fn read_bound_records(
         open_file_nofollow(root, &store.object_record_relative_path(&version.object_id))
             .map_err(TransferSourceError::Io)?;
     let object: LocalObjectRecord = read_json_bounded(&mut object_file, MAX_OBJECT_RECORD_BYTES)?;
-    store.validate_chunk_transfer_records(version_id, &version, &object)?;
+    let object_path = store
+        .validate_chunk_transfer_membership(version_id, &version, &object)
+        .map_err(|_| TransferSourceError::SourceChanged)?;
+    TransferAuthority::new(store, root).validate(&version.object_id, &object_path)?;
     Ok((version, object, version_file))
+}
+
+struct TransferAuthority<'a> {
+    store: &'a LocalVersionStore,
+    root: &'a Dir,
+}
+
+impl<'a> TransferAuthority<'a> {
+    fn new(store: &'a LocalVersionStore, root: &'a Dir) -> Self {
+        Self { store, root }
+    }
+
+    fn validate(
+        &self,
+        object_id: &ObjectId,
+        object_path: &Path,
+    ) -> Result<(), TransferSourceError> {
+        self.validate_current_boundary(object_path)?;
+        let receipt_relative =
+            Path::new(OUTGOING_TRANSFER_AUTHORITY_DIRECTORY).join(format!("{object_id}.json"));
+        let Some(mut receipt) = open_optional_file_nofollow(self.root, &receipt_relative)? else {
+            return Ok(());
+        };
+        let receipt_bytes = read_bytes_bounded(&mut receipt, MAX_TRANSFER_AUTHORITY_RECORD_BYTES)?;
+        let mut manifest = open_file_nofollow(self.root, Path::new(FOLDERBASE_MANIFEST_PATH))
+            .map_err(|_| TransferSourceError::SourceChanged)?;
+        let manifest_bytes =
+            read_bytes_bounded(&mut manifest, MAX_TRANSFER_AUTHORITY_RECORD_BYTES)?;
+        let manifest_path = self.store.root().join(FOLDERBASE_MANIFEST_PATH);
+        let folderbase_id = folderbase_id_from_manifest_bytes(&manifest_bytes, &manifest_path)
+            .map_err(|_| TransferSourceError::SourceChanged)?;
+        validate_chunk_transfer_receipt_bytes(
+            &receipt_bytes,
+            &self.store.root().join(receipt_relative),
+            object_id,
+            &folderbase_id,
+        )
+        .map_err(|_| TransferSourceError::SourceChanged)
+    }
+
+    fn validate_current_boundary(&self, relative: &Path) -> Result<(), TransferSourceError> {
+        let mut current = self
+            .root
+            .try_clone()
+            .map_err(|_| TransferSourceError::SourceChanged)?;
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
+            let Component::Normal(expected) = component else {
+                return Err(TransferSourceError::SourceChanged);
+            };
+            let Some(actual) = case_folded_child(&current, expected)? else {
+                return Ok(());
+            };
+            let metadata = current
+                .symlink_metadata(&actual)
+                .map_err(|_| TransferSourceError::SourceChanged)?;
+            if metadata.file_type().is_symlink() {
+                return Err(TransferSourceError::SourceChanged);
+            }
+            if metadata.is_dir() {
+                let child = current
+                    .open_dir_nofollow(&actual)
+                    .map_err(|_| TransferSourceError::SourceChanged)?;
+                if has_nested_folderbase_marker(&child)? {
+                    return Err(TransferSourceError::SourceChanged);
+                }
+                current = child;
+            } else if components.peek().is_some() {
+                return Err(TransferSourceError::SourceChanged);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn case_folded_child(
+    directory: &Dir,
+    expected: &OsStr,
+) -> Result<Option<OsString>, TransferSourceError> {
+    let expected = expected
+        .to_str()
+        .ok_or(TransferSourceError::SourceChanged)?;
+    let mut found = None;
+    for entry in directory
+        .entries()
+        .map_err(|_| TransferSourceError::SourceChanged)?
+    {
+        let entry = entry.map_err(|_| TransferSourceError::SourceChanged)?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+        {
+            if found.is_some() {
+                return Err(TransferSourceError::SourceChanged);
+            }
+            found = Some(name);
+        }
+    }
+    Ok(found)
+}
+
+fn has_nested_folderbase_marker(directory: &Dir) -> Result<bool, TransferSourceError> {
+    let mut has_entry = false;
+    let mut state_entries = Vec::new();
+    for entry in directory
+        .entries()
+        .map_err(|_| TransferSourceError::SourceChanged)?
+    {
+        let entry = entry.map_err(|_| TransferSourceError::SourceChanged)?;
+        let name = entry.file_name();
+        if os_name_eq_ignore_ascii_case(&name, "FOLDERBASE.md") {
+            has_entry = true;
+        } else if os_name_eq_ignore_ascii_case(&name, ".folderbase") {
+            state_entries.push(name);
+        }
+    }
+    if !has_entry {
+        return Ok(false);
+    }
+    for state_name in state_entries {
+        let metadata = directory
+            .symlink_metadata(&state_name)
+            .map_err(|_| TransferSourceError::SourceChanged)?;
+        if metadata.file_type().is_symlink() {
+            return Ok(true);
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let state = directory
+            .open_dir_nofollow(&state_name)
+            .map_err(|_| TransferSourceError::SourceChanged)?;
+        for entry in state
+            .entries()
+            .map_err(|_| TransferSourceError::SourceChanged)?
+        {
+            let entry = entry.map_err(|_| TransferSourceError::SourceChanged)?;
+            if os_name_eq_ignore_ascii_case(&entry.file_name(), "manifest.json") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn os_name_eq_ignore_ascii_case(name: &OsStr, expected: &str) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
+
+fn open_optional_file_nofollow(
+    root: &Dir,
+    relative: &Path,
+) -> Result<Option<fs::File>, TransferSourceError> {
+    open_optional_file_nofollow_io(root, relative).map_err(|_| TransferSourceError::SourceChanged)
+}
+
+fn open_optional_file_nofollow_io(
+    root: &Dir,
+    relative: &Path,
+) -> std::io::Result<Option<fs::File>> {
+    let name = relative
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("source path has no file name"))?;
+    let mut current = root.try_clone()?;
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                return Err(std::io::Error::other("source path is not relative"));
+            };
+            match current.open_dir_nofollow(component) {
+                Ok(next) => current = next,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(source) => return Err(source),
+            }
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = match current.open_with(name, &options) {
+        Ok(file) => file.into_std(),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(source),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("source is not a regular file"));
+    }
+    Ok(Some(file))
+}
+
+fn read_bytes_bounded(
+    file: &mut fs::File,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, TransferSourceError> {
+    let mut bytes = Vec::new();
+    file.take(maximum_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| TransferSourceError::SourceChanged)?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(TransferSourceError::SourceChanged);
+    }
+    Ok(bytes)
 }
 
 fn read_json_bounded<T: serde::de::DeserializeOwned>(

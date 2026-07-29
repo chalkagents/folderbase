@@ -1006,6 +1006,16 @@ impl LocalVersionStore {
         record: &LocalObjectRecord,
         path: &Path,
     ) -> Result<()> {
+        let relative_path = self.validate_object_record_membership(object_id, record, path)?;
+        self.ensure_path_within_current_folderbase_boundary(&relative_path)
+    }
+
+    fn validate_object_record_membership(
+        &self,
+        object_id: &ObjectId,
+        record: &LocalObjectRecord,
+        path: &Path,
+    ) -> Result<PathBuf> {
         object_id.validate(path)?;
         record.id.validate(path)?;
         if record.id != *object_id {
@@ -1027,7 +1037,7 @@ impl LocalVersionStore {
                 "current version is absent from the object version history",
             ));
         }
-        Ok(())
+        Ok(relative_path)
     }
 
     pub fn read_version(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
@@ -1068,24 +1078,24 @@ impl LocalVersionStore {
         validate_content_digest(&record.content, path)
     }
 
-    pub(crate) fn validate_chunk_transfer_records(
+    pub(crate) fn validate_chunk_transfer_membership(
         &self,
         version_id: &VersionId,
         version: &LocalVersionRecord,
         object: &LocalObjectRecord,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         let version_path = self.version_record_path(version_id);
         self.validate_version_record(version_id, version, &version_path)?;
         let object_path = self.object_record_path(&version.object_id);
-        self.deny_if_transferred_out(&version.object_id)?;
-        self.validate_object_record(&version.object_id, object, &object_path)?;
+        let relative_path =
+            self.validate_object_record_membership(&version.object_id, object, &object_path)?;
         if !object.versions.contains(version_id) {
             return Err(invalid_record(
                 version_path,
                 "version is absent from its object's version history",
             ));
         }
-        Ok(())
+        Ok(relative_path)
     }
 
     /// Read and validate every complete journal line.
@@ -1813,24 +1823,12 @@ impl LocalVersionStore {
         let Some(bytes) = read_optional_file_nofollow(&path)? else {
             return Ok(());
         };
-        let receipt: HistoryTransferReceipt = serde_json::from_slice(&bytes)
-            .map_err(|source| FolderbaseError::json(&path, source))?;
-        validate_history_transfer_receipt(&receipt, &path)?;
-        if receipt.object_id != *object_id
-            || receipt.source_folderbase_id != read_folderbase_identity(&self.root)?.id
-        {
-            return Err(invalid_record(
-                path,
-                "outgoing history-transfer receipt does not match this folderbase or object",
-            ));
-        }
-        Err(invalid_record(
-            path,
-            format!(
-                "object history transferred to folderbase {}",
-                receipt.destination_folderbase_id
-            ),
-        ))
+        validate_chunk_transfer_receipt_bytes(
+            &bytes,
+            &path,
+            object_id,
+            &read_folderbase_identity(&self.root)?.id,
+        )
     }
 }
 
@@ -2946,19 +2944,48 @@ fn read_folderbase_identity(root: &Path) -> Result<FolderbaseIdentity> {
     let path = root.join(".folderbase/manifest.json");
     let bytes = read_optional_file_nofollow(&path)?
         .ok_or_else(|| FolderbaseError::io(&path, std::io::ErrorKind::NotFound.into()))?;
-    let manifest: Value =
-        serde_json::from_slice(&bytes).map_err(|source| FolderbaseError::json(&path, source))?;
-    let id = manifest
-        .get("folderbase")
-        .and_then(|folderbase| folderbase.get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid_record(&path, "manifest is missing folderbase.id"))?
-        .to_owned();
-    validate_prefixed_uuid(&id, "folderbase_", &path)?;
+    let id = folderbase_id_from_manifest_bytes(&bytes, &path)?;
     Ok(FolderbaseIdentity {
         id,
         manifest_sha256: digest_hex(Sha256::digest(&bytes).as_slice()),
     })
+}
+
+pub(crate) fn folderbase_id_from_manifest_bytes(bytes: &[u8], path: &Path) -> Result<String> {
+    let manifest: Value =
+        serde_json::from_slice(bytes).map_err(|source| FolderbaseError::json(path, source))?;
+    let id = manifest
+        .get("folderbase")
+        .and_then(|folderbase| folderbase.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_record(path, "manifest is missing folderbase.id"))?
+        .to_owned();
+    validate_prefixed_uuid(&id, "folderbase_", path)?;
+    Ok(id)
+}
+
+pub(crate) fn validate_chunk_transfer_receipt_bytes(
+    bytes: &[u8],
+    path: &Path,
+    object_id: &ObjectId,
+    source_folderbase_id: &str,
+) -> Result<()> {
+    let receipt: HistoryTransferReceipt =
+        serde_json::from_slice(bytes).map_err(|source| FolderbaseError::json(path, source))?;
+    validate_history_transfer_receipt(&receipt, path)?;
+    if receipt.object_id != *object_id || receipt.source_folderbase_id != source_folderbase_id {
+        return Err(invalid_record(
+            path,
+            "outgoing history-transfer receipt does not match this folderbase or object",
+        ));
+    }
+    Err(invalid_record(
+        path,
+        format!(
+            "object history transferred to folderbase {}",
+            receipt.destination_folderbase_id
+        ),
+    ))
 }
 
 fn history_transfer_plan_path(root: &Path, transfer_id: &str) -> PathBuf {

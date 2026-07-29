@@ -4,7 +4,9 @@ use std::{
 };
 
 use folderbase_core::{
-    ChunkTransferProfile, LocalVersionStore, TransferSourceError,
+    ChunkTransferProfile, FolderbaseKind, InitializationOptions, LocalVersionStore, ObjectId,
+    TransferSourceError, VersionId, apply_history_transfer, approve_history_transfer, initialize,
+    plan_initialization,
     transfer_manifest::{ChunkManifest, LARGE_PROFILE_V1, STANDARD_PROFILE_V1},
 };
 use tempfile::tempdir;
@@ -369,4 +371,159 @@ fn symlinked_internal_blob_directories_are_never_followed() {
             .open_chunk_transfer(&captured.version.id, ChunkTransferProfile::StandardV1)
             .is_err()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_outgoing_authority_cannot_hide_a_transfer_revocation() {
+    assert_symlinked_transfer_authority_fails_closed("outgoing");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_history_transfer_authority_cannot_hide_a_transfer_revocation() {
+    assert_symlinked_transfer_authority_fails_closed("history-transfers");
+}
+
+#[cfg(unix)]
+#[test]
+fn corrupt_transfer_authority_cannot_hide_a_transfer_revocation() {
+    let (fixture, store, object_id, version_id, mut opened_source) = transferred_out_fixture();
+    fs::write(
+        fixture
+            .path()
+            .join(".folderbase/history-transfers/outgoing")
+            .join(format!("{object_id}.json")),
+        b"{not valid json",
+    )
+    .unwrap();
+
+    assert_transfer_source_changed(&store, &version_id, &mut opened_source);
+}
+
+#[cfg(unix)]
+fn assert_symlinked_transfer_authority_fails_closed(authority_directory: &str) {
+    use std::os::unix::fs::symlink;
+
+    let (fixture, store, _, version_id, mut opened_source) = transferred_out_fixture();
+    let empty_authority = tempdir().unwrap();
+    let authority = match authority_directory {
+        "outgoing" => fixture
+            .path()
+            .join(".folderbase/history-transfers/outgoing"),
+        "history-transfers" => fixture.path().join(".folderbase/history-transfers"),
+        other => panic!("unknown transfer authority directory {other}"),
+    };
+    let detached = authority.with_extension("detached");
+    fs::rename(&authority, &detached).unwrap();
+    symlink(empty_authority.path(), &authority).unwrap();
+
+    assert_transfer_source_changed(&store, &version_id, &mut opened_source);
+}
+
+#[cfg(unix)]
+fn assert_transfer_source_changed(
+    store: &LocalVersionStore,
+    version_id: &VersionId,
+    opened_source: &mut folderbase_core::ChunkTransferSource,
+) {
+    assert!(matches!(
+        store.open_chunk_transfer(version_id, ChunkTransferProfile::StandardV1),
+        Err(TransferSourceError::SourceChanged)
+    ));
+
+    let mut output = Vec::new();
+    assert!(matches!(
+        opened_source.copy_chunk(0, &mut output),
+        Err(TransferSourceError::SourceChanged)
+    ));
+    assert!(output.is_empty());
+}
+
+#[cfg(unix)]
+fn transferred_out_fixture() -> (
+    tempfile::TempDir,
+    LocalVersionStore,
+    ObjectId,
+    VersionId,
+    folderbase_core::ChunkTransferSource,
+) {
+    let fixture = tempdir().unwrap();
+    let parent = initialize(
+        &plan_initialization(
+            fixture.path(),
+            InitializationOptions {
+                name: Some("Parent".to_owned()),
+                kind: FolderbaseKind::Organization,
+                create_agent_adapters: false,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs::create_dir(fixture.path().join("Client")).unwrap();
+    fs::write(
+        fixture.path().join("Client/private.txt"),
+        b"revoked bytes\n",
+    )
+    .unwrap();
+    let store = LocalVersionStore::open(fixture.path()).unwrap();
+    let captured = store.capture_file("Client/private.txt").unwrap();
+    let source = store
+        .open_chunk_transfer(&captured.version.id, ChunkTransferProfile::StandardV1)
+        .unwrap();
+
+    let child_fixture = tempdir().unwrap();
+    let child = initialize(
+        &plan_initialization(
+            child_fixture.path(),
+            InitializationOptions {
+                name: Some("Client".to_owned()),
+                kind: FolderbaseKind::Project,
+                create_agent_adapters: false,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
+    fs::copy(
+        child_fixture.path().join("FOLDERBASE.md"),
+        fixture.path().join("Client/FOLDERBASE.md"),
+    )
+    .unwrap();
+    fs::copy(
+        child_fixture.path().join(".folderbase/manifest.json"),
+        fixture.path().join("Client/.folderbase/manifest.json"),
+    )
+    .unwrap();
+    let child_store = LocalVersionStore::open(fixture.path().join("Client")).unwrap();
+    let plan = store
+        .propose_history_transfer(
+            &child_store,
+            &parent.folderbase_id,
+            &child.folderbase_id,
+            &captured.object.id,
+            "private.txt",
+        )
+        .unwrap();
+    apply_history_transfer(approve_history_transfer(plan).unwrap()).unwrap();
+    assert!(
+        fixture
+            .path()
+            .join(".folderbase/history-transfers/outgoing")
+            .join(format!("{}.json", captured.object.id))
+            .is_file()
+    );
+
+    fs::remove_file(fixture.path().join("Client/FOLDERBASE.md")).unwrap();
+    fs::remove_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
+
+    (
+        fixture,
+        store,
+        captured.object.id,
+        captured.version.id,
+        source,
+    )
 }
