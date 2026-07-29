@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -8,12 +9,13 @@ use folderbase_core::{
     ApprovedMigration, FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlan,
     InitializationPlanDigest, InitializationResult, InspectionReport, LocalVersionStore,
     MAX_WORKSPACE_TEXT_BYTES, MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview,
-    MigrationResult, MigrationState, RollbackResult, TemplateAnswerType, TemplateAnswerValue,
-    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
-    analyze_migration, apply_migration, approve_migration, initialize,
-    initialize_with_expected_plan_digest, inspect, list_workspace, load_builtin_template,
-    plan_initialization, plan_migration, plan_template_initialization, preview_migration,
-    read_workspace_text, save_workspace_text, validate,
+    MigrationResult, MigrationState, ROOT_INSTANCE_FORMAT_V1, RollbackResult, RootAttestationError,
+    TemplateAnswerType, TemplateAnswerValue, TemplatePackage, ValidationLevel, ValidationReport,
+    ValidationSeverity, VersionId, analyze_migration, apply_migration, approve_migration,
+    attest_folderbase_root, initialize, initialize_with_expected_plan_digest, inspect,
+    list_workspace, load_builtin_template, plan_initialization, plan_migration,
+    plan_template_initialization, preview_migration, read_workspace_text, save_workspace_text,
+    validate,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -39,6 +41,15 @@ enum Command {
         path: PathBuf,
 
         /// Emit the inspection report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Attest one exact Folderbase root without changing it.
+    Attest {
+        path: PathBuf,
+
+        /// Emit the flat attestation receipt as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -283,6 +294,47 @@ enum ValidationLevelArg {
     ContentIntegrity,
 }
 
+#[derive(Debug)]
+enum CliError {
+    Folderbase(FolderbaseError),
+    RootAttestation(RootAttestationError),
+    OutputSerialization(serde_json::Error),
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Folderbase(source) => source.fmt(formatter),
+            Self::RootAttestation(source) => source.fmt(formatter),
+            Self::OutputSerialization(source) => {
+                write!(formatter, "failed to serialize command output: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Folderbase(source) => Some(source),
+            Self::RootAttestation(source) => Some(source),
+            Self::OutputSerialization(source) => Some(source),
+        }
+    }
+}
+
+impl From<FolderbaseError> for CliError {
+    fn from(source: FolderbaseError) -> Self {
+        Self::Folderbase(source)
+    }
+}
+
+impl From<RootAttestationError> for CliError {
+    fn from(source: RootAttestationError) -> Self {
+        Self::RootAttestation(source)
+    }
+}
+
 impl From<ValidationLevelArg> for ValidationLevel {
     fn from(value: ValidationLevelArg) -> Self {
         match value {
@@ -300,16 +352,18 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             if json_errors {
-                eprintln!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "error": {
-                            "code": error_code(&error),
-                            "message": error.to_string(),
-                        }
-                    }))
-                    .expect("error envelopes must serialize")
-                );
+                let envelope = serde_json::json!({
+                    "error": {
+                        "code": error_code(&error),
+                        "message": error.to_string(),
+                    }
+                });
+                match serde_json::to_string_pretty(&envelope) {
+                    Ok(encoded) => eprintln!("{encoded}"),
+                    Err(serialization) => {
+                        eprintln!("error: {error} (JSON serialization failed: {serialization})");
+                    }
+                }
             } else {
                 eprintln!("error: {error}");
             }
@@ -318,14 +372,30 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> folderbase_core::Result<u8> {
+fn run(cli: Cli) -> Result<u8, CliError> {
     match cli.command {
         Command::Inspect { path, json } => {
             let report = inspect(&path)?;
             if json {
-                print_json(&report);
+                print_json(&report)?;
             } else {
                 print_inspection(&report);
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Attest { path, json } => {
+            let receipt = attest_folderbase_root(path)?;
+            if json {
+                print_json(&receipt)?;
+            } else {
+                println!("Attested Folderbase root: {}", receipt.root.display());
+                println!("Folderbase ID: {}", receipt.folderbase_id);
+                println!("Protocol version: {}", receipt.protocol_version);
+                println!("Manifest SHA-256: {}", receipt.manifest_sha256);
+                println!(
+                    "Physical root instance ({ROOT_INSTANCE_FORMAT_V1}): {}",
+                    receipt.root_instance_sha256
+                );
             }
             Ok(EXIT_SUCCESS)
         }
@@ -355,14 +425,15 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     return Err(folderbase_core::FolderbaseError::InvalidRecord {
                         path,
                         message: "template answers require --template".to_owned(),
-                    });
+                    }
+                    .into());
                 }
                 plan_initialization(&path, options)?
             };
 
             if dry_run {
                 if json {
-                    print_json(&plan);
+                    print_json(&plan)?;
                 } else {
                     print_initialization_plan(&plan);
                 }
@@ -375,7 +446,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     None => initialize(&plan)?,
                 };
                 if json {
-                    print_json(&result);
+                    print_json(&result)?;
                 } else {
                     print_initialization_result(&result);
                 }
@@ -386,7 +457,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
         Command::Validate { path, level, json } => {
             let report = validate(&path, level.into())?;
             if json {
-                print_json(&report);
+                print_json(&report)?;
             } else {
                 print_validation(&report);
             }
@@ -422,7 +493,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 if json {
-                    print_json(&analysis);
+                    print_json(&analysis)?;
                 } else {
                     print_migration_questions(&analysis);
                 }
@@ -433,14 +504,14 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
             if apply {
                 let result = apply_migration(approve_migration(plan)?)?;
                 if json {
-                    print_json(&result);
+                    print_json(&result)?;
                 } else {
                     print_migration_result(&result);
                 }
             } else {
                 let preview = preview_migration(&plan)?;
                 if json {
-                    print_json(&preview);
+                    print_json(&preview)?;
                 } else {
                     print_migration_preview(&preview);
                 }
@@ -452,7 +523,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 TransformCommand::Analyze { path, json } => {
                     let analysis = analyze_migration(path)?;
                     if json {
-                        print_json(&analysis);
+                        print_json(&analysis)?;
                     } else {
                         print_migration_questions(&analysis);
                     }
@@ -467,13 +538,14 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                         return Err(FolderbaseError::InvalidRecord {
                             path: PathBuf::from("migration-answers-stdin"),
                             message: "transform plan requires --answers-stdin".to_owned(),
-                        });
+                        }
+                        .into());
                     }
                     let analysis = analyze_migration(&path)?;
                     let answers = parse_migration_answers_stdin()?;
                     let plan = plan_migration(analysis, answers, destination)?;
                     if json {
-                        print_json(&plan);
+                        print_json(&plan)?;
                     } else {
                         print_migration_preview(&preview_migration(&plan)?);
                     }
@@ -486,7 +558,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     let plan = MigrationPlan::reopen(path, &migration_id)?;
                     let preview = preview_migration(&plan)?;
                     if json {
-                        print_json(&preview);
+                        print_json(&preview)?;
                     } else {
                         print_migration_preview(&preview);
                     }
@@ -500,7 +572,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     drop(approve_migration(plan)?);
                     let approved = MigrationPlan::reopen(path, &migration_id)?;
                     if json {
-                        print_json(&approved);
+                        print_json(&approved)?;
                     } else {
                         println!("Approved transform {}", approved.id);
                     }
@@ -513,7 +585,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     let approved = ApprovedMigration::reopen(&path, &migration_id)?;
                     let result = apply_migration(approved)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_migration_result(&result);
                     }
@@ -525,7 +597,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 } => {
                     let result = MigrationResult::reopen(path, &migration_id)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_migration_result(&result);
                     }
@@ -537,7 +609,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 } => {
                     let result = MigrationResult::recover(path, &migration_id)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_migration_result(&result);
                     }
@@ -558,7 +630,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                         MigrationResult::rollback_by_id(path, &migration_id)?
                     };
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         print_rollback_result(&result);
                     }
@@ -575,7 +647,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 } => {
                     let result = LocalVersionStore::open(folderbase)?.capture_file(path)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         println!(
                             "Captured {} as {} ({})",
@@ -593,7 +665,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     let result = LocalVersionStore::open(folderbase)?
                         .restore_version(&version, destination)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         println!(
                             "Restored {} to {} ({} bytes)",
@@ -606,7 +678,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 VersionCommand::History { folderbase, json } => {
                     let events = LocalVersionStore::open(folderbase)?.journal_events()?;
                     if json {
-                        print_json(&events);
+                        print_json(&events)?;
                     } else if events.is_empty() {
                         println!("No local version history.");
                     } else {
@@ -632,7 +704,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 WorkspaceCommand::List { folderbase, json } => {
                     let listing = list_workspace(folderbase)?;
                     if json {
-                        print_json(&listing);
+                        print_json(&listing)?;
                     } else {
                         for entry in listing.entries {
                             println!("{}\t{:?}", entry.path, entry.kind);
@@ -646,7 +718,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                 } => {
                     let document = read_workspace_text(folderbase, path)?;
                     if json {
-                        print_json(&document);
+                        print_json(&document)?;
                     } else {
                         print!("{}", document.content);
                     }
@@ -662,7 +734,8 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                         return Err(folderbase_core::FolderbaseError::InvalidRecord {
                             path: PathBuf::from("stdin"),
                             message: "workspace save requires --stdin".to_owned(),
-                        });
+                        }
+                        .into());
                     }
                     let mut bytes = Vec::new();
                     std::io::stdin()
@@ -678,7 +751,8 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                             message: format!(
                                 "workspace text exceeds the {MAX_WORKSPACE_TEXT_BYTES} byte limit"
                             ),
-                        });
+                        }
+                        .into());
                     }
                     let content = String::from_utf8(bytes).map_err(|_| {
                         folderbase_core::FolderbaseError::InvalidRecord {
@@ -688,7 +762,7 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
                     })?;
                     let result = save_workspace_text(folderbase, path, &expected_sha256, &content)?;
                     if json {
-                        print_json(&result);
+                        print_json(&result)?;
                     } else {
                         println!(
                             "Saved {} as {} ({})",
@@ -702,14 +776,16 @@ fn run(cli: Cli) -> folderbase_core::Result<u8> {
     }
 }
 
-fn print_json(value: &impl serde::Serialize) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("core reports must serialize")
-    );
+fn print_json(value: &impl serde::Serialize) -> Result<(), CliError> {
+    let encoded = serde_json::to_string_pretty(value).map_err(CliError::OutputSerialization)?;
+    println!("{encoded}");
+    Ok(())
 }
 
 fn command_emits_json_errors(command: &Command) -> bool {
+    if let Command::Attest { json, .. } = command {
+        return *json;
+    }
     if let Command::Init { json, .. } = command {
         return *json;
     }
@@ -728,7 +804,12 @@ fn command_emits_json_errors(command: &Command) -> bool {
     }
 }
 
-fn error_code(error: &FolderbaseError) -> &'static str {
+fn error_code(error: &CliError) -> &'static str {
+    let error = match error {
+        CliError::Folderbase(error) => error,
+        CliError::RootAttestation(error) => return error.code(),
+        CliError::OutputSerialization(_) => return "output_serialization",
+    };
     match error {
         FolderbaseError::InvalidRoot(_) => "invalid_root",
         FolderbaseError::UnsafePath(_) => "unsafe_path",
