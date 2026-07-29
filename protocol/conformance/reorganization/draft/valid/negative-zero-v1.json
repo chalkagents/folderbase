@@ -1,0 +1,39 @@
+{
+  "protocol_version": "0.3.0",
+  "profile": "folderbase-reorganization-draft-v1",
+  "id": "reorg_019f9b75-0000-7000-8000-000000001001",
+  "generation": 1,
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
+  "path_profile": "portable-case-sensitive-v1",
+  "analysis_scope": {
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ignore_policy": {
+      "expectation": "absent",
+      "path": ".folderbaseignore"
+    },
+    "structural_changes_policy": "approve",
+    "nested_boundaries": [],
+    "operation_closure": [
+      {
+        "expectation": "absent",
+        "path": "Current"
+      }
+    ],
+    "declared_entries": [
+      {
+        "expectation": "file",
+        "path": "Evidence/empty.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "byte_count": -0.0e99
+      }
+    ]
+  },
+  "questions": [],
+  "rationale": "Mathematical negative zero is the non-negative canonical integer zero.",
+  "operations": [
+    {
+      "kind": "create_directory",
+      "path": "Current"
+    }
+  ]
+}

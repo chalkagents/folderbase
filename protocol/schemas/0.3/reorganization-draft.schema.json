@@ -1,0 +1,772 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.3/reorganization-draft.schema.json",
+  "title": "Folderbase Reorganization Draft v1",
+  "description": "An inert, revisable, data-only proposal for reorganizing an existing Folderbase. Possession of this record grants no authority.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "profile",
+    "id",
+    "generation",
+    "folderbase_id",
+    "path_profile",
+    "analysis_scope",
+    "questions",
+    "rationale",
+    "operations"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": "0.3.0"
+    },
+    "profile": {
+      "const": "folderbase-reorganization-draft-v1"
+    },
+    "id": {
+      "$ref": "#/$defs/reorganizationId"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "folderbase_id": {
+      "$ref": "#/$defs/folderbaseId"
+    },
+    "path_profile": {
+      "$ref": "#/$defs/pathProfile"
+    },
+    "analysis_scope": {
+      "$ref": "#/$defs/analysisScope"
+    },
+    "questions": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/draftQuestion"
+      }
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2097152
+    },
+    "template_references": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "maxLength": 255
+    },
+    "reorganizationId": {
+      "type": "string",
+      "pattern": "^reorg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "versionId": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "objectRecordPath": {
+      "type": "string",
+      "pattern": "^\\.folderbase/objects/obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$",
+      "maxLength": 4096
+    },
+    "relationshipType": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "maxLength": 255
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\/$)[^\\u0000]+$"
+    },
+    "ordinaryContentPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        {
+          "not": {
+            "pattern": "(^|/)([.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE]|[.][gG][iI][tT])(/|$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^([fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][.]md|[aA][gG][eE][nN][tT][sS][.]md|[cC][lL][aA][uU][dD][eE][.]md|[.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][iI][gG][nN][oO][rR][eE])$"
+          }
+        }
+      ]
+    },
+    "agentAdapterPath": {
+      "enum": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ]
+    },
+    "managedBlockBody": {
+      "type": "string",
+      "maxLength": 2097152,
+      "pattern": "^[^\\u0000]*$",
+      "not": {
+        "pattern": "<!-- folderbase:"
+      }
+    },
+    "pathProfile": {
+      "enum": [
+        "portable-case-sensitive-v1",
+        "portable-case-fold-v1"
+      ]
+    },
+    "policyFact": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "expectation",
+            "path"
+          ],
+          "properties": {
+            "expectation": {
+              "const": "absent"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "expectation",
+            "path",
+            "sha256",
+            "byte_count"
+          ],
+          "properties": {
+            "expectation": {
+              "const": "file"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "byte_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "scopeEntry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "expectation",
+            "path"
+          ],
+          "properties": {
+            "expectation": {
+              "const": "absent"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "expectation",
+            "path"
+          ],
+          "properties": {
+            "expectation": {
+              "const": "directory"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "expectation",
+            "path",
+            "sha256",
+            "byte_count"
+          ],
+          "properties": {
+            "expectation": {
+              "const": "file"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "byte_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "expectation",
+            "path",
+            "object_id",
+            "version_id"
+          ],
+          "properties": {
+            "expectation": {
+              "const": "tracked_object"
+            },
+            "path": {
+              "$ref": "#/$defs/safeRelativePath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "version_id": {
+              "$ref": "#/$defs/versionId"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "nestedBoundary": {
+      "type": "object",
+      "required": [
+        "path",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "analysisScope": {
+      "type": "object",
+      "required": [
+        "manifest_sha256",
+        "ignore_policy",
+        "structural_changes_policy",
+        "nested_boundaries",
+        "operation_closure",
+        "declared_entries"
+      ],
+      "properties": {
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ignore_policy": {
+          "$ref": "#/$defs/policyFact"
+        },
+        "structural_changes_policy": {
+          "enum": [
+            "suggest",
+            "approve",
+            "autonomous"
+          ]
+        },
+        "nested_boundaries": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/nestedBoundary"
+          }
+        },
+        "operation_closure": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/scopeEntry"
+          }
+        },
+        "declared_entries": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/scopeEntry"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "textAnswer": {
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2097152
+        }
+      },
+      "additionalProperties": false
+    },
+    "booleanAnswer": {
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "boolean"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "singleChoiceAnswer": {
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "single_choice"
+        },
+        "value": {
+          "$ref": "#/$defs/token"
+        }
+      },
+      "additionalProperties": false
+    },
+    "draftQuestion": {
+      "type": "object",
+      "required": [
+        "id",
+        "prompt",
+        "answer_type",
+        "required"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/token"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2097152
+        },
+        "answer_type": {
+          "enum": [
+            "text",
+            "boolean",
+            "single_choice"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "answer": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/textAnswer"
+            },
+            {
+              "$ref": "#/$defs/booleanAnswer"
+            },
+            {
+              "$ref": "#/$defs/singleChoiceAnswer"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "answer_type": {
+                "const": "text"
+              }
+            },
+            "required": [
+              "answer_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "options": {
+                "maxItems": 0
+              },
+              "answer": {
+                "$ref": "#/$defs/textAnswer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "answer_type": {
+                "const": "boolean"
+              }
+            },
+            "required": [
+              "answer_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "options": {
+                "maxItems": 0
+              },
+              "answer": {
+                "$ref": "#/$defs/booleanAnswer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "answer_type": {
+                "const": "single_choice"
+              }
+            },
+            "required": [
+              "answer_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "options"
+            ],
+            "properties": {
+              "options": {
+                "minItems": 1
+              },
+              "answer": {
+                "$ref": "#/$defs/singleChoiceAnswer"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path"
+          ],
+          "properties": {
+            "kind": {
+              "const": "create_directory"
+            },
+            "path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path",
+            "content"
+          ],
+          "properties": {
+            "kind": {
+              "const": "create_utf8_file"
+            },
+            "path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 2097152
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path",
+            "expected_sha256",
+            "content"
+          ],
+          "properties": {
+            "kind": {
+              "const": "replace_utf8_file"
+            },
+            "path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 2097152
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path",
+            "adapter",
+            "expected_sha256",
+            "managed_block"
+          ],
+          "properties": {
+            "kind": {
+              "const": "update_managed_agent_block"
+            },
+            "path": {
+              "$ref": "#/$defs/agentAdapterPath"
+            },
+            "adapter": {
+              "$ref": "#/$defs/token"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "managed_block": {
+              "$ref": "#/$defs/managedBlockBody"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "source_path",
+            "destination_path",
+            "expected_sha256",
+            "expected_byte_count"
+          ],
+          "properties": {
+            "kind": {
+              "const": "move_file"
+            },
+            "source_path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            },
+            "destination_path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            },
+            "expected_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expected_byte_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "source_path",
+            "destination_path",
+            "object_id",
+            "expected_version_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "move_tracked_object"
+            },
+            "source_path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            },
+            "destination_path": {
+              "$ref": "#/$defs/ordinaryContentPath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_version_id": {
+              "$ref": "#/$defs/versionId"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "object_record_path",
+            "object_id",
+            "expected_version_id",
+            "expected_record_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "mark_canonical",
+                "archive_object"
+              ]
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/objectRecordPath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "expected_record_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "object_record_path",
+            "object_id",
+            "expected_version_id",
+            "superseded_by",
+            "expected_record_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "mark_superseded"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/objectRecordPath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "superseded_by": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_record_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "object_record_path",
+            "object_id",
+            "expected_version_id",
+            "relationship_type",
+            "target_object_id",
+            "expected_record_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "add_relationship"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/objectRecordPath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "relationship_type": {
+              "$ref": "#/$defs/relationshipType"
+            },
+            "target_object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_record_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

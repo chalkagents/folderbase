@@ -42,6 +42,9 @@ jobs:
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Verify the independent reorganization digest vector
+        run: node scripts/verify-reorganization-digest-vector.mjs
+
       - name: Test
         run: cargo test --workspace --all-features --locked
 
