@@ -126,8 +126,11 @@ profiles:
 
 The profile identifier and exact parameters are part of the manifest rather
 than ambient client configuration, so a different valid configuration cannot
-masquerade as the same transfer plan. Manifest v1 caps one object at 1 TiB and
-uses `large-v1` at that scale. Its 4 MiB minimum remains within the
+masquerade as the same transfer plan. Manifest v1 caps one object at 1 TiB.
+The managed planner recommends and defaults to `large-v1` for large objects to
+reduce descriptor count; validation intentionally accepts either exact profile
+for any conforming object up to 1 TiB and does not define or infer a profile
+switch threshold. The large profile's 4 MiB minimum remains within the
 262,144-descriptor cap even under worst-case boundary selection. Custom
 configurations are not accepted as hosted v1 profiles.
 
@@ -141,8 +144,8 @@ become persistent state. `ChunkManifest::validate()` will reject:
 - anything other than lowercase 64-character SHA-256 values;
 - more than 262,144 chunk descriptors;
 - a whole-object length or descriptor offset greater than 1 TiB;
-- nonsequential indices, gaps, overlaps, zero-length chunks, arithmetic
-  overflow, or a descriptor larger than the declared maximum;
+- nonsequential indices, gaps, overlaps, zero-length chunks, or a descriptor
+  larger than the declared maximum;
 - a nonfinal chunk smaller than the declared minimum;
 - a descriptor total that differs from the whole-object length; and
 - an empty-object representation other than zero descriptors and the SHA-256
@@ -154,10 +157,14 @@ multi-gigabyte objects required by the first product. Callers also bound each
 request's chunk-index batch; a manifest never implies allocating one operation
 per descriptor at once.
 
-Whole-object lengths and descriptor offsets are JSON integers no greater than
-1 TiB. This keeps their exact identity inside the lossless integer range of
-JavaScript and TypeScript clients; implementations must not round JSON numbers
-before producing the canonical digest.
+Every numeric field uses the JSON Schema `integer` type, so exact integral
+decimal and exponent forms are valid alongside plain integer tokens.
+Deserializers preserve the number token until they have proved its exact
+nonnegative integer value and field bound; they reject fractional, nonfinite,
+or out-of-range forms without floating-point rounding. Whole-object lengths
+and descriptor offsets are no greater than 1 TiB, inside the lossless integer
+range of JavaScript and TypeScript clients. These caps plus the 64 MiB chunk
+maximum also prove that offset-plus-length arithmetic cannot overflow.
 
 `ChunkManifest::canonical_digest()` will compute SHA-256 over a
 domain-separated binary encoding. It begins with the exact ASCII bytes

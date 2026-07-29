@@ -21,7 +21,8 @@ independent of the Folderbase application and hosted services.
   provider-neutral `folderbase-chunk-manifest-v1` transfer plan.
 - `conformance/` contains valid and invalid compatibility fixtures.
 - `conformance/chunk-manifest/` fixes the valid and invalid manifest shapes;
-  its `.sha256` sidecar fixes the cross-client canonical binary digest.
+  its independently generated `.sha256` sidecars fix cross-client canonical
+  binary digests for small and greater-than-32-bit identities.
 - `conformance/template/valid/digest-vector-0.2.0.{json,sha256}` fixes the
   cross-client canonical package-digest contract.
 - `templates/0.2/project/template.json` is the built-in data-only

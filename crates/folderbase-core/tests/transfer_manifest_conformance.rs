@@ -11,6 +11,14 @@ use folderbase_core::transfer_manifest::{
 use serde_json::Value;
 
 const MANIFEST_SCHEMA: &str = "schemas/0.3/chunk-manifest.schema.json";
+const POSITIVE_VECTORS: [&str; 6] = [
+    "conformance/chunk-manifest/valid/empty-standard-v1.json",
+    "conformance/chunk-manifest/valid/two-chunk-standard-v1.json",
+    "conformance/chunk-manifest/valid/single-chunk-large-v1.json",
+    "conformance/chunk-manifest/valid/integral-decimal-standard-v1.json",
+    "conformance/chunk-manifest/valid/integral-exponent-standard-v1.json",
+    "conformance/chunk-manifest/valid/large-offset-large-v1.json",
+];
 
 fn protocol_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol")
@@ -35,10 +43,22 @@ fn schema_accepts(fixture_relative: &str) -> bool {
 }
 
 fn decode_fixture(relative: &str) -> Result<ChunkManifest, String> {
+    decode_fixture_result(relative).map_err(|error| error.to_string())
+}
+
+fn decode_fixture_result(relative: &str) -> Result<ChunkManifest, ManifestError> {
     let path = protocol_root().join(relative);
     let encoded =
         fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    ChunkManifest::decode_bounded(Cursor::new(encoded)).map_err(|error| error.to_string())
+    ChunkManifest::decode_bounded(Cursor::new(encoded))
+}
+
+fn decode_violation(relative: &str) -> ManifestViolation {
+    match decode_fixture_result(relative) {
+        Err(ManifestError::InvalidManifest(violation)) => violation,
+        Err(error) => panic!("{relative}: expected semantic violation, got {error}"),
+        Ok(_) => panic!("{relative}: expected semantic violation"),
+    }
 }
 
 #[test]
@@ -57,12 +77,7 @@ fn public_chunk_manifest_schema_is_draft_2020_12() {
 
 #[test]
 fn published_positive_vectors_conform_to_the_schema() {
-    let published = [
-        "conformance/chunk-manifest/valid/empty-standard-v1.json",
-        "conformance/chunk-manifest/valid/two-chunk-standard-v1.json",
-        "conformance/chunk-manifest/valid/single-chunk-large-v1.json",
-    ];
-    for relative in published {
+    for relative in POSITIVE_VECTORS {
         assert!(schema_accepts(relative), "{relative} must conform");
     }
 
@@ -71,7 +86,7 @@ fn published_positive_vectors_conform_to_the_schema() {
         .unwrap_or_else(|error| panic!("read {}: {error}", valid_directory.display()))
         .map(|entry| entry.expect("conformance directory entry").path())
         .collect::<Vec<_>>();
-    assert_eq!(inventory.len(), 4, "unexpected valid-directory artifact");
+    assert_eq!(inventory.len(), 8, "unexpected valid-directory artifact");
     assert_eq!(
         inventory
             .iter()
@@ -79,7 +94,7 @@ fn published_positive_vectors_conform_to_the_schema() {
                 .extension()
                 .is_some_and(|extension| extension == "json"))
             .count(),
-        published.len(),
+        POSITIVE_VECTORS.len(),
         "unexpected positive-vector inventory"
     );
     assert_eq!(
@@ -89,8 +104,36 @@ fn published_positive_vectors_conform_to_the_schema() {
                 .extension()
                 .is_some_and(|extension| extension == "sha256"))
             .count(),
-        1,
+        2,
         "unexpected canonical-digest inventory"
+    );
+}
+
+#[test]
+fn bounded_decoder_accepts_every_valid_public_vector() {
+    for relative in POSITIVE_VECTORS {
+        decode_fixture(relative).unwrap_or_else(|error| panic!("{relative}: {error}"));
+    }
+}
+
+#[test]
+fn integral_decimal_and_exponent_forms_preserve_exact_manifest_identity() {
+    let plain_empty =
+        decode_fixture("conformance/chunk-manifest/valid/empty-standard-v1.json").unwrap();
+    let decimal_empty =
+        decode_fixture("conformance/chunk-manifest/valid/integral-decimal-standard-v1.json")
+            .unwrap();
+    assert_eq!(decimal_empty, plain_empty);
+
+    let plain_two_chunk =
+        decode_fixture("conformance/chunk-manifest/valid/two-chunk-standard-v1.json").unwrap();
+    let exponent_two_chunk =
+        decode_fixture("conformance/chunk-manifest/valid/integral-exponent-standard-v1.json")
+            .unwrap();
+    assert_eq!(exponent_two_chunk, plain_two_chunk);
+    assert_eq!(
+        exponent_two_chunk.canonical_digest().unwrap(),
+        plain_two_chunk.canonical_digest().unwrap()
     );
 }
 
@@ -156,7 +199,6 @@ fn decoder_rejects_invalid_descriptor_topology_and_object_shape() {
         "conformance/chunk-manifest/invalid/zero-length-chunk.json",
         "conformance/chunk-manifest/invalid/chunk-exceeds-profile-maximum.json",
         "conformance/chunk-manifest/invalid/nonfinal-chunk-below-minimum.json",
-        "conformance/chunk-manifest/invalid/descriptor-arithmetic-overflow.json",
         "conformance/chunk-manifest/invalid/object-length-mismatch.json",
         "conformance/chunk-manifest/invalid/empty-object-wrong-digest.json",
         "conformance/chunk-manifest/invalid/empty-object-with-chunk.json",
@@ -167,6 +209,135 @@ fn decoder_rejects_invalid_descriptor_topology_and_object_shape() {
         assert!(
             decode_fixture(relative).is_err(),
             "{relative} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn named_semantic_vectors_report_exact_violations() {
+    for (relative, expected) in [
+        (
+            "conformance/chunk-manifest/invalid/unknown-format.json",
+            ManifestViolation::UnknownFormat,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/unknown-algorithm.json",
+            ManifestViolation::UnknownAlgorithm,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/unknown-profile.json",
+            ManifestViolation::UnknownProfile,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/standard-profile-parameter-mismatch.json",
+            ManifestViolation::ProfileParameterMismatch,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/large-profile-parameter-mismatch.json",
+            ManifestViolation::ProfileParameterMismatch,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/uppercase-object-digest.json",
+            ManifestViolation::InvalidObjectDigest,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/nonhex-object-digest.json",
+            ManifestViolation::InvalidObjectDigest,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/short-chunk-digest.json",
+            ManifestViolation::InvalidChunkDigest { index: 0 },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/nonsequential-index.json",
+            ManifestViolation::NonsequentialIndex {
+                position: 0,
+                actual: 1,
+            },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/offset-gap.json",
+            ManifestViolation::NoncontiguousOffset {
+                index: 1,
+                expected: 262_144,
+                actual: 262_145,
+            },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/offset-overlap.json",
+            ManifestViolation::NoncontiguousOffset {
+                index: 1,
+                expected: 262_144,
+                actual: 262_143,
+            },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/chunk-exceeds-profile-maximum.json",
+            ManifestViolation::ChunkTooLarge { index: 0 },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/nonfinal-chunk-below-minimum.json",
+            ManifestViolation::NonfinalChunkTooSmall { index: 0 },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/object-length-mismatch.json",
+            ManifestViolation::ObjectLengthMismatch {
+                expected: 2,
+                actual: 1,
+            },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/empty-object-wrong-digest.json",
+            ManifestViolation::InvalidEmptyObject,
+        ),
+        (
+            "conformance/chunk-manifest/invalid/empty-object-with-chunk.json",
+            ManifestViolation::ObjectLengthMismatch {
+                expected: 0,
+                actual: 1,
+            },
+        ),
+        (
+            "conformance/chunk-manifest/invalid/nonempty-object-without-chunks.json",
+            ManifestViolation::ObjectLengthMismatch {
+                expected: 1,
+                actual: 0,
+            },
+        ),
+    ] {
+        assert_eq!(decode_violation(relative), expected, "{relative}");
+    }
+}
+
+#[test]
+fn decoder_rejects_fractional_nonfinite_and_out_of_range_numeric_forms() {
+    for relative in [
+        "conformance/chunk-manifest/invalid/fractional-object-length.json",
+        "conformance/chunk-manifest/invalid/fractional-chunk-index.json",
+        "conformance/chunk-manifest/invalid/fractional-chunk-offset.json",
+        "conformance/chunk-manifest/invalid/fractional-chunk-length.json",
+        "conformance/chunk-manifest/invalid/chunk-index-out-of-range.json",
+    ] {
+        assert!(
+            decode_fixture(relative).is_err(),
+            "{relative} must be rejected"
+        );
+    }
+
+    let empty =
+        include_str!("../../../protocol/conformance/chunk-manifest/valid/empty-standard-v1.json");
+    for token in [
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "1e400",
+        "1.0000000000000000001",
+        "1.099511627777e12",
+    ] {
+        let encoded = empty.replace("\"object_bytes\": 0", &format!("\"object_bytes\": {token}"));
+        assert!(
+            ChunkManifest::decode_bounded(Cursor::new(encoded)).is_err(),
+            "{token} must be rejected without numeric rounding"
         );
     }
 }
@@ -292,6 +463,28 @@ fn canonical_digest_matches_the_published_big_endian_vector() {
 }
 
 #[test]
+fn canonical_digest_matches_the_large_offset_reference_vector() {
+    let manifest = decode_fixture("conformance/chunk-manifest/valid/large-offset-large-v1.json")
+        .expect("valid large-offset digest vector");
+    assert!(manifest.object_bytes > u32::MAX as u64);
+    assert!(
+        manifest
+            .chunks
+            .iter()
+            .any(|descriptor| descriptor.offset > u32::MAX as u64)
+    );
+    let expected_path =
+        protocol_root().join("conformance/chunk-manifest/valid/large-offset-large-v1.sha256");
+    let expected = fs::read_to_string(&expected_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", expected_path.display()));
+
+    assert_eq!(
+        manifest.canonical_digest().expect("canonical digest"),
+        expected.trim()
+    );
+}
+
+#[test]
 fn schema_and_semantic_validation_have_explicit_conformance_roles() {
     for relative in [
         "conformance/chunk-manifest/invalid/unknown-format.json",
@@ -311,7 +504,11 @@ fn schema_and_semantic_validation_have_explicit_conformance_roles() {
         "conformance/chunk-manifest/invalid/nonempty-object-without-chunks.json",
         "conformance/chunk-manifest/invalid/object-exceeds-v1-maximum.json",
         "conformance/chunk-manifest/invalid/offset-exceeds-v1-maximum.json",
-        "conformance/chunk-manifest/invalid/descriptor-arithmetic-overflow.json",
+        "conformance/chunk-manifest/invalid/fractional-object-length.json",
+        "conformance/chunk-manifest/invalid/fractional-chunk-index.json",
+        "conformance/chunk-manifest/invalid/fractional-chunk-offset.json",
+        "conformance/chunk-manifest/invalid/fractional-chunk-length.json",
+        "conformance/chunk-manifest/invalid/chunk-index-out-of-range.json",
     ] {
         assert!(!schema_accepts(relative), "{relative} must fail the schema");
     }
@@ -347,7 +544,7 @@ fn every_published_negative_vector_fails_bounded_decode() {
         .collect::<Vec<_>>();
     vectors.sort();
 
-    assert_eq!(vectors.len(), 23, "unexpected negative-vector inventory");
+    assert_eq!(vectors.len(), 27, "unexpected negative-vector inventory");
     for path in vectors {
         let encoded =
             fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));

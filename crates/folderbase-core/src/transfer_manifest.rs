@@ -24,10 +24,14 @@ pub struct ChunkManifest {
     pub format: String,
     pub algorithm: String,
     pub profile: String,
+    #[serde(deserialize_with = "deserialize_chunk_size")]
     pub minimum_chunk_bytes: u64,
+    #[serde(deserialize_with = "deserialize_chunk_size")]
     pub average_chunk_bytes: u64,
+    #[serde(deserialize_with = "deserialize_chunk_size")]
     pub maximum_chunk_bytes: u64,
     pub object_sha256: String,
+    #[serde(deserialize_with = "deserialize_object_size")]
     pub object_bytes: u64,
     pub chunks: Vec<ChunkDescriptor>,
 }
@@ -35,8 +39,11 @@ pub struct ChunkManifest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChunkDescriptor {
+    #[serde(deserialize_with = "deserialize_index")]
     pub index: u32,
+    #[serde(deserialize_with = "deserialize_object_size")]
     pub offset: u64,
+    #[serde(deserialize_with = "deserialize_chunk_size")]
     pub bytes: u64,
     pub sha256: String,
 }
@@ -90,9 +97,6 @@ pub enum ManifestViolation {
 
     #[error("nonfinal chunk {index} is smaller than the declared minimum size")]
     NonfinalChunkTooSmall { index: u32 },
-
-    #[error("chunk {index} offset plus length overflows")]
-    DescriptorArithmeticOverflow { index: u32 },
 
     #[error("chunk {index} offset exceeds the v1 maximum of {maximum} bytes")]
     DescriptorOffsetTooLarge { index: u32, maximum: u64 },
@@ -197,11 +201,9 @@ impl ChunkManifest {
                     maximum: MAX_OBJECT_BYTES,
                 });
             }
-            let end = descriptor.offset.checked_add(descriptor.bytes).ok_or(
-                ManifestViolation::DescriptorArithmeticOverflow {
-                    index: descriptor.index,
-                },
-            )?;
+            // Both operands are already capped at 1 TiB and 64 MiB, so this
+            // addition is provably below u64::MAX.
+            let end = descriptor.offset + descriptor.bytes;
             if descriptor.offset != expected_offset {
                 return Err(ManifestViolation::NoncontiguousOffset {
                     index: descriptor.index,
@@ -274,4 +276,100 @@ fn hex_nibble(byte: u8) -> u8 {
         b'a'..=b'f' => byte - b'a' + 10,
         _ => unreachable!("digest syntax is validated before canonical encoding"),
     }
+}
+
+fn deserialize_chunk_size<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_exact_unsigned(deserializer, 1, 64 * 1024 * 1024, "chunk byte count")
+}
+
+fn deserialize_object_size<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_exact_unsigned(
+        deserializer,
+        0,
+        MAX_OBJECT_BYTES,
+        "object byte count or offset",
+    )
+}
+
+fn deserialize_index<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = deserialize_exact_unsigned(deserializer, 0, u32::MAX as u64, "chunk index")?;
+    Ok(value as u32)
+}
+
+fn deserialize_exact_unsigned<'de, D>(
+    deserializer: D,
+    minimum: u64,
+    maximum: u64,
+    label: &'static str,
+) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    parse_exact_unsigned(raw.get())
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "{label} must be an exact integer between {minimum} and {maximum}"
+            ))
+        })
+}
+
+fn parse_exact_unsigned(encoded: &str) -> Option<u64> {
+    let (negative, unsigned) = match encoded.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, encoded),
+    };
+    let (coefficient, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, "0"), |parts| parts);
+    let exponent = exponent.parse::<i64>().ok();
+    let (integer, fraction) = coefficient
+        .split_once('.')
+        .map_or((coefficient, ""), |parts| parts);
+    let digits = format!("{integer}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return Some(0);
+    }
+    if negative {
+        return None;
+    }
+
+    let exponent = exponent?;
+    let scale = exponent.checked_sub(fraction.len() as i64)?;
+    let mut normalized = significant.to_owned();
+    if scale >= 0 {
+        let zero_count = usize::try_from(scale).ok()?;
+        if normalized.len().checked_add(zero_count)? > 20 {
+            return None;
+        }
+        normalized.extend(std::iter::repeat_n('0', zero_count));
+    } else {
+        let removed = usize::try_from(scale.unsigned_abs()).ok()?;
+        if removed > normalized.len() {
+            return None;
+        }
+        let retained = normalized.len() - removed;
+        if !normalized.as_bytes()[retained..]
+            .iter()
+            .all(|byte| *byte == b'0')
+        {
+            return None;
+        }
+        normalized.truncate(retained);
+        if normalized.is_empty() {
+            return Some(0);
+        }
+    }
+    normalized.parse().ok()
 }
