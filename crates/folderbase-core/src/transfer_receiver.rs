@@ -14,6 +14,7 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use same_file::Handle;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, Version};
@@ -76,6 +77,9 @@ pub enum TransferReceiverError {
 
     #[error("receiver checkpoint state is accessible outside its owning user")]
     InsecureCheckpointPermissions,
+
+    #[error("receiver checkpoint state changed during the operation")]
+    CheckpointStateChanged,
 
     #[error("chunk {0} is not present in the bound manifest")]
     UnknownChunk(u32),
@@ -213,22 +217,36 @@ impl PersistentTransfer {
             .map_err(TransferReceiverError::Io)?;
         let ingestion = copy_exact_chunk(descriptor, &mut reader, &mut staged)
             .and_then(|()| staged.sync_all().map_err(TransferReceiverError::Io));
-        drop(staged);
-        if let Err(error) = ingestion {
-            let _ = self.chunks.remove_file(&staging);
-            return Err(error);
+        let staging_identity = match ingestion {
+            Ok(()) => Handle::from_file(staged.into_std()).map_err(TransferReceiverError::Io)?,
+            Err(error) => {
+                if let Ok(partial_identity) = Handle::from_file(staged.into_std()) {
+                    remove_named_file_if_same(&self.chunks, &staging, &partial_identity);
+                }
+                return Err(error);
+            }
+        };
+        let current_staging = open_named_file_identity(&self.chunks, &staging)
+            .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+        if current_staging != staging_identity {
+            return Err(TransferReceiverError::CheckpointStateChanged);
         }
 
         match self.chunks.hard_link(&staging, &self.chunks, &destination) {
             Ok(()) => {
-                self.chunks
-                    .remove_file(&staging)
-                    .map_err(TransferReceiverError::Io)?;
+                remove_named_file_if_same(&self.chunks, &staging, &staging_identity);
                 sync_directory(&self.chunks)?;
+                let destination_identity = open_named_file_identity(&self.chunks, &destination)
+                    .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
+                if destination_identity != staging_identity {
+                    remove_named_file_if_same(&self.chunks, &destination, &destination_identity);
+                    sync_directory(&self.chunks)?;
+                    return Err(TransferReceiverError::CheckpointStateChanged);
+                }
                 Ok(ChunkAcceptance::Accepted)
             }
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = self.chunks.remove_file(&staging);
+                remove_named_file_if_same(&self.chunks, &staging, &staging_identity);
                 let mut existing = open_regular_file_nofollow(&self.chunks, &destination)
                     .map_err(TransferReceiverError::Io)?;
                 validate_chunk_reader(descriptor, &mut existing)?;
@@ -379,6 +397,23 @@ fn open_regular_file_nofollow(
         ));
     }
     Ok(file)
+}
+
+fn open_named_file_identity(
+    directory: &Dir,
+    name: impl AsRef<Path>,
+) -> Result<Handle, TransferReceiverError> {
+    let file = open_regular_file_nofollow(directory, name).map_err(TransferReceiverError::Io)?;
+    Handle::from_file(file.into_std()).map_err(TransferReceiverError::Io)
+}
+
+fn remove_named_file_if_same(directory: &Dir, name: &str, expected: &Handle) {
+    let Ok(current) = open_named_file_identity(directory, name) else {
+        return;
+    };
+    if &current == expected {
+        let _ = directory.remove_file(name);
+    }
 }
 
 fn sync_directory(directory: &Dir) -> Result<(), TransferReceiverError> {

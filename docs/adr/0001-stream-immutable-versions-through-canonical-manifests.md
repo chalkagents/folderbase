@@ -253,9 +253,13 @@ The receiver implementation fixes these additional v1 details:
 3. Chunk receipt reads and hashes the complete retry stream before returning
    either `Accepted` or `AlreadyPresent`. It writes through one private
    lowercase-hyphenated UUIDv7 staging file, synchronizes that file, installs
-   with a no-clobber link, and synchronizes the chunks directory. A short,
-   long, corrupt, unknown, or conflicting retry returns no acceptance result
-   and never replaces an installed chunk.
+   with a no-clobber link, and synchronizes the chunks directory. The receiver
+   retains the verified staging file identity, proves the no-follow staging
+   name still identifies that file immediately before linking, and proves the
+   installed destination identifies it before reporting `Accepted`. An
+   identity change fails closed without treating a replacement pathname as
+   operation-owned cleanup. A short, long, corrupt, unknown, or conflicting
+   retry returns no acceptance result and never replaces an installed chunk.
 4. Resume enumeration inspects at most the caller's capped page of sequential
    descriptor indices and returns the next descriptor index as its cursor.
    Reopen validates every installed in-manifest chunk. It ignores only regular,

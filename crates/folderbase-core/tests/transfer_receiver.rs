@@ -3,7 +3,7 @@ use std::{
     io::{Cursor, Read},
     path::Path,
     rc::Rc,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -88,6 +88,22 @@ impl Read for RequestBoundedReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         self.maximum_requested
             .set(self.maximum_requested.get().max(buffer.len()));
+        self.inner.read(buffer)
+    }
+}
+
+struct BlockingReader {
+    inner: Cursor<Vec<u8>>,
+    paused: Option<mpsc::SyncSender<()>>,
+    resume: mpsc::Receiver<()>,
+}
+
+impl Read for BlockingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(paused) = self.paused.take() {
+            paused.send(()).unwrap();
+            self.resume.recv().unwrap();
+        }
         self.inner.read(buffer)
     }
 }
@@ -214,6 +230,58 @@ fn chunk_acceptance_is_streamed_exact_and_idempotent() {
     assert_eq!(
         std::fs::read(temporary.path().join("inbound/chunks/0.chunk")).unwrap(),
         b"hello folderbase"
+    );
+}
+
+#[test]
+fn replacing_the_verified_staging_path_never_accepts_the_replacement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+    let transfer =
+        Arc::new(PersistentTransfer::create(&root, "inbound", single_chunk_manifest()).unwrap());
+    let (paused_sender, paused_receiver) = mpsc::sync_channel(0);
+    let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
+    let accepting = {
+        let transfer = Arc::clone(&transfer);
+        std::thread::spawn(move || {
+            transfer.accept_chunk_from(
+                0,
+                BlockingReader {
+                    inner: Cursor::new(b"hello folderbase".to_vec()),
+                    paused: Some(paused_sender),
+                    resume: resume_receiver,
+                },
+            )
+        })
+    };
+
+    paused_receiver.recv().unwrap();
+    let chunks = temporary.path().join("inbound/chunks");
+    let staging = std::fs::read_dir(&chunks)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".chunk-") && name.ends_with(".part"))
+        })
+        .expect("accept must create its staging file before reading");
+    std::fs::remove_file(&staging).unwrap();
+    std::fs::write(&staging, b"corrupt replacement").unwrap();
+    #[cfg(unix)]
+    set_mode(&staging, 0o600);
+    resume_sender.send(()).unwrap();
+
+    let result = accepting.join().unwrap();
+    assert!(
+        matches!(result, Err(TransferReceiverError::CheckpointStateChanged)),
+        "{result:?}"
+    );
+    assert!(!chunks.join("0.chunk").exists());
+    assert_eq!(
+        std::fs::read(staging).unwrap(),
+        b"corrupt replacement",
+        "a path replacement must not be mistaken for operation-owned cleanup"
     );
 }
 
