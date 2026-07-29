@@ -620,6 +620,24 @@ fn find_restore_binding(
     current: &FolderbaseVersion,
     tombstone: &Tombstone,
 ) -> Result<PathBinding, FolderbaseCaptureError> {
+    find_restore_binding_with_limit(
+        store,
+        local,
+        state,
+        current,
+        tombstone,
+        crate::folderbase_version::MAX_VERSION_ENTRIES,
+    )
+}
+
+fn find_restore_binding_with_limit(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    current: &FolderbaseVersion,
+    tombstone: &Tombstone,
+    maximum_ancestors: usize,
+) -> Result<PathBinding, FolderbaseCaptureError> {
     let expected_version = tombstone.last_object_version_id().ok_or_else(|| {
         FolderbaseCaptureError::InvalidRestoreAncestry(
             "regular-file Tombstone omitted its Object Version".to_owned(),
@@ -651,7 +669,7 @@ fn find_restore_binding(
             continue;
         }
         visited += 1;
-        if visited > crate::folderbase_version::MAX_VERSION_ENTRIES {
+        if visited > maximum_ancestors {
             return Err(FolderbaseCaptureError::InvalidRestoreAncestry(
                 "ancestor search exceeded the bounded version limit".to_owned(),
             ));
@@ -3049,6 +3067,37 @@ mod tests {
         read_head_record(&FolderbaseState::open(root).expect("state")).expect("Local Head")
     }
 
+    fn install_test_version(root: &Path, version: &FolderbaseVersion) {
+        let state = FolderbaseState::open(root).expect("state");
+        install_folderbase_version(
+            &state,
+            version,
+            &version.canonical_digest().expect("version digest"),
+        )
+        .expect("install test version");
+    }
+
+    fn point_test_head(root: &Path, version: &FolderbaseVersion) {
+        let state = FolderbaseState::open(root).expect("state");
+        state
+            .replace(
+                Path::new(LOCAL_HEAD_PATH),
+                &json_bytes(&LocalHeadRecord {
+                    format: "folderbase-local-head-v1".to_owned(),
+                    folderbase_id: version.folderbase_id().to_owned(),
+                    root_instance_sha256: FolderbaseVersionStore::open(root)
+                        .expect("store")
+                        .root_attestation
+                        .root_instance_sha256,
+                    version_id: version.version_id().to_owned(),
+                    version_sha256: version.canonical_digest().expect("version digest"),
+                    transaction_sha256: "0".repeat(64),
+                })
+                .expect("Head bytes"),
+            )
+            .expect("point test Head");
+    }
+
     #[test]
     fn tombstone_restore_reopens_and_converges_at_every_persistence_checkpoint() {
         for fault in [
@@ -3295,6 +3344,198 @@ mod tests {
         ));
         assert!(!root.path().join("active.bin").exists());
         assert_eq!(head.version_id, deletion.version_id());
+    }
+
+    #[test]
+    fn restore_ancestor_search_is_bounded_before_any_restore_intent() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        let current =
+            read_and_verify_folderbase_version(&store, &local, &state, deletion.version_id())
+                .expect("current");
+        let tombstone = &current.tombstones()[0];
+
+        assert!(matches!(
+            find_restore_binding_with_limit(&store, &local, &state, &current, tombstone, 0),
+            Err(FolderbaseCaptureError::InvalidRestoreAncestry(message))
+                if message.contains("bounded")
+        ));
+        assert!(!root.path().join("active.bin").exists());
+        assert!(
+            read_active_restore_transaction(&state)
+                .expect("active restore")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn nearest_ancestor_fidelity_disagreement_is_refused_as_ambiguous() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let genesis_version = store.read_version(genesis.version_id()).expect("genesis");
+        let original = genesis_version
+            .lookup_binding("active.bin")
+            .expect("active")
+            .clone();
+        let alternate_binding = PathBinding::regular_file_from_verified_producer(
+            original.path(),
+            original.object_id(),
+            original.object_version_id().expect("Object Version"),
+            original.content_sha256().expect("digest"),
+            original.bytes().expect("bytes"),
+            !original.executable().expect("executable"),
+        );
+        let mut alternate_bindings = genesis_version.bindings().to_vec();
+        let index = alternate_bindings
+            .iter()
+            .position(|binding| binding.path() == "active.bin")
+            .expect("active index");
+        alternate_bindings[index] = alternate_binding;
+        let alternate = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                format!("fbversion_{}", Uuid::now_v7()),
+                Vec::new(),
+                Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    alternate_bindings,
+                    Vec::new(),
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("alternate");
+        install_test_version(root.path(), &alternate);
+
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let current = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                format!("fbversion_{}", Uuid::now_v7()),
+                vec![
+                    genesis_version.version_id().to_owned(),
+                    alternate.version_id().to_owned(),
+                ],
+                Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    genesis_version
+                        .bindings()
+                        .iter()
+                        .filter(|binding| binding.path() != "active.bin")
+                        .cloned()
+                        .collect(),
+                    vec![Tombstone::from_verified_producer(
+                        original.path(),
+                        original.object_id(),
+                        DeletedKind::RegularFile,
+                        original.object_version_id().map(str::to_owned),
+                    )],
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("ambiguous current");
+        install_test_version(root.path(), &current);
+        point_test_head(root.path(), &current);
+
+        assert!(matches!(
+            FolderbaseVersionStore::open(root.path())
+                .expect("reopen")
+                .restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreAncestry(message))
+                if message.contains("disagree")
+        ));
+        assert!(!root.path().join("active.bin").exists());
+    }
+
+    #[test]
+    fn cyclic_ancestor_graph_is_refused_before_restore_publication() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let genesis_version = store.read_version(genesis.version_id()).expect("genesis");
+        let original = genesis_version
+            .lookup_binding("active.bin")
+            .expect("active")
+            .clone();
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let surviving = genesis_version
+            .bindings()
+            .iter()
+            .filter(|binding| binding.path() != "active.bin")
+            .cloned()
+            .collect::<Vec<_>>();
+        let tombstones = vec![Tombstone::from_verified_producer(
+            original.path(),
+            original.object_id(),
+            DeletedKind::RegularFile,
+            original.object_version_id().map(str::to_owned),
+        )];
+        let first_id = format!("fbversion_{}", Uuid::now_v7());
+        let second_id = format!("fbversion_{}", Uuid::now_v7());
+        let cycle_version = |version_id: &str, parent: &str| {
+            FolderbaseVersion::from_verified_parts(
+                FolderbaseVersionParts::portable_v1_from_verified_producer(
+                    genesis_version.folderbase_id(),
+                    version_id,
+                    vec![parent.to_owned()],
+                    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    genesis_version.root_manifest().clone(),
+                    FolderbaseVersionEntries::from_verified_producer(
+                        surviving.clone(),
+                        tombstones.clone(),
+                        genesis_version.exclusions().to_vec(),
+                    ),
+                ),
+            )
+            .expect("cycle member")
+        };
+        let first = cycle_version(&first_id, &second_id);
+        let second = cycle_version(&second_id, &first_id);
+        install_test_version(root.path(), &first);
+        install_test_version(root.path(), &second);
+        let current = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                format!("fbversion_{}", Uuid::now_v7()),
+                vec![first_id],
+                Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    surviving,
+                    tombstones,
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("current");
+        install_test_version(root.path(), &current);
+        point_test_head(root.path(), &current);
+
+        assert!(matches!(
+            FolderbaseVersionStore::open(root.path())
+                .expect("reopen")
+                .restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreAncestry(message))
+                if message.contains("cycle")
+        ));
+        assert!(!root.path().join("active.bin").exists());
     }
 
     #[cfg(unix)]

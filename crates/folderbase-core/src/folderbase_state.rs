@@ -622,6 +622,9 @@ impl FolderbaseState {
                 display.push(component);
                 directory = open_directory_nofollow(&directory, component, &display, self.access)
                     .map_err(|source| FolderbaseError::io(&display, source))?;
+                if contains_folderbase_marker(&directory, &display)? {
+                    return Err(FolderbaseError::UnsafePath(display));
+                }
             }
         }
         Ok((directory, name))
@@ -678,6 +681,31 @@ fn safe_workspace_relative(path: &Path) -> Result<PathBuf> {
         safe.push(name);
     }
     Ok(safe)
+}
+
+fn contains_folderbase_marker(directory: &Dir, display: &Path) -> Result<bool> {
+    let state_display = display.join(STATE_COMPONENT);
+    let state = match open_directory_nofollow(
+        directory,
+        OsStr::new(STATE_COMPONENT),
+        &state_display,
+        StateAccess::ReadOnly,
+    ) {
+        Ok(state) => state,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(FolderbaseError::io(state_display, source)),
+    };
+    let marker = OsStr::new("manifest.json");
+    let marker_display = state_display.join(marker);
+    let metadata = match state.symlink_metadata(marker) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(FolderbaseError::io(marker_display, source)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(marker_display));
+    }
+    Ok(true)
 }
 
 fn verify_open_regular_metadata(

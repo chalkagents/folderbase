@@ -608,6 +608,48 @@ fn missing_immutable_restore_bytes_fail_before_journal_workspace_or_head_mutatio
 }
 
 #[test]
+fn corrupt_object_version_record_fails_before_restore_intent_or_head_mutation() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    fs::write(&path, b"sealed bytes").expect("proposal");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let object_version = store
+        .read_version(genesis.version_id())
+        .unwrap()
+        .lookup_binding("proposal.docx")
+        .unwrap()
+        .object_version_id()
+        .unwrap()
+        .to_owned();
+    fs::remove_file(&path).expect("delete proposal");
+    store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    let head_path = root.path().join(".folderbase/local/head.json");
+    let head_before = fs::read(&head_path).unwrap();
+    fs::write(
+        root.path()
+            .join(".folderbase/versions/records")
+            .join(format!("{object_version}.json")),
+        b"{\"corrupt\":true}\n",
+    )
+    .expect("corrupt immutable Object Version record");
+
+    assert!(store.restore_tombstone("proposal.docx").is_err());
+    assert!(!path.exists());
+    assert_eq!(fs::read(head_path).unwrap(), head_before);
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/transactions/folderbase-version-restores/active.json")
+            .exists()
+    );
+}
+
+#[test]
 fn restore_removes_only_the_selected_tombstone_and_rejects_reserved_state() {
     let root = folderbase();
     fs::write(root.path().join("one.bin"), b"one").expect("one");
@@ -663,6 +705,44 @@ fn v1_restore_refuses_directory_tombstones_without_mutation() {
             .tombstones()
             .len(),
         1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn v1_restore_refuses_symlink_tombstones_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let root = folderbase();
+    fs::write(root.path().join("target"), b"target").expect("target");
+    symlink("target", root.path().join("reference")).expect("reference");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    fs::remove_file(root.path().join("reference")).expect("delete symlink");
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    let head_path = root.path().join(".folderbase/local/head.json");
+    let before = fs::read(&head_path).unwrap();
+
+    assert!(matches!(
+        store.restore_tombstone("reference"),
+        Err(FolderbaseCaptureError::UnsupportedTombstoneKind(path))
+            if path == Path::new("reference")
+    ));
+    assert_eq!(fs::read(head_path).unwrap(), before);
+    assert_eq!(
+        store
+            .read_version(deletion.version_id())
+            .unwrap()
+            .tombstones()
+            .iter()
+            .find(|tombstone| tombstone.path() == "reference")
+            .unwrap()
+            .deleted_kind(),
+        DeletedKind::Symlink
     );
 }
 
