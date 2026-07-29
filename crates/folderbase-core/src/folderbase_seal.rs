@@ -2351,6 +2351,55 @@ mod tests {
     }
 
     #[test]
+    fn post_head_legacy_journal_without_tombstone_field_still_recovers() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::HeadReplaced {
+                    let state = FolderbaseState::open(root.path()).expect("state");
+                    let active_path = Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH);
+                    let encoded = state
+                        .read_bounded(active_path, MAX_CAPTURE_TRANSACTION_BYTES)
+                        .expect("read active journal")
+                        .expect("active journal");
+                    let mut wire: serde_json::Value =
+                        serde_json::from_slice(&encoded).expect("journal JSON");
+                    assert_eq!(
+                        wire.as_object_mut()
+                            .expect("journal object")
+                            .remove("target_tombstones"),
+                        Some(serde_json::json!([]))
+                    );
+                    let legacy_encoded = json_bytes(&wire).expect("legacy journal bytes");
+                    state
+                        .replace(active_path, &legacy_encoded)
+                        .expect("install legacy journal");
+
+                    let mut head = local_head(root.path()).expect("Local Head");
+                    head.transaction_sha256 =
+                        format!("{:x}", Sha256::digest(&legacy_encoded));
+                    state
+                        .replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&head).unwrap())
+                        .expect("bind Head to legacy journal");
+                    panic!("stop after legacy Head replacement");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let assigned = local_head(root.path()).expect("legacy Head").version_id;
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+        let retry = reopened
+            .seal_capture(reopened.plan_capture().expect("same live plan"))
+            .expect("legacy post-Head intent must recover");
+        assert_eq!(retry.version_id(), assigned);
+        assert!(reopened.read_version(retry.version_id()).is_ok());
+        assert!(active_transaction(root.path()).is_none());
+    }
+
+    #[test]
     fn tombstone_capture_reopens_and_converges_at_every_persistence_checkpoint() {
         for fault in [
             CaptureCheckpoint::JournalDurable,
