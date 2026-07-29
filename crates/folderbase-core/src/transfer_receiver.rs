@@ -1222,7 +1222,12 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
     };
 
-    use super::{CheckpointLease, CheckpointLock, ChunkAcceptance, TransferReceiverError};
+    use sha2::{Digest, Sha256};
+
+    use super::{
+        AcceptedChunkReader, CheckpointLease, CheckpointLock, ChunkAcceptance,
+        MaterializationStaging, TransferReceiverError,
+    };
 
     #[derive(Default)]
     struct InjectedUnlockFailure {
@@ -1270,6 +1275,112 @@ mod tests {
             lock.lock_calls.get(),
             1,
             "a poisoned receiver must fail before a platform-dependent relock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identical_replacement_of_an_open_accepted_chunk_fails_at_eof_identity_check() {
+        use std::{io::Read, os::unix::fs::PermissionsExt};
+
+        use cap_std::{ambient_authority, fs::Dir};
+
+        use crate::transfer_manifest::{
+            CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, MANIFEST_FORMAT_V1,
+            STANDARD_PROFILE_V1,
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let chunks = Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+        let bytes = b"transfer payload";
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let manifest = ChunkManifest {
+            format: MANIFEST_FORMAT_V1.to_owned(),
+            algorithm: CHUNKING_ALGORITHM_V1.to_owned(),
+            profile: STANDARD_PROFILE_V1.to_owned(),
+            minimum_chunk_bytes: 256 * 1024,
+            average_chunk_bytes: 1024 * 1024,
+            maximum_chunk_bytes: 4 * 1024 * 1024,
+            object_sha256: digest.clone(),
+            object_bytes: bytes.len() as u64,
+            chunks: vec![ChunkDescriptor {
+                index: 0,
+                offset: 0,
+                bytes: bytes.len() as u64,
+                sha256: digest,
+            }],
+        };
+        let accepted = temporary.path().join("0.chunk");
+        std::fs::write(&accepted, bytes).unwrap();
+        std::fs::set_permissions(&accepted, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut reader = AcceptedChunkReader::new(&chunks, &manifest);
+        let mut prefix = [0_u8; 15];
+        reader.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, &bytes[..15]);
+
+        let retained = temporary.path().join("retained-original.chunk");
+        std::fs::rename(&accepted, retained).unwrap();
+        std::fs::write(&accepted, bytes).unwrap();
+        std::fs::set_permissions(&accepted, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut final_byte = [0_u8; 1];
+        reader.read_exact(&mut final_byte).unwrap();
+        assert_eq!(final_byte[0], bytes[15]);
+        let error = reader.read(&mut final_byte).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error
+                .to_string()
+                .contains("accepted chunk 0 pathname identity changed"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(accepted).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_materialization_staging_directory_is_neither_linked_nor_removed() {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+
+        use cap_std::{ambient_authority, fs::Dir};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_root =
+            Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+        let mut staging = MaterializationStaging::create(&destination_root).unwrap();
+        let staging_name = staging.name.clone();
+        let mut object = staging.create_object().unwrap();
+        object.write_all(b"verified original").unwrap();
+        object.sync_all().unwrap();
+        drop(object);
+
+        let retained = temporary.path().join("retained-original");
+        std::fs::rename(temporary.path().join(&staging_name), &retained).unwrap();
+        let replacement = temporary.path().join(&staging_name);
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(replacement.join("sentinel"), b"replacement must survive").unwrap();
+
+        let install = staging.install("must-not-install.bin");
+
+        assert!(
+            matches!(install, Err(TransferReceiverError::DestinationStateChanged)),
+            "{install:?}"
+        );
+        assert!(!temporary.path().join("must-not-install.bin").exists());
+        assert!(matches!(
+            staging.cleanup(),
+            Err(TransferReceiverError::DestinationStateChanged)
+        ));
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"replacement must survive"
+        );
+        assert!(
+            !retained.exists(),
+            "cleanup must remove the original directory through its retained capability"
         );
     }
 }

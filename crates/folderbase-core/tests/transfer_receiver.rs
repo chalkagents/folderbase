@@ -10,7 +10,7 @@ use std::{
 
 use cap_std::{ambient_authority, fs::Dir};
 use folderbase_core::transfer_manifest::{
-    CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, LARGE_PROFILE_V1, MANIFEST_FORMAT_V1,
+    CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, MANIFEST_FORMAT_V1,
     ObjectVerificationError, STANDARD_PROFILE_V1,
 };
 use folderbase_core::transfer_receiver::{
@@ -52,25 +52,6 @@ fn empty_manifest() -> ChunkManifest {
             .to_owned(),
         object_bytes: 0,
         chunks: Vec::new(),
-    }
-}
-
-fn one_large_chunk_manifest(object_bytes: u64, digest: String) -> ChunkManifest {
-    ChunkManifest {
-        format: MANIFEST_FORMAT_V1.to_owned(),
-        algorithm: CHUNKING_ALGORITHM_V1.to_owned(),
-        profile: LARGE_PROFILE_V1.to_owned(),
-        minimum_chunk_bytes: 4 * 1024 * 1024,
-        average_chunk_bytes: 16 * 1024 * 1024,
-        maximum_chunk_bytes: 64 * 1024 * 1024,
-        object_sha256: digest.clone(),
-        object_bytes,
-        chunks: vec![ChunkDescriptor {
-            index: 0,
-            offset: 0,
-            bytes: object_bytes,
-            sha256: digest,
-        }],
     }
 }
 
@@ -597,6 +578,60 @@ fn incomplete_receiver_leaves_destination_and_staging_absent() {
 }
 
 #[test]
+fn multi_chunk_incomplete_receiver_reports_the_first_missing_chunk_without_side_effects() {
+    let (object, manifest) = multi_chunk_fixture(3);
+    let chunk_bytes = 256 * 1024;
+
+    for missing in [0_usize, 1, 2] {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temporary.path().join("receiver")).unwrap();
+        std::fs::create_dir(temporary.path().join("destination")).unwrap();
+        let receiver_root =
+            Dir::open_ambient_dir(temporary.path().join("receiver"), ambient_authority()).unwrap();
+        let destination_root =
+            Dir::open_ambient_dir(temporary.path().join("destination"), ambient_authority())
+                .unwrap();
+        let transfer = PersistentTransfer::create(
+            &receiver_root,
+            format!("inbound-{missing}"),
+            manifest.clone(),
+        )
+        .unwrap();
+        for index in 0..3 {
+            if index == missing {
+                continue;
+            }
+            let start = index * chunk_bytes;
+            let end = start + chunk_bytes;
+            transfer
+                .accept_chunk_from(index as u32, Cursor::new(&object[start..end]))
+                .unwrap();
+        }
+        let destination = format!("missing-{missing}.bin");
+
+        let result = transfer.materialize_to(&destination_root, &destination);
+
+        assert!(
+            matches!(
+                result,
+                Err(TransferReceiverError::IncompleteTransfer {
+                    first_missing_chunk
+                }) if first_missing_chunk == missing as u32
+            ),
+            "missing {missing}: {result:?}"
+        );
+        assert!(
+            !temporary
+                .path()
+                .join("destination")
+                .join(destination)
+                .exists()
+        );
+        assert_no_materialization_staging(&temporary.path().join("destination"));
+    }
+}
+
+#[test]
 fn corrupt_or_truncated_chunks_never_materialize() {
     for replacement in [
         b"HELLO FOLDERBASE".as_slice(),
@@ -754,6 +789,79 @@ fn unsafe_destination_spellings_are_rejected_before_side_effects() {
             .count(),
         0
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_unsafe_destination_spellings_are_rejected_exactly() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temporary.path().join("receiver")).unwrap();
+    std::fs::create_dir(temporary.path().join("destination")).unwrap();
+    let receiver_root =
+        Dir::open_ambient_dir(temporary.path().join("receiver"), ambient_authority()).unwrap();
+    let destination_root =
+        Dir::open_ambient_dir(temporary.path().join("destination"), ambient_authority()).unwrap();
+    let transfer =
+        PersistentTransfer::create(&receiver_root, "inbound", single_chunk_manifest()).unwrap();
+    transfer
+        .accept_chunk_from(0, Cursor::new(b"hello folderbase"))
+        .unwrap();
+
+    for unsafe_path in [
+        r"C:artifact.bin",
+        r"C:\artifact.bin",
+        r"\artifact.bin",
+        r"\\server\share\artifact.bin",
+        r"\\?\C:\artifact.bin",
+        r"\\.\NUL",
+        r"nested\\artifact.bin",
+        "nested\\",
+    ] {
+        let result = transfer.materialize_to(&destination_root, Path::new(unsafe_path));
+        assert!(
+            matches!(result, Err(TransferReceiverError::UnsafeDestinationPath)),
+            "{unsafe_path:?}: {result:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("destination"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_nested_forward_and_backslash_destinations_are_both_supported() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temporary.path().join("receiver")).unwrap();
+    std::fs::create_dir_all(temporary.path().join("destination/nested")).unwrap();
+    let receiver_root =
+        Dir::open_ambient_dir(temporary.path().join("receiver"), ambient_authority()).unwrap();
+    let destination_root =
+        Dir::open_ambient_dir(temporary.path().join("destination"), ambient_authority()).unwrap();
+    let transfer =
+        PersistentTransfer::create(&receiver_root, "inbound", single_chunk_manifest()).unwrap();
+    transfer
+        .accept_chunk_from(0, Cursor::new(b"hello folderbase"))
+        .unwrap();
+
+    for destination in ["nested/forward.bin", r"nested\back.bin"] {
+        let materialized = transfer
+            .materialize_to(&destination_root, destination)
+            .unwrap();
+
+        assert_eq!(
+            materialized.relative_destination,
+            PathBuf::from(destination)
+        );
+        assert_eq!(
+            std::fs::read(temporary.path().join("destination").join(destination)).unwrap(),
+            b"hello folderbase"
+        );
+    }
+    assert_no_materialization_staging(&temporary.path().join("destination/nested"));
 }
 
 #[test]
@@ -919,75 +1027,6 @@ fn materialization_staging_is_private_and_removed_after_ordinary_results() {
         "the installed hard link must retain the staging inode's private mode"
     );
     assert_no_materialization_staging(&temporary.path().join("destination"));
-}
-
-#[cfg(unix)]
-#[test]
-fn a_replaced_materialization_staging_name_is_never_linked_or_deleted_as_owned() {
-    let temporary = tempfile::tempdir().unwrap();
-    std::fs::create_dir(temporary.path().join("receiver")).unwrap();
-    std::fs::create_dir(temporary.path().join("destination")).unwrap();
-    let object_path = temporary.path().join("large-object.bin");
-    write_repeated_file(&object_path, 0xa5, 32 * 1024 * 1024);
-    let digest = sha256_file(&object_path);
-    let receiver_root =
-        Dir::open_ambient_dir(temporary.path().join("receiver"), ambient_authority()).unwrap();
-    let destination_root =
-        Dir::open_ambient_dir(temporary.path().join("destination"), ambient_authority()).unwrap();
-    let transfer = Arc::new(
-        PersistentTransfer::create(
-            &receiver_root,
-            "inbound",
-            one_large_chunk_manifest(32 * 1024 * 1024, digest),
-        )
-        .unwrap(),
-    );
-    transfer
-        .accept_chunk_from(0, std::fs::File::open(&object_path).unwrap())
-        .unwrap();
-    let materializing = {
-        let transfer = Arc::clone(&transfer);
-        std::thread::spawn(move || {
-            transfer.materialize_to(&destination_root, "never-installed.bin")
-        })
-    };
-    let destination = temporary.path().join("destination");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let staging = loop {
-        let candidate = std::fs::read_dir(&destination)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with(".folderbase-materialize-") && name.ends_with(".part")
-                    })
-            });
-        if let Some(candidate) = candidate {
-            break candidate;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "materializer completed before staging replacement could be exercised"
-        );
-        std::thread::yield_now();
-    };
-    std::fs::remove_file(&staging).unwrap();
-    std::fs::write(&staging, b"replacement must survive").unwrap();
-    set_mode(&staging, 0o600);
-
-    let result = materializing.join().unwrap();
-
-    assert!(
-        matches!(result, Err(TransferReceiverError::DestinationStateChanged)),
-        "{result:?}"
-    );
-    assert!(!destination.join("never-installed.bin").exists());
-    assert_eq!(
-        std::fs::read(&staging).unwrap(),
-        b"replacement must survive"
-    );
 }
 
 #[test]
@@ -1163,6 +1202,10 @@ fn opaque_file_matrix_round_trips_without_type_specific_behavior() {
 #[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
 fn non_utf8_destination_names_round_trip_without_loss() {
+    // The proof applies where the Unix filesystem/API accepts opaque non-UTF-8
+    // leaf bytes. Tested macOS/APFS rejects this spelling with EILSEQ before
+    // Core can create the hard link, so Apple is excluded rather than claiming
+    // support the platform does not provide.
     use std::os::unix::ffi::OsStringExt;
 
     let temporary = tempfile::tempdir().unwrap();
@@ -1289,108 +1332,6 @@ fn captured_source_receiver_restart_and_materializer_complete_end_to_end() {
     );
     assert_eq!(materialized.object.manifest_digest, manifest_digest);
     assert_eq!(materialized.object.object_sha256, expected_digest);
-}
-
-#[cfg(unix)]
-#[test]
-fn same_bytes_chunk_path_replacement_fails_closed_and_remains_reusable() {
-    let temporary = tempfile::tempdir().unwrap();
-    let source_root = temporary.path().join("source");
-    let receiver_root_path = temporary.path().join("receiver");
-    let destination_root_path = temporary.path().join("destination");
-    std::fs::create_dir(&source_root).unwrap();
-    std::fs::create_dir(&receiver_root_path).unwrap();
-    std::fs::create_dir(&destination_root_path).unwrap();
-    let mut generated = std::fs::File::create(source_root.join("large.bin")).unwrap();
-    std::io::copy(
-        &mut std::io::repeat(0xa5).take(32 * 1024 * 1024),
-        &mut generated,
-    )
-    .unwrap();
-    generated.sync_all().unwrap();
-    let store = LocalVersionStore::open(&source_root).unwrap();
-    let captured = store.capture_file("large.bin").unwrap();
-    let mut source = store
-        .open_chunk_transfer(&captured.version.id, ChunkTransferProfile::LargeV1)
-        .unwrap();
-    let receiver_root = Dir::open_ambient_dir(&receiver_root_path, ambient_authority()).unwrap();
-    let destination_root =
-        Dir::open_ambient_dir(&destination_root_path, ambient_authority()).unwrap();
-    let transfer = Arc::new(
-        PersistentTransfer::create(&receiver_root, "inbound", source.manifest().clone()).unwrap(),
-    );
-    for index in 0..source.manifest().chunks.len() as u32 {
-        let chunk_path = temporary.path().join(format!("chunk-{index}.tmp"));
-        let mut chunk_writer = std::fs::File::create(&chunk_path).unwrap();
-        source.copy_chunk(index, &mut chunk_writer).unwrap();
-        chunk_writer.sync_all().unwrap();
-        transfer
-            .accept_chunk_from(index, std::fs::File::open(&chunk_path).unwrap())
-            .unwrap();
-        std::fs::remove_file(chunk_path).unwrap();
-    }
-    let chunk_count = source.manifest().chunks.len() as u32;
-    for index in 0..chunk_count {
-        std::fs::copy(
-            receiver_root_path.join(format!("inbound/chunks/{index}.chunk")),
-            temporary.path().join(format!("replacement-{index}.chunk")),
-        )
-        .unwrap();
-    }
-    let materializing = {
-        let transfer = Arc::clone(&transfer);
-        std::thread::spawn(move || {
-            transfer.materialize_to(&destination_root, "must-not-install.bin")
-        })
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if std::fs::read_dir(&destination_root_path)
-            .unwrap()
-            .any(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(".folderbase-materialize-"))
-            })
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "materialization did not stage");
-        std::thread::yield_now();
-    }
-    for index in 0..chunk_count {
-        std::fs::rename(
-            receiver_root_path.join(format!("inbound/chunks/{index}.chunk")),
-            temporary.path().join(format!("retired-{index}.chunk")),
-        )
-        .unwrap();
-        std::fs::rename(
-            temporary.path().join(format!("replacement-{index}.chunk")),
-            receiver_root_path.join(format!("inbound/chunks/{index}.chunk")),
-        )
-        .unwrap();
-    }
-
-    let first = materializing.join().unwrap();
-
-    assert!(
-        matches!(first, Err(TransferReceiverError::ObjectVerification(_))),
-        "{first:?}"
-    );
-    assert!(!destination_root_path.join("must-not-install.bin").exists());
-    let destination_root =
-        Dir::open_ambient_dir(&destination_root_path, ambient_authority()).unwrap();
-    transfer
-        .materialize_to(&destination_root, "replacement-is-reusable.bin")
-        .unwrap();
-    assert_eq!(
-        std::fs::metadata(destination_root_path.join("replacement-is-reusable.bin"))
-            .unwrap()
-            .len(),
-        32 * 1024 * 1024
-    );
 }
 
 #[test]
