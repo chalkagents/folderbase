@@ -815,6 +815,7 @@ fn windows_unsafe_destination_spellings_are_rejected_exactly() {
         r"\\?\C:\artifact.bin",
         r"\\.\NUL",
         r"nested\\artifact.bin",
+        r"nested\.\artifact.bin",
         "nested\\",
     ] {
         let result = transfer.materialize_to(&destination_root, Path::new(unsafe_path));

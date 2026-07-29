@@ -501,15 +501,31 @@ fn destination_spelling_is_exact(relative: &Path, rebuilt: &Path) -> bool {
 fn destination_spelling_is_exact(relative: &Path, _rebuilt: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
 
+    windows_destination_spelling_is_exact(&relative.as_os_str().encode_wide().collect::<Vec<_>>())
+}
+
+#[cfg(any(windows, test))]
+fn windows_destination_spelling_is_exact(spelling: &[u16]) -> bool {
     fn is_separator(unit: u16) -> bool {
         unit == u16::from(b'/') || unit == u16::from(b'\\')
     }
 
-    let spelling = relative.as_os_str().encode_wide().collect::<Vec<_>>();
-    spelling.last().is_some_and(|last| !is_separator(*last))
-        && !spelling
-            .windows(2)
-            .any(|pair| is_separator(pair[0]) && is_separator(pair[1]))
+    fn is_exact_segment(segment: &[u16]) -> bool {
+        !segment.is_empty()
+            && segment != [u16::from(b'.')]
+            && segment != [u16::from(b'.'), u16::from(b'.')]
+    }
+
+    let mut segment_start = 0;
+    for (index, unit) in spelling.iter().copied().enumerate() {
+        if is_separator(unit) {
+            if !is_exact_segment(&spelling[segment_start..index]) {
+                return false;
+            }
+            segment_start = index + 1;
+        }
+    }
+    is_exact_segment(&spelling[segment_start..])
 }
 
 fn ensure_destination_absent(
@@ -668,6 +684,25 @@ impl<'a> MaterializationStaging<'a> {
     fn cleanup_inner(&mut self) -> Result<(), TransferReceiverError> {
         let directory_binding = self.validate_directory_binding();
         if !self.object_removed {
+            self.remove_object_with_sync(sync_directory)?;
+        }
+
+        let directory = self
+            .directory
+            .take()
+            .ok_or(TransferReceiverError::DestinationStateChanged)?;
+        directory
+            .remove_open_dir()
+            .map_err(TransferReceiverError::Io)?;
+        sync_directory(self.parent)?;
+        directory_binding
+    }
+
+    fn remove_object_with_sync(
+        &mut self,
+        sync: impl FnOnce(&Dir) -> Result<(), TransferReceiverError>,
+    ) -> Result<(), TransferReceiverError> {
+        {
             let expected_object = self
                 .object_identity
                 .as_ref()
@@ -681,19 +716,9 @@ impl<'a> MaterializationStaging<'a> {
             directory
                 .remove_file(MATERIALIZATION_OBJECT_FILE)
                 .map_err(TransferReceiverError::Io)?;
-            sync_directory(directory)?;
-            self.object_removed = true;
         }
-
-        let directory = self
-            .directory
-            .take()
-            .ok_or(TransferReceiverError::DestinationStateChanged)?;
-        directory
-            .remove_open_dir()
-            .map_err(TransferReceiverError::Io)?;
-        sync_directory(self.parent)?;
-        directory_binding
+        self.object_removed = true;
+        sync(self.directory()?)
     }
 
     fn validate_directory_binding(&self) -> Result<(), TransferReceiverError> {
@@ -1226,7 +1251,7 @@ mod tests {
 
     use super::{
         AcceptedChunkReader, CheckpointLease, CheckpointLock, ChunkAcceptance,
-        MaterializationStaging, TransferReceiverError,
+        MaterializationStaging, TransferReceiverError, windows_destination_spelling_is_exact,
     };
 
     #[derive(Default)]
@@ -1276,6 +1301,67 @@ mod tests {
             1,
             "a poisoned receiver must fail before a platform-dependent relock"
         );
+    }
+
+    #[test]
+    fn windows_raw_destination_segments_reject_aliases_but_allow_either_separator() {
+        for spelling in ["nested/artifact.bin", r"nested\artifact.bin"] {
+            assert!(
+                windows_destination_spelling_is_exact(&spelling.encode_utf16().collect::<Vec<_>>()),
+                "{spelling:?}"
+            );
+        }
+        for spelling in [
+            "nested//artifact.bin",
+            r"nested\\artifact.bin",
+            "nested/./artifact.bin",
+            r"nested\.\artifact.bin",
+            "nested/../artifact.bin",
+            r"nested\..\artifact.bin",
+            "nested/",
+            "nested\\",
+        ] {
+            assert!(
+                !windows_destination_spelling_is_exact(
+                    &spelling.encode_utf16().collect::<Vec<_>>()
+                ),
+                "{spelling:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removed_materialization_object_stays_removed_after_directory_sync_failure() {
+        use std::io::Write;
+
+        use cap_std::{ambient_authority, fs::Dir};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_root =
+            Dir::open_ambient_dir(temporary.path(), ambient_authority()).unwrap();
+        let mut staging = MaterializationStaging::create(&destination_root).unwrap();
+        let staging_name = staging.name.clone();
+        let mut object = staging.create_object().unwrap();
+        object.write_all(b"verified original").unwrap();
+        object.sync_all().unwrap();
+        drop(object);
+
+        let result = staging.remove_object_with_sync(|_| {
+            Err(TransferReceiverError::Io(io::Error::other(
+                "injected staging directory sync failure",
+            )))
+        });
+
+        assert!(
+            matches!(result, Err(TransferReceiverError::Io(ref error))
+                if error.to_string() == "injected staging directory sync failure"),
+            "{result:?}"
+        );
+        assert!(staging.object_removed);
+        assert!(!temporary.path().join(&staging_name).join("object").exists());
+        drop(staging);
+        assert!(!temporary.path().join(staging_name).exists());
     }
 
     #[cfg(unix)]

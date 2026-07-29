@@ -311,9 +311,12 @@ The receiver implementation fixes these additional v1 details:
    applies the platform directory-persistence policy. Cleanup removes
    `object` capability-relative, then consumes the retained open directory
    with the platform's nonrecursive open-directory removal primitive and
-   synchronizes the destination parent. A replacement installed at the former
-   staging pathname is neither linked nor removed. The materializer never
-   scans user folders for stale-looking names.
+   synchronizes the destination parent. Under the cooperative
+   destination-parent mutation contract, a replacement already present when
+   identity validation runs is neither linked nor removed. Open-directory
+   removal is best-effort and nonrecursive; it is not an atomic security
+   boundary against a deliberate rename after validation. The materializer
+   never scans user folders for stale-looking names.
 9. Once the no-clobber link succeeds, a late identity, synchronization,
    staging-cleanup, or lease-release failure never causes Core to delete the
    installed destination. Such a retry observes the existing leaf and refuses
@@ -339,9 +342,12 @@ materialization staging directory while the operation is running: Core checks
 the object before linking and the installed identity afterward, but does not
 claim an atomic security boundary against an actor holding that directory open.
 Top-level staging-name replacement cannot redirect the retained hard-link
-source or capability-relative object cleanup. Receiver v1 exposes no public
-per-file cleanup or garbage-collection API: bounded stale cleanup is an
-internal part of the next leased receipt.
+source or capability-relative object cleanup. Removal of the top-level staging
+directory uses the strongest available open-directory primitive, but deliberate
+concurrent rewrites of that destination-parent namespace are likewise outside
+the writer coordination boundary. Receiver v1 exposes no public per-file cleanup
+or garbage-collection API: bounded stale cleanup is an internal part of the
+next leased receipt.
 
 Directory-entry durability follows the strongest documented primitive on each
 supported platform. Unix implementations reopen `.` beneath the retained
