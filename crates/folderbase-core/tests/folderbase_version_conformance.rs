@@ -107,6 +107,34 @@ fn bounded_decoder_accepts_the_minimal_restorable_public_version() {
 }
 
 #[test]
+fn controlled_encoder_round_trips_only_a_validated_version_without_digest_drift() {
+    let version =
+        decode_fixture("conformance/folderbase-version/valid/fidelity-and-lifecycle-v1.json")
+            .expect("valid fidelity vector");
+    let expected_digest = version.canonical_digest().expect("validated digest");
+    let expected_json =
+        read_json("conformance/folderbase-version/valid/fidelity-and-lifecycle-v1.json");
+
+    let mut encoded = Vec::new();
+    version
+        .encode_bounded(&mut encoded)
+        .expect("controlled encoding");
+
+    assert!(encoded.len() as u64 <= MAX_ENCODED_VERSION_BYTES);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encoded).expect("encoded JSON"),
+        expected_json
+    );
+
+    let decoded =
+        FolderbaseVersion::decode_bounded(Cursor::new(&encoded)).expect("round-trip decode");
+    assert_eq!(
+        decoded.canonical_digest().expect("round-trip digest"),
+        expected_digest
+    );
+}
+
+#[test]
 fn public_schema_is_closed_draft_2020_12_and_accepts_the_minimal_vector() {
     let schema = read_json(VERSION_SCHEMA);
     let validator = jsonschema::draft202012::options()

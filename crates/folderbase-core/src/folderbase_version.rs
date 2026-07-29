@@ -7,13 +7,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
-    io::Read,
+    io::{Read, Write},
     marker::PhantomData,
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{
-    Deserialize,
+    Deserialize, Serialize,
     de::{IgnoredAny, SeqAccess, Visitor},
 };
 use sha2::{Digest, Sha256};
@@ -65,7 +65,7 @@ struct FolderbaseVersionWire {
     exclusions: Vec<Exclusion>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PathPolicy {
     format: String,
@@ -75,7 +75,7 @@ struct PathPolicy {
     case_folding_unicode_version: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RootManifest {
     path: String,
@@ -91,7 +91,7 @@ pub enum PathBindingKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum PathBinding {
     Directory(DirectoryBinding),
@@ -99,7 +99,7 @@ pub enum PathBinding {
     Symlink(SymlinkBinding),
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectoryBinding {
     path: String,
@@ -108,7 +108,7 @@ pub struct DirectoryBinding {
     kind: DirectoryKind,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RegularFileBinding {
     path: String,
@@ -121,7 +121,7 @@ pub struct RegularFileBinding {
     executable: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymlinkBinding {
     path: String,
@@ -133,37 +133,37 @@ pub struct SymlinkBinding {
     target_safety: SymlinkTargetSafety,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum DirectoryKind {
     Directory,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RegularFileKind {
     RegularFile,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum SymlinkKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum LiveLifecycle {
     Live,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum SymlinkTargetSafety {
     RelativeWithinFolderbase,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Tombstone {
     path: String,
@@ -173,13 +173,13 @@ pub struct Tombstone {
     last_object_version_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum DeletedLifecycle {
     Deleted,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeletedKind {
     Directory,
@@ -187,7 +187,7 @@ pub enum DeletedKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Exclusion {
     path: String,
@@ -195,7 +195,7 @@ pub struct Exclusion {
     reason: ExclusionReason,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExclusionKind {
     NestedFolderbase,
@@ -207,7 +207,7 @@ pub enum ExclusionKind {
     OtherSpecial,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExclusionReason {
     NestedFolderbaseBoundary,
@@ -284,6 +284,9 @@ pub enum FolderbaseVersionError {
     #[error("Folderbase Version is not valid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
 
+    #[error("could not write encoded Folderbase Version: {0}")]
+    EncodingIo(#[source] std::io::Error),
+
     #[error("Folderbase Version violates the protocol: {0}")]
     InvalidVersion(String),
 }
@@ -301,11 +304,41 @@ impl FolderbaseVersion {
                 maximum_bytes: MAX_ENCODED_VERSION_BYTES,
             });
         }
-        let counts: EntryCountProbe = serde_json::from_slice(&encoded)?;
+        Self::decode_verified_slice(&encoded)
+    }
+
+    /// Encode one already-validated Folderbase Version as bounded JSON.
+    ///
+    /// The public value intentionally does not implement `Serialize`; this
+    /// method is the only supported JSON encoding path.
+    pub fn encode_bounded(&self, mut writer: impl Write) -> Result<(), FolderbaseVersionError> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(&FolderbaseVersionWireRef::from(self))?;
+        if encoded.len() as u64 > MAX_ENCODED_VERSION_BYTES {
+            return Err(FolderbaseVersionError::EncodedVersionTooLarge {
+                maximum_bytes: MAX_ENCODED_VERSION_BYTES,
+            });
+        }
+        writer
+            .write_all(&encoded)
+            .map_err(FolderbaseVersionError::EncodingIo)
+    }
+
+    /// Construct a validated value from a bounded in-memory representation.
+    ///
+    /// This crate-private seam is reserved for later producer transactions;
+    /// external callers continue to use `decode_bounded`.
+    pub(crate) fn decode_verified_slice(encoded: &[u8]) -> Result<Self, FolderbaseVersionError> {
+        if encoded.len() as u64 > MAX_ENCODED_VERSION_BYTES {
+            return Err(FolderbaseVersionError::EncodedVersionTooLarge {
+                maximum_bytes: MAX_ENCODED_VERSION_BYTES,
+            });
+        }
+        let counts: EntryCountProbe = serde_json::from_slice(encoded)?;
         if counts.total() > MAX_VERSION_ENTRIES {
             return invalid("Folderbase Version entry count exceeds the v1 limit");
         }
-        let version = Self::from(serde_json::from_slice::<FolderbaseVersionWire>(&encoded)?);
+        let version = Self::from(serde_json::from_slice::<FolderbaseVersionWire>(encoded)?);
         version.validate()?;
         Ok(version)
     }
@@ -864,6 +897,39 @@ impl FolderbaseVersion {
 
         changes.sort_by_cached_key(change_sort_key);
         Ok(FolderbaseVersionDiff { changes })
+    }
+}
+
+#[derive(Serialize)]
+struct FolderbaseVersionWireRef<'a> {
+    format: &'a str,
+    protocol_version: &'a str,
+    folderbase_id: &'a str,
+    version_id: &'a str,
+    parents: &'a [String],
+    created_at: &'a str,
+    path_policy: &'a PathPolicy,
+    root_manifest: &'a RootManifest,
+    bindings: &'a [PathBinding],
+    tombstones: &'a [Tombstone],
+    exclusions: &'a [Exclusion],
+}
+
+impl<'a> From<&'a FolderbaseVersion> for FolderbaseVersionWireRef<'a> {
+    fn from(version: &'a FolderbaseVersion) -> Self {
+        Self {
+            format: &version.format,
+            protocol_version: &version.protocol_version,
+            folderbase_id: &version.folderbase_id,
+            version_id: &version.version_id,
+            parents: &version.parents,
+            created_at: &version.created_at,
+            path_policy: &version.path_policy,
+            root_manifest: &version.root_manifest,
+            bindings: &version.bindings,
+            tombstones: &version.tombstones,
+            exclusions: &version.exclusions,
+        }
     }
 }
 
@@ -1493,7 +1559,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct ExactU64(u64);
 
 impl<'de> Deserialize<'de> for ExactU64 {
