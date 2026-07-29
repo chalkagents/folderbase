@@ -662,13 +662,12 @@ fn find_restore_binding(
                     "ancestor {version_id} could not be verified: {error}"
                 ))
             })?;
-        if let Some(binding) = version.lookup_binding(tombstone.path()) {
-            if binding.kind() == PathBindingKind::RegularFile
-                && binding.object_id() == tombstone.object_id()
-                && binding.object_version_id() == Some(expected_version)
-            {
-                candidates.push(binding.clone());
-            }
+        if let Some(binding) = version.lookup_binding(tombstone.path())
+            && binding.kind() == PathBindingKind::RegularFile
+            && binding.object_id() == tombstone.object_id()
+            && binding.object_version_id() == Some(expected_version)
+        {
+            candidates.push(binding.clone());
         }
         let mut next_lineage = lineage;
         next_lineage.push(version_id);
@@ -3160,6 +3159,224 @@ mod tests {
         assert_eq!(
             fs::read(root.path().join("active.bin")).expect("foreign bytes preserved"),
             b"first opaque bytes"
+        );
+    }
+
+    #[test]
+    fn capture_and_restore_active_journals_mutually_exclude_each_other() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        fs::write(root.path().join("FOLDERBASE.md"), "# changed\n").expect("unrelated update");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(
+                store.plan_capture().expect("capture plan"),
+                |checkpoint| {
+                    if checkpoint == &CaptureCheckpoint::JournalDurable {
+                        panic!("leave capture active");
+                    }
+                },
+            )
+        }));
+        assert!(interrupted.is_err());
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::ConflictingTransaction(message))
+                if message.contains("capture")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::JournalDurable {
+                    panic!("leave restore active");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        assert!(matches!(
+            store.seal_capture(store.plan_capture().expect("capture plan")),
+            Err(FolderbaseCaptureError::ConflictingTransaction(message))
+                if message.contains("restore")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+    }
+
+    #[test]
+    fn restore_journal_and_head_tamper_fail_closed_before_workspace_publication() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::JournalDurable {
+                    panic!("leave restore journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut transaction = read_active_restore_transaction(&state)
+            .expect("journal")
+            .expect("active");
+        transaction.target_version_sha256 = "0".repeat(64);
+        state
+            .replace(
+                Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+                &encode_restore_transaction(&transaction).expect("tampered journal"),
+            )
+            .expect("replace journal");
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreTransaction(_))
+        ));
+        assert!(!root.path().join("active.bin").exists());
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::JournalDurable {
+                    panic!("leave restore journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut head = read_head_record(&state).expect("Head").expect("Head");
+        head.transaction_sha256 = "0".repeat(64);
+        state
+            .replace(
+                Path::new(LOCAL_HEAD_PATH),
+                &json_bytes(&head).expect("tampered Head"),
+            )
+            .expect("replace Head");
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::LocalHeadChanged)
+        ));
+        assert!(!root.path().join("active.bin").exists());
+        assert_eq!(head.version_id, deletion.version_id());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_parent_symlink_swap_never_writes_outside_retained_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = folderbase();
+        fs::create_dir(root.path().join("docs")).expect("docs");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("docs/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("docs/active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let outside = tempdir().expect("outside");
+
+        let error = store
+            .restore_tombstone_with_hook("docs/active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::StageDurable {
+                    fs::rename(root.path().join("docs"), root.path().join("detached-docs"))
+                        .expect("detach parent");
+                    symlink(outside.path(), root.path().join("docs")).expect("redirect parent");
+                }
+            })
+            .expect_err("parent symlink swap must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::LocalStore(_)
+                | FolderbaseCaptureError::RestoreTargetOccupied(_)
+        ));
+        assert!(!outside.path().join("active.bin").exists());
+        assert!(!root.path().join("detached-docs/active.bin").exists());
+    }
+
+    #[test]
+    fn restore_never_crosses_a_new_nested_folderbase_boundary() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("client")).expect("client");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("client/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("client/active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        fs::create_dir(root.path().join("client/.folderbase")).expect("nested state");
+        fs::write(
+            root.path().join("client/.folderbase/manifest.json"),
+            br#"{
+  "protocol_version": "0.4.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
+  }
+}
+"#,
+        )
+        .expect("nested manifest");
+        fs::write(
+            root.path().join("client/FOLDERBASE.md"),
+            "# Nested Folderbase\n",
+        )
+        .expect("nested entry");
+
+        assert!(store.restore_tombstone("client/active.bin").is_err());
+        assert!(!root.path().join("client/active.bin").exists());
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
         );
     }
 

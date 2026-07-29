@@ -514,6 +514,100 @@ fn carried_tombstone_restores_from_nearest_verified_live_ancestor_only() {
 }
 
 #[test]
+fn delete_recreate_delete_restores_only_the_newest_tombstone_generation() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    fs::write(&path, b"first generation").expect("first");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let first = store
+        .seal_capture(store.plan_capture().expect("first plan"))
+        .expect("first");
+    let first_object = store
+        .read_version(first.version_id())
+        .unwrap()
+        .lookup_binding("proposal.docx")
+        .unwrap()
+        .object_id()
+        .to_owned();
+    fs::remove_file(&path).expect("first delete");
+    store
+        .seal_capture(store.plan_capture().expect("first delete plan"))
+        .expect("first delete");
+    fs::write(&path, b"second generation").expect("second");
+    let second = store
+        .seal_capture(store.plan_capture().expect("second plan"))
+        .expect("second");
+    let second_binding = store
+        .read_version(second.version_id())
+        .unwrap()
+        .lookup_binding("proposal.docx")
+        .unwrap()
+        .clone();
+    assert_ne!(second_binding.object_id(), first_object);
+    fs::remove_file(&path).expect("second delete");
+    let second_deletion = store
+        .seal_capture(store.plan_capture().expect("second delete plan"))
+        .expect("second delete");
+    let tombstone = store
+        .read_version(second_deletion.version_id())
+        .unwrap()
+        .tombstones()[0]
+        .clone();
+    assert_eq!(tombstone.object_id(), second_binding.object_id());
+
+    let restored = store
+        .restore_tombstone("proposal.docx")
+        .expect("restore newest generation");
+    assert_eq!(restored.object_id(), second_binding.object_id());
+    assert_eq!(
+        restored.object_version_id(),
+        second_binding.object_version_id().unwrap()
+    );
+    assert_eq!(fs::read(path).unwrap(), b"second generation");
+}
+
+#[test]
+fn missing_immutable_restore_bytes_fail_before_journal_workspace_or_head_mutation() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    fs::write(&path, b"sealed bytes").expect("proposal");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let digest = store
+        .read_version(genesis.version_id())
+        .unwrap()
+        .lookup_binding("proposal.docx")
+        .unwrap()
+        .content_sha256()
+        .unwrap()
+        .to_owned();
+    fs::remove_file(&path).expect("delete proposal");
+    store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    let head_path = root.path().join(".folderbase/local/head.json");
+    let head_before = fs::read(&head_path).unwrap();
+    fs::remove_file(
+        root.path()
+            .join(".folderbase/versions/blobs/sha256")
+            .join(digest),
+    )
+    .expect("remove immutable blob");
+
+    assert!(store.restore_tombstone("proposal.docx").is_err());
+    assert!(!path.exists());
+    assert_eq!(fs::read(head_path).unwrap(), head_before);
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/transactions/folderbase-version-restores/active.json")
+            .exists()
+    );
+}
+
+#[test]
 fn restore_removes_only_the_selected_tombstone_and_rejects_reserved_state() {
     let root = folderbase();
     fs::write(root.path().join("one.bin"), b"one").expect("one");
