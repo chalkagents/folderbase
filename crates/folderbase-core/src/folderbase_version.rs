@@ -65,9 +65,28 @@ struct FolderbaseVersionWire {
     exclusions: Vec<Exclusion>,
 }
 
+/// Crate-private construction boundary for future verified producers.
+///
+/// Later capture/seal code may prepare these parts only after it has verified
+/// their referenced bytes. Construction still performs the complete protocol
+/// validation before returning a `FolderbaseVersion`.
+pub(crate) struct FolderbaseVersionParts {
+    pub(crate) format: String,
+    pub(crate) protocol_version: String,
+    pub(crate) folderbase_id: String,
+    pub(crate) version_id: String,
+    pub(crate) parents: Vec<String>,
+    pub(crate) created_at: String,
+    pub(crate) path_policy: PathPolicy,
+    pub(crate) root_manifest: RootManifest,
+    pub(crate) bindings: Vec<PathBinding>,
+    pub(crate) tombstones: Vec<Tombstone>,
+    pub(crate) exclusions: Vec<Exclusion>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PathPolicy {
+pub(crate) struct PathPolicy {
     format: String,
     normalization: String,
     normalization_unicode_version: String,
@@ -340,7 +359,29 @@ impl FolderbaseVersion {
         if counts.total() > MAX_VERSION_ENTRIES {
             return invalid("Folderbase Version entry count exceeds the v1 limit");
         }
-        let version = Self::from(serde_json::from_slice::<FolderbaseVersionWire>(encoded)?);
+        let parts =
+            FolderbaseVersionParts::from(serde_json::from_slice::<FolderbaseVersionWire>(encoded)?);
+        Self::from_verified_parts(parts)
+    }
+
+    /// Construct one value from producer-verified parts, then independently
+    /// enforce every Folderbase Version invariant.
+    pub(crate) fn from_verified_parts(
+        parts: FolderbaseVersionParts,
+    ) -> Result<Self, FolderbaseVersionError> {
+        let version = Self {
+            format: parts.format,
+            protocol_version: parts.protocol_version,
+            folderbase_id: parts.folderbase_id,
+            version_id: parts.version_id,
+            parents: parts.parents,
+            created_at: parts.created_at,
+            path_policy: parts.path_policy,
+            root_manifest: parts.root_manifest,
+            bindings: parts.bindings,
+            tombstones: parts.tombstones,
+            exclusions: parts.exclusions,
+        };
         version.validate()?;
         Ok(version)
     }
@@ -974,7 +1015,7 @@ impl<'a> From<&'a FolderbaseVersion> for FolderbaseVersionWireRef<'a> {
     }
 }
 
-impl From<FolderbaseVersionWire> for FolderbaseVersion {
+impl From<FolderbaseVersionWire> for FolderbaseVersionParts {
     fn from(wire: FolderbaseVersionWire) -> Self {
         Self {
             format: wire.format,

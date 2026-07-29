@@ -81,6 +81,9 @@ jobs:
       - name: Test the public Folderbase Version contract
         run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
 
+      - name: Test metadata-only Folderbase capture planning
+        run: cargo test --package folderbase-core --test folderbase_capture --locked
+
       - name: Verify independent Folderbase Version digest vectors
         run: node scripts/verify-folderbase-version-digest-vectors.mjs
 

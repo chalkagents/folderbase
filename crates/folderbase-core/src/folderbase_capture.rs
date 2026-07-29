@@ -6,7 +6,8 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    ffi::OsStr,
+    fmt, fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
 };
@@ -41,6 +42,15 @@ const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
 pub enum CapturePlanLimitKind {
     Entries,
     ObjectBytes,
+}
+
+impl fmt::Display for CapturePlanLimitKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Entries => "entries",
+            Self::ObjectBytes => "object_bytes",
+        })
+    }
 }
 
 /// Metadata kind observed for a future live Path Binding.
@@ -165,6 +175,7 @@ impl CaptureLocalHead {
 #[derive(Debug)]
 pub struct CapturePlan {
     root_attestation: FolderbaseRootAttestation,
+    root_manifest_bytes: u64,
     current_local_head: Option<CaptureLocalHead>,
     ignore_policy_sha256: String,
     entries: Vec<CapturePlanEntry>,
@@ -183,6 +194,14 @@ impl CapturePlan {
 
     pub fn root_instance_sha256(&self) -> &str {
         &self.root_attestation.root_instance_sha256
+    }
+
+    pub fn root_manifest_sha256(&self) -> &str {
+        &self.root_attestation.manifest_sha256
+    }
+
+    pub fn root_manifest_bytes(&self) -> u64 {
+        self.root_manifest_bytes
     }
 
     pub fn current_local_head(&self) -> Option<&CaptureLocalHead> {
@@ -246,11 +265,11 @@ pub enum FolderbaseCaptureError {
     #[error("capture planning state changed while it was being observed")]
     PlanningStateChanged,
 
-    #[error("capture inventory exceeded the {limit:?} limit of {maximum} at {path:?}")]
+    #[error("capture inventory exceeded the {limit} limit of {maximum} at {path}")]
     InventoryLimitExceeded {
         limit: CapturePlanLimitKind,
         maximum: u64,
-        path: Option<PathBuf>,
+        path: PathBuf,
     },
 
     #[error("filesystem I/O failed while planning capture at {path}: {source}")]
@@ -290,6 +309,8 @@ impl FolderbaseVersionStore {
         if current.root_instance_sha256 != self.root_attestation.root_instance_sha256 {
             return Err(RootAttestationError::RootChangedDuringAttestation.into());
         }
+        let root_manifest_bytes =
+            protocol_file_length(&current.root, Path::new(".folderbase/manifest.json"))?;
         let ignore = read_ignore_policy(&current.root)?;
         let current_local_head = read_local_head(&current)?;
 
@@ -317,34 +338,25 @@ impl FolderbaseVersionStore {
             if entry.depth() == 0 {
                 continue;
             }
-            if is_folderbase_state_component(entry.file_name()) {
+            if entry.file_name() == OsStr::new(".folderbase") {
                 if entry.file_type().is_dir() {
                     walker.skip_current_dir();
                 }
                 continue;
             }
+            if is_folderbase_state_component(entry.file_name()) {
+                return Err(FolderbaseCaptureError::UnsafePortablePath(
+                    entry
+                        .path()
+                        .strip_prefix(&current.root)
+                        .unwrap_or(entry.path())
+                        .to_path_buf(),
+                ));
+            }
             let relative = entry
                 .path()
                 .strip_prefix(&current.root)
                 .expect("WalkDir entries remain under their root");
-            if entry.file_type().is_dir() && is_nested_folderbase(entry.path())? {
-                walker.skip_current_dir();
-                let path = portable_relative(relative)?;
-                validate_capture_path(&path).map_err(|_| {
-                    FolderbaseCaptureError::UnsafePortablePath(relative.to_path_buf())
-                })?;
-                path_index.insert(&path)?;
-                ensure_record_capacity(
-                    entries.len() + exclusions.len() + ignored_paths.len(),
-                    relative,
-                )?;
-                exclusions.push(CapturePlanExclusion {
-                    path,
-                    kind: CaptureExclusionKind::NestedFolderbase,
-                    reason: CaptureExclusionReason::NestedFolderbaseBoundary,
-                });
-                continue;
-            }
             let required_marker = relative == Path::new(".folderbaseignore")
                 || relative == Path::new("FOLDERBASE.md");
             if !required_marker
@@ -366,6 +378,24 @@ impl FolderbaseVersionStore {
                 ignored_paths.push(CaptureIgnoredPath { path });
                 continue;
             }
+            if entry.file_type().is_dir() && is_nested_folderbase(entry.path())? {
+                walker.skip_current_dir();
+                let path = portable_relative(relative)?;
+                validate_capture_path(&path).map_err(|_| {
+                    FolderbaseCaptureError::UnsafePortablePath(relative.to_path_buf())
+                })?;
+                path_index.insert(&path)?;
+                ensure_record_capacity(
+                    entries.len() + exclusions.len() + ignored_paths.len(),
+                    relative,
+                )?;
+                exclusions.push(CapturePlanExclusion {
+                    path,
+                    kind: CaptureExclusionKind::NestedFolderbase,
+                    reason: CaptureExclusionReason::NestedFolderbaseBoundary,
+                });
+                continue;
+            }
             let path = portable_relative(relative)?;
             validate_capture_path(&path)
                 .map_err(|_| FolderbaseCaptureError::UnsafePortablePath(relative.to_path_buf()))?;
@@ -377,6 +407,11 @@ impl FolderbaseVersionStore {
                 }
             })?;
             if let Some(kind) = unsupported_entry_kind(entry.path(), &metadata)? {
+                if required_marker {
+                    return Err(FolderbaseCaptureError::RequiredMarker(
+                        entry.path().to_path_buf(),
+                    ));
+                }
                 ensure_record_capacity(
                     entries.len() + exclusions.len() + ignored_paths.len(),
                     relative,
@@ -410,7 +445,7 @@ impl FolderbaseVersionStore {
                     return Err(FolderbaseCaptureError::InventoryLimitExceeded {
                         limit: CapturePlanLimitKind::ObjectBytes,
                         maximum: MAX_OBJECT_BYTES,
-                        path: Some(relative.to_path_buf()),
+                        path: relative.to_path_buf(),
                     });
                 }
                 (
@@ -449,14 +484,20 @@ impl FolderbaseVersionStore {
                 )?;
             }
         }
+        let final_attestation = attest_folderbase_root(&current.root)?;
         let final_ignore = read_ignore_policy(&current.root)?;
-        if read_local_head(&current)? != current_local_head || final_ignore.sha256 != ignore.sha256
+        if read_local_head(&current)? != current_local_head
+            || final_ignore.sha256 != ignore.sha256
+            || final_attestation != current
+            || protocol_file_length(&current.root, Path::new(".folderbase/manifest.json"))?
+                != root_manifest_bytes
         {
             return Err(FolderbaseCaptureError::PlanningStateChanged);
         }
 
         Ok(CapturePlan {
             root_attestation: current,
+            root_manifest_bytes,
             current_local_head,
             ignore_policy_sha256: ignore.sha256,
             entries,
@@ -574,13 +615,26 @@ fn unsupported_entry_kind(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> Result<Option<CaptureExclusionKind>, FolderbaseCaptureError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Ok(None);
     }
-    let file = fs::File::open(path).map_err(|source| FolderbaseCaptureError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = options
+        .open(path)
+        .map_err(|source| FolderbaseCaptureError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let information =
         winapi_util::file::information(&file).map_err(|source| FolderbaseCaptureError::Io {
             path: path.to_path_buf(),
@@ -594,7 +648,7 @@ fn ensure_record_capacity(current: usize, path: &Path) -> Result<(), FolderbaseC
         return Err(FolderbaseCaptureError::InventoryLimitExceeded {
             limit: CapturePlanLimitKind::Entries,
             maximum: MAX_CAPTURE_PLAN_RECORDS as u64,
-            path: Some(path.to_path_buf()),
+            path: path.to_path_buf(),
         });
     }
     Ok(())
@@ -655,64 +709,44 @@ fn read_local_head(
 }
 
 fn is_nested_folderbase(path: &Path) -> Result<bool, FolderbaseCaptureError> {
-    let mut has_entry = false;
-    let mut state_paths = Vec::new();
-    let entries = fs::read_dir(path).map_err(|source| FolderbaseCaptureError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| FolderbaseCaptureError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case("FOLDERBASE.md"))
-        {
-            has_entry = true;
-        } else if name
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(".folderbase"))
-        {
-            state_paths.push(entry.path());
+    let entry_path = path.join("FOLDERBASE.md");
+    let _entry = match fs::symlink_metadata(&entry_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(FolderbaseCaptureError::Io {
+                path: entry_path,
+                source,
+            });
         }
+    };
+    let state_path = path.join(".folderbase");
+    let state = match fs::symlink_metadata(&state_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(FolderbaseCaptureError::Io {
+                path: state_path,
+                source,
+            });
+        }
+    };
+    if state.file_type().is_symlink() {
+        return Ok(true);
     }
-    if !has_entry {
+    if !state.is_dir() {
         return Ok(false);
     }
-    for state_path in state_paths {
-        let metadata =
-            fs::symlink_metadata(&state_path).map_err(|source| FolderbaseCaptureError::Io {
-                path: state_path.clone(),
-                source,
-            })?;
-        if metadata.file_type().is_symlink() {
-            return Ok(true);
-        }
-        if !metadata.is_dir() {
-            continue;
-        }
-        let entries = fs::read_dir(&state_path).map_err(|source| FolderbaseCaptureError::Io {
-            path: state_path.clone(),
+
+    let manifest_path = state_path.join("manifest.json");
+    match fs::symlink_metadata(&manifest_path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(FolderbaseCaptureError::Io {
+            path: manifest_path,
             source,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| FolderbaseCaptureError::Io {
-                path: state_path.clone(),
-                source,
-            })?;
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
-            {
-                return Ok(true);
-            }
-        }
+        }),
     }
-    Ok(false)
 }
 
 fn read_ignore_policy(root: &Path) -> Result<IgnorePolicy, FolderbaseCaptureError> {
@@ -791,6 +825,22 @@ fn require_regular_marker(path: &Path) -> Result<(), FolderbaseCaptureError> {
         return Err(FolderbaseCaptureError::RequiredMarker(path.to_path_buf()));
     }
     Ok(())
+}
+
+fn protocol_file_length(root: &Path, relative: &Path) -> Result<u64, FolderbaseCaptureError> {
+    let path = root.join(relative);
+    let file =
+        open_regular_nofollow(root, relative).map_err(|source| FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseCaptureError::Io { path, source })?;
+    if !metadata.is_file() {
+        return Err(FolderbaseCaptureError::RequiredMarker(root.join(relative)));
+    }
+    Ok(metadata.len())
 }
 
 fn open_regular_nofollow(root: &Path, relative: &Path) -> io::Result<fs::File> {

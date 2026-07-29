@@ -45,6 +45,8 @@ fn open_and_plan_bind_metadata_to_one_attested_root_without_writing() {
     assert_eq!(plan.root(), root.path().canonicalize().unwrap());
     assert_eq!(plan.folderbase_id(), FOLDERBASE_ID);
     assert_eq!(plan.root_instance_sha256().len(), 64);
+    assert_eq!(plan.root_manifest_sha256().len(), 64);
+    assert_eq!(plan.root_manifest_bytes(), MANIFEST.len() as u64);
     assert_eq!(plan.current_local_head(), None);
     assert_eq!(plan.ignore_policy_sha256().len(), 64);
     assert_eq!(
@@ -82,14 +84,25 @@ fn ordered_ignore_policy_applies_defaults_negation_required_overrides_and_prunes
 
     #[cfg(unix)]
     {
+        use std::os::unix::fs::PermissionsExt;
+
         fs::write(root.path().join("dist/deep/CON"), "must never be visited")
             .expect("nonportable descendant");
+        fs::set_permissions(root.path().join("dist"), fs::Permissions::from_mode(0o0))
+            .expect("excluded directory cannot be opened");
     }
 
-    let plan = FolderbaseVersionStore::open(root.path())
+    let planned = FolderbaseVersionStore::open(root.path())
         .expect("open")
-        .plan_capture()
-        .expect("ignored directory is pruned before unsafe descendant traversal");
+        .plan_capture();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(root.path().join("dist"), fs::Permissions::from_mode(0o700))
+            .expect("restore cleanup access");
+    }
+    let plan = planned.expect("ignored directory is pruned before opening or traversing it");
     let paths = plan
         .entries()
         .iter()
@@ -134,7 +147,10 @@ fn nested_folderbases_are_typed_boundaries_and_all_regular_file_formats_remain_o
     fs::create_dir_all(child.join(".folderbase")).expect("nested state");
     fs::write(child.join(".folderbase/manifest.json"), MANIFEST).expect("nested manifest");
     fs::write(child.join("FOLDERBASE.md"), "# Child\n").expect("nested entry");
+    #[cfg(unix)]
     fs::write(child.join("CON"), "must not be traversed").expect("unsafe nested descendant");
+    #[cfg(windows)]
+    fs::write(child.join("private.bin"), "must not be traversed").expect("nested descendant");
 
     let plan = FolderbaseVersionStore::open(root.path())
         .expect("open")
@@ -175,6 +191,35 @@ fn nested_folderbases_are_typed_boundaries_and_all_regular_file_formats_remain_o
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn malformed_nested_entry_marker_still_closes_the_nested_boundary() {
+    let root = folderbase();
+    let child = root.path().join("Clients/Malformed");
+    fs::create_dir_all(child.join(".folderbase")).expect("nested state");
+    fs::write(child.join(".folderbase/manifest.json"), MANIFEST).expect("nested manifest");
+    std::os::unix::fs::symlink("missing-entry", child.join("FOLDERBASE.md"))
+        .expect("malformed nested entry marker");
+    fs::write(child.join("CON"), "must not be traversed").expect("unsafe nested descendant");
+
+    let plan = FolderbaseVersionStore::open(root.path())
+        .expect("open")
+        .plan_capture()
+        .expect("malformed child is still an opaque nested boundary");
+
+    let boundary = plan
+        .exclusions()
+        .iter()
+        .find(|exclusion| exclusion.path() == "Clients/Malformed")
+        .expect("typed nested boundary");
+    assert_eq!(boundary.kind(), CaptureExclusionKind::NestedFolderbase);
+    assert_eq!(
+        boundary.reason(),
+        CaptureExclusionReason::NestedFolderbaseBoundary
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn sparse_ten_gibibyte_file_is_planned_by_metadata_and_v1_object_size_is_bounded() {
     let root = folderbase();
@@ -226,6 +271,30 @@ fn sparse_ten_gibibyte_file_is_planned_by_metadata_and_v1_object_size_is_bounded
         }) if limit == CapturePlanLimitKind::ObjectBytes
             && maximum == 1024 * 1024 * 1024 * 1024
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_hard_links_are_typed_exclusions() {
+    let root = folderbase();
+    fs::write(root.path().join("original.bin"), "same inode").expect("regular file");
+    fs::hard_link(
+        root.path().join("original.bin"),
+        root.path().join("alias.bin"),
+    )
+    .expect("hard link");
+
+    let plan = FolderbaseVersionStore::open(root.path())
+        .expect("open")
+        .plan_capture()
+        .expect("typed hard links");
+    assert_eq!(
+        plan.exclusions()
+            .iter()
+            .filter(|entry| entry.kind() == CaptureExclusionKind::HardLink)
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -433,6 +502,25 @@ fn required_ignore_marker_and_bounded_policy_fail_closed() {
             .plan_capture(),
         Err(FolderbaseCaptureError::IgnorePolicyTooLarge { maximum_bytes })
             if maximum_bytes == folderbase_core::MAX_FOLDERBASEIGNORE_BYTES
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn required_visible_markers_cannot_be_downgraded_to_hard_link_exclusions() {
+    let root = folderbase();
+    fs::hard_link(
+        root.path().join(".folderbaseignore"),
+        root.path().join("ignore-policy.backup"),
+    )
+    .expect("hard-linked required marker");
+
+    assert!(matches!(
+        FolderbaseVersionStore::open(root.path())
+            .expect("regular marker opens")
+            .plan_capture(),
+        Err(FolderbaseCaptureError::RequiredMarker(path))
+            if path.ends_with(".folderbaseignore")
     ));
 }
 
