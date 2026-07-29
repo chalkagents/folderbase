@@ -31,7 +31,13 @@ The implementation proves:
 
 - genesis and update Folderbase Versions with exact parent linkage;
 - stable Object ID reuse only from a verified prior Local Head binding;
+- fail-closed reuse when physical-identity evidence is missing, including
+  replacement after Head but before derived identity projection;
+- Unix device/inode and Windows volume plus 128-bit File ID continuity from
+  opened no-follow handles;
 - new IDs persisted in a durable transaction before immutable object writes;
+- exact active-journal cardinality and prior-lineage validation, plus one
+  declared writer/restart byte bound;
 - exact bytes for PDF, video, CSV, SQLite, Git packs, office-shaped, binary, and
   unknown files without format interpretation;
 - directory, symlink target, empty-directory, and executable fidelity;
@@ -43,6 +49,11 @@ The implementation proves:
 - no-op and crash retry convergence on the exact assigned Folderbase Version;
 - append-only blob, Object Version, and complete Folderbase Version
   verification before Local Head compare-and-replace;
+- capability-confined journal, blob, Object Version, Folderbase Version,
+  derived projection, identity, and Head publication;
+- a retained-parent swap regression proving an outside symlink receives no
+  state writes;
+- an exclusive cross-platform transaction file-lock contention test;
 - fresh-process recovery at journal, object-write, Folderbase-Version,
   Head-replace, and cleanup checkpoints;
 - no lost prior Head during update recovery;
@@ -55,10 +66,19 @@ Focused gates:
 
 ```text
 cargo test -p folderbase-core --test folderbase_seal
-5 passed; 0 failed
+6 passed; 0 failed
 
-cargo test -p folderbase-core folderbase_seal::tests
-4 passed; 0 failed
+cargo test -p folderbase-core --lib folderbase_seal::tests::
+9 passed; 0 failed
+
+cargo test -p folderbase-core --lib folderbase_state::tests::
+1 passed; 0 failed
+
+cargo test -p folderbase-core --lib local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
+1 passed; 0 failed
+
+cargo check -p folderbase-core --target x86_64-pc-windows-msvc
+passed
 
 cargo clippy --workspace --all-targets -- -D warnings
 passed
@@ -78,3 +98,8 @@ kind-replacement capture, complete restore/no-clobber reconstruction, restore
 crash recovery, filesystem or database snapshot coordination, Remote Head,
 sync, sharing, authorization, Cloud durability, or hosted deployment. Those
 remain required before ADR-0005 can be Accepted.
+
+The local cross-target library check proves Windows code compiles, while the
+checked-in `windows-latest` CI matrix owns runtime proof for Windows File IDs,
+exclusive locking, Head replacement, and crash recovery. A local macOS host
+cannot execute that Windows binary.

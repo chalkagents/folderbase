@@ -772,7 +772,10 @@ portable-path, Unicode collision, depth, entry-count, and object-size limits.
 `FolderbaseVersionStore::seal_capture(plan)` first revalidates the complete plan,
 then durably journals every new stable Object ID, candidate Object Version ID,
 Folderbase Version ID, parent, timestamp, and expected Local Head. It may reuse
-identity only from a fully verified prior Local Head binding. All ordinary
+identity only from a fully verified prior Local Head binding and a matching
+device-local physical-identity record. Missing evidence fails closed. Unix
+bindings use device/inode identity; Windows bindings use the volume serial and
+complete 128-bit File ID from the opened no-follow handle. All ordinary
 regular files are read as exact opaque bytes through root-relative no-follow
 capabilities and checked against planned metadata and physical identity before
 and after the read.
@@ -781,8 +784,17 @@ Core installs content-addressed blobs and immutable Object Version records throu
 the existing `LocalVersionStore`. It then constructs the one canonical
 Folderbase Version through the crate-private verified-producer seam, encodes it
 with the bounded encoder, publishes it append-only, and independently verifies
-every referenced durable record. Local Head advances only after those checks,
-through a compare-and-replace under the shared device-local transaction lock.
+every referenced durable record. A shared capability-confined state publisher
+stages, flushes, publishes, verifies, replaces, and removes capture state
+relative to retained no-follow directory handles. It rejects symlink/junction
+parent swaps; a detached write cannot advance visible Head. Local Head advances
+only after those checks, through a compare-and-replace under a cross-platform
+exclusive device-local file lock.
+
+The active journal's writer and restart reader share one explicit bound.
+Assignment cardinality and every planned path/kind/observation plus reused
+Object ID, prior Object Version, root-manifest lineage, and expected Head are
+matched to the approved plan and verified parent before object writes.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 

@@ -62,13 +62,28 @@ timestamp, plan digest, and expected Local Head. A prior Object or Object Versio
 may be reused only after the exact prior Local Head, complete Folderbase Version,
 immutable Object Version record, and content blob verify. Device-local physical
 identity records distinguish a same-inode update from a same-path recreation
-after the first verified binding.
+after the first verified binding. Missing identity evidence never authorizes
+reuse. Unix records bind device and inode; Windows records bind the volume
+serial number and complete 128-bit File ID obtained from the no-follow handle.
+A replacement after Head publication retains the identity of the sealed entry,
+so the next capture detects the mismatch and refuses until Tombstones exist.
 
 Content blobs, immutable Object Version records, and the complete bounded
 Folderbase Version are installed append-only with temp-file fsync, atomic
 no-clobber publication, and post-install verification. Only then does Core
 compare the observed Local Head and atomically replace it under the shared local
-transaction lock. The active capture journal remains until derived regular-file
+transaction lock, implemented by the standard cross-platform exclusive file
+lock rather than an in-process mutex. All capture state publication is relative
+to retained no-follow `.folderbase` directory capabilities; data and directory
+handles are flushed, and visible `.folderbase` attachment is verified before
+and after Head replacement. A state-directory swap can leave only a detached
+orphan and cannot redirect publication through a symlink or junction.
+
+The active journal uses the same explicit byte bound for write and restart read.
+Before any immutable write, its assignment count and every path, kind, observed
+identity, reused Object ID, prior Object Version, and root-manifest parent are
+matched exactly to the approved plan and verified prior Head. The active capture
+journal remains until derived regular-file
 object projections and physical identity records are repaired. A retry after
 interruption at journal, Object Version, Folderbase Version, Local Head, or
 cleanup boundaries converges on the exact journal-assigned version. A stale
