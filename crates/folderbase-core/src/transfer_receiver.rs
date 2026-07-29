@@ -1,8 +1,8 @@
-//! Durable, capability-rooted receipt of canonical immutable object chunks.
+//! Durable, capability-rooted receipt and materialization of immutable objects.
 //!
 //! This module owns checkpoint persistence, bounded chunk ingestion, resume
-//! validation, and pagination. Materialization into a caller-selected
-//! destination is deliberately a later module slice.
+//! validation, pagination, canonical whole-object verification, and atomic
+//! no-clobber installation beneath caller-opened destination capabilities.
 
 use std::{
     ffi::OsString,
@@ -567,6 +567,8 @@ struct AcceptedChunkFile {
     file: cap_std::fs::File,
     remaining: u64,
     index: u32,
+    name: String,
+    identity: Handle,
 }
 
 impl<'a> AcceptedChunkReader<'a> {
@@ -607,6 +609,19 @@ impl Read for AcceptedChunkReader<'_> {
                         format!("accepted chunk {} contains trailing bytes", current.index),
                     ));
                 }
+                let current_identity = open_named_file_identity(self.chunks, &current.name)
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "accepted chunk {} pathname changed: {error}",
+                            current.index
+                        ))
+                    })?;
+                if current_identity != current.identity {
+                    return Err(std::io::Error::other(format!(
+                        "accepted chunk {} pathname identity changed",
+                        current.index
+                    )));
+                }
                 self.current = None;
             }
 
@@ -615,10 +630,16 @@ impl Read for AcceptedChunkReader<'_> {
             };
             let name = chunk_file_name(descriptor.index);
             let file = open_regular_file_nofollow(self.chunks, &name)?;
+            validate_private_regular_file(self.chunks, &name)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let identity =
+                Handle::from_file(file.try_clone()?.into_std()).map_err(std::io::Error::other)?;
             self.current = Some(AcceptedChunkFile {
                 file,
                 remaining: descriptor.bytes,
                 index: descriptor.index,
+                name,
+                identity,
             });
             self.next_index += 1;
         }
