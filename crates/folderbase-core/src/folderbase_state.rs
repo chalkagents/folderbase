@@ -729,6 +729,34 @@ fn directory_identity(directory: &Dir, display: &Path) -> Result<Handle> {
     Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
 }
 
+#[cfg(target_os = "linux")]
+fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
+    let expected_identity = directory_identity(directory, display)?;
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory
+        .open_with(Path::new("."), &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    let observed_identity = Handle::from_file(
+        file.try_clone()
+            .map_err(|source| FolderbaseError::io(display, source))?,
+    )
+    .map_err(|source| FolderbaseError::io(display, source))?;
+    if observed_identity != expected_identity {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    file.sync_all()
+        .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
     directory
         .try_clone()
