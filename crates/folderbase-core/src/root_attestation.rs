@@ -2,7 +2,6 @@ use std::{
     fmt, fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
@@ -18,7 +17,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Largest manifest accepted by the root-attestation seam.
-pub const MAX_FOLDERBASE_ROOT_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_FOLDERBASE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Domain separator for the current device-local root-instance digest.
 pub const ROOT_INSTANCE_FORMAT_V1: &str = "folderbase-physical-root-instance-v1";
@@ -69,29 +68,38 @@ pub struct FolderbaseRootAttestation {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RootAttestationError {
-    #[error("root is not an exact no-follow directory: {root}")]
-    InvalidRoot { root: PathBuf },
+    #[error("Folderbase root does not exist: {root}")]
+    RootNotFound { root: PathBuf },
+
+    #[error("Folderbase root must not be a symbolic link or reparse point: {root}")]
+    RootSymlink { root: PathBuf },
+
+    #[error("Folderbase root is not a directory: {root}")]
+    RootNotDirectory { root: PathBuf },
 
     #[error("required Folderbase marker is missing: {marker}")]
-    MissingMarker { marker: FolderbaseRootMarker },
+    MarkerMissing { marker: FolderbaseRootMarker },
 
     #[error("Folderbase marker must not be a symbolic link or reparse point: {marker}")]
-    MarkerIsLink { marker: FolderbaseRootMarker },
+    MarkerSymlink { marker: FolderbaseRootMarker },
 
     #[error("Folderbase marker has the wrong filesystem type: {marker}")]
-    WrongMarkerType { marker: FolderbaseRootMarker },
+    MarkerWrongType { marker: FolderbaseRootMarker },
 
     #[error("Folderbase manifest exceeds the attestation maximum of {maximum_bytes} bytes")]
     ManifestTooLarge { maximum_bytes: u64 },
 
     #[error("Folderbase manifest is not valid JSON")]
-    InvalidManifestJson,
+    ManifestInvalidJson,
 
     #[error("Folderbase manifest contains a duplicate object key")]
-    DuplicateManifestKey,
+    ManifestDuplicateField,
 
-    #[error("Folderbase manifest does not contain the required string fields")]
-    InvalidManifestShape,
+    #[error("Folderbase manifest field is missing: {field}")]
+    ManifestFieldMissing { field: &'static str },
+
+    #[error("Folderbase manifest field has the wrong JSON type: {field}")]
+    ManifestFieldWrongType { field: &'static str },
 
     #[error("Folderbase manifest id is not folderbase_<lowercase-hyphenated-UUID>")]
     InvalidFolderbaseId,
@@ -100,17 +108,14 @@ pub enum RootAttestationError {
     InvalidProtocolVersion,
 
     #[error("Folderbase root identity changed during attestation")]
-    RootStateChanged,
-
-    #[error("Folderbase marker changed during attestation: {marker}")]
-    MarkerStateChanged { marker: FolderbaseRootMarker },
+    RootChangedDuringAttestation,
 
     #[error("this platform does not expose the physical identity required by root-instance-v1")]
-    RootIdentityUnavailable,
+    PhysicalIdentityUnavailable,
 
-    #[error("filesystem I/O failed while attesting {marker}: {source}")]
+    #[error("filesystem I/O failed while attesting {path}: {source}")]
     Io {
-        marker: FolderbaseRootMarker,
+        path: PathBuf,
         #[source]
         source: io::Error,
     },
@@ -120,19 +125,21 @@ impl RootAttestationError {
     /// Stable machine-readable code used by the Folderbase CLI.
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::InvalidRoot { .. } => "invalid_root",
-            Self::MissingMarker { .. } => "missing_marker",
-            Self::MarkerIsLink { .. } => "marker_is_link",
-            Self::WrongMarkerType { .. } => "wrong_marker_type",
+            Self::RootNotFound { .. } => "root_not_found",
+            Self::RootSymlink { .. } => "root_symlink",
+            Self::RootNotDirectory { .. } => "root_not_directory",
+            Self::MarkerMissing { .. } => "marker_missing",
+            Self::MarkerSymlink { .. } => "marker_symlink",
+            Self::MarkerWrongType { .. } => "marker_wrong_type",
             Self::ManifestTooLarge { .. } => "manifest_too_large",
-            Self::InvalidManifestJson => "invalid_manifest_json",
-            Self::DuplicateManifestKey => "duplicate_manifest_key",
-            Self::InvalidManifestShape => "invalid_manifest_shape",
+            Self::ManifestInvalidJson => "manifest_invalid_json",
+            Self::ManifestDuplicateField => "manifest_duplicate_field",
+            Self::ManifestFieldMissing { .. } => "manifest_field_missing",
+            Self::ManifestFieldWrongType { .. } => "manifest_field_wrong_type",
             Self::InvalidFolderbaseId => "invalid_folderbase_id",
             Self::InvalidProtocolVersion => "invalid_protocol_version",
-            Self::RootStateChanged => "root_state_changed",
-            Self::MarkerStateChanged { .. } => "marker_state_changed",
-            Self::RootIdentityUnavailable => "root_identity_unavailable",
+            Self::RootChangedDuringAttestation => "root_changed_during_attestation",
+            Self::PhysicalIdentityUnavailable => "physical_identity_unavailable",
             Self::Io { .. } => "attestation_io",
         }
     }
@@ -147,7 +154,6 @@ struct OpenedMarker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileSnapshot {
     bytes: u64,
-    modified: Option<SystemTime>,
 }
 
 impl FileSnapshot {
@@ -155,7 +161,6 @@ impl FileSnapshot {
         let metadata = file.metadata()?;
         Ok(Self {
             bytes: metadata.len(),
-            modified: metadata.modified().ok(),
         })
     }
 }
@@ -164,90 +169,87 @@ impl FileSnapshot {
 pub fn attest_folderbase_root(
     root: impl AsRef<Path>,
 ) -> Result<FolderbaseRootAttestation, RootAttestationError> {
-    let root = root.as_ref();
-    let root_file = open_root_nofollow(root).map_err(|_| RootAttestationError::InvalidRoot {
-        root: root.to_path_buf(),
+    attest_folderbase_root_inner(root.as_ref(), || {})
+}
+
+fn attest_folderbase_root_inner(
+    root: &Path,
+    before_final_validation: impl FnOnce(),
+) -> Result<FolderbaseRootAttestation, RootAttestationError> {
+    classify_root(root)?;
+    let root_file = open_root_nofollow(root).map_err(|source| RootAttestationError::Io {
+        path: root.to_path_buf(),
+        source,
     })?;
     let root_identity =
         Handle::from_file(
             root_file
                 .try_clone()
                 .map_err(|source| RootAttestationError::Io {
-                    marker: FolderbaseRootMarker::StateDirectory,
+                    path: root.to_path_buf(),
                     source,
                 })?,
         )
         .map_err(|source| RootAttestationError::Io {
-            marker: FolderbaseRootMarker::StateDirectory,
+            path: root.to_path_buf(),
             source,
         })?;
-    let root_instance_sha256 = root_instance_sha256(&root_file)?;
+    let root_instance_sha256 = root_instance_sha256(&root_file, root)?;
     let root_dir = Dir::from_std_file(root_file);
 
     let state_metadata = marker_metadata(
         &root_dir,
         STATE_DIRECTORY,
         FolderbaseRootMarker::StateDirectory,
+        root,
     )?;
     if state_metadata.file_type().is_symlink() {
-        return Err(RootAttestationError::MarkerIsLink {
+        return Err(RootAttestationError::MarkerSymlink {
             marker: FolderbaseRootMarker::StateDirectory,
         });
     }
     if !state_metadata.is_dir() {
-        return Err(RootAttestationError::WrongMarkerType {
+        return Err(RootAttestationError::MarkerWrongType {
             marker: FolderbaseRootMarker::StateDirectory,
         });
     }
     let state_dir = root_dir
         .open_dir_nofollow(STATE_DIRECTORY)
-        .map_err(|source| marker_open_error(FolderbaseRootMarker::StateDirectory, source))?;
+        .map_err(|source| marker_open_error(root, FolderbaseRootMarker::StateDirectory, source))?;
     let state_identity = Handle::from_file(
         state_dir
             .try_clone()
             .map_err(|source| RootAttestationError::Io {
-                marker: FolderbaseRootMarker::StateDirectory,
+                path: root.join(STATE_DIRECTORY),
                 source,
             })?
             .into_std_file(),
     )
     .map_err(|source| RootAttestationError::Io {
-        marker: FolderbaseRootMarker::StateDirectory,
+        path: root.join(STATE_DIRECTORY),
         source,
     })?;
 
-    let mut manifest =
-        open_regular_marker(&state_dir, MANIFEST_FILE, FolderbaseRootMarker::Manifest)?;
-    let entry = open_regular_marker(&root_dir, ENTRY_FILE, FolderbaseRootMarker::Entry)?;
+    let mut manifest = open_regular_marker(
+        &state_dir,
+        MANIFEST_FILE,
+        FolderbaseRootMarker::Manifest,
+        root,
+    )?;
+    let entry = open_regular_marker(&root_dir, ENTRY_FILE, FolderbaseRootMarker::Entry, root)?;
 
-    if manifest.snapshot.bytes > MAX_FOLDERBASE_ROOT_MANIFEST_BYTES {
+    if manifest.snapshot.bytes > MAX_FOLDERBASE_MANIFEST_BYTES {
         return Err(RootAttestationError::ManifestTooLarge {
-            maximum_bytes: MAX_FOLDERBASE_ROOT_MANIFEST_BYTES,
+            maximum_bytes: MAX_FOLDERBASE_MANIFEST_BYTES,
         });
     }
-    let mut manifest_bytes = Vec::with_capacity(manifest.snapshot.bytes as usize);
-    manifest
-        .file
-        .by_ref()
-        .take(MAX_FOLDERBASE_ROOT_MANIFEST_BYTES + 1)
-        .read_to_end(&mut manifest_bytes)
-        .map_err(|source| RootAttestationError::Io {
-            marker: FolderbaseRootMarker::Manifest,
-            source,
-        })?;
-    if manifest_bytes.len() as u64 > MAX_FOLDERBASE_ROOT_MANIFEST_BYTES {
-        return Err(RootAttestationError::ManifestTooLarge {
-            maximum_bytes: MAX_FOLDERBASE_ROOT_MANIFEST_BYTES,
-        });
-    }
+    let manifest_bytes = read_manifest_bounded(&mut manifest.file, root)?;
     if FileSnapshot::read(&manifest.file).map_err(|source| RootAttestationError::Io {
-        marker: FolderbaseRootMarker::Manifest,
+        path: root.join(FolderbaseRootMarker::Manifest.relative_path()),
         source,
     })? != manifest.snapshot
     {
-        return Err(RootAttestationError::MarkerStateChanged {
-            marker: FolderbaseRootMarker::Manifest,
-        });
+        return Err(RootAttestationError::RootChangedDuringAttestation);
     }
 
     let parsed = decode_unique_json(&manifest_bytes)?;
@@ -256,26 +258,30 @@ pub fn attest_folderbase_root(
     Version::parse(&protocol_version).map_err(|_| RootAttestationError::InvalidProtocolVersion)?;
     let manifest_sha256 = hex_sha256(&manifest_bytes);
 
-    revalidate_root(root, &root_identity)?;
-    revalidate_directory(
-        &root_dir,
+    before_final_validation();
+
+    let reopened_root = revalidate_root(root, &root_identity)?;
+    let reopened_state = revalidate_directory(
+        &reopened_root,
         STATE_DIRECTORY,
         FolderbaseRootMarker::StateDirectory,
         &state_identity,
     )?;
-    revalidate_file(
-        &state_dir,
+    revalidate_manifest(
+        &reopened_state,
         MANIFEST_FILE,
         FolderbaseRootMarker::Manifest,
         &manifest.identity,
-        Some(&manifest.snapshot),
+        &manifest_sha256,
+        root,
     )?;
     revalidate_file(
-        &root_dir,
+        &reopened_root,
         ENTRY_FILE,
         FolderbaseRootMarker::Entry,
         &entry.identity,
         Some(&entry.snapshot),
+        root,
     )?;
 
     Ok(FolderbaseRootAttestation {
@@ -287,14 +293,41 @@ pub fn attest_folderbase_root(
     })
 }
 
+fn classify_root(root: &Path) -> Result<(), RootAttestationError> {
+    let metadata = fs::symlink_metadata(root).map_err(|source| {
+        if source.kind() == io::ErrorKind::NotFound {
+            RootAttestationError::RootNotFound {
+                root: root.to_path_buf(),
+            }
+        } else {
+            RootAttestationError::Io {
+                path: root.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(RootAttestationError::RootSymlink {
+            root: root.to_path_buf(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(RootAttestationError::RootNotDirectory {
+            root: root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 fn marker_metadata(
     directory: &Dir,
     name: &str,
     marker: FolderbaseRootMarker,
+    root: &Path,
 ) -> Result<cap_std::fs::Metadata, RootAttestationError> {
     directory
         .symlink_metadata(name)
-        .map_err(|source| marker_open_error(marker, source))
+        .map_err(|source| marker_open_error(root, marker, source))
 }
 
 fn open_root_nofollow(path: &Path) -> io::Result<fs::File> {
@@ -326,11 +359,18 @@ fn open_root_nofollow(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
-fn marker_open_error(marker: FolderbaseRootMarker, source: io::Error) -> RootAttestationError {
+fn marker_open_error(
+    root: &Path,
+    marker: FolderbaseRootMarker,
+    source: io::Error,
+) -> RootAttestationError {
     if source.kind() == io::ErrorKind::NotFound {
-        RootAttestationError::MissingMarker { marker }
+        RootAttestationError::MarkerMissing { marker }
     } else {
-        RootAttestationError::Io { marker, source }
+        RootAttestationError::Io {
+            path: root.join(marker.relative_path()),
+            source,
+        }
     }
 }
 
@@ -338,34 +378,47 @@ fn open_regular_marker(
     directory: &Dir,
     name: &str,
     marker: FolderbaseRootMarker,
+    root: &Path,
 ) -> Result<OpenedMarker, RootAttestationError> {
-    let metadata = marker_metadata(directory, name, marker)?;
+    let metadata = marker_metadata(directory, name, marker, root)?;
     if metadata.file_type().is_symlink() {
-        return Err(RootAttestationError::MarkerIsLink { marker });
+        return Err(RootAttestationError::MarkerSymlink { marker });
     }
     if !metadata.is_file() {
-        return Err(RootAttestationError::WrongMarkerType { marker });
+        return Err(RootAttestationError::MarkerWrongType { marker });
     }
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let file = directory
         .open_with(name, &options)
-        .map_err(|source| marker_open_error(marker, source))?
+        .map_err(|source| marker_open_error(root, marker, source))?
         .into_std();
-    let snapshot =
-        FileSnapshot::read(&file).map_err(|source| RootAttestationError::Io { marker, source })?;
+    let snapshot = FileSnapshot::read(&file).map_err(|source| RootAttestationError::Io {
+        path: root.join(marker.relative_path()),
+        source,
+    })?;
     if !file
         .metadata()
-        .map_err(|source| RootAttestationError::Io { marker, source })?
+        .map_err(|source| RootAttestationError::Io {
+            path: root.join(marker.relative_path()),
+            source,
+        })?
         .is_file()
     {
-        return Err(RootAttestationError::WrongMarkerType { marker });
+        return Err(RootAttestationError::MarkerWrongType { marker });
     }
-    let identity = Handle::from_file(
-        file.try_clone()
-            .map_err(|source| RootAttestationError::Io { marker, source })?,
-    )
-    .map_err(|source| RootAttestationError::Io { marker, source })?;
+    let identity =
+        Handle::from_file(
+            file.try_clone()
+                .map_err(|source| RootAttestationError::Io {
+                    path: root.join(marker.relative_path()),
+                    source,
+                })?,
+        )
+        .map_err(|source| RootAttestationError::Io {
+            path: root.join(marker.relative_path()),
+            source,
+        })?;
     Ok(OpenedMarker {
         identity,
         snapshot,
@@ -373,30 +426,62 @@ fn open_regular_marker(
     })
 }
 
-fn revalidate_root(root: &Path, expected: &Handle) -> Result<(), RootAttestationError> {
-    let reopened = open_root_nofollow(root).map_err(|_| RootAttestationError::RootStateChanged)?;
-    let actual = Handle::from_file(reopened).map_err(|_| RootAttestationError::RootStateChanged)?;
-    if &actual != expected {
-        return Err(RootAttestationError::RootStateChanged);
+fn read_manifest_bounded(
+    manifest: &mut fs::File,
+    root: &Path,
+) -> Result<Vec<u8>, RootAttestationError> {
+    let mut bytes = Vec::new();
+    manifest
+        .by_ref()
+        .take(MAX_FOLDERBASE_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| RootAttestationError::Io {
+            path: root.join(FolderbaseRootMarker::Manifest.relative_path()),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_FOLDERBASE_MANIFEST_BYTES {
+        return Err(RootAttestationError::ManifestTooLarge {
+            maximum_bytes: MAX_FOLDERBASE_MANIFEST_BYTES,
+        });
     }
-    Ok(())
+    Ok(bytes)
+}
+
+fn revalidate_root(root: &Path, expected: &Handle) -> Result<Dir, RootAttestationError> {
+    let reopened =
+        open_root_nofollow(root).map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let actual = Handle::from_file(
+        reopened
+            .try_clone()
+            .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?,
+    )
+    .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if &actual != expected {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
+    Ok(Dir::from_std_file(reopened))
 }
 
 fn revalidate_directory(
     parent: &Dir,
     name: &str,
-    marker: FolderbaseRootMarker,
+    _marker: FolderbaseRootMarker,
     expected: &Handle,
-) -> Result<(), RootAttestationError> {
-    let actual = parent
+) -> Result<Dir, RootAttestationError> {
+    let directory = parent
         .open_dir_nofollow(name)
-        .map(Dir::into_std_file)
-        .and_then(Handle::from_file)
-        .map_err(|_| RootAttestationError::MarkerStateChanged { marker })?;
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let actual = Handle::from_file(
+        directory
+            .try_clone()
+            .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?
+            .into_std_file(),
+    )
+    .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &actual != expected {
-        return Err(RootAttestationError::MarkerStateChanged { marker });
+        return Err(RootAttestationError::RootChangedDuringAttestation);
     }
-    Ok(())
+    Ok(directory)
 }
 
 fn revalidate_file(
@@ -405,13 +490,35 @@ fn revalidate_file(
     marker: FolderbaseRootMarker,
     expected: &Handle,
     expected_snapshot: Option<&FileSnapshot>,
+    root: &Path,
 ) -> Result<(), RootAttestationError> {
-    let reopened = open_regular_marker(parent, name, marker)
-        .map_err(|_| RootAttestationError::MarkerStateChanged { marker })?;
+    let reopened = open_regular_marker(parent, name, marker, root)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &reopened.identity != expected
         || expected_snapshot.is_some_and(|snapshot| snapshot != &reopened.snapshot)
     {
-        return Err(RootAttestationError::MarkerStateChanged { marker });
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
+    Ok(())
+}
+
+fn revalidate_manifest(
+    parent: &Dir,
+    name: &str,
+    marker: FolderbaseRootMarker,
+    expected: &Handle,
+    expected_sha256: &str,
+    root: &Path,
+) -> Result<(), RootAttestationError> {
+    let mut reopened = open_regular_marker(parent, name, marker, root)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if &reopened.identity != expected {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
+    let bytes = read_manifest_bounded(&mut reopened.file, root)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if hex_sha256(&bytes) != expected_sha256 {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
     }
     Ok(())
 }
@@ -419,17 +526,43 @@ fn revalidate_file(
 fn required_manifest_fields(value: &Value) -> Result<(String, String), RootAttestationError> {
     let object = value
         .as_object()
-        .ok_or(RootAttestationError::InvalidManifestShape)?;
-    let protocol_version = object
-        .get("protocol_version")
-        .and_then(Value::as_str)
-        .ok_or(RootAttestationError::InvalidManifestShape)?;
-    let folderbase_id = object
-        .get("folderbase")
-        .and_then(Value::as_object)
-        .and_then(|folderbase| folderbase.get("id"))
-        .and_then(Value::as_str)
-        .ok_or(RootAttestationError::InvalidManifestShape)?;
+        .ok_or(RootAttestationError::ManifestFieldWrongType { field: "$" })?;
+    let protocol_version_value =
+        object
+            .get("protocol_version")
+            .ok_or(RootAttestationError::ManifestFieldMissing {
+                field: "protocol_version",
+            })?;
+    let protocol_version =
+        protocol_version_value
+            .as_str()
+            .ok_or(RootAttestationError::ManifestFieldWrongType {
+                field: "protocol_version",
+            })?;
+    let folderbase_value =
+        object
+            .get("folderbase")
+            .ok_or(RootAttestationError::ManifestFieldMissing {
+                field: "folderbase",
+            })?;
+    let folderbase =
+        folderbase_value
+            .as_object()
+            .ok_or(RootAttestationError::ManifestFieldWrongType {
+                field: "folderbase",
+            })?;
+    let folderbase_id_value =
+        folderbase
+            .get("id")
+            .ok_or(RootAttestationError::ManifestFieldMissing {
+                field: "folderbase.id",
+            })?;
+    let folderbase_id =
+        folderbase_id_value
+            .as_str()
+            .ok_or(RootAttestationError::ManifestFieldWrongType {
+                field: "folderbase.id",
+            })?;
     Ok((folderbase_id.to_owned(), protocol_version.to_owned()))
 }
 
@@ -449,9 +582,9 @@ fn decode_unique_json(bytes: &[u8]) -> Result<Value, RootAttestationError> {
         .map(|value| value.0)
         .map_err(|source| {
             if source.to_string().contains(DUPLICATE_KEY_SENTINEL) {
-                RootAttestationError::DuplicateManifestKey
+                RootAttestationError::ManifestDuplicateField
             } else {
-                RootAttestationError::InvalidManifestJson
+                RootAttestationError::ManifestInvalidJson
             }
         })
 }
@@ -552,7 +685,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn root_instance_sha256(file: &fs::File) -> Result<String, RootAttestationError> {
+fn root_instance_sha256(file: &fs::File, root: &Path) -> Result<String, RootAttestationError> {
     let mut digest = Sha256::new();
     digest.update(ROOT_INSTANCE_FORMAT_V1.as_bytes());
     digest.update([0]);
@@ -562,7 +695,7 @@ fn root_instance_sha256(file: &fs::File) -> Result<String, RootAttestationError>
         use std::os::unix::fs::MetadataExt;
 
         let metadata = file.metadata().map_err(|source| RootAttestationError::Io {
-            marker: FolderbaseRootMarker::StateDirectory,
+            path: root.to_path_buf(),
             source,
         })?;
         digest.update(b"unix");
@@ -575,7 +708,7 @@ fn root_instance_sha256(file: &fs::File) -> Result<String, RootAttestationError>
     {
         let information =
             winapi_util::file::information(file).map_err(|source| RootAttestationError::Io {
-                marker: FolderbaseRootMarker::StateDirectory,
+                path: root.to_path_buf(),
                 source,
             })?;
         digest.update(b"windows");
@@ -587,7 +720,8 @@ fn root_instance_sha256(file: &fs::File) -> Result<String, RootAttestationError>
     #[cfg(not(any(unix, windows)))]
     {
         let _ = file;
-        return Err(RootAttestationError::RootIdentityUnavailable);
+        let _ = root;
+        return Err(RootAttestationError::PhysicalIdentityUnavailable);
     }
 
     Ok(format!("{:x}", digest.finalize()))
@@ -596,6 +730,7 @@ fn root_instance_sha256(file: &fs::File) -> Result<String, RootAttestationError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn closed_marker_paths_are_stable() {
@@ -609,5 +744,26 @@ mod tests {
             assert_eq!(marker.relative_path(), expected);
             assert_eq!(marker.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn final_validation_rejects_equal_length_in_place_manifest_rewrite() {
+        let root = tempdir().expect("root");
+        fs::create_dir(root.path().join(STATE_DIRECTORY)).expect("state");
+        let first = br#"{"protocol_version":"0.2.0","folderbase":{"id":"folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"}}"#;
+        let changed = br#"{"protocol_version":"0.2.0","folderbase":{"id":"folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"}}"#;
+        assert_eq!(first.len(), changed.len());
+        let manifest_path = root.path().join(".folderbase/manifest.json");
+        fs::write(&manifest_path, first).expect("manifest");
+        fs::write(root.path().join(ENTRY_FILE), b"# Folderbase\n").expect("entry");
+
+        let result = attest_folderbase_root_inner(root.path(), || {
+            fs::write(&manifest_path, changed).expect("equal-length in-place rewrite");
+        });
+
+        assert!(matches!(
+            result,
+            Err(RootAttestationError::RootChangedDuringAttestation)
+        ));
     }
 }

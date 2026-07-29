@@ -82,10 +82,18 @@ The public error is a typed, non-exhaustive taxonomy. A closed public marker
 enum identifies `.folderbase`, `.folderbase/manifest.json`, and
 `FOLDERBASE.md`, so callers can handle known protocol markers while remaining
 forward-compatible with new error categories. Attestation errors distinguish
-an invalid root, a missing marker, a linked marker, a wrong marker type, an
-oversized manifest, malformed JSON, duplicate keys, invalid required shape,
-invalid Folderbase identity, invalid protocol version, changed retained state,
-unavailable physical identity, and filesystem I/O.
+`RootNotFound`, `RootSymlink`, and `RootNotDirectory`;
+`MarkerMissing`, `MarkerSymlink`, and `MarkerWrongType`; an oversized manifest;
+`ManifestInvalidJson`; `ManifestDuplicateField` at any depth; missing and
+wrong-type required manifest fields; invalid Folderbase identity; invalid
+protocol version; one `RootChangedDuringAttestation` for any changed retained
+root, marker, or manifest-byte chain; unavailable physical identity; and
+filesystem I/O.
+
+Final validation reopens the exact root, state directory, manifest, and entry.
+It requires the retained identities to match and bounded-reads the reopened
+manifest again. The second exact-byte SHA-256 must equal the receipt's
+`manifest_sha256`; inode, length, or timestamp checks alone are insufficient.
 
 The CLI exposes:
 

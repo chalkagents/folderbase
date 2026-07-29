@@ -69,7 +69,7 @@ pub use reorganization::{
     validate_reorganization_draft, validate_reorganization_plan,
 };
 pub use root_attestation::{
-    FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_ROOT_MANIFEST_BYTES,
+    FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES,
     ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
 };
 pub use sharing::{
