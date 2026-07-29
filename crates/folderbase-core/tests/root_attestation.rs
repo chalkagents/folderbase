@@ -1,8 +1,8 @@
 use std::{fs, path::Path};
 
 use folderbase_core::{
-    FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES, ROOT_INSTANCE_FORMAT_V1,
-    RootAttestationError, attest_folderbase_root,
+    FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES,
+    ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
@@ -145,6 +145,25 @@ fn physical_v1_survives_rename_but_changes_for_same_path_replacement() {
         replacement.root_instance_sha256,
         after_rename.root_instance_sha256
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn public_receipt_serializes_a_non_utf8_root_as_display_only_text() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    let root = PathBuf::from(OsString::from_vec(b"/tmp/folderbase-\xff-root".to_vec()));
+    let receipt = FolderbaseRootAttestation {
+        root: root.clone(),
+        folderbase_id: FOLDERBASE_ID.to_owned(),
+        protocol_version: "0.2.0".to_owned(),
+        manifest_sha256: "1".repeat(64),
+        root_instance_sha256: "2".repeat(64),
+    };
+
+    let value = serde_json::to_value(receipt).expect("display-only receipt must serialize");
+    assert_eq!(value["root"], root.to_string_lossy().as_ref());
+    assert_eq!(value.as_object().expect("flat receipt").len(), 5);
 }
 
 #[test]
@@ -349,6 +368,96 @@ fn rejects_windows_symlink_and_reparse_markers_without_skipping() {
     .expect("entry file symlink");
     assert!(matches!(
         attest_folderbase_root(entry_link_root.path()),
+        Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::Entry
+        })
+    ));
+}
+
+#[cfg(windows)]
+fn create_windows_junction(target: &Path, link: &Path) {
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .expect("run mklink");
+    assert!(
+        output.status.success(),
+        "mklink /J failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata = fs::symlink_metadata(link).expect("junction metadata");
+    assert!(
+        !metadata.file_type().is_symlink(),
+        "this test requires a non-symlink reparse point"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_every_non_symlink_reparse_marker_before_wrong_type_classification() {
+    let target = root_with_manifest(MANIFEST);
+    let links = tempdir().expect("junction parent");
+    let root_junction = links.path().join("root");
+    create_windows_junction(target.path(), &root_junction);
+    assert!(matches!(
+        attest_folderbase_root(&root_junction),
+        Err(RootAttestationError::RootSymlink { root }) if root == root_junction
+    ));
+
+    let state_junction_root = tempdir().expect("state junction root");
+    create_windows_junction(
+        &target.path().join(".folderbase"),
+        &state_junction_root.path().join(".folderbase"),
+    );
+    fs::write(
+        state_junction_root.path().join("FOLDERBASE.md"),
+        b"# Entry\n",
+    )
+    .expect("entry");
+    assert!(matches!(
+        attest_folderbase_root(state_junction_root.path()),
+        Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::StateDirectory
+        })
+    ));
+
+    let directory_target = tempdir().expect("directory target");
+    let manifest_junction_root = tempdir().expect("manifest junction root");
+    fs::create_dir(manifest_junction_root.path().join(".folderbase")).expect("state");
+    create_windows_junction(
+        directory_target.path(),
+        &manifest_junction_root
+            .path()
+            .join(".folderbase/manifest.json"),
+    );
+    fs::write(
+        manifest_junction_root.path().join("FOLDERBASE.md"),
+        b"# Entry\n",
+    )
+    .expect("entry");
+    assert!(matches!(
+        attest_folderbase_root(manifest_junction_root.path()),
+        Err(RootAttestationError::MarkerSymlink {
+            marker: FolderbaseRootMarker::Manifest
+        })
+    ));
+
+    let entry_junction_root = tempdir().expect("entry junction root");
+    fs::create_dir(entry_junction_root.path().join(".folderbase")).expect("state");
+    fs::write(
+        entry_junction_root.path().join(".folderbase/manifest.json"),
+        MANIFEST,
+    )
+    .expect("manifest");
+    create_windows_junction(
+        directory_target.path(),
+        &entry_junction_root.path().join("FOLDERBASE.md"),
+    );
+    assert!(matches!(
+        attest_folderbase_root(entry_junction_root.path()),
         Err(RootAttestationError::MarkerSymlink {
             marker: FolderbaseRootMarker::Entry
         })

@@ -19,10 +19,14 @@ fn folderbase() -> Command {
 
 fn valid_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("root");
-    fs::create_dir(root.path().join(".folderbase")).expect("state");
-    fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
-    fs::write(root.path().join("FOLDERBASE.md"), b"# Folderbase\n").expect("entry");
+    write_valid_root(root.path());
     root
+}
+
+fn write_valid_root(root: &std::path::Path) {
+    fs::create_dir_all(root.join(".folderbase")).expect("state");
+    fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+    fs::write(root.join("FOLDERBASE.md"), b"# Folderbase\n").expect("entry");
 }
 
 #[test]
@@ -103,4 +107,29 @@ fn attest_json_failure_uses_the_stable_envelope_and_exit_two() {
         value["error"]["message"],
         "required Folderbase marker is missing: .folderbase"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn attest_json_uses_a_display_string_for_an_exact_non_utf8_root() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let parent = tempfile::tempdir().expect("parent");
+    let non_utf8_name = OsString::from_vec(b"folderbase-\xff-root".to_vec());
+    let root = parent.path().join(non_utf8_name);
+    write_valid_root(&root);
+
+    let assertion = folderbase()
+        .arg("attest")
+        .arg(&root)
+        .arg("--json")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+    let value: serde_json::Value =
+        serde_json::from_slice(&assertion.get_output().stdout).expect("flat receipt JSON");
+
+    assert_eq!(value["root"], root.to_string_lossy().as_ref());
+    assert_eq!(value["folderbase_id"], FOLDERBASE_ID);
+    assert_eq!(value.as_object().expect("flat receipt").len(), 5);
 }
