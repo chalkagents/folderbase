@@ -861,6 +861,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn exact_state_record_verification_stops_after_growth_beyond_expected_bytes() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        let expected = b"bounded state record";
+        let record = fixture.path().join(".folderbase/proof");
+        fs::write(&record, expected).expect("expected record");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+        let error = verify_exact_file_with_hook(
+            &state.state,
+            OsStr::new("proof"),
+            expected,
+            &record,
+            || {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&record)
+                    .expect("open record after metadata check")
+                    .write_all(b"x")
+                    .expect("grow record beyond expected length");
+            },
+        )
+        .expect_err("concurrent state-record growth must fail bounded verification");
+
+        assert!(matches!(
+            error,
+            FolderbaseError::InvalidRecord { message, .. }
+                if message.contains("published state record")
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn mutating_state_open_rejects_a_directory_junction_root() {
