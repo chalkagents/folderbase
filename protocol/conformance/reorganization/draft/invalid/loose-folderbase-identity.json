@@ -1,9 +1,9 @@
 {
   "protocol_version": "0.3.0",
   "profile": "folderbase-reorganization-draft-v1",
-  "id": "reorg_additive_folder",
+  "id": "reorg_loose_identity",
   "generation": 1,
-  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
+  "folderbase_id": "folderbase_example",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -22,7 +22,7 @@
     "declared_entries": []
   },
   "questions": [],
-  "rationale": "Add useful structure without imposing a template.",
+  "rationale": "Loose prefixed tokens are not released Core identities.",
   "operations": [
     {
       "kind": "create_directory",

@@ -3,12 +3,12 @@
   "profile": "folderbase-reorganization-draft-v1",
   "id": "reorg_authority",
   "generation": 1,
-  "folderbase_id": "folderbase_example",
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "ignore_policy": { "expectation": "absent", "path": ".folderbaseignore" },
-    "structural_policy": { "expectation": "absent", "path": ".folderbase/policy.json" },
+    "structural_changes_policy": "approve",
     "nested_boundaries": [],
     "operation_closure": [{ "expectation": "absent", "path": "Current" }],
     "declared_entries": []

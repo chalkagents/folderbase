@@ -1,0 +1,32 @@
+{
+  "protocol_version": "0.3.0",
+  "profile": "folderbase-reorganization-draft-v1",
+  "id": "reorg_relationship_grammar",
+  "generation": 1,
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
+  "path_profile": "portable-case-sensitive-v1",
+  "analysis_scope": {
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ignore_policy": {
+      "expectation": "absent",
+      "path": ".folderbaseignore"
+    },
+    "structural_changes_policy": "approve",
+    "nested_boundaries": [],
+    "operation_closure": [],
+    "declared_entries": []
+  },
+  "questions": [],
+  "rationale": "Relationship types use the released lowercase Object Protocol grammar.",
+  "operations": [
+    {
+      "kind": "add_relationship",
+      "object_record_path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000102.json",
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000102",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000202",
+      "relationship_type": "Supports-v2",
+      "target_object_id": "obj_019f9b75-0000-7000-8000-000000000101",
+      "expected_record_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

@@ -3,7 +3,7 @@
   "profile": "folderbase-reorganization-plan-v1",
   "id": "reorg_project_cleanup",
   "generation": 1,
-  "folderbase_id": "folderbase_project",
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000002",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -11,12 +11,7 @@
       "expectation": "absent",
       "path": ".folderbaseignore"
     },
-    "structural_policy": {
-      "expectation": "file",
-      "path": ".folderbase/policy.json",
-      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "byte_count": 128
-    },
+    "structural_changes_policy": "approve",
     "nested_boundaries": [],
     "operation_closure": [
       {
@@ -47,7 +42,7 @@
       }
     ]
   },
-  "analysis_scope_digest": "c72af3ec9e9d19867b78c3ee8ea139a37daf6492145d64dfb7c8b6a817500f5e",
+  "analysis_scope_digest": "d1593f60460548508985a2f8c712a91e0505bdd1fc0fe644a02b528a02e09b4a",
   "questions": [
     {
       "id": "approved_proposal",

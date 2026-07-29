@@ -1,9 +1,11 @@
 use folderbase_core::{
+    ConsequentialAnswerType, ConsequentialQuestion, InitializationOptions,
     MAX_REORGANIZATION_RECORD_BYTES, NestedBoundary, ScopeEntry, decode_reorganization_draft,
-    decode_reorganization_draft_slice, decode_reorganization_plan_slice,
-    reorganization_analysis_scope_sha256, reorganization_plan_sha256, seal_reorganization_draft,
-    validate_reorganization_draft, validate_reorganization_plan,
+    decode_reorganization_draft_slice, decode_reorganization_plan_slice, initialize,
+    plan_initialization, reorganization_analysis_scope_sha256, reorganization_plan_sha256,
+    seal_reorganization_draft, validate_reorganization_draft, validate_reorganization_plan,
 };
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 fn protocol_root() -> PathBuf {
@@ -25,17 +27,12 @@ fn a_complete_reorganization_draft_decodes_through_the_public_contract() {
       "profile": "folderbase-reorganization-draft-v1",
       "id": "reorg_project_cleanup",
       "generation": 1,
-      "folderbase_id": "folderbase_project",
+      "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000002",
       "path_profile": "portable-case-sensitive-v1",
       "analysis_scope": {
         "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "ignore_policy": { "expectation": "absent", "path": ".folderbaseignore" },
-        "structural_policy": {
-          "expectation": "file",
-          "path": ".folderbase/policy.json",
-          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "byte_count": 128
-        },
+        "structural_changes_policy": "approve",
         "nested_boundaries": [],
         "operation_closure": [
           { "expectation": "absent", "path": "Canonical" },
@@ -219,7 +216,7 @@ fn canonical_plan_digest_matches_the_independent_node_crypto_vector() {
     assert_eq!(plan.plan_digest, expected.trim());
     assert_eq!(
         plan.analysis_scope_digest,
-        "c72af3ec9e9d19867b78c3ee8ea139a37daf6492145d64dfb7c8b6a817500f5e"
+        "d1593f60460548508985a2f8c712a91e0505bdd1fc0fe644a02b528a02e09b4a"
     );
 }
 
@@ -255,6 +252,7 @@ fn all_public_draft_vectors_match_the_schema_and_core_contract() {
         "conformance/reorganization/draft/valid/additive-folder-v1.json",
         "conformance/reorganization/draft/valid/all-operation-kinds-v1.json",
         "conformance/reorganization/draft/valid/mathematical-integers-v1.json",
+        "conformance/reorganization/draft/valid/negative-zero-v1.json",
         "conformance/reorganization/draft/valid/unanswered-consequential-v1.json",
     ] {
         let fixture = protocol_json(relative);
@@ -270,6 +268,9 @@ fn all_public_draft_vectors_match_the_schema_and_core_contract() {
     for relative in [
         "conformance/reorganization/draft/invalid/authority-field.json",
         "conformance/reorganization/draft/invalid/delete-operation.json",
+        "conformance/reorganization/draft/invalid/loose-folderbase-identity.json",
+        "conformance/reorganization/draft/invalid/relationship-type-grammar.json",
+        "conformance/reorganization/draft/invalid/reserved-operation-path.json",
         "conformance/reorganization/draft/invalid/unsafe-path.json",
         "conformance/reorganization/draft/invalid/unsupported-profile.json",
     ] {
@@ -304,6 +305,51 @@ fn all_public_draft_vectors_match_the_schema_and_core_contract() {
             "{relative} must be rejected by Core semantics"
         );
     }
+}
+
+#[test]
+fn schema_valid_negative_zero_forms_normalize_before_nonnegative_integer_validation() {
+    let relative = "conformance/reorganization/draft/valid/negative-zero-v1.json";
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let fixture = protocol_json(relative);
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile public Draft schema");
+    assert!(
+        validator.is_valid(&fixture),
+        "negative zero is JSON integer zero"
+    );
+
+    let draft = decode_reorganization_draft_slice(
+        &std::fs::read(protocol_root().join(relative)).expect("negative-zero vector"),
+    )
+    .expect("Core accepts schema-valid mathematical zero");
+    let ScopeEntry::File { byte_count, .. } = &draft.analysis_scope.declared_entries[0] else {
+        panic!("declared empty file");
+    };
+    assert_eq!(*byte_count, 0);
+}
+
+#[test]
+fn analysis_scope_binds_the_real_initialized_manifest_structural_changes_policy() {
+    let root = tempfile::tempdir().expect("temporary Folderbase root");
+    let initialization = plan_initialization(root.path(), InitializationOptions::default())
+        .expect("plan initialization");
+    initialize(&initialization).expect("initialize Folderbase");
+    let manifest_bytes =
+        std::fs::read(root.path().join(".folderbase/manifest.json")).expect("manifest");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("initialized manifest JSON");
+
+    let mut draft = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+    draft["folderbase_id"] = manifest["folderbase"]["id"].clone();
+    draft["analysis_scope"]["manifest_sha256"] =
+        serde_json::json!(format!("{:x}", Sha256::digest(&manifest_bytes)));
+    draft["analysis_scope"]["structural_changes_policy"] =
+        manifest["policies"]["structural_changes"].clone();
+
+    decode_reorganization_draft_slice(&serde_json::to_vec(&draft).expect("reachable Draft"))
+        .expect("initialized Folderbase policy is representable");
 }
 
 #[test]
@@ -366,7 +412,59 @@ fn the_closed_v1_operation_set_covers_text_opaque_tracked_and_protocol_changes()
     let bytes = serde_json::to_vec(&fixture).expect("fixture bytes");
     let draft = decode_reorganization_draft_slice(&bytes).expect("all operations validate");
 
-    assert_eq!(draft.operations.len(), 8);
+    assert_eq!(draft.operations.len(), 10);
+}
+
+#[test]
+fn typed_object_operations_match_the_released_object_protocol() {
+    let fixture =
+        protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+    let operation_kinds = fixture["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .filter_map(|operation| operation["kind"].as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "mark_canonical",
+        "mark_superseded",
+        "archive_object",
+        "add_relationship",
+    ] {
+        assert!(
+            operation_kinds.contains(&required),
+            "missing released object operation {required}"
+        );
+    }
+    assert!(!operation_kinds.contains(&"update_object_lifecycle"));
+    assert!(!operation_kinds.contains(&"update_relationship"));
+    assert!(
+        fixture["operations"]
+            .as_array()
+            .expect("operations")
+            .iter()
+            .all(|operation| operation.get("expected_revision").is_none()
+                && operation.get("new_revision").is_none())
+    );
+    decode_reorganization_draft_slice(&serde_json::to_vec(&fixture).expect("object operations"))
+        .expect("released object operations form a reachable Draft");
+
+    let mut invalid_relationship = fixture;
+    invalid_relationship["operations"][9]["relationship_type"] = serde_json::json!("Supports-v2");
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile Draft schema");
+    assert!(!validator.is_valid(&invalid_relationship));
+    assert!(
+        decode_reorganization_draft_slice(
+            &serde_json::to_vec(&invalid_relationship).expect("relationship grammar fixture")
+        )
+        .expect_err("relationship grammar is the released Object Protocol grammar")
+        .to_string()
+        .contains("lowercase protocol token")
+    );
 }
 
 #[test]
@@ -374,9 +472,9 @@ fn object_protocol_operations_only_target_the_matching_canonical_object_record()
     let mut draft =
         protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
     draft["operations"][6]["object_record_path"] =
-        serde_json::json!(".folderbase/objects/object_other.json");
+        serde_json::json!(".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000199.json");
     draft["analysis_scope"]["operation_closure"][13]["path"] =
-        serde_json::json!(".folderbase/objects/object_other.json");
+        serde_json::json!(".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000199.json");
 
     let bytes = serde_json::to_vec(&draft).expect("mismatched object record fixture");
     let error = decode_reorganization_draft_slice(&bytes)
@@ -385,6 +483,141 @@ fn object_protocol_operations_only_target_the_matching_canonical_object_record()
     assert!(
         error.to_string().contains("canonical object record path"),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn core_identity_fields_use_the_reachable_prefixed_uuid_grammars() {
+    let mut draft = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+    draft["folderbase_id"] = serde_json::json!("folderbase_019f9b75-0000-7000-8000-000000000001");
+    decode_reorganization_draft_slice(&serde_json::to_vec(&draft).expect("reachable identity"))
+        .expect("real Folderbase identity is accepted");
+
+    draft["folderbase_id"] = serde_json::json!("folderbase_example");
+    let error = decode_reorganization_draft_slice(
+        &serde_json::to_vec(&draft).expect("loose identity fixture"),
+    )
+    .expect_err("loose prefixed tokens are not real Core identities");
+
+    assert!(
+        error
+            .to_string()
+            .contains("folderbase identifier is invalid")
+    );
+
+    let mut tracked =
+        protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+    tracked["operations"][5]["object_id"] = serde_json::json!("object_database");
+    assert!(
+        decode_reorganization_draft_slice(
+            &serde_json::to_vec(&tracked).expect("loose object identity fixture")
+        )
+        .expect_err("object_* is not the released obj_<UUID> grammar")
+        .to_string()
+        .contains("object identifier is invalid")
+    );
+    tracked = protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+    tracked["operations"][5]["expected_version_id"] = serde_json::json!("version_database_7");
+    assert!(
+        decode_reorganization_draft_slice(
+            &serde_json::to_vec(&tracked).expect("loose version identity fixture")
+        )
+        .expect_err("version_* suffix must be a UUID")
+        .to_string()
+        .contains("version identifier is invalid")
+    );
+}
+
+#[test]
+fn generic_operations_cannot_mutate_reserved_protocol_git_or_root_adapter_paths() {
+    let base = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile Draft schema");
+    for operation in [
+        serde_json::json!({ "kind": "create_directory", "path": ".git/hooks" }),
+        serde_json::json!({
+            "kind": "create_utf8_file",
+            "path": ".folderbase/private.json",
+            "content": "{}"
+        }),
+        serde_json::json!({
+            "kind": "replace_utf8_file",
+            "path": "FOLDERBASE.md",
+            "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "content": "# replaced\n"
+        }),
+        serde_json::json!({
+            "kind": "move_file",
+            "source_path": "AGENTS.md",
+            "destination_path": "Archive/AGENTS.md",
+            "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "expected_byte_count": 1
+        }),
+    ] {
+        let mut draft = base.clone();
+        draft["operations"] = serde_json::json!([operation]);
+        assert!(
+            !validator.is_valid(&draft),
+            "public schema must preserve reserved operation paths"
+        );
+        let error = decode_reorganization_draft_slice(
+            &serde_json::to_vec(&draft).expect("reserved-path fixture"),
+        )
+        .expect_err("generic operation must preserve reserved paths");
+        assert!(
+            error.to_string().contains("reserved"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn direct_struct_validation_sealing_and_digesting_enforce_the_aggregate_record_limit() {
+    let base = decode_reorganization_draft_slice(include_bytes!(
+        "../../../protocol/conformance/reorganization/draft/valid/additive-folder-v1.json"
+    ))
+    .expect("valid base Draft");
+    let oversized_questions = (0..5)
+        .map(|index| ConsequentialQuestion {
+            id: format!("oversized_{index}"),
+            prompt: "x".repeat(2 * 1024 * 1024),
+            answer_type: ConsequentialAnswerType::Boolean,
+            required: false,
+            options: Vec::new(),
+            answer: None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut oversized_draft = base.clone();
+    oversized_draft.questions = oversized_questions.clone();
+    assert!(
+        validate_reorganization_draft(&oversized_draft)
+            .expect_err("direct Draft validation must enforce aggregate bytes")
+            .to_string()
+            .contains("8 MiB")
+    );
+    assert!(
+        seal_reorganization_draft(oversized_draft)
+            .expect_err("sealing must stop before cloning oversized state")
+            .to_string()
+            .contains("8 MiB")
+    );
+
+    let mut oversized_plan = seal_reorganization_draft(base).expect("small plan");
+    oversized_plan.questions = oversized_questions;
+    assert!(
+        validate_reorganization_plan(&oversized_plan)
+            .expect_err("direct Plan validation must enforce aggregate bytes")
+            .to_string()
+            .contains("8 MiB")
+    );
+    assert!(
+        reorganization_plan_sha256(&oversized_plan)
+            .expect_err("direct Plan digesting must enforce aggregate bytes")
+            .to_string()
+            .contains("8 MiB")
     );
 }
 
@@ -525,7 +758,7 @@ fn a_created_parent_directory_must_precede_its_child_operation() {
 }
 
 #[test]
-fn policy_snapshots_are_exact_file_or_absence_facts() {
+fn ignore_policy_snapshot_is_an_exact_file_or_absence_fact() {
     let mut draft = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
     draft["analysis_scope"]["ignore_policy"] = serde_json::json!({
       "expectation": "directory",
@@ -536,7 +769,7 @@ fn policy_snapshots_are_exact_file_or_absence_facts() {
     let error =
         decode_reorganization_draft_slice(&bytes).expect_err("policy path cannot be a directory");
 
-    assert!(error.to_string().contains("file or absence facts"));
+    assert!(error.to_string().contains("file or absence fact"));
 }
 
 #[test]

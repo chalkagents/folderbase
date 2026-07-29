@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Read,
+    io::{Read, Write},
     path::Path,
 };
 
@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::{FolderbaseError, Result};
+use crate::{
+    FolderbaseError, ObjectId, Result, VersionId, traversal_policy::is_reserved_workspace_component,
+};
 
 pub const MAX_REORGANIZATION_RECORD_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_CANONICAL_JSON_INTEGER: u64 = 9_007_199_254_740_991;
@@ -51,8 +53,8 @@ pub enum ScopeEntry {
     },
     TrackedObject {
         path: String,
-        object_id: String,
-        version_id: String,
+        object_id: ObjectId,
+        version_id: VersionId,
     },
 }
 
@@ -79,10 +81,18 @@ pub struct NestedBoundary {
 pub struct AnalysisScope {
     pub manifest_sha256: String,
     pub ignore_policy: ScopeEntry,
-    pub structural_policy: ScopeEntry,
+    pub structural_changes_policy: StructuralChangesPolicy,
     pub nested_boundaries: Vec<NestedBoundary>,
     pub operation_closure: Vec<ScopeEntry>,
     pub declared_entries: Vec<ScopeEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralChangesPolicy {
+    Suggest,
+    Approve,
+    Autonomous,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,40 +160,36 @@ pub enum ReorganizationOperation {
     MoveTrackedObject {
         source_path: String,
         destination_path: String,
-        object_id: String,
-        expected_version_id: String,
+        object_id: ObjectId,
+        expected_version_id: VersionId,
     },
-    UpdateRelationship {
+    MarkCanonical {
         object_record_path: String,
-        object_id: String,
-        expected_version_id: String,
+        object_id: ObjectId,
+        expected_version_id: VersionId,
+        expected_record_sha256: String,
+    },
+    MarkSuperseded {
+        object_record_path: String,
+        object_id: ObjectId,
+        expected_version_id: VersionId,
+        superseded_by: ObjectId,
+        expected_record_sha256: String,
+    },
+    ArchiveObject {
+        object_record_path: String,
+        object_id: ObjectId,
+        expected_version_id: VersionId,
+        expected_record_sha256: String,
+    },
+    AddRelationship {
+        object_record_path: String,
+        object_id: ObjectId,
+        expected_version_id: VersionId,
         relationship_type: String,
-        target_object_id: String,
+        target_object_id: ObjectId,
         expected_record_sha256: String,
-        #[serde(deserialize_with = "deserialize_canonical_u64")]
-        expected_revision: u64,
-        #[serde(deserialize_with = "deserialize_canonical_u64")]
-        new_revision: u64,
     },
-    UpdateObjectLifecycle {
-        object_record_path: String,
-        object_id: String,
-        expected_version_id: String,
-        from: ObjectLifecycleState,
-        to: ObjectLifecycleState,
-        expected_record_sha256: String,
-        #[serde(deserialize_with = "deserialize_canonical_u64")]
-        expected_revision: u64,
-        #[serde(deserialize_with = "deserialize_canonical_u64")]
-        new_revision: u64,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObjectLifecycleState {
-    Active,
-    Archived,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +317,7 @@ pub fn validate_reorganization_plan(plan: &ReorganizationPlan) -> Result<()> {
 }
 
 pub fn reorganization_analysis_scope_sha256(scope: &AnalysisScope) -> Result<String> {
+    ensure_aggregate_record_bound(scope, "reorganization analysis scope")?;
     let mut normalized = scope.clone();
     normalize_scope(&mut normalized);
     canonical_digest(ANALYSIS_SCOPE_DIGEST_DOMAIN, &normalized)
@@ -321,6 +328,7 @@ pub fn reorganization_plan_sha256(plan: &ReorganizationPlan) -> Result<String> {
 }
 
 fn validate_plan(plan: &ReorganizationPlan) -> Result<()> {
+    ensure_aggregate_record_bound(plan, "reorganization plan")?;
     if plan.profile != REORGANIZATION_PLAN_PROFILE {
         return invalid_record(format!(
             "unsupported reorganization plan profile {}",
@@ -362,6 +370,7 @@ fn validate_plan(plan: &ReorganizationPlan) -> Result<()> {
 }
 
 fn validate_draft(draft: &ReorganizationDraft) -> Result<()> {
+    ensure_aggregate_record_bound(draft, "reorganization draft")?;
     if draft.protocol_version != REORGANIZATION_PROTOCOL_VERSION {
         return invalid_record(format!(
             "unsupported reorganization protocol {}",
@@ -375,7 +384,7 @@ fn validate_draft(draft: &ReorganizationDraft) -> Result<()> {
         ));
     }
     validate_identifier(&draft.id, "reorganization id", "reorg_")?;
-    validate_identifier(&draft.folderbase_id, "folderbase id", "folderbase_")?;
+    validate_folderbase_id(&draft.folderbase_id)?;
     if draft.generation == 0 || draft.generation > MAX_CANONICAL_JSON_INTEGER {
         return invalid_record(
             "reorganization generation must be a positive canonical JSON integer",
@@ -461,20 +470,13 @@ fn validate_scope(path_profile: PathProfile, scope: &AnalysisScope) -> Result<()
     if scope.ignore_policy.path() != ".folderbaseignore" {
         return invalid_record("ignore policy fact must describe .folderbaseignore");
     }
-    if scope.structural_policy.path() != ".folderbase/policy.json" {
-        return invalid_record("structural policy fact must describe .folderbase/policy.json");
-    }
     if !matches!(
         scope.ignore_policy,
         ScopeEntry::Absent { .. } | ScopeEntry::File { .. }
-    ) || !matches!(
-        scope.structural_policy,
-        ScopeEntry::Absent { .. } | ScopeEntry::File { .. }
     ) {
-        return invalid_record("policy snapshots must be exact file or absence facts");
+        return invalid_record("ignore policy snapshot must be an exact file or absence fact");
     }
     validate_scope_entry(&scope.ignore_policy)?;
-    validate_scope_entry(&scope.structural_policy)?;
     let mut boundary_paths: BTreeSet<String> = BTreeSet::new();
     for boundary in &scope.nested_boundaries {
         validate_path(&boundary.path)?;
@@ -516,8 +518,8 @@ fn validate_scope_entry(entry: &ScopeEntry) -> Result<()> {
             version_id,
             ..
         } => {
-            validate_identifier(object_id, "object id", "object_")?;
-            validate_identifier(version_id, "version id", "version_")
+            validate_object_id(object_id)?;
+            validate_version_id(version_id)
         }
         ScopeEntry::Absent { .. } | ScopeEntry::Directory { .. } => Ok(()),
     }
@@ -567,9 +569,9 @@ fn validate_question(question: &ConsequentialQuestion) -> Result<()> {
 
 fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
     match operation {
-        ReorganizationOperation::CreateDirectory { path } => validate_path(path),
+        ReorganizationOperation::CreateDirectory { path } => validate_ordinary_content_path(path),
         ReorganizationOperation::CreateUtf8File { path, content } => {
-            validate_path(path)?;
+            validate_ordinary_content_path(path)?;
             validate_bounded_text(content)
         }
         ReorganizationOperation::ReplaceUtf8File {
@@ -577,7 +579,7 @@ fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
             expected_sha256,
             content,
         } => {
-            validate_path(path)?;
+            validate_ordinary_content_path(path)?;
             validate_digest(expected_sha256)?;
             validate_bounded_text(content)
         }
@@ -587,8 +589,7 @@ fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
             expected_sha256,
             content,
         } => {
-            validate_path(path)?;
-            validate_token(adapter, "agent adapter")?;
+            validate_agent_adapter_path(path, adapter)?;
             validate_digest(expected_sha256)?;
             validate_bounded_text(content)
         }
@@ -599,6 +600,8 @@ fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
             expected_byte_count,
         } => {
             validate_distinct_paths(source_path, destination_path)?;
+            validate_ordinary_content_path(source_path)?;
+            validate_ordinary_content_path(destination_path)?;
             validate_digest(expected_sha256)?;
             validate_canonical_integer(*expected_byte_count)
         }
@@ -609,45 +612,60 @@ fn validate_operation(operation: &ReorganizationOperation) -> Result<()> {
             expected_version_id,
         } => {
             validate_distinct_paths(source_path, destination_path)?;
-            validate_identifier(object_id, "object id", "object_")?;
-            validate_identifier(expected_version_id, "version id", "version_")
+            validate_ordinary_content_path(source_path)?;
+            validate_ordinary_content_path(destination_path)?;
+            validate_object_id(object_id)?;
+            validate_version_id(expected_version_id)
         }
-        ReorganizationOperation::UpdateRelationship {
+        ReorganizationOperation::MarkCanonical {
+            object_record_path,
+            object_id,
+            expected_version_id,
+            expected_record_sha256,
+        } => {
+            validate_object_id(object_id)?;
+            validate_object_record_path(object_record_path, object_id)?;
+            validate_version_id(expected_version_id)?;
+            validate_digest(expected_record_sha256)
+        }
+        ReorganizationOperation::MarkSuperseded {
+            object_record_path,
+            object_id,
+            expected_version_id,
+            superseded_by,
+            expected_record_sha256,
+        } => {
+            validate_object_id(object_id)?;
+            validate_object_record_path(object_record_path, object_id)?;
+            validate_version_id(expected_version_id)?;
+            validate_digest(expected_record_sha256)?;
+            validate_object_id(superseded_by)
+        }
+        ReorganizationOperation::ArchiveObject {
+            object_record_path,
+            object_id,
+            expected_version_id,
+            expected_record_sha256,
+        } => {
+            validate_object_id(object_id)?;
+            validate_object_record_path(object_record_path, object_id)?;
+            validate_version_id(expected_version_id)?;
+            validate_digest(expected_record_sha256)
+        }
+        ReorganizationOperation::AddRelationship {
             object_record_path,
             object_id,
             expected_version_id,
             relationship_type,
             target_object_id,
             expected_record_sha256,
-            expected_revision,
-            new_revision,
         } => {
-            validate_identifier(object_id, "object id", "object_")?;
+            validate_object_id(object_id)?;
             validate_object_record_path(object_record_path, object_id)?;
-            validate_identifier(expected_version_id, "version id", "version_")?;
-            validate_token(relationship_type, "relationship type")?;
-            validate_identifier(target_object_id, "target object id", "object_")?;
-            validate_digest(expected_record_sha256)?;
-            validate_revision(*expected_revision, *new_revision)
-        }
-        ReorganizationOperation::UpdateObjectLifecycle {
-            object_record_path,
-            object_id,
-            expected_version_id,
-            from,
-            to,
-            expected_record_sha256,
-            expected_revision,
-            new_revision,
-        } => {
-            validate_identifier(object_id, "object id", "object_")?;
-            validate_object_record_path(object_record_path, object_id)?;
-            validate_identifier(expected_version_id, "version id", "version_")?;
-            validate_digest(expected_record_sha256)?;
-            if from == to {
-                return invalid_record("object lifecycle operation must change state");
-            }
-            validate_revision(*expected_revision, *new_revision)
+            validate_version_id(expected_version_id)?;
+            validate_relationship_type(relationship_type)?;
+            validate_object_id(target_object_id)?;
+            validate_digest(expected_record_sha256)
         }
     }
 }
@@ -661,8 +679,8 @@ enum ClosureRequirement {
         byte_count: Option<u64>,
     },
     TrackedObject {
-        object_id: String,
-        version_id: String,
+        object_id: ObjectId,
+        version_id: VersionId,
     },
 }
 
@@ -788,12 +806,22 @@ fn validate_operation_closure(
                     ClosureRequirement::Absent,
                 )?;
             }
-            ReorganizationOperation::UpdateRelationship {
+            ReorganizationOperation::MarkCanonical {
                 object_record_path,
                 expected_record_sha256,
                 ..
             }
-            | ReorganizationOperation::UpdateObjectLifecycle {
+            | ReorganizationOperation::MarkSuperseded {
+                object_record_path,
+                expected_record_sha256,
+                ..
+            }
+            | ReorganizationOperation::ArchiveObject {
+                object_record_path,
+                expected_record_sha256,
+                ..
+            }
+            | ReorganizationOperation::AddRelationship {
                 object_record_path,
                 expected_record_sha256,
                 ..
@@ -857,7 +885,7 @@ fn validate_operation_closure(
         .cloned()
         .chain([
             portable_path_key(path_profile, ".folderbaseignore"),
-            portable_path_key(path_profile, ".folderbase/policy.json"),
+            portable_path_key(path_profile, ".folderbase/manifest.json"),
         ])
         .collect::<BTreeSet<_>>();
     let mut declared = BTreeSet::new();
@@ -1006,10 +1034,16 @@ fn operation_paths(operation: &ReorganizationOperation) -> Vec<&str> {
             destination_path,
             ..
         } => vec![source_path, destination_path],
-        ReorganizationOperation::UpdateRelationship {
+        ReorganizationOperation::MarkCanonical {
             object_record_path, ..
         }
-        | ReorganizationOperation::UpdateObjectLifecycle {
+        | ReorganizationOperation::MarkSuperseded {
+            object_record_path, ..
+        }
+        | ReorganizationOperation::ArchiveObject {
+            object_record_path, ..
+        }
+        | ReorganizationOperation::AddRelationship {
             object_record_path, ..
         } => vec![object_record_path],
     }
@@ -1023,10 +1057,16 @@ fn operation_preexisting_paths(operation: &ReorganizationOperation) -> Vec<&str>
         | ReorganizationOperation::UpdateManagedAgentBlock { path, .. } => vec![path],
         ReorganizationOperation::MoveFile { source_path, .. }
         | ReorganizationOperation::MoveTrackedObject { source_path, .. } => vec![source_path],
-        ReorganizationOperation::UpdateRelationship {
+        ReorganizationOperation::MarkCanonical {
             object_record_path, ..
         }
-        | ReorganizationOperation::UpdateObjectLifecycle {
+        | ReorganizationOperation::MarkSuperseded {
+            object_record_path, ..
+        }
+        | ReorganizationOperation::ArchiveObject {
+            object_record_path, ..
+        }
+        | ReorganizationOperation::AddRelationship {
             object_record_path, ..
         } => vec![object_record_path],
     }
@@ -1047,15 +1087,6 @@ fn path_is_at_or_below(path: &str, boundary: &str) -> bool {
             .is_some_and(|remainder| remainder.starts_with('/'))
 }
 
-fn validate_revision(expected: u64, new: u64) -> Result<()> {
-    validate_canonical_integer(expected)?;
-    validate_canonical_integer(new)?;
-    if new != expected.checked_add(1).unwrap_or(0) {
-        return invalid_record("protocol record revision must advance by exactly one");
-    }
-    Ok(())
-}
-
 fn validate_canonical_integer(value: u64) -> Result<()> {
     if value > MAX_CANONICAL_JSON_INTEGER {
         return invalid_record(format!(
@@ -1074,12 +1105,12 @@ where
 }
 
 fn exact_canonical_u64(lexeme: &str) -> std::result::Result<u64, String> {
-    if lexeme.starts_with('-') {
-        return Err("expected a non-negative exact canonical JSON integer".to_owned());
-    }
-    let exponent_index = lexeme.find(['e', 'E']);
-    let (mantissa, exponent_text) = exponent_index.map_or((lexeme, None), |index| {
-        (&lexeme[..index], Some(&lexeme[index + 1..]))
+    let (negative, unsigned) = lexeme
+        .strip_prefix('-')
+        .map_or((false, lexeme), |unsigned| (true, unsigned));
+    let exponent_index = unsigned.find(['e', 'E']);
+    let (mantissa, exponent_text) = exponent_index.map_or((unsigned, None), |index| {
+        (&unsigned[..index], Some(&unsigned[index + 1..]))
     });
     let (integer, fraction) = mantissa
         .split_once('.')
@@ -1089,6 +1120,9 @@ fn exact_canonical_u64(lexeme: &str) -> std::result::Result<u64, String> {
     digits.push_str(fraction);
     if digits.bytes().all(|byte| byte == b'0') {
         return Ok(0);
+    }
+    if negative {
+        return Err("expected a non-negative exact canonical JSON integer".to_owned());
     }
 
     let exponent = parse_bounded_decimal_exponent(exponent_text.unwrap_or("0"))?;
@@ -1200,7 +1234,82 @@ fn validate_identifier(value: &str, label: &str, prefix: &str) -> Result<()> {
     validate_token(value, label)
 }
 
-fn validate_object_record_path(path: &str, object_id: &str) -> Result<()> {
+fn validate_folderbase_id(value: &str) -> Result<()> {
+    if value
+        .strip_prefix("folderbase_")
+        .is_none_or(|uuid| uuid::Uuid::parse_str(uuid).is_err())
+    {
+        return invalid_record("folderbase identifier is invalid");
+    }
+    Ok(())
+}
+
+fn validate_object_id(value: &ObjectId) -> Result<()> {
+    if ObjectId::parse(value.as_str().to_owned()).is_err() {
+        return invalid_record("object identifier is invalid");
+    }
+    Ok(())
+}
+
+fn validate_version_id(value: &VersionId) -> Result<()> {
+    if VersionId::parse(value.as_str().to_owned()).is_err() {
+        return invalid_record("version identifier is invalid");
+    }
+    Ok(())
+}
+
+fn validate_relationship_type(value: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return invalid_record("relationship type must be a lowercase protocol token");
+    }
+    Ok(())
+}
+
+fn validate_ordinary_content_path(path: &str) -> Result<()> {
+    validate_path(path)?;
+    if Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .any(is_reserved_workspace_component)
+        || (!path.contains('/')
+            && [
+                "FOLDERBASE.md",
+                "AGENTS.md",
+                "CLAUDE.md",
+                ".folderbaseignore",
+            ]
+            .iter()
+            .any(|reserved| path.eq_ignore_ascii_case(reserved)))
+    {
+        return invalid_record(format!(
+            "ordinary operation path is reserved and requires an exact typed operation: {path}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_adapter_path(path: &str, adapter: &str) -> Result<()> {
+    validate_path(path)?;
+    let expected = match adapter {
+        "codex" => "AGENTS.md",
+        "claude" => "CLAUDE.md",
+        _ => return invalid_record("unsupported managed agent adapter"),
+    };
+    if path != expected {
+        return invalid_record(format!(
+            "managed {adapter} adapter operation must target {expected}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_object_record_path(path: &str, object_id: &ObjectId) -> Result<()> {
     validate_path(path)?;
     let expected = format!(".folderbase/objects/{object_id}.json");
     if path != expected {
@@ -1243,6 +1352,7 @@ fn validate_path(value: &str) -> Result<()> {
 }
 
 fn canonical_plan_digest(plan: &ReorganizationPlan) -> Result<String> {
+    ensure_aggregate_record_bound(plan, "reorganization plan")?;
     let mut normalized = plan.clone();
     normalize_plan(&mut normalized);
     let mut value = serde_json::to_value(normalized)
@@ -1255,9 +1365,38 @@ fn canonical_plan_digest(plan: &ReorganizationPlan) -> Result<String> {
 }
 
 fn canonical_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<String> {
+    ensure_aggregate_record_bound(value, "reorganization digest input")?;
     let value = serde_json::to_value(value)
         .map_err(|source| FolderbaseError::json("<reorganization-digest>", source))?;
     canonical_value_digest(domain, &value)
+}
+
+fn ensure_aggregate_record_bound(value: &(impl Serialize + ?Sized), label: &str) -> Result<()> {
+    let mut writer = BoundedJsonWriter { written: 0 };
+    if serde_json::to_writer(&mut writer, value).is_err() {
+        return invalid_record(format!("{label} exceeds the 8 MiB encoded-record limit"));
+    }
+    Ok(())
+}
+
+struct BoundedJsonWriter {
+    written: usize,
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.written.saturating_add(bytes.len()) > MAX_REORGANIZATION_RECORD_BYTES {
+            return Err(std::io::Error::other(
+                "reorganization encoded-record limit exceeded",
+            ));
+        }
+        self.written += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn canonical_value_digest(domain: &[u8], value: &Value) -> Result<String> {

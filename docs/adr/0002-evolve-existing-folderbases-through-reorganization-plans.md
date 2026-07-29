@@ -53,7 +53,8 @@ The Analysis Scope has two explicit parts.
 
 Core derives a mandatory operation closure containing:
 
-- the active manifest digest and the relevant ignore and structural-policy digests;
+- the active `.folderbase/manifest.json` digest, its exact
+  `policies.structural_changes` value, and the relevant ignore-policy fact;
 - every source, destination, and destination-parent path used by an operation;
 - the ancestor directories needed to prove those paths remain inside the same root;
   and
@@ -96,8 +97,8 @@ The first Reorganization Plan may use these generic operations:
 - move or rename an ordinary file;
 - move a tracked Knowledge Object while preserving its Object ID and version
   history;
-- update an existing relationship or Object lifecycle state through its already
-  defined typed protocol operation.
+- mark an Object canonical or superseded, archive it, or add a relationship
+  through the already-defined Object Protocol operations.
 
 Large and binary files remain opaque bytes. A plan may move them without loading
 them into model context or claiming format-aware understanding.
@@ -181,8 +182,8 @@ Rollback follows exact postconditions:
   and bytes and the source remains absent;
 - reverse a tracked move only by restoring the filesystem path, Object ID/path
   record, and journal together; and
-- reverse relationship or lifecycle state only when its current revision is still
-  the revision written by the Plan.
+- reverse relationship or lifecycle state only when the current record digest
+  still equals the exact Plan-applied result.
 
 Otherwise Core preserves every side and returns a rollback conflict without
 overwriting user work. A verified completion record is written only after all

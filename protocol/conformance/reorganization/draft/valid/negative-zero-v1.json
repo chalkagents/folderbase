@@ -1,7 +1,7 @@
 {
   "protocol_version": "0.3.0",
   "profile": "folderbase-reorganization-draft-v1",
-  "id": "reorg_additive_folder",
+  "id": "reorg_negative_zero",
   "generation": 1,
   "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
   "path_profile": "portable-case-sensitive-v1",
@@ -19,10 +19,17 @@
         "path": "Current"
       }
     ],
-    "declared_entries": []
+    "declared_entries": [
+      {
+        "expectation": "file",
+        "path": "Evidence/empty.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "byte_count": -0.0e99
+      }
+    ]
   },
   "questions": [],
-  "rationale": "Add useful structure without imposing a template.",
+  "rationale": "Mathematical negative zero is the non-negative canonical integer zero.",
   "operations": [
     {
       "kind": "create_directory",

@@ -3,7 +3,7 @@
   "profile": "folderbase-reorganization-draft-v1",
   "id": "reorg_all_operations",
   "generation": 1,
-  "folderbase_id": "folderbase_example",
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -11,10 +11,7 @@
       "expectation": "absent",
       "path": ".folderbaseignore"
     },
-    "structural_policy": {
-      "expectation": "absent",
-      "path": ".folderbase/policy.json"
-    },
+    "structural_changes_policy": "approve",
     "nested_boundaries": [],
     "operation_closure": [
       {
@@ -58,8 +55,8 @@
       {
         "expectation": "tracked_object",
         "path": "db.sqlite",
-        "object_id": "object_database",
-        "version_id": "version_database_7"
+        "object_id": "obj_019f9b75-0000-7000-8000-000000000101",
+        "version_id": "version_019f9b75-0000-7000-8000-000000000201"
       },
       {
         "expectation": "directory",
@@ -79,15 +76,27 @@
       },
       {
         "expectation": "file",
-        "path": ".folderbase/objects/object_alpha.json",
+        "path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000102.json",
         "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "byte_count": 300
       },
       {
         "expectation": "file",
-        "path": ".folderbase/objects/object_beta.json",
+        "path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000103.json",
         "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "byte_count": 400
+      },
+      {
+        "expectation": "file",
+        "path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000104.json",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "byte_count": 500
+      },
+      {
+        "expectation": "file",
+        "path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000105.json",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "byte_count": 600
       }
     ],
     "declared_entries": []
@@ -128,30 +137,39 @@
       "kind": "move_tracked_object",
       "source_path": "db.sqlite",
       "destination_path": "Data/db.sqlite",
-      "object_id": "object_database",
-      "expected_version_id": "version_database_7"
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000101",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000201"
     },
     {
-      "kind": "update_relationship",
-      "object_record_path": ".folderbase/objects/object_alpha.json",
-      "object_id": "object_alpha",
-      "expected_version_id": "version_alpha_3",
-      "relationship_type": "supports",
-      "target_object_id": "object_database",
-      "expected_record_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "expected_revision": 3,
-      "new_revision": 4
+      "kind": "mark_canonical",
+      "object_record_path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000102.json",
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000102",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000202",
+      "expected_record_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     },
     {
-      "kind": "update_object_lifecycle",
-      "object_record_path": ".folderbase/objects/object_beta.json",
-      "object_id": "object_beta",
-      "expected_version_id": "version_beta_7",
-      "from": "active",
-      "to": "archived",
-      "expected_record_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-      "expected_revision": 7,
-      "new_revision": 8
+      "kind": "mark_superseded",
+      "object_record_path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000103.json",
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000103",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000203",
+      "superseded_by": "obj_019f9b75-0000-7000-8000-000000000101",
+      "expected_record_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "kind": "archive_object",
+      "object_record_path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000104.json",
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000104",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000204",
+      "expected_record_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "kind": "add_relationship",
+      "object_record_path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000105.json",
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000105",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000205",
+      "relationship_type": "supports_v2",
+      "target_object_id": "obj_019f9b75-0000-7000-8000-000000000101",
+      "expected_record_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
     }
   ]
 }

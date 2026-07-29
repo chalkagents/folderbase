@@ -3,7 +3,7 @@
   "profile": "folderbase-reorganization-draft-v1",
   "id": "reorg_mathematical_integers",
   "generation": 1e0,
-  "folderbase_id": "folderbase_example",
+  "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -11,10 +11,7 @@
       "expectation": "absent",
       "path": ".folderbaseignore"
     },
-    "structural_policy": {
-      "expectation": "absent",
-      "path": ".folderbase/policy.json"
-    },
+    "structural_changes_policy": "approve",
     "nested_boundaries": [],
     "operation_closure": [
       {
@@ -45,7 +42,7 @@
       },
       {
         "expectation": "file",
-        "path": ".folderbase/objects/object_alpha.json",
+        "path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000102.json",
         "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "byte_count": 2.0e2
       }
@@ -63,15 +60,13 @@
       "expected_byte_count": 10.0
     },
     {
-      "kind": "update_relationship",
-      "object_record_path": ".folderbase/objects/object_alpha.json",
-      "object_id": "object_alpha",
-      "expected_version_id": "version_alpha_3",
+      "kind": "add_relationship",
+      "object_record_path": ".folderbase/objects/obj_019f9b75-0000-7000-8000-000000000102.json",
+      "object_id": "obj_019f9b75-0000-7000-8000-000000000102",
+      "expected_version_id": "version_019f9b75-0000-7000-8000-000000000202",
       "relationship_type": "supports",
-      "target_object_id": "object_database",
-      "expected_record_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "expected_revision": 3.0,
-      "new_revision": 4e0
+      "target_object_id": "obj_019f9b75-0000-7000-8000-000000000101",
+      "expected_record_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     }
   ]
 }

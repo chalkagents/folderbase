@@ -1,19 +1,28 @@
 {
   "protocol_version": "0.3.0",
   "profile": "folderbase-reorganization-draft-v1",
-  "id": "reorg_delete",
+  "id": "reorg_reserved_path",
   "generation": 1,
   "folderbase_id": "folderbase_019f9b75-0000-7000-8000-000000000001",
   "path_profile": "portable-case-sensitive-v1",
   "analysis_scope": {
     "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "ignore_policy": { "expectation": "absent", "path": ".folderbaseignore" },
+    "ignore_policy": {
+      "expectation": "absent",
+      "path": ".folderbaseignore"
+    },
     "structural_changes_policy": "approve",
     "nested_boundaries": [],
-    "operation_closure": [{ "expectation": "file", "path": "Evidence.pdf", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "byte_count": 42 }],
+    "operation_closure": [],
     "declared_entries": []
   },
   "questions": [],
-  "rationale": "Deletion is not part of reorganization-v1.",
-  "operations": [{ "kind": "delete_file", "path": "Evidence.pdf" }]
+  "rationale": "Generic operations cannot enter protocol state.",
+  "operations": [
+    {
+      "kind": "create_utf8_file",
+      "path": ".folderbase/private.json",
+      "content": "{}"
+    }
+  ]
 }

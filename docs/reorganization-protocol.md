@@ -30,9 +30,10 @@ The scope separates:
 - caller-declared `declared_entries` whose path, presence, identity, or bytes
   informed the proposal beyond that closure.
 
-The active manifest digest, ignore-policy fact, structural-policy fact, and every
-known nested Folderbase boundary are bound separately. A parent plan cannot declare
-or operate on a nested Folderbase or any descendant.
+The active `.folderbase/manifest.json` digest, its exact
+`policies.structural_changes` value, the `.folderbaseignore` fact, and every known
+nested Folderbase boundary are bound separately. A parent plan cannot declare or
+operate on a nested Folderbase or any descendant.
 
 Portable facts use relative slash-separated paths. Files bind lowercase SHA-256 and
 byte count; tracked objects bind stable Object ID and immutable Version ID. Files of
@@ -49,14 +50,25 @@ The v1 operation vocabulary is closed:
 - `update_managed_agent_block`
 - `move_file`
 - `move_tracked_object`
-- `update_relationship`
-- `update_object_lifecycle`
+- `mark_canonical`
+- `mark_superseded`
+- `archive_object`
+- `add_relationship`
 
 There is no delete or directory-move operation. Created paths and move destinations
 must be absent. Text creation and replacement are bounded; an opaque file move
 binds metadata without embedding content. Case-only renames are refused. Paths are
 NFC-normalized for collision detection, and the selected path profile additionally
 controls Unicode case folding.
+
+Generic create, replace, and move operations cannot enter `.folderbase` or `.git`
+or replace the root entry, adapters, or ignore policy. Managed adapter updates are
+limited to the matching root `AGENTS.md` or `CLAUDE.md`. The four typed Object
+operations are the only v1 seam into `.folderbase/objects/<obj_UUID>.json`; they
+bind the real `obj_<UUID>` Object ID, `version_<UUID>` base Version ID, and exact
+record digest. Relationship types follow the Object Protocol lowercase-token
+grammar. The contract does not invent revision counters absent from Object
+Protocol 0.1.
 
 Templates may be cited as provenance, but are optional guidance. They never become
 continuing layout authority. Drafts and Plans contain no grants, roles, approval
@@ -66,7 +78,10 @@ must authorize any later transition.
 ## Bounds
 
 Core reads at most 8 MiB plus one sentinel byte before refusing an encoded record.
-It also bounds questions, operations, scope entries, paths, and embedded UTF-8.
+Direct in-memory validation, sealing, and digest entry points enforce the same
+aggregate encoded limit through bounded streaming serialization before cloning or
+canonicalizing a record. Core also bounds questions, operations, scope entries,
+paths, and embedded UTF-8.
 String and path `maxLength` values count Unicode code points, matching JSON Schema;
 the encoded-record cap separately bounds bytes and memory.
 Canonical integer fields are limited to `9007199254740991`, the exact common range
@@ -86,8 +101,9 @@ Digest input is the validated typed record serialized as compact canonical JSON:
 - optional empty fields omitted by the typed contract remain omitted;
 - strings use standard JSON escaping and UTF-8;
 - booleans and nulls use their JSON spelling; schema-valid decimal or exponent
-  forms of mathematical integers are parsed from their arbitrary-precision
-  lexical spelling, decode exactly, and re-encode as shortest base-10 integers;
+forms of mathematical integers are parsed from their arbitrary-precision
+  lexical spelling, decode exactly, normalize mathematical negative zero to zero,
+  and re-encode as shortest base-10 integers;
   and
 - floating-point numbers are not part of the contract.
 
@@ -126,5 +142,5 @@ node scripts/verify-reorganization-digest-vector.mjs
 The Plan schema references shared definitions by the absolute `$id` of the Draft
 schema. Validators should register both public schemas before compiling the Plan
 schema. Schema validation checks record shape; Core validation additionally checks
-operation closure, question/option uniqueness, path-profile aliases, nested
-boundaries, revision progression, and both digests.
+operation closure, question/option uniqueness, path-profile aliases, reserved
+paths, nested boundaries, real Core identities, and both digests.

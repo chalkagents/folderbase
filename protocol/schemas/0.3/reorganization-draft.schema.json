@@ -34,9 +34,7 @@
       "maximum": 9007199254740991
     },
     "folderbase_id": {
-      "type": "string",
-      "pattern": "^folderbase_[A-Za-z0-9_.-]+$",
-      "maxLength": 255
+      "$ref": "#/$defs/folderbaseId"
     },
     "path_profile": {
       "$ref": "#/$defs/pathProfile"
@@ -85,11 +83,56 @@
       "pattern": "^[A-Za-z0-9_.-]+$",
       "maxLength": 255
     },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "versionId": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "objectRecordPath": {
+      "type": "string",
+      "pattern": "^\\.folderbase/objects/obj_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$",
+      "maxLength": 4096
+    },
+    "relationshipType": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "maxLength": 255
+    },
     "safeRelativePath": {
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
       "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\/$)[^\\u0000]+$"
+    },
+    "ordinaryContentPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        {
+          "not": {
+            "pattern": "(^|/)([.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE]|[.][gG][iI][tT])(/|$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^([fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][.]md|[aA][gG][eE][nN][tT][sS][.]md|[cC][lL][aA][uU][dD][eE][.]md|[.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][iI][gG][nN][oO][rR][eE])$"
+          }
+        }
+      ]
+    },
+    "agentAdapterPath": {
+      "enum": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ]
     },
     "pathProfile": {
       "enum": [
@@ -219,14 +262,10 @@
               "$ref": "#/$defs/safeRelativePath"
             },
             "object_id": {
-              "type": "string",
-              "pattern": "^object_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/objectId"
             },
             "version_id": {
-              "type": "string",
-              "pattern": "^version_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/versionId"
             }
           },
           "additionalProperties": false
@@ -254,7 +293,7 @@
       "required": [
         "manifest_sha256",
         "ignore_policy",
-        "structural_policy",
+        "structural_changes_policy",
         "nested_boundaries",
         "operation_closure",
         "declared_entries"
@@ -266,8 +305,12 @@
         "ignore_policy": {
           "$ref": "#/$defs/policyFact"
         },
-        "structural_policy": {
-          "$ref": "#/$defs/policyFact"
+        "structural_changes_policy": {
+          "enum": [
+            "suggest",
+            "approve",
+            "autonomous"
+          ]
         },
         "nested_boundaries": {
           "type": "array",
@@ -477,7 +520,7 @@
               "const": "create_directory"
             },
             "path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             }
           },
           "additionalProperties": false
@@ -494,7 +537,7 @@
               "const": "create_utf8_file"
             },
             "path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             },
             "content": {
               "type": "string",
@@ -516,7 +559,7 @@
               "const": "replace_utf8_file"
             },
             "path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             },
             "expected_sha256": {
               "$ref": "#/$defs/sha256"
@@ -542,7 +585,7 @@
               "const": "update_managed_agent_block"
             },
             "path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/agentAdapterPath"
             },
             "adapter": {
               "$ref": "#/$defs/token"
@@ -571,10 +614,10 @@
               "const": "move_file"
             },
             "source_path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             },
             "destination_path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             },
             "expected_sha256": {
               "$ref": "#/$defs/sha256"
@@ -601,20 +644,79 @@
               "const": "move_tracked_object"
             },
             "source_path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             },
             "destination_path": {
-              "$ref": "#/$defs/safeRelativePath"
+              "$ref": "#/$defs/ordinaryContentPath"
             },
             "object_id": {
-              "type": "string",
-              "pattern": "^object_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/objectId"
             },
             "expected_version_id": {
-              "type": "string",
-              "pattern": "^version_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/versionId"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "object_record_path",
+            "object_id",
+            "expected_version_id",
+            "expected_record_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "mark_canonical",
+                "archive_object"
+              ]
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/objectRecordPath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "expected_record_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "object_record_path",
+            "object_id",
+            "expected_version_id",
+            "superseded_by",
+            "expected_record_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "mark_superseded"
+            },
+            "object_record_path": {
+              "$ref": "#/$defs/objectRecordPath"
+            },
+            "object_id": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_version_id": {
+              "$ref": "#/$defs/versionId"
+            },
+            "superseded_by": {
+              "$ref": "#/$defs/objectId"
+            },
+            "expected_record_sha256": {
+              "$ref": "#/$defs/sha256"
             }
           },
           "additionalProperties": false
@@ -628,109 +730,29 @@
             "expected_version_id",
             "relationship_type",
             "target_object_id",
-            "expected_record_sha256",
-            "expected_revision",
-            "new_revision"
+            "expected_record_sha256"
           ],
           "properties": {
             "kind": {
-              "const": "update_relationship"
+              "const": "add_relationship"
             },
             "object_record_path": {
-              "type": "string",
-              "pattern": "^\\.folderbase/objects/object_[A-Za-z0-9_.-]+\\.json$",
-              "maxLength": 4096
+              "$ref": "#/$defs/objectRecordPath"
             },
             "object_id": {
-              "type": "string",
-              "pattern": "^object_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/objectId"
             },
             "expected_version_id": {
-              "type": "string",
-              "pattern": "^version_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/versionId"
             },
             "relationship_type": {
-              "$ref": "#/$defs/token"
+              "$ref": "#/$defs/relationshipType"
             },
             "target_object_id": {
-              "type": "string",
-              "pattern": "^object_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
+              "$ref": "#/$defs/objectId"
             },
             "expected_record_sha256": {
               "$ref": "#/$defs/sha256"
-            },
-            "expected_revision": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "new_revision": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": [
-            "kind",
-            "object_record_path",
-            "object_id",
-            "expected_version_id",
-            "from",
-            "to",
-            "expected_record_sha256",
-            "expected_revision",
-            "new_revision"
-          ],
-          "properties": {
-            "kind": {
-              "const": "update_object_lifecycle"
-            },
-            "object_record_path": {
-              "type": "string",
-              "pattern": "^\\.folderbase/objects/object_[A-Za-z0-9_.-]+\\.json$",
-              "maxLength": 4096
-            },
-            "object_id": {
-              "type": "string",
-              "pattern": "^object_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
-            },
-            "expected_version_id": {
-              "type": "string",
-              "pattern": "^version_[A-Za-z0-9_.-]+$",
-              "maxLength": 255
-            },
-            "from": {
-              "enum": [
-                "active",
-                "archived"
-              ]
-            },
-            "to": {
-              "enum": [
-                "active",
-                "archived"
-              ]
-            },
-            "expected_record_sha256": {
-              "$ref": "#/$defs/sha256"
-            },
-            "expected_revision": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "new_revision": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
             }
           },
           "additionalProperties": false
