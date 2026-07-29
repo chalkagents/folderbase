@@ -16,7 +16,9 @@ The planning seam is `FolderbaseVersionStore::open(root)` followed by
 Folderbase identity, effective ordered ignore-policy digest, and optional
 device-local head observed at `.folderbase/local/head.json`. A Local Head record
 is accepted only when it is closed, bounded, and names the exact Folderbase and
-physical root. It is device-local state, not shared or Cloud authority.
+physical root. It also anchors the SHA-256 digest of the exact capture
+transaction whose complete Folderbase Version it names. It is device-local
+state, not shared or Cloud authority.
 
 Metadata planning treats every regular file identically, including PDFs, videos,
 CSV, SQLite, unknown formats, and Git pack files. It records length and executable
@@ -74,21 +76,27 @@ no-clobber publication, and post-install verification. Only then does Core
 compare the observed Local Head and atomically replace it under the shared local
 transaction lock, implemented by the standard cross-platform exclusive file
 lock rather than an in-process mutex. All capture state publication is relative
-to retained no-follow `.folderbase` directory capabilities; data and directory
+to one retained no-follow `.folderbase` directory capability. Sealing opens that
+existing capability and re-attests the inert plan before creating a lock,
+repairing derived state, or publishing any capture record; it does not invoke
+the legacy ambient-path transaction recovery prelude. Data and directory
 handles are flushed, and visible `.folderbase` attachment is verified before
-and after Head replacement. A state-directory swap can leave only a detached
-orphan and cannot redirect publication through a symlink or junction.
+and after Head replacement. Exact root and state junctions/reparse points are
+rejected on Windows. A state-directory swap can leave only a detached orphan
+and cannot redirect publication through a symlink or junction.
 
 The active journal uses the same explicit byte bound for write and restart read.
 Before any immutable write, its assignment count and every path, kind, observed
 identity, reused Object ID, prior Object Version, and root-manifest parent are
 matched exactly to the approved plan and verified prior Head. The active capture
-journal remains until derived regular-file
-object projections and physical identity records are repaired. A retry after
-interruption at journal, Object Version, Folderbase Version, Local Head, or
-cleanup boundaries converges on the exact journal-assigned version. A stale
-attempt may discard only its intent; verified immutable records remain safe,
-reusable orphans.
+journal remains until derived regular-file object projections and physical
+identity records are repaired. After Head publication, recovery first verifies
+the Head-anchored digest of the complete journal and requires the committed
+version's parents and timestamp to match that immutable intent before journal
+identity evidence can be projected. A retry after interruption at journal,
+Object Version, Folderbase Version, Local Head, or cleanup boundaries converges
+on the exact journal-assigned version. A stale attempt may discard only its
+intent; verified immutable records remain safe, reusable orphans.
 
 This decision remains **Proposed**. This slice does not yet produce Tombstones,
 so deletion, same-path recreation, and kind replacement are refused without

@@ -789,7 +789,16 @@ stages, flushes, publishes, verifies, replaces, and removes capture state
 relative to retained no-follow directory handles. It rejects symlink/junction
 parent swaps; a detached write cannot advance visible Head. Local Head advances
 only after those checks, through a compare-and-replace under a cross-platform
-exclusive device-local file lock.
+exclusive device-local file lock. The Local Head also binds the SHA-256 digest
+of the complete capture journal. Recovery after Head publication refuses any
+journal mutation and requires the committed version's exact parents and
+timestamp to match the anchored intent before projecting identity evidence.
+
+Sealing opens the existing retained state capability and re-attests the inert
+plan before any lock, layout, recovery, or capture publication. Capture-specific
+blob, Object Version, Folderbase Version, projection, identity, journal, and Head
+operations reuse that capability rather than re-entering through ambient paths.
+Mutating root openers reject Windows junctions and all other reparse points.
 
 The active journal's writer and restart reader share one explicit bound.
 Assignment cardinality and every planned path/kind/observation plus reused

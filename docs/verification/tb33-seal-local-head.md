@@ -38,6 +38,10 @@ The implementation proves:
 - new IDs persisted in a durable transaction before immutable object writes;
 - exact active-journal cardinality and prior-lineage validation, plus one
   declared writer/restart byte bound;
+- Local Head anchoring of the complete capture-journal digest, with
+  post-Head journal-observation tamper refusal;
+- exact committed parent and timestamp validation before recovery may project
+  identity evidence;
 - exact bytes for PDF, video, CSV, SQLite, Git packs, office-shaped, binary, and
   unknown files without format interpretation;
 - directory, symlink target, empty-directory, and executable fidelity;
@@ -53,6 +57,10 @@ The implementation proves:
   derived projection, identity, and Head publication;
 - a retained-parent swap regression proving an outside symlink receives no
   state writes;
+- a seal-prelude regression proving no lock or state publication occurs before
+  the retained state capability is open and the plan is re-attested;
+- shared Windows reparse-point rejection for root, state, workspace, and seal
+  mutation paths, plus a native Windows directory-junction regression;
 - an exclusive cross-platform transaction file-lock contention test;
 - fresh-process recovery at journal, object-write, Folderbase-Version,
   Head-replace, and cleanup checkpoints;
@@ -69,7 +77,7 @@ cargo test -p folderbase-core --test folderbase_seal
 6 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
-9 passed; 0 failed
+12 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
 1 passed; 0 failed
