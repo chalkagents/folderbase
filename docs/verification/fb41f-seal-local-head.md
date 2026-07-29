@@ -130,19 +130,115 @@ but stores directory iterators and capabilities in explicit heap frames, so the
 129th component returns the typed portable-depth refusal on constant native
 stack.
 
+## Productive Tombstone Phase A
+
+Phase A froze the product decision that snapshot capture uses exact path plus
+supported kind as logical Knowledge Object continuity. Physical identity is
+race evidence and a future move hint, not sole cross-capture logical identity
+authority. This keeps atomic-save editors usable while requiring durable
+deletion evidence before a same-path/same-kind recreation receives a new
+Object ID.
+
+The genuine RED/GREEN pairs are:
+
+```text
+a154410 test(core): require productive deletion tombstones
+e4ac4c1 feat(core): seal absent bindings as tombstones
+
+8a981b2 test(core): require atomic-save identity continuity
+fbf7539 feat(core): preserve same-kind path continuity
+
+3b64d2b test(core): bind executable fidelity to object versions
+d2b3600 fix(core): version executable fidelity changes
+
+3ff51f8 test(core): require productive kind replacement
+7b99c6d feat(core): tombstone supported kind replacement
+
+f510555 test(core): refuse hidden prior bindings
+02a78e3 fix(core): refuse hidden prior bindings
+
+df4296e test(core): bound capture journal entry aggregate
+8783a05 fix(core): bound capture journal entry aggregate
+
+57ecf06 test(core): preserve legacy capture journal digest
+bb05fdb fix(core): preserve legacy empty journal encoding
+
+ca20008 test(core): preserve intent across scope refusal
+ef26b2c fix(core): refuse scope change before intent cleanup
+```
+
+The first RED observed `TombstonesRequired` for an ordinary captured absence.
+Its GREEN transaction carries the complete sorted target Tombstone set, seals
+it into the immutable Folderbase Version, and advances Local Head only after
+referenced Object Versions verify. The atomic-save REDs observed the same old
+refusal for a provably distinct replacement and for missing derived physical
+identity. GREEN preserves the Object ID at the same exact path and supported
+kind; changed bytes or executable fidelity receive a new Object Version.
+
+The kind-replacement RED observed the old refusal for both regular-to-directory
+and directory-to-regular changes. GREEN assigns a new Object ID while retaining
+the prior Object as a Tombstone. The scope-safety RED introduced a typed
+`PriorBindingHidden` contract; GREEN refuses new ignore, nested-Folderbase, and
+unsupported-node hiding before capture-journal or Head mutation. The aggregate
+RED proved that a journal could separately fit the assignment and Tombstone
+caps while exceeding the one Folderbase Version entry limit. GREEN checks their
+sum before accepting the journal.
+
+The compatibility RED installed legacy pre-Tombstone-field journal bytes after
+Head replacement and anchored their exact digest in Local Head. Deserializing
+the missing field to an empty collection and then serializing the new field
+broke recovery. GREEN keeps the field optional on decode and omits it on encode
+when empty, preserving the exact legacy digest while non-empty Tombstone target
+sets remain explicit.
+
+The interrupted-scope RED left a durable update intent, then introduced each of
+an ignore rule, a nested Folderbase boundary, and an unsupported hard-link
+replacement that hid a prior binding. The typed refusal occurred only after the
+old implementation removed the intent. GREEN verifies the current prior and
+refuses the scope change before stale-intent cleanup. The journal remains
+byte-identical, Local Head remains unchanged, and restoring the exact approved
+ignore-case plan converges on the originally assigned Folderbase Version.
+
+Three additional commits are explicitly regression coverage, not claimed REDs:
+
+```text
+f236e85 test(core): cover newest tombstone lifecycle
+c334e31 test(core): cover tombstone crash convergence
+a13d32f test(core): reject tombstone journal tamper
+```
+
+The generic projection introduced by the first GREEN already made
+delete→recreate→delete retain only the newest deleted Object for one exact path.
+The recovery regression proves the exact Tombstone-bearing target converges
+after interruption at journal, object-write, Folderbase-Version, Head-replace,
+and cleanup checkpoints. The tamper regression proves an active journal cannot
+substitute a different target Tombstone for the one derived from the verified
+parent and approved plan.
+
 ## Green behavior
 
 The implementation proves:
 
 - genesis and update Folderbase Versions with exact parent linkage;
-- stable Object ID reuse only from a verified prior Local Head binding;
-- fail-closed reuse when physical-identity evidence is missing, including
-  replacement after Head but before derived identity projection;
-- Unix device/inode and Windows volume plus 128-bit File ID continuity from
-  opened no-follow handles;
+- same-path/same-supported-kind logical Object ID continuity only from a
+  verified prior Local Head binding, including atomic-save replacement;
+- changed content or executable fidelity creates a new Object Version under the
+  same logical Object ID;
+- captured absence creates a durable Tombstone, while supported-kind
+  replacement creates prior Tombstone plus new live Object ID;
+- delete→recreate→delete retains only the newest deleted Object for one exact
+  path, and captured absence is durable evidence that recreation is new;
+- physical identity from Unix device/inode or Windows volume plus 128-bit File
+  ID remains exact-read race evidence and derived local state rather than sole
+  cross-capture logical identity authority;
+- missing or stale derived physical identity is rebuilt without splitting a
+  same-path/same-kind Knowledge Object;
 - new IDs persisted in a durable transaction before immutable object writes;
-- exact active-journal cardinality and prior-lineage validation, with bounded
-  streaming JSON encoding under the same declared writer/restart byte bound;
+- complete sorted target Tombstones persisted in that transaction and matched
+  to the verified parent, approved plan, and committed immutable version;
+- exact active-journal assignment-plus-Tombstone aggregate and prior-lineage
+  validation, with bounded streaming JSON encoding under the same declared
+  writer/restart byte bound;
 - preflight encoding of the complete future Folderbase Version before the
   journal or any immutable object is published;
 - new-capture and prior-Head/no-op content reads stop after one byte beyond the
@@ -163,6 +259,12 @@ The implementation proves:
   planning fixture;
 - required markers, ordered exclusions, nested boundaries, and
   `.folderbase/**` non-capture;
+- fail-closed refusal before journal or Head mutation when ignore policy, a
+  nested Folderbase, or an unsupported exclusion hides a prior live binding;
+- byte-identical preservation of an existing durable capture intent and its
+  Local Head across that typed scope refusal;
+- post-Head recovery of legacy capture journals that predate the optional
+  Tombstone target field;
 - concurrent/stale metadata rejection without Local Head movement;
 - no-op and crash retry convergence on the exact assigned Folderbase Version;
 - append-only blob, Object Version, and complete Folderbase Version
@@ -186,12 +288,11 @@ The implementation proves:
   Windows directory write authority;
 - an exclusive cross-platform transaction file-lock contention test;
 - fresh-process recovery at journal, object-write, Folderbase-Version,
-  Head-replace, and cleanup checkpoints;
+  Head-replace, and cleanup checkpoints for both live updates and Tombstones;
 - no lost prior Head during update recovery;
 - stale-intent cleanup while retaining only safe content-addressed or immutable
   orphans;
-- explicit no-write refusal when a deletion requires an unimplemented
-  Tombstone.
+- active-journal Tombstone tamper refusal without moving the prior Head.
 
 ## Hosted Linux replacement-fixture hardening
 
@@ -201,8 +302,8 @@ test-fixture ambiguity in
 The `HeadReplaced` hook ran and replaced `active.bin`, but the fixture closed
 the removed file before recreating the path. Linux immediately reused its
 device/inode, so the alleged replacement had the same physical identity and the
-next capture correctly treated it as continuity under the evidence it received.
-No process-global fault injector exists: each seal owns its callback closure.
+then-current test could not prove that two filesystem objects had existed. No
+process-global fault injector exists: each seal owns its callback closure.
 
 The test-only RED commit is:
 
@@ -227,20 +328,22 @@ recycle the removed inode while constructing the fault. The native Linux
 eight-worker test was GREEN in all 20 runs, the original hosted test passed,
 and all 15 seal unit tests passed together with eight test threads.
 
-ADR-0005 records the remaining protocol boundary: Unix device/inode is a live
-object identity, not a globally unique lifetime token. A same-path, same-kind
-delete-and-recreate that occurs entirely between captures and receives a reused
-inode requires explicit deletion evidence from the future Tombstone lifecycle;
-this narrowly scoped CI repair does not redefine cross-capture logical identity.
+Phase A later superseded the old cross-capture expectation while retaining the
+deterministic fixture: a same-path/same-kind replacement is logical continuity
+by default even when its physical identity differs. A captured absence is
+durable deletion evidence and makes later recreation new. Delete-and-recreate
+entirely between captures needs a future App event journal or explicit Core
+operation to override that atomic-save-friendly default.
 
 Focused gates:
 
 ```text
 cargo test -p folderbase-core --test folderbase_seal
-6 passed; 0 failed on macOS; 7 tests are selected on Windows
+12 passed; 0 failed on macOS; the Windows-only read-authority regression replaces
+the Unix-only fidelity regression in the native Windows selection
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
-15 passed; 0 failed
+22 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
 5 passed; 0 failed on macOS
@@ -257,8 +360,12 @@ passed
 cargo check -p folderbase-core --target x86_64-pc-windows-msvc
 passed
 
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
+
+scripts/test-package-install.sh
+passed; extracted Core and CLI packages are self-contained and the installed
+binary reports folderbase 0.4.0
 ```
 
 The Windows target has six state tests: read-only inspection, bounded source
@@ -282,11 +389,14 @@ passed
 
 ## Truth boundary
 
-This evidence does not claim Tombstone production, same-path recreation,
-kind-replacement capture, complete restore/no-clobber reconstruction, restore
-crash recovery, filesystem or database snapshot coordination, Remote Head,
-sync, sharing, authorization, Cloud durability, or hosted deployment. Those
-remain required before ADR-0005 can be Accepted.
+This evidence proves productive captured-absence Tombstones, same-path/same-kind
+logical continuity, and supported-kind replacement capture. It does not claim
+durable App filesystem-event intake or an explicit Core deletion operation for
+delete-and-recreate entirely between captures, cross-path move detection,
+complete restore/no-clobber reconstruction, restore crash recovery, filesystem
+or database snapshot coordination, Remote Head, sync, sharing, authorization,
+Cloud durability, or hosted deployment. Those remain required before ADR-0005
+can be Accepted.
 
 The local cross-target library check proves Windows code compiles, while the
 checked-in `windows-latest` CI matrix owns runtime proof for Windows File IDs,

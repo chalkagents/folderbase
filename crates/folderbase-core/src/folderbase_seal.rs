@@ -27,9 +27,9 @@ use crate::{
     },
     folderbase_state::FolderbaseState,
     folderbase_version::{
-        Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion, FolderbaseVersionEntries,
-        FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding, PathBindingKind,
-        RootManifest, validate_capture_version_id,
+        DeletedKind, Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion,
+        FolderbaseVersionEntries, FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding,
+        PathBindingKind, RootManifest, Tombstone, validate_capture_version_id,
     },
     local_versions::{
         ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
@@ -127,6 +127,8 @@ struct CaptureTransaction {
     root_manifest_candidate_version_id: String,
     prior_root_manifest_version_id: Option<String>,
     assignments: Vec<CaptureAssignment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    target_tombstones: Vec<Tombstone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +265,8 @@ impl FolderbaseVersionStore {
             } else if transaction.expected_head != current_head {
                 return Err(FolderbaseCaptureError::LocalHeadChanged);
             } else if transaction.plan_sha256 != plan_sha256 {
+                let prior = load_prior_head(self, &local, &state, plan.current_local_head())?;
+                ensure_prior_bindings_observable(&plan, prior.as_ref())?;
                 // The old Head still owns authority. Immutable records already
                 // installed by the abandoned attempt remain safe orphans;
                 // removing only the active intent permits a fresh assignment.
@@ -272,6 +276,7 @@ impl FolderbaseVersionStore {
         }
 
         let prior = load_prior_head(self, &local, &state, plan.current_local_head())?;
+        ensure_prior_bindings_observable(&plan, prior.as_ref())?;
         if active.is_none()
             && live_state_matches_prior(
                 self,
@@ -295,12 +300,10 @@ impl FolderbaseVersionStore {
         let transaction = match active {
             Some(transaction) => transaction,
             None => {
-                let transaction =
-                    assign_capture_transaction(self, &state, &plan, &plan_sha256, prior.as_ref())?;
+                let transaction = assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
-                    prior.as_ref(),
                     maximum_transaction_bytes,
                     maximum_version_bytes,
                 )?;
@@ -325,7 +328,6 @@ impl FolderbaseVersionStore {
         preflight_capture_envelopes(
             &plan,
             &transaction,
-            prior.as_ref(),
             maximum_transaction_bytes,
             maximum_version_bytes,
         )?;
@@ -559,8 +561,6 @@ fn ensure_same_plan(
 }
 
 fn assign_capture_transaction(
-    store: &FolderbaseVersionStore,
-    state: &FolderbaseState,
     plan: &CapturePlan,
     plan_sha256: &str,
     prior: Option<&FolderbaseVersion>,
@@ -574,42 +574,11 @@ fn assign_capture_transaction(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    if let Some(version) = prior {
-        for binding in version.bindings() {
-            if !plan
-                .entries()
-                .iter()
-                .any(|entry| entry.path() == binding.path())
-            {
-                return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
-                    binding.path(),
-                )));
-            }
-        }
-    }
-
     let mut assignments = Vec::with_capacity(plan.entries().len());
     for entry in plan.entries() {
         let prior_binding = prior_bindings.get(entry.path()).copied();
-        if prior_binding.is_some_and(|binding| binding.kind() != path_binding_kind(entry.kind())) {
-            return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
-                entry.path(),
-            )));
-        }
-        let reused_object = match prior_binding {
-            Some(binding) => identity_allows_reuse(
-                state,
-                &store.root_attestation.root,
-                binding.object_id(),
-                entry,
-            )?,
-            None => false,
-        };
-        if prior_binding.is_some() && !reused_object {
-            return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
-                entry.path(),
-            )));
-        }
+        let reused_object =
+            prior_binding.is_some_and(|binding| binding.kind() == path_binding_kind(entry.kind()));
         let object_id = prior_binding
             .filter(|_| reused_object)
             .map(|binding| binding.object_id().to_owned())
@@ -631,6 +600,7 @@ fn assign_capture_transaction(
         });
     }
 
+    let target_tombstones = project_target_tombstones(prior, &assignments);
     Ok(CaptureTransaction {
         format: CAPTURE_TRANSACTION_FORMAT_V1.to_owned(),
         transaction_id: format!("fbcapture_{}", Uuid::now_v7()),
@@ -645,7 +615,94 @@ fn assign_capture_transaction(
         prior_root_manifest_version_id: prior
             .map(|version| version.root_manifest().object_version_id().to_owned()),
         assignments,
+        target_tombstones,
     })
+}
+
+fn ensure_prior_bindings_observable(
+    plan: &CapturePlan,
+    prior: Option<&FolderbaseVersion>,
+) -> Result<(), FolderbaseCaptureError> {
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    let live_paths = plan
+        .entries()
+        .iter()
+        .map(|entry| entry.path())
+        .collect::<std::collections::BTreeSet<_>>();
+    for binding in prior.bindings() {
+        if live_paths.contains(binding.path()) {
+            continue;
+        }
+        let hidden_by_ignore = plan
+            .ignored_paths()
+            .iter()
+            .any(|ignored| path_is_same_or_descendant_of(binding.path(), ignored.path()));
+        let hidden_by_exclusion = plan.exclusions().iter().any(|exclusion| {
+            binding.path() == exclusion.path()
+                || (exclusion.kind() == CaptureExclusionKind::NestedFolderbase
+                    && path_is_same_or_descendant_of(binding.path(), exclusion.path()))
+        });
+        if hidden_by_ignore || hidden_by_exclusion {
+            return Err(FolderbaseCaptureError::PriorBindingHidden(PathBuf::from(
+                binding.path(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn path_is_same_or_descendant_of(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn project_target_tombstones(
+    prior: Option<&FolderbaseVersion>,
+    assignments: &[CaptureAssignment],
+) -> Vec<Tombstone> {
+    let Some(prior) = prior else {
+        return Vec::new();
+    };
+    let assignments = assignments
+        .iter()
+        .map(|assignment| (assignment.path.as_str(), assignment))
+        .collect::<BTreeMap<_, _>>();
+    let mut by_path = prior
+        .tombstones()
+        .iter()
+        .cloned()
+        .map(|tombstone| (tombstone.path().to_owned(), tombstone))
+        .collect::<BTreeMap<_, _>>();
+    for binding in prior.bindings() {
+        let continued = assignments.get(binding.path()).is_some_and(|assignment| {
+            assignment.reused_object && assignment.object_id == binding.object_id()
+        });
+        if continued {
+            continue;
+        }
+        by_path.insert(
+            binding.path().to_owned(),
+            Tombstone::from_verified_producer(
+                binding.path(),
+                binding.object_id(),
+                deleted_kind(binding.kind()),
+                binding.object_version_id().map(str::to_owned),
+            ),
+        );
+    }
+    by_path.into_values().collect()
+}
+
+fn deleted_kind(kind: PathBindingKind) -> DeletedKind {
+    match kind {
+        PathBindingKind::Directory => DeletedKind::Directory,
+        PathBindingKind::RegularFile => DeletedKind::RegularFile,
+        PathBindingKind::Symlink => DeletedKind::Symlink,
+    }
 }
 
 fn path_binding_kind(kind: CaptureEntryKind) -> PathBindingKind {
@@ -823,7 +880,6 @@ fn live_state_matches_prior(
 fn preflight_capture_envelopes(
     plan: &CapturePlan,
     transaction: &CaptureTransaction,
-    prior: Option<&FolderbaseVersion>,
     maximum_transaction_bytes: u64,
     maximum_version_bytes: u64,
 ) -> Result<(), FolderbaseCaptureError> {
@@ -887,9 +943,7 @@ fn preflight_capture_envelopes(
             )
         })
         .collect();
-    let tombstones = prior
-        .map(|version| version.tombstones().to_vec())
-        .unwrap_or_default();
+    let tombstones = transaction.target_tombstones.clone();
     let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
@@ -1026,6 +1080,7 @@ fn build_and_install_capture(
                     binding.object_id() == assignment.object_id
                         && binding.content_sha256() == Some(content.digest.as_str())
                         && binding.bytes() == Some(content.bytes)
+                        && binding.executable() == entry.executable()
                 }) {
                     let version_id = VersionId::parse(
                         assignment.prior_object_version_id.clone().ok_or_else(|| {
@@ -1134,9 +1189,7 @@ fn build_and_install_capture(
             )
         })
         .collect();
-    let tombstones = prior
-        .map(|version| version.tombstones().to_vec())
-        .unwrap_or_default();
+    let tombstones = transaction.target_tombstones.clone();
     let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
@@ -1599,6 +1652,15 @@ fn validate_transaction(
     store: &FolderbaseVersionStore,
     transaction: &CaptureTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
+    let aggregate_entries = transaction
+        .assignments
+        .len()
+        .checked_add(transaction.target_tombstones.len())
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(
+                "active journal entry aggregate exceeds the supported range".to_owned(),
+            )
+        })?;
     if transaction.format != CAPTURE_TRANSACTION_FORMAT_V1
         || !transaction.transaction_id.starts_with("fbcapture_")
         || Uuid::parse_str(
@@ -1611,10 +1673,10 @@ fn validate_transaction(
         || transaction.folderbase_id != store.root_attestation.folderbase_id
         || transaction.root_instance_sha256 != store.root_attestation.root_instance_sha256
         || transaction.plan_sha256.len() != 64
-        || transaction.assignments.len() > crate::folderbase_version::MAX_VERSION_ENTRIES
+        || aggregate_entries > crate::folderbase_version::MAX_VERSION_ENTRIES
     {
         return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
-            "active journal metadata is inconsistent".to_owned(),
+            "active journal metadata or entry aggregate is inconsistent".to_owned(),
         ));
     }
     validate_capture_version_id(&transaction.target_version_id)?;
@@ -1646,6 +1708,27 @@ fn validate_transaction(
             VersionId::parse(version_id.clone())?;
         }
         previous = Some(assignment.path.as_str());
+    }
+    let mut previous = None;
+    for tombstone in &transaction.target_tombstones {
+        if previous.is_some_and(|value: &str| value.as_bytes() >= tombstone.path().as_bytes()) {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "journal Tombstones are not in strict portable-path order".to_owned(),
+            ));
+        }
+        ObjectId::parse(tombstone.object_id().to_owned())?;
+        match (tombstone.deleted_kind(), tombstone.last_object_version_id()) {
+            (DeletedKind::Directory, None) => {}
+            (DeletedKind::RegularFile | DeletedKind::Symlink, Some(version_id)) => {
+                VersionId::parse(version_id.to_owned())?;
+            }
+            _ => {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                    "journal Tombstone Object Version does not match its deleted kind".to_owned(),
+                ));
+            }
+        }
+        previous = Some(tombstone.path());
     }
     Ok(())
 }
@@ -1686,6 +1769,11 @@ fn validate_transaction_against_plan(
                     && assignment.object_id == binding.object_id()
                     && assignment.prior_object_version_id.as_deref()
                         == binding.object_version_id() => {}
+            Some(binding)
+                if !assignment.reused_object
+                    && binding.kind() != path_binding_kind(entry.kind())
+                    && assignment.object_id != binding.object_id()
+                    && assignment.prior_object_version_id.is_none() => {}
             None if !assignment.reused_object && assignment.prior_object_version_id.is_none() => {}
             _ => {
                 return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
@@ -1694,6 +1782,12 @@ fn validate_transaction_against_plan(
                 )));
             }
         }
+    }
+    if transaction.target_tombstones != project_target_tombstones(prior, &transaction.assignments) {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "journal Tombstones do not match the verified parent and approved CapturePlan"
+                .to_owned(),
+        ));
     }
     let expected_prior_root = prior.map(|version| version.root_manifest().object_version_id());
     if transaction.prior_root_manifest_version_id.as_deref() != expected_prior_root {
@@ -1716,6 +1810,7 @@ fn validate_committed_transaction(
         .unwrap_or_default();
     if committed.version_id() != transaction.target_version_id
         || committed.bindings().len() != transaction.assignments.len()
+        || committed.tombstones() != transaction.target_tombstones
         || committed.parents() != expected_parents
         || committed.created_at() != transaction.created_at
     {
@@ -1756,6 +1851,13 @@ fn validate_committed_transaction(
                 } else {
                     assignment.candidate_object_version_id.as_deref()
                 }
+            }
+            (Some(parent), false)
+                if parent.kind() != binding.kind()
+                    && parent.object_id() != assignment.object_id
+                    && assignment.prior_object_version_id.is_none() =>
+            {
+                assignment.candidate_object_version_id.as_deref()
             }
             (None, false) if assignment.prior_object_version_id.is_none() => {
                 assignment.candidate_object_version_id.as_deref()
@@ -2250,6 +2352,308 @@ mod tests {
         }
     }
 
+    #[test]
+    fn post_head_legacy_journal_without_tombstone_field_still_recovers() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::HeadReplaced {
+                    let state = FolderbaseState::open(root.path()).expect("state");
+                    let active_path = Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH);
+                    let encoded = state
+                        .read_bounded(active_path, MAX_CAPTURE_TRANSACTION_BYTES)
+                        .expect("read active journal")
+                        .expect("active journal");
+                    let mut wire: serde_json::Value =
+                        serde_json::from_slice(&encoded).expect("journal JSON");
+                    wire.as_object_mut()
+                        .expect("journal object")
+                        .remove("target_tombstones");
+                    assert!(wire.get("target_tombstones").is_none());
+                    let legacy_encoded = json_bytes(&wire).expect("legacy journal bytes");
+                    state
+                        .replace(active_path, &legacy_encoded)
+                        .expect("install legacy journal");
+
+                    let mut head = local_head(root.path()).expect("Local Head");
+                    head.transaction_sha256 = format!("{:x}", Sha256::digest(&legacy_encoded));
+                    state
+                        .replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&head).unwrap())
+                        .expect("bind Head to legacy journal");
+                    panic!("stop after legacy Head replacement");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let assigned = local_head(root.path()).expect("legacy Head").version_id;
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+        let retry = reopened
+            .seal_capture(reopened.plan_capture().expect("same live plan"))
+            .expect("legacy post-Head intent must recover");
+        assert_eq!(retry.version_id(), assigned);
+        assert!(reopened.read_version(retry.version_id()).is_ok());
+        assert!(active_transaction(root.path()).is_none());
+    }
+
+    fn interrupt_update_after_journal(
+        root: &Path,
+        store: &FolderbaseVersionStore,
+    ) -> (Vec<u8>, String) {
+        fs::write(root.join("pending.bin"), b"pending update").expect("pending update");
+        let plan = store.plan_capture().expect("update plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("stop after active journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let transaction = active_transaction(root).expect("active intent");
+        let encoded = fs::read(root.join(ACTIVE_CAPTURE_TRANSACTION_PATH))
+            .expect("exact active journal bytes");
+        (encoded, transaction.target_version_id)
+    }
+
+    fn assert_hidden_retry_preserves_active_intent(
+        root: &Path,
+        store: &FolderbaseVersionStore,
+        journal_before: &[u8],
+        hidden_path: &Path,
+    ) {
+        let head_before = fs::read(root.join(LOCAL_HEAD_PATH)).expect("prior Head");
+        let error = store
+            .seal_capture(store.plan_capture().expect("scope-change plan"))
+            .expect_err("hidden prior binding must be refused");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::PriorBindingHidden(path) if path == hidden_path
+        ));
+        assert_eq!(
+            fs::read(root.join(ACTIVE_CAPTURE_TRANSACTION_PATH)).expect("preserved active intent"),
+            journal_before
+        );
+        assert_eq!(
+            fs::read(root.join(LOCAL_HEAD_PATH)).expect("unchanged prior Head"),
+            head_before
+        );
+    }
+
+    #[test]
+    fn newly_ignored_path_preserves_stale_active_intent_before_refusal() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let ignore_path = root.path().join(".folderbaseignore");
+        let original_modified = fs::metadata(&ignore_path)
+            .expect("ignore metadata")
+            .modified()
+            .expect("ignore modified time");
+        let (journal, assigned) = interrupt_update_after_journal(root.path(), &store);
+
+        fs::write(&ignore_path, "active.bin\n").expect("hide prior binding");
+        assert_hidden_retry_preserves_active_intent(
+            root.path(),
+            &store,
+            &journal,
+            Path::new("active.bin"),
+        );
+
+        fs::write(&ignore_path, "").expect("restore ignore policy");
+        File::options()
+            .write(true)
+            .open(&ignore_path)
+            .expect("open restored policy")
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .expect("restore approved plan time");
+        let retry = store
+            .seal_capture(store.plan_capture().expect("restored update plan"))
+            .expect("preserved intent remains recoverable");
+        assert_eq!(retry.version_id(), assigned);
+        assert!(active_transaction(root.path()).is_none());
+    }
+
+    #[test]
+    fn new_nested_boundary_preserves_stale_active_intent_before_refusal() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("client")).expect("client");
+        fs::write(root.path().join("client/notes.md"), "client notes").expect("client notes");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let (journal, _) = interrupt_update_after_journal(root.path(), &store);
+
+        fs::create_dir(root.path().join("client/.folderbase")).expect("nested state");
+        fs::write(
+            root.path().join("client/.folderbase/manifest.json"),
+            br#"{
+  "protocol_version": "0.4.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
+  }
+}
+"#,
+        )
+        .expect("nested manifest");
+        fs::write(
+            root.path().join("client/FOLDERBASE.md"),
+            "# Nested Folderbase\n",
+        )
+        .expect("nested entry");
+        assert_hidden_retry_preserves_active_intent(
+            root.path(),
+            &store,
+            &journal,
+            Path::new("client"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_replacement_preserves_stale_active_intent_before_refusal() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        let (journal, _) = interrupt_update_after_journal(root.path(), &store);
+
+        let original = root.path().join("original-active.bin");
+        fs::rename(root.path().join("active.bin"), &original).expect("retain original inode");
+        fs::hard_link(&original, root.path().join("active.bin")).expect("unsupported hard link");
+        assert_hidden_retry_preserves_active_intent(
+            root.path(),
+            &store,
+            &journal,
+            Path::new("active.bin"),
+        );
+    }
+
+    #[test]
+    fn tombstone_capture_reopens_and_converges_at_every_persistence_checkpoint() {
+        for fault in [
+            CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ObjectWritesDurable,
+            CaptureCheckpoint::VersionDurable,
+            CaptureCheckpoint::HeadReplaced,
+            CaptureCheckpoint::CleanupComplete,
+        ] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            let genesis = store
+                .seal_capture(store.plan_capture().expect("genesis plan"))
+                .expect("genesis");
+            let prior = store
+                .read_version(genesis.version_id())
+                .expect("genesis version");
+            let prior_binding = prior.lookup_binding("active.bin").expect("prior binding");
+            let prior_object_id = prior_binding.object_id().to_owned();
+            let prior_object_version_id = prior_binding
+                .object_version_id()
+                .expect("prior Object Version")
+                .to_owned();
+            fs::remove_file(root.path().join("active.bin")).expect("delete active file");
+
+            let plan = store.plan_capture().expect("deletion plan");
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                store.seal_capture_with_hook(plan, |checkpoint| {
+                    if checkpoint == &fault {
+                        panic!("simulated Tombstone termination at {fault:?}");
+                    }
+                })
+            }));
+            assert!(interrupted.is_err(), "fault {fault:?}");
+
+            let assigned = active_transaction(root.path())
+                .map(|transaction| transaction.target_version_id)
+                .or_else(|| local_head(root.path()).map(|head| head.version_id))
+                .expect("durable assigned Tombstone target");
+            drop(store);
+            let reopened = FolderbaseVersionStore::open(root.path()).expect("crash reopen");
+            let retry = reopened
+                .seal_capture(reopened.plan_capture().expect("reopen deletion plan"))
+                .expect("exact Tombstone retry");
+            assert_eq!(retry.version_id(), assigned, "fault {fault:?}");
+            let verified = reopened
+                .read_version(retry.version_id())
+                .expect("Tombstone references verify");
+            assert_eq!(verified.parents(), &[genesis.version_id().to_owned()]);
+            assert!(verified.lookup_binding("active.bin").is_none());
+            assert_eq!(verified.tombstones().len(), 1);
+            let tombstone = &verified.tombstones()[0];
+            assert_eq!(tombstone.path(), "active.bin");
+            assert_eq!(tombstone.object_id(), prior_object_id);
+            assert_eq!(
+                tombstone.last_object_version_id(),
+                Some(prior_object_version_id.as_str())
+            );
+            assert!(active_transaction(root.path()).is_none());
+            assert_eq!(
+                local_head(root.path()).expect("Local Head").version_id,
+                assigned
+            );
+        }
+    }
+
+    #[test]
+    fn active_journal_tombstone_tamper_never_changes_the_verified_deletion_target() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis plan"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete active file");
+        let plan = store.plan_capture().expect("deletion plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("stop after Tombstone journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let mut transaction = active_transaction(root.path()).expect("active Tombstone intent");
+        let original = transaction
+            .target_tombstones
+            .first()
+            .expect("target Tombstone")
+            .clone();
+        transaction.target_tombstones[0] = Tombstone::from_verified_producer(
+            original.path(),
+            ObjectId::new().to_string(),
+            original.deleted_kind(),
+            original.last_object_version_id().map(str::to_owned),
+        );
+        FolderbaseState::open(root.path())
+            .expect("state")
+            .replace(
+                Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                &json_bytes(&transaction).expect("tampered journal"),
+            )
+            .expect("replace active journal");
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+        let error = reopened
+            .seal_capture(reopened.plan_capture().expect("same deletion plan"))
+            .expect_err("tampered target Tombstone must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(message)
+                if message.contains("Tombstones")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("prior Head").version_id,
+            genesis.version_id()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn seal_retains_state_capability_before_any_publication_and_never_writes_through_a_swap() {
@@ -2411,35 +2815,47 @@ mod tests {
     }
 
     #[test]
-    fn missing_identity_evidence_never_authorizes_prior_object_reuse() {
+    fn missing_physical_identity_rebuilds_evidence_without_splitting_logical_identity() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let genesis = store
             .seal_capture(store.plan_capture().expect("genesis plan"))
             .expect("genesis");
         let version = store.read_version(genesis.version_id()).expect("version");
-        let object_id = version
+        let prior = version
             .lookup_binding("active.bin")
-            .expect("active binding")
-            .object_id();
-        fs::remove_file(root.path().join(capture_identity_relative_path(object_id)))
+            .expect("active binding");
+        let object_id = prior.object_id().to_owned();
+        let object_version_id = prior
+            .object_version_id()
+            .expect("Object Version")
+            .to_owned();
+        fs::remove_file(root.path().join(capture_identity_relative_path(&object_id)))
             .expect("remove local identity evidence");
 
-        let error = store
+        let repaired = store
             .seal_capture(store.plan_capture().expect("next plan"))
-            .expect_err("missing identity must fail closed");
-        assert!(matches!(
-            error,
-            FolderbaseCaptureError::TombstonesRequired(path)
-                if path == Path::new("active.bin")
-        ));
+            .expect("same-path same-kind continuity");
+        assert!(repaired.created());
+        let current = store
+            .read_version(repaired.version_id())
+            .expect("repaired version");
+        let current = current
+            .lookup_binding("active.bin")
+            .expect("active binding");
+        assert_eq!(current.object_id(), object_id);
         assert_eq!(
-            local_head(root.path()).expect("prior Head").version_id,
-            genesis.version_id()
+            current.object_version_id(),
+            Some(object_version_id.as_str())
+        );
+        assert!(
+            root.path()
+                .join(capture_identity_relative_path(&object_id))
+                .is_file()
         );
     }
 
-    fn assert_replacement_after_head_requires_a_tombstone(start: Option<&Barrier>) {
+    fn assert_same_kind_replacement_after_head_preserves_logical_identity(start: Option<&Barrier>) {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let plan = store.plan_capture().expect("plan");
@@ -2484,19 +2900,45 @@ mod tests {
         );
 
         let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
-        let error = reopened
+        let captured_head = reopened
+            .plan_capture()
+            .expect("replacement plan")
+            .current_local_head()
+            .expect("captured Head")
+            .version_id()
+            .to_owned();
+        let captured = reopened
+            .read_version(&captured_head)
+            .expect("captured version");
+        let captured_binding = captured
+            .lookup_binding("active.bin")
+            .expect("captured binding");
+        let captured_object_id = captured_binding.object_id().to_owned();
+        let captured_object_version_id = captured_binding
+            .object_version_id()
+            .expect("captured Object Version")
+            .to_owned();
+        let updated = reopened
             .seal_capture(reopened.plan_capture().expect("replacement plan"))
-            .expect_err("replacement needs a tombstone");
-        assert!(matches!(
-            error,
-            FolderbaseCaptureError::TombstonesRequired(path)
-                if path == Path::new("active.bin")
-        ));
+            .expect("same-kind replacement remains the same Knowledge Object");
+        let current = reopened
+            .read_version(updated.version_id())
+            .expect("replacement version");
+        let current_binding = current
+            .lookup_binding("active.bin")
+            .expect("replacement binding");
+        assert_eq!(current.parents(), &[captured_head]);
+        assert_eq!(current_binding.object_id(), captured_object_id);
+        assert_ne!(
+            current_binding.object_version_id(),
+            Some(captured_object_version_id.as_str())
+        );
+        assert!(current.tombstones().is_empty());
     }
 
     #[test]
-    fn replacement_after_head_and_before_identity_projection_requires_a_tombstone() {
-        assert_replacement_after_head_requires_a_tombstone(None);
+    fn replacement_after_head_and_before_identity_projection_preserves_logical_identity() {
+        assert_same_kind_replacement_after_head_preserves_logical_identity(None);
     }
 
     #[test]
@@ -2509,7 +2951,9 @@ mod tests {
                 .map(|_| {
                     let start = Arc::clone(&start);
                     scope.spawn(move || {
-                        assert_replacement_after_head_requires_a_tombstone(Some(&start));
+                        assert_same_kind_replacement_after_head_preserves_logical_identity(Some(
+                            &start,
+                        ));
                     })
                 })
                 .collect::<Vec<_>>();
@@ -2700,10 +3144,7 @@ mod tests {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         let plan = store.plan_capture().expect("plan");
-        let state = FolderbaseState::open_existing(root.path()).expect("state");
         let transaction = assign_capture_transaction(
-            &store,
-            &state,
             &plan,
             &capture_plan_sha256(&plan).expect("plan digest"),
             None,
@@ -2725,6 +3166,37 @@ mod tests {
             MAX_CAPTURE_TRANSACTION_BYTES, MAX_ENCODED_VERSION_BYTES,
             "writer and restart reader intentionally share one declared bound"
         );
+    }
+
+    #[test]
+    fn active_journal_bounds_assignments_and_tombstones_as_one_version_entry_set() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let plan = store.plan_capture().expect("plan");
+        let mut transaction = assign_capture_transaction(
+            &plan,
+            &capture_plan_sha256(&plan).expect("plan digest"),
+            None,
+        )
+        .expect("assignment");
+        transaction.target_tombstones = (0..crate::folderbase_version::MAX_VERSION_ENTRIES)
+            .map(|index| {
+                Tombstone::from_verified_producer(
+                    format!("deleted/{index:05}.bin"),
+                    ObjectId::new().to_string(),
+                    DeletedKind::RegularFile,
+                    Some(VersionId::new().to_string()),
+                )
+            })
+            .collect();
+
+        let error = validate_transaction(&store, &transaction)
+            .expect_err("journal aggregate must fit one bounded Folderbase Version");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidCaptureTransaction(message)
+                if message.contains("aggregate")
+        ));
     }
 
     #[test]
