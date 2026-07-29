@@ -343,7 +343,7 @@ cargo test -p folderbase-core --test folderbase_seal
 the Unix-only fidelity regression in the native Windows selection
 
 cargo test -p folderbase-core --lib folderbase_seal::tests::
-18 passed; 0 failed
+22 passed; 0 failed
 
 cargo test -p folderbase-core --lib folderbase_state::tests::
 5 passed; 0 failed on macOS
@@ -360,8 +360,12 @@ passed
 cargo check -p folderbase-core --target x86_64-pc-windows-msvc
 passed
 
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
+
+scripts/test-package-install.sh
+passed; extracted Core and CLI packages are self-contained and the installed
+binary reports folderbase 0.4.0
 ```
 
 The Windows target has six state tests: read-only inspection, bounded source
