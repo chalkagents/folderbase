@@ -2,8 +2,7 @@ use std::{fs, path::Path};
 
 use folderbase_core::{
     CaptureEntryKind, FolderbaseCaptureError, FolderbaseVersionStore, LocalVersionStore,
-    PathBindingKind, VersionId,
-    folderbase_version::DeletedKind,
+    PathBindingKind, VersionId, folderbase_version::DeletedKind,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};

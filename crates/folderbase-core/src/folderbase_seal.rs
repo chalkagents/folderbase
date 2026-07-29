@@ -27,9 +27,9 @@ use crate::{
     },
     folderbase_state::FolderbaseState,
     folderbase_version::{
-        Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion, FolderbaseVersionEntries,
-        FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding, PathBindingKind,
-        RootManifest, validate_capture_version_id,
+        DeletedKind, Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion,
+        FolderbaseVersionEntries, FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding,
+        PathBindingKind, RootManifest, Tombstone, validate_capture_version_id,
     },
     local_versions::{
         ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
@@ -127,6 +127,8 @@ struct CaptureTransaction {
     root_manifest_candidate_version_id: String,
     prior_root_manifest_version_id: Option<String>,
     assignments: Vec<CaptureAssignment>,
+    #[serde(default)]
+    target_tombstones: Vec<Tombstone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,7 +302,6 @@ impl FolderbaseVersionStore {
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
-                    prior.as_ref(),
                     maximum_transaction_bytes,
                     maximum_version_bytes,
                 )?;
@@ -325,7 +326,6 @@ impl FolderbaseVersionStore {
         preflight_capture_envelopes(
             &plan,
             &transaction,
-            prior.as_ref(),
             maximum_transaction_bytes,
             maximum_version_bytes,
         )?;
@@ -574,20 +574,6 @@ fn assign_capture_transaction(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    if let Some(version) = prior {
-        for binding in version.bindings() {
-            if !plan
-                .entries()
-                .iter()
-                .any(|entry| entry.path() == binding.path())
-            {
-                return Err(FolderbaseCaptureError::TombstonesRequired(PathBuf::from(
-                    binding.path(),
-                )));
-            }
-        }
-    }
-
     let mut assignments = Vec::with_capacity(plan.entries().len());
     for entry in plan.entries() {
         let prior_binding = prior_bindings.get(entry.path()).copied();
@@ -631,6 +617,7 @@ fn assign_capture_transaction(
         });
     }
 
+    let target_tombstones = project_target_tombstones(prior, &assignments);
     Ok(CaptureTransaction {
         format: CAPTURE_TRANSACTION_FORMAT_V1.to_owned(),
         transaction_id: format!("fbcapture_{}", Uuid::now_v7()),
@@ -645,7 +632,53 @@ fn assign_capture_transaction(
         prior_root_manifest_version_id: prior
             .map(|version| version.root_manifest().object_version_id().to_owned()),
         assignments,
+        target_tombstones,
     })
+}
+
+fn project_target_tombstones(
+    prior: Option<&FolderbaseVersion>,
+    assignments: &[CaptureAssignment],
+) -> Vec<Tombstone> {
+    let Some(prior) = prior else {
+        return Vec::new();
+    };
+    let assignments = assignments
+        .iter()
+        .map(|assignment| (assignment.path.as_str(), assignment))
+        .collect::<BTreeMap<_, _>>();
+    let mut by_path = prior
+        .tombstones()
+        .iter()
+        .cloned()
+        .map(|tombstone| (tombstone.path().to_owned(), tombstone))
+        .collect::<BTreeMap<_, _>>();
+    for binding in prior.bindings() {
+        let continued = assignments.get(binding.path()).is_some_and(|assignment| {
+            assignment.reused_object && assignment.object_id == binding.object_id()
+        });
+        if continued {
+            continue;
+        }
+        by_path.insert(
+            binding.path().to_owned(),
+            Tombstone::from_verified_producer(
+                binding.path(),
+                binding.object_id(),
+                deleted_kind(binding.kind()),
+                binding.object_version_id().map(str::to_owned),
+            ),
+        );
+    }
+    by_path.into_values().collect()
+}
+
+fn deleted_kind(kind: PathBindingKind) -> DeletedKind {
+    match kind {
+        PathBindingKind::Directory => DeletedKind::Directory,
+        PathBindingKind::RegularFile => DeletedKind::RegularFile,
+        PathBindingKind::Symlink => DeletedKind::Symlink,
+    }
 }
 
 fn path_binding_kind(kind: CaptureEntryKind) -> PathBindingKind {
@@ -823,7 +856,6 @@ fn live_state_matches_prior(
 fn preflight_capture_envelopes(
     plan: &CapturePlan,
     transaction: &CaptureTransaction,
-    prior: Option<&FolderbaseVersion>,
     maximum_transaction_bytes: u64,
     maximum_version_bytes: u64,
 ) -> Result<(), FolderbaseCaptureError> {
@@ -887,9 +919,7 @@ fn preflight_capture_envelopes(
             )
         })
         .collect();
-    let tombstones = prior
-        .map(|version| version.tombstones().to_vec())
-        .unwrap_or_default();
+    let tombstones = transaction.target_tombstones.clone();
     let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
@@ -1134,9 +1164,7 @@ fn build_and_install_capture(
             )
         })
         .collect();
-    let tombstones = prior
-        .map(|version| version.tombstones().to_vec())
-        .unwrap_or_default();
+    let tombstones = transaction.target_tombstones.clone();
     let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
@@ -1647,6 +1675,27 @@ fn validate_transaction(
         }
         previous = Some(assignment.path.as_str());
     }
+    let mut previous = None;
+    for tombstone in &transaction.target_tombstones {
+        if previous.is_some_and(|value: &str| value.as_bytes() >= tombstone.path().as_bytes()) {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "journal Tombstones are not in strict portable-path order".to_owned(),
+            ));
+        }
+        ObjectId::parse(tombstone.object_id().to_owned())?;
+        match (tombstone.deleted_kind(), tombstone.last_object_version_id()) {
+            (DeletedKind::Directory, None) => {}
+            (DeletedKind::RegularFile | DeletedKind::Symlink, Some(version_id)) => {
+                VersionId::parse(version_id.to_owned())?;
+            }
+            _ => {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                    "journal Tombstone Object Version does not match its deleted kind".to_owned(),
+                ));
+            }
+        }
+        previous = Some(tombstone.path());
+    }
     Ok(())
 }
 
@@ -1695,6 +1744,12 @@ fn validate_transaction_against_plan(
             }
         }
     }
+    if transaction.target_tombstones != project_target_tombstones(prior, &transaction.assignments) {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "journal Tombstones do not match the verified parent and approved CapturePlan"
+                .to_owned(),
+        ));
+    }
     let expected_prior_root = prior.map(|version| version.root_manifest().object_version_id());
     if transaction.prior_root_manifest_version_id.as_deref() != expected_prior_root {
         return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
@@ -1716,6 +1771,7 @@ fn validate_committed_transaction(
         .unwrap_or_default();
     if committed.version_id() != transaction.target_version_id
         || committed.bindings().len() != transaction.assignments.len()
+        || committed.tombstones() != transaction.target_tombstones
         || committed.parents() != expected_parents
         || committed.created_at() != transaction.created_at
     {
