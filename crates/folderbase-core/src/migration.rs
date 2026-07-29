@@ -1297,8 +1297,11 @@ fn merge_managed_block(current: &str, body: &str, path: &Path) -> Result<String>
 }
 
 pub(crate) fn validate_managed_block_body(body: &str, path: &Path) -> Result<()> {
-    validate_managed_block_body_syntax(body, path)?;
-    if body.len() as u64 > MAX_STRUCTURAL_TEXT_BYTES {
+    if body.contains(MANAGED_BLOCK_BEGIN)
+        || body.contains(MANAGED_BLOCK_END)
+        || body.len() as u64 > MAX_STRUCTURAL_TEXT_BYTES
+        || body.contains('\0')
+    {
         return Err(FolderbaseError::InvalidRecord {
             path: path.to_path_buf(),
             message: "managed adapter body is invalid".to_owned(),

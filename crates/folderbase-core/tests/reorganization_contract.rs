@@ -146,6 +146,98 @@ fn parent_plans_cannot_operate_inside_a_nested_folderbase_boundary() {
 }
 
 #[test]
+fn near_limit_sibling_boundary_sets_validate_through_the_public_decoder() {
+    let mut draft = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+    draft["analysis_scope"]["nested_boundaries"] = serde_json::Value::Array(
+        (0..50_000)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("Nested/{index:05}"),
+                    "manifest_sha256":
+                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                })
+            })
+            .collect(),
+    );
+    let encoded = serde_json::to_vec(&draft).expect("encode near-limit sibling boundaries");
+    assert!(
+        encoded.len() < MAX_REORGANIZATION_RECORD_BYTES,
+        "adversarial record must exercise the public bounded decoder"
+    );
+
+    let decoded = decode_reorganization_draft_slice(&encoded)
+        .expect("large non-overlapping sibling boundary set remains valid");
+    assert_eq!(decoded.analysis_scope.nested_boundaries.len(), 50_000);
+}
+
+#[test]
+fn lexicographic_siblings_cannot_hide_nested_boundary_overlap() {
+    for boundary_paths in [
+        ["Client", "Client.", "Client/Prosperna"],
+        ["Client/Prosperna", "Client.", "Client"],
+    ] {
+        let mut draft =
+            protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+        draft["analysis_scope"]["nested_boundaries"] = serde_json::Value::Array(
+            boundary_paths
+                .into_iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path,
+                        "manifest_sha256":
+                            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    })
+                })
+                .collect(),
+        );
+
+        let error = decode_reorganization_draft_slice(
+            &serde_json::to_vec(&draft).expect("encode overlapping boundaries"),
+        )
+        .expect_err("prefix overlap must be found in either input order");
+        assert!(
+            error.to_string().contains("unique and non-overlapping"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn near_limit_declared_scope_is_checked_against_many_sibling_boundaries() {
+    let mut draft = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+    draft["analysis_scope"]["nested_boundaries"] = serde_json::Value::Array(
+        (0..50_000)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("Nested/{index:05}"),
+                    "manifest_sha256":
+                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                })
+            })
+            .collect(),
+    );
+    draft["analysis_scope"]["declared_entries"] = serde_json::Value::Array(
+        (0..50_000)
+            .map(|index| {
+                serde_json::json!({
+                    "expectation": "absent",
+                    "path": format!("Observed/{index:05}")
+                })
+            })
+            .collect(),
+    );
+    let encoded = serde_json::to_vec(&draft).expect("encode near-limit confinement record");
+    assert!(
+        encoded.len() < MAX_REORGANIZATION_RECORD_BYTES,
+        "adversarial record must stay inside the public 8 MiB contract"
+    );
+
+    let decoded = decode_reorganization_draft_slice(&encoded)
+        .expect("large disjoint declared scope remains outside every nested boundary");
+    assert_eq!(decoded.analysis_scope.declared_entries.len(), 50_000);
+}
+
+#[test]
 fn active_path_profile_rejects_aliasing_operation_paths() {
     let mut draft: serde_json::Value = serde_json::from_slice(include_bytes!(
         "../../../protocol/conformance/reorganization/draft/valid/project-cleanup-v1.json"
@@ -649,6 +741,31 @@ fn typed_object_operations_match_the_released_object_protocol() {
 }
 
 #[test]
+fn relationship_types_match_the_public_schema_255_character_limit() {
+    let mut draft =
+        protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+    draft["operations"][9]["relationship_type"] = serde_json::json!("a".repeat(256));
+
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile Draft schema");
+    assert!(
+        !validator.is_valid(&draft),
+        "public schema refuses a 256-character relationship type"
+    );
+
+    let error = decode_reorganization_draft_slice(
+        &serde_json::to_vec(&draft).expect("oversized relationship type"),
+    )
+    .expect_err("runtime must enforce the same 255-character relationship-type bound");
+    assert!(
+        error.to_string().contains("relationship type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn object_protocol_operations_only_target_the_matching_canonical_object_record() {
     let mut draft =
         protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
@@ -707,6 +824,61 @@ fn core_identity_fields_use_the_reachable_prefixed_uuid_grammars() {
         .to_string()
         .contains("version identifier is invalid")
     );
+}
+
+#[test]
+fn core_identity_fields_match_the_schemas_lowercase_hyphenated_uuid_spelling() {
+    for invalid_folderbase_id in [
+        "folderbase_019F9B75-0000-7000-8000-000000000001",
+        "folderbase_019f9b75000070008000000000000001",
+    ] {
+        let mut draft =
+            protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+        draft["folderbase_id"] = serde_json::json!(invalid_folderbase_id);
+        let error = decode_reorganization_draft_slice(
+            &serde_json::to_vec(&draft).expect("Folderbase identity mutation"),
+        )
+        .expect_err("runtime must match the schema's exact Folderbase identity spelling");
+        assert!(
+            error
+                .to_string()
+                .contains("folderbase identifier is invalid")
+        );
+    }
+
+    for (invalid_object_id, invalid_version_id) in [
+        (
+            "obj_019F9B75-0000-7000-8000-000000000101",
+            "version_019F9B75-0000-7000-8000-000000000201",
+        ),
+        (
+            "obj_019f9b75000070008000000000000101",
+            "version_019f9b75000070008000000000000201",
+        ),
+    ] {
+        let mut object_draft =
+            protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+        object_draft["operations"][5]["object_id"] = serde_json::json!(invalid_object_id);
+        object_draft["analysis_scope"]["operation_closure"][8]["object_id"] =
+            serde_json::json!(invalid_object_id);
+        let error = decode_reorganization_draft_slice(
+            &serde_json::to_vec(&object_draft).expect("Object identity mutation"),
+        )
+        .expect_err("runtime must match the schema's exact Object identity spelling");
+        assert!(error.to_string().contains("object identifier is invalid"));
+
+        let mut version_draft =
+            protocol_json("conformance/reorganization/draft/valid/all-operation-kinds-v1.json");
+        version_draft["operations"][5]["expected_version_id"] =
+            serde_json::json!(invalid_version_id);
+        version_draft["analysis_scope"]["operation_closure"][8]["version_id"] =
+            serde_json::json!(invalid_version_id);
+        let error = decode_reorganization_draft_slice(
+            &serde_json::to_vec(&version_draft).expect("Version identity mutation"),
+        )
+        .expect_err("runtime must match the schema's exact Version identity spelling");
+        assert!(error.to_string().contains("version identifier is invalid"));
+    }
 }
 
 #[test]

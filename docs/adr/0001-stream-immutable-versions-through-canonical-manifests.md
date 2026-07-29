@@ -268,13 +268,15 @@ manifest contract only; the source, receiver, verifier, and capability-rooted
 materializer remained separate implementation slices.
 
 The subsequent source slice implements the immutable `LocalVersionStore`
-planner and exact chunk-copy seam. Its candidate evidence includes nine
-source-specific public-seam tests, the independent canonical digest vector,
+planner and exact chunk-copy seam. It merged in PR 15 at commit
+`359d1b8933724ba10e7470cbddd42dc4d0c5a799`. Its acceptance evidence includes
+12 source-specific public-seam tests, the independent canonical digest vector,
 the complete locked workspace suite, strict formatting and linting, public
 eclipse and CI-policy checks, extracted-package verification, and offline CLI
-installation. Independent review and hosted CI remain merge gates for that
-slice. The receiver, whole-object verifier, and capability-rooted materializer
-remain unimplemented by the source slice.
+installation. Both independent review axes reported no findings after
+remediation. Hosted PR CI run `30430141590` and post-merge `main` run
+`30430363260` passed. The receiver, whole-object verifier, and
+capability-rooted materializer remain unimplemented by the source slice.
 
 ## Explicit deferrals
 

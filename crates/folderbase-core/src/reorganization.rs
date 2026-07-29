@@ -483,18 +483,14 @@ fn validate_scope(path_profile: PathProfile, scope: &AnalysisScope) -> Result<()
         validate_path(&boundary.path)?;
         validate_digest(&boundary.manifest_sha256)?;
         let key = portable_path_key(path_profile, &boundary.path);
-        if boundary_paths
-            .iter()
-            .any(|existing| path_is_at_or_below(&key, existing))
-            || boundary_paths
-                .iter()
-                .any(|existing| path_is_at_or_below(existing, &key))
-            || !boundary_paths.insert(key)
+        if set_contains_path_at_or_above(&boundary_paths, &key)
+            || set_contains_path_below(&boundary_paths, &key)
         {
             return invalid_record(
                 "nested Folderbase boundaries must be unique and non-overlapping",
             );
         }
+        boundary_paths.insert(key);
     }
     for entry in &scope.operation_closure {
         validate_scope_entry(entry)?;
@@ -986,7 +982,7 @@ fn validate_nested_boundary_confinement(
         .nested_boundaries
         .iter()
         .map(|boundary| portable_path_key(path_profile, &boundary.path))
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
 
     for entry in scope
         .operation_closure
@@ -994,10 +990,7 @@ fn validate_nested_boundary_confinement(
         .chain(&scope.declared_entries)
     {
         let path = portable_path_key(path_profile, entry.path());
-        if boundaries
-            .iter()
-            .any(|boundary| path_is_at_or_below(&path, boundary))
-        {
+        if set_contains_path_at_or_above(&boundaries, &path) {
             return invalid_record(format!(
                 "declared analysis path enters a nested Folderbase boundary: {}",
                 entry.path()
@@ -1007,10 +1000,7 @@ fn validate_nested_boundary_confinement(
     for operation in operations {
         for path in operation_paths(operation) {
             let key = portable_path_key(path_profile, path);
-            if boundaries
-                .iter()
-                .any(|boundary| path_is_at_or_below(&key, boundary))
-            {
+            if set_contains_path_at_or_above(&boundaries, &key) {
                 return invalid_record(format!(
                     "operation path enters a nested Folderbase boundary: {path}"
                 ));
@@ -1082,11 +1072,19 @@ fn portable_path_key(profile: PathProfile, path: &str) -> String {
     }
 }
 
-fn path_is_at_or_below(path: &str, boundary: &str) -> bool {
-    path == boundary
-        || path
-            .strip_prefix(boundary)
-            .is_some_and(|remainder| remainder.starts_with('/'))
+fn set_contains_path_at_or_above(paths: &BTreeSet<String>, path: &str) -> bool {
+    paths.contains(path)
+        || path_ancestors(path)
+            .into_iter()
+            .any(|ancestor| paths.contains(ancestor))
+}
+
+fn set_contains_path_below(paths: &BTreeSet<String>, path: &str) -> bool {
+    let descendant_prefix = format!("{path}/");
+    paths
+        .range(descendant_prefix.clone()..)
+        .next()
+        .is_some_and(|candidate| candidate.starts_with(&descendant_prefix))
 }
 
 fn validate_canonical_integer(value: u64) -> Result<()> {
@@ -1243,32 +1241,34 @@ fn validate_reorganization_id(value: &str) -> Result<()> {
 }
 
 fn validate_folderbase_id(value: &str) -> Result<()> {
-    if value
-        .strip_prefix("folderbase_")
-        .is_none_or(|uuid| uuid::Uuid::parse_str(uuid).is_err())
-    {
-        return invalid_record("folderbase identifier is invalid");
-    }
-    Ok(())
+    validate_exact_prefixed_uuid(value, "folderbase_", "folderbase identifier")
 }
 
 fn validate_object_id(value: &ObjectId) -> Result<()> {
-    if ObjectId::parse(value.as_str().to_owned()).is_err() {
-        return invalid_record("object identifier is invalid");
-    }
-    Ok(())
+    validate_exact_prefixed_uuid(value.as_str(), "obj_", "object identifier")
 }
 
 fn validate_version_id(value: &VersionId) -> Result<()> {
-    if VersionId::parse(value.as_str().to_owned()).is_err() {
-        return invalid_record("version identifier is invalid");
+    validate_exact_prefixed_uuid(value.as_str(), "version_", "version identifier")
+}
+
+fn validate_exact_prefixed_uuid(value: &str, prefix: &str, label: &str) -> Result<()> {
+    let Some(uuid_text) = value.strip_prefix(prefix) else {
+        return invalid_record(format!("{label} is invalid"));
+    };
+    let Ok(uuid) = uuid::Uuid::parse_str(uuid_text) else {
+        return invalid_record(format!("{label} is invalid"));
+    };
+    if uuid.hyphenated().to_string() != uuid_text {
+        return invalid_record(format!("{label} is invalid"));
     }
     Ok(())
 }
 
 fn validate_relationship_type(value: &str) -> Result<()> {
     let mut bytes = value.bytes();
-    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+    if value.len() > 255
+        || !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
         || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     {
         return invalid_record("relationship type must be a lowercase protocol token");
