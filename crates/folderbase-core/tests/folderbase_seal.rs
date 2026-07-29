@@ -266,6 +266,100 @@ fn deletion_seals_a_durable_tombstone_and_advances_local_head() {
 }
 
 #[test]
+fn restore_tombstone_reinstates_exact_sealed_bytes_metadata_and_local_head() {
+    let root = folderbase();
+    let path = root.path().join("proposal.docx");
+    let exact_bytes = [0_u8, 255, 17, 42, 0, 99];
+    fs::write(&path, exact_bytes).expect("opaque document");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("executable fidelity");
+    }
+
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    let prior = store
+        .read_version(genesis.version_id())
+        .expect("genesis version");
+    let prior_binding = prior
+        .lookup_binding("proposal.docx")
+        .expect("prior live binding");
+    let prior_object_id = prior_binding.object_id().to_owned();
+    let prior_object_version_id = prior_binding
+        .object_version_id()
+        .expect("prior Object Version")
+        .to_owned();
+    let prior_sha256 = prior_binding
+        .content_sha256()
+        .expect("prior content digest")
+        .to_owned();
+    let prior_executable = prior_binding.executable();
+
+    fs::remove_file(&path).expect("delete live document");
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    let deleted = store
+        .read_version(deletion.version_id())
+        .expect("Tombstone-bearing version");
+    assert!(deleted.lookup_binding("proposal.docx").is_none());
+    assert_eq!(deleted.tombstones().len(), 1);
+
+    let restored = store
+        .restore_tombstone("proposal.docx")
+        .expect("restore exact Tombstone bytes");
+
+    assert!(restored.created());
+    assert_eq!(restored.path(), Path::new("proposal.docx"));
+    assert_eq!(restored.object_id(), prior_object_id);
+    assert_eq!(restored.object_version_id(), prior_object_version_id);
+    assert_eq!(fs::read(&path).expect("restored bytes"), exact_bytes);
+    let current = store
+        .read_version(restored.version_id())
+        .expect("restored Folderbase Version");
+    assert_eq!(current.parents(), &[deletion.version_id().to_owned()]);
+    let current_binding = current
+        .lookup_binding("proposal.docx")
+        .expect("restored live binding");
+    assert_eq!(current_binding.object_id(), prior_object_id);
+    assert_eq!(
+        current_binding.object_version_id(),
+        Some(prior_object_version_id.as_str())
+    );
+    assert_eq!(current_binding.content_sha256(), Some(prior_sha256.as_str()));
+    assert_eq!(current_binding.bytes(), Some(exact_bytes.len() as u64));
+    assert_eq!(current_binding.executable(), prior_executable);
+    assert!(
+        current
+            .tombstones()
+            .iter()
+            .all(|tombstone| tombstone.path() != "proposal.docx")
+    );
+    assert_eq!(
+        store
+            .plan_capture()
+            .expect("restored Head remains readable")
+            .current_local_head()
+            .expect("restored Head")
+            .version_id(),
+        restored.version_id()
+    );
+    assert_eq!(
+        store
+            .read_version(deletion.version_id())
+            .expect("immutable deletion history remains")
+            .tombstones()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn same_kind_atomic_replacement_preserves_logical_identity() {
     let root = folderbase();
     let path = root.path().join("proposal.docx");
