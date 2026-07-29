@@ -31,6 +31,7 @@ use crate::transfer_manifest::{
 const MANIFEST_FILE: &str = "manifest.json";
 const CHUNKS_DIRECTORY: &str = "chunks";
 const RECEIVER_LOCK_FILE: &str = "receiver.lock";
+const MATERIALIZATION_OBJECT_FILE: &str = "object";
 pub const MAX_MISSING_CHUNKS_PER_PAGE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,64 +376,27 @@ impl PersistentTransfer {
             }
             ensure_destination_absent(&destination_parent, &destination_name)?;
 
-            let staging = format!(".folderbase-materialize-{}.part", Uuid::now_v7());
-            let mut options = OpenOptions::new();
-            options
-                .write(true)
-                .create_new(true)
-                .follow(FollowSymlinks::No);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut staged = destination_parent
-                .open_with(&staging, &options)
-                .map_err(TransferReceiverError::Io)?;
-            let staging_identity = Handle::from_file(
-                staged
-                    .try_clone()
-                    .map_err(TransferReceiverError::Io)?
-                    .into_std(),
-            )
-            .map_err(TransferReceiverError::Io)?;
+            let mut staging = MaterializationStaging::create(&destination_parent)?;
+            let mut staged = staging.create_object()?;
 
             let operation = (|| {
                 let reader = AcceptedChunkReader::new(&self.chunks, &self.manifest);
                 let object = self.manifest.verify_object_and_copy(reader, &mut staged)?;
                 staged.sync_all().map_err(TransferReceiverError::Io)?;
-                validate_private_regular_file(&destination_parent, &staging)?;
-                let current_staging = open_named_file_identity(&destination_parent, &staging)
-                    .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
-                if current_staging != staging_identity {
-                    return Err(TransferReceiverError::DestinationStateChanged);
-                }
                 let current_lock = open_named_file_identity(&self._directory, RECEIVER_LOCK_FILE)
                     .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
                 if current_lock != self.receiver_lock_identity {
                     return Err(TransferReceiverError::CheckpointStateChanged);
                 }
-
-                match destination_parent.hard_link(&staging, &destination_parent, &destination_name)
-                {
-                    Ok(()) => {}
-                    Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                        return Err(TransferReceiverError::DestinationAlreadyExists);
-                    }
-                    Err(source) => return Err(TransferReceiverError::Io(source)),
-                }
-                let destination_identity =
-                    open_named_file_identity(&destination_parent, &destination_name)
-                        .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
-                if destination_identity != staging_identity {
-                    return Err(TransferReceiverError::DestinationStateChanged);
-                }
-                sync_directory(&destination_parent)?;
+                staging.install(&destination_name)?;
                 Ok(VerifiedMaterialization {
                     object,
                     relative_destination,
                 })
             })();
 
-            let cleanup =
-                cleanup_materialization_staging(&destination_parent, &staging, &staging_identity);
+            drop(staged);
+            let cleanup = staging.cleanup();
             match cleanup {
                 Err(error) => Err(error),
                 Ok(()) => operation,
@@ -513,7 +477,7 @@ fn open_destination_parent_nofollow(
         exact.push(name);
         names.push(name.to_os_string());
     }
-    if names.is_empty() || exact.as_os_str() != relative.as_os_str() {
+    if names.is_empty() || !destination_spelling_is_exact(relative, &exact) {
         return Err(TransferReceiverError::UnsafeDestinationPath);
     }
     let destination_name = names
@@ -526,6 +490,26 @@ fn open_destination_parent_nofollow(
             .map_err(TransferReceiverError::Io)?;
     }
     Ok((current, destination_name))
+}
+
+#[cfg(not(windows))]
+fn destination_spelling_is_exact(relative: &Path, rebuilt: &Path) -> bool {
+    rebuilt.as_os_str() == relative.as_os_str()
+}
+
+#[cfg(windows)]
+fn destination_spelling_is_exact(relative: &Path, _rebuilt: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn is_separator(unit: u16) -> bool {
+        unit == u16::from(b'/') || unit == u16::from(b'\\')
+    }
+
+    let spelling = relative.as_os_str().encode_wide().collect::<Vec<_>>();
+    spelling.last().is_some_and(|last| !is_separator(*last))
+        && !spelling
+            .windows(2)
+            .any(|pair| is_separator(pair[0]) && is_separator(pair[1]))
 }
 
 fn ensure_destination_absent(
@@ -561,6 +545,183 @@ struct AcceptedChunkReader<'a> {
     manifest: &'a ChunkManifest,
     next_index: usize,
     current: Option<AcceptedChunkFile>,
+}
+
+struct MaterializationStaging<'a> {
+    parent: &'a Dir,
+    name: String,
+    directory: Option<Dir>,
+    directory_identity: Option<Handle>,
+    object_identity: Option<Handle>,
+    object_removed: bool,
+    finished: bool,
+}
+
+impl<'a> MaterializationStaging<'a> {
+    fn create(parent: &'a Dir) -> Result<Self, TransferReceiverError> {
+        let name = format!(".folderbase-materialize-{}.part", Uuid::now_v7());
+        create_private_dir(parent, &name).map_err(TransferReceiverError::Io)?;
+        let directory = match parent.open_dir_nofollow(&name) {
+            Ok(directory) => directory,
+            Err(source) => {
+                if parent.remove_dir(&name).is_ok() {
+                    let _ = sync_directory(parent);
+                }
+                return Err(TransferReceiverError::Io(source));
+            }
+        };
+        let mut staging = Self {
+            parent,
+            name,
+            directory: Some(directory),
+            directory_identity: None,
+            object_identity: None,
+            object_removed: true,
+            finished: false,
+        };
+        validate_private_directory(staging.directory()?)?;
+        staging.directory_identity = Some(
+            Handle::from_file(
+                staging
+                    .directory()?
+                    .try_clone()
+                    .map_err(TransferReceiverError::Io)?
+                    .into_std_file(),
+            )
+            .map_err(TransferReceiverError::Io)?,
+        );
+        staging.validate_directory_binding()?;
+        Ok(staging)
+    }
+
+    fn create_object(&mut self) -> Result<cap_std::fs::File, TransferReceiverError> {
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let object = self
+            .directory()?
+            .open_with(MATERIALIZATION_OBJECT_FILE, &options)
+            .map_err(TransferReceiverError::Io)?;
+        self.object_removed = false;
+        let identity = object
+            .try_clone()
+            .map_err(TransferReceiverError::Io)
+            .and_then(|file| Handle::from_file(file.into_std()).map_err(TransferReceiverError::Io));
+        match identity {
+            Ok(identity) => {
+                self.object_identity = Some(identity);
+                Ok(object)
+            }
+            Err(error) => {
+                drop(object);
+                self.directory()?
+                    .remove_file(MATERIALIZATION_OBJECT_FILE)
+                    .map_err(TransferReceiverError::Io)?;
+                sync_directory(self.directory()?)?;
+                self.object_removed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn install(&self, destination_name: impl AsRef<Path>) -> Result<(), TransferReceiverError> {
+        self.validate_directory_binding()?;
+        let expected_object = self
+            .object_identity
+            .as_ref()
+            .ok_or(TransferReceiverError::DestinationStateChanged)?;
+        let directory = self.directory()?;
+        validate_private_regular_file(directory, MATERIALIZATION_OBJECT_FILE)?;
+        let current_object = open_named_file_identity(directory, MATERIALIZATION_OBJECT_FILE)
+            .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
+        if &current_object != expected_object {
+            return Err(TransferReceiverError::DestinationStateChanged);
+        }
+        let destination_name = destination_name.as_ref();
+        match directory.hard_link(MATERIALIZATION_OBJECT_FILE, self.parent, destination_name) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(TransferReceiverError::DestinationAlreadyExists);
+            }
+            Err(source) => return Err(TransferReceiverError::Io(source)),
+        }
+        let destination_identity = open_named_file_identity(self.parent, destination_name)
+            .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
+        if &destination_identity != expected_object {
+            return Err(TransferReceiverError::DestinationStateChanged);
+        }
+        sync_directory(self.parent)
+    }
+
+    fn cleanup(mut self) -> Result<(), TransferReceiverError> {
+        let result = self.cleanup_inner();
+        if self.directory.is_none() {
+            self.finished = true;
+        }
+        result
+    }
+
+    fn cleanup_inner(&mut self) -> Result<(), TransferReceiverError> {
+        let directory_binding = self.validate_directory_binding();
+        if !self.object_removed {
+            let expected_object = self
+                .object_identity
+                .as_ref()
+                .ok_or(TransferReceiverError::DestinationStateChanged)?;
+            let directory = self.directory()?;
+            let current_object = open_named_file_identity(directory, MATERIALIZATION_OBJECT_FILE)
+                .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
+            if &current_object != expected_object {
+                return Err(TransferReceiverError::DestinationStateChanged);
+            }
+            directory
+                .remove_file(MATERIALIZATION_OBJECT_FILE)
+                .map_err(TransferReceiverError::Io)?;
+            sync_directory(directory)?;
+            self.object_removed = true;
+        }
+
+        let directory = self
+            .directory
+            .take()
+            .ok_or(TransferReceiverError::DestinationStateChanged)?;
+        directory
+            .remove_open_dir()
+            .map_err(TransferReceiverError::Io)?;
+        sync_directory(self.parent)?;
+        directory_binding
+    }
+
+    fn validate_directory_binding(&self) -> Result<(), TransferReceiverError> {
+        let expected = self
+            .directory_identity
+            .as_ref()
+            .ok_or(TransferReceiverError::DestinationStateChanged)?;
+        let current = open_named_directory_identity(self.parent, &self.name)
+            .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
+        if &current != expected {
+            return Err(TransferReceiverError::DestinationStateChanged);
+        }
+        Ok(())
+    }
+
+    fn directory(&self) -> Result<&Dir, TransferReceiverError> {
+        self.directory
+            .as_ref()
+            .ok_or(TransferReceiverError::DestinationStateChanged)
+    }
+}
+
+impl Drop for MaterializationStaging<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.cleanup_inner();
+        }
+    }
 }
 
 struct AcceptedChunkFile {
@@ -729,6 +890,16 @@ fn open_named_file_identity(
 ) -> Result<Handle, TransferReceiverError> {
     let file = open_regular_file_nofollow(directory, name).map_err(TransferReceiverError::Io)?;
     Handle::from_file(file.into_std()).map_err(TransferReceiverError::Io)
+}
+
+fn open_named_directory_identity(
+    parent: &Dir,
+    name: impl AsRef<Path>,
+) -> Result<Handle, TransferReceiverError> {
+    let directory = parent
+        .open_dir_nofollow(name)
+        .map_err(TransferReceiverError::Io)?;
+    Handle::from_file(directory.into_std_file()).map_err(TransferReceiverError::Io)
 }
 
 #[cfg(unix)]
@@ -901,22 +1072,6 @@ fn cleanup_owned_staging(
         .remove_file(name)
         .map_err(TransferReceiverError::Io)?;
     sync_directory(chunks)
-}
-
-fn cleanup_materialization_staging(
-    parent: &Dir,
-    name: &str,
-    expected: &Handle,
-) -> Result<(), TransferReceiverError> {
-    let current = open_named_file_identity(parent, name)
-        .map_err(|_| TransferReceiverError::DestinationStateChanged)?;
-    if &current != expected {
-        return Err(TransferReceiverError::DestinationStateChanged);
-    }
-    parent
-        .remove_file(name)
-        .map_err(TransferReceiverError::Io)?;
-    sync_directory(parent)
 }
 
 fn validate_checkpoint_top_level(directory: &Dir) -> Result<(), TransferReceiverError> {
