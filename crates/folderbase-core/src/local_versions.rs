@@ -992,31 +992,42 @@ impl LocalVersionStore {
     }
 
     pub fn read_object(&self, object_id: &ObjectId) -> Result<LocalObjectRecord> {
-        object_id.validate(&self.object_record_path(object_id))?;
-        self.deny_if_transferred_out(object_id)?;
         let path = self.object_record_path(object_id);
+        object_id.validate(&path)?;
+        self.deny_if_transferred_out(object_id)?;
         let record: LocalObjectRecord = read_json(&path)?;
-        record.id.validate(&path)?;
+        self.validate_object_record(object_id, &record, &path)?;
+        Ok(record)
+    }
+
+    fn validate_object_record(
+        &self,
+        object_id: &ObjectId,
+        record: &LocalObjectRecord,
+        path: &Path,
+    ) -> Result<()> {
+        object_id.validate(path)?;
+        record.id.validate(path)?;
         if record.id != *object_id {
             return Err(invalid_record(
-                path,
+                path.to_path_buf(),
                 "object ID does not match its filename",
             ));
         }
         let relative_path = safe_content_path(Path::new(&record.path)).map_err(|_| {
             invalid_record(
-                self.object_record_path(object_id),
+                path.to_path_buf(),
                 "object path is not a safe relative path",
             )
         })?;
         self.ensure_path_within_current_folderbase_boundary(&relative_path)?;
         if record.versions.is_empty() || !record.versions.contains(&record.current_version) {
             return Err(invalid_record(
-                self.object_record_path(object_id),
+                path.to_path_buf(),
                 "current version is absent from the object version history",
             ));
         }
-        Ok(record)
+        Ok(())
     }
 
     pub fn read_version(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
@@ -1032,19 +1043,49 @@ impl LocalVersionStore {
     }
 
     fn read_version_record(&self, version_id: &VersionId) -> Result<LocalVersionRecord> {
-        version_id.validate(&self.version_record_path(version_id))?;
         let path = self.version_record_path(version_id);
+        version_id.validate(&path)?;
         let record: LocalVersionRecord = read_json(&path)?;
-        record.id.validate(&path)?;
-        record.object_id.validate(&path)?;
+        self.validate_version_record(version_id, &record, &path)?;
+        Ok(record)
+    }
+
+    fn validate_version_record(
+        &self,
+        version_id: &VersionId,
+        record: &LocalVersionRecord,
+        path: &Path,
+    ) -> Result<()> {
+        version_id.validate(path)?;
+        record.id.validate(path)?;
+        record.object_id.validate(path)?;
         if record.id != *version_id {
             return Err(invalid_record(
-                path,
+                path.to_path_buf(),
                 "version ID does not match its filename",
             ));
         }
-        validate_content_digest(&record.content, &path)?;
-        Ok(record)
+        validate_content_digest(&record.content, path)
+    }
+
+    pub(crate) fn validate_chunk_transfer_records(
+        &self,
+        version_id: &VersionId,
+        version: &LocalVersionRecord,
+        object: &LocalObjectRecord,
+    ) -> Result<()> {
+        let version_path = self.version_record_path(version_id);
+        self.validate_version_record(version_id, version, &version_path)?;
+        let object_path = self.object_record_path(&version.object_id);
+        self.deny_if_transferred_out(&version.object_id)?;
+        self.validate_object_record(&version.object_id, object, &object_path)?;
+        if !object.versions.contains(version_id) {
+            return Err(invalid_record(
+                version_path,
+                "version is absent from its object's version history",
+            ));
+        }
+        Ok(())
     }
 
     /// Read and validate every complete journal line.
@@ -1699,9 +1740,7 @@ impl LocalVersionStore {
     }
 
     fn object_record_path(&self, object_id: &ObjectId) -> PathBuf {
-        self.root
-            .join(OBJECTS_DIRECTORY)
-            .join(format!("{object_id}.json"))
+        self.root.join(self.object_record_relative_path(object_id))
     }
 
     fn path_identity_path(&self, object_id: &ObjectId) -> PathBuf {
@@ -1750,12 +1789,23 @@ impl LocalVersionStore {
 
     fn version_record_path(&self, version_id: &VersionId) -> PathBuf {
         self.root
-            .join(VERSION_RECORDS_DIRECTORY)
-            .join(format!("{version_id}.json"))
+            .join(self.version_record_relative_path(version_id))
     }
 
     fn blob_path(&self, digest: &str) -> PathBuf {
-        self.root.join(BLOBS_DIRECTORY).join(digest)
+        self.root.join(self.blob_relative_path(digest))
+    }
+
+    pub(crate) fn version_record_relative_path(&self, version_id: &VersionId) -> PathBuf {
+        PathBuf::from(VERSION_RECORDS_DIRECTORY).join(format!("{version_id}.json"))
+    }
+
+    pub(crate) fn object_record_relative_path(&self, object_id: &ObjectId) -> PathBuf {
+        PathBuf::from(OBJECTS_DIRECTORY).join(format!("{object_id}.json"))
+    }
+
+    pub(crate) fn blob_relative_path(&self, digest: &str) -> PathBuf {
+        PathBuf::from(BLOBS_DIRECTORY).join(digest)
     }
 
     fn deny_if_transferred_out(&self, object_id: &ObjectId) -> Result<()> {

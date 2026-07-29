@@ -32,7 +32,8 @@ not require a Folderbase account.
 
 - `folderbase-core`: Rust library for inspection, initialization, validation,
   templates, migration, local versions, workspace operations, sharing policy,
-  transfer, and sync primitives
+  canonical bounded-memory transfer planning/source streaming, and sync
+  primitives
 - `folderbase`: reference command-line interface
 - versioned JSON Schemas and conformance fixtures
 - built-in person, organization, customer, engagement, project, temporary, and
@@ -143,6 +144,10 @@ printf '%s' "$UPDATED_TEXT" | folderbase workspace save \
 Binary and very large files remain part of the workspace. Agents can inspect
 their metadata first; transformations operate with streaming and
 content-addressed chunks rather than loading entire files into model context.
+Core opens a transfer source by immutable `VersionId`, never by the mutable
+workspace path. The source binds a canonical manifest to that exact
+content-addressed blob and emits a verification receipt only after an exact
+chunk range has been streamed and checked.
 
 ## Protocol
 
