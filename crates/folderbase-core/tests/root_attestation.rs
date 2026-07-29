@@ -375,7 +375,9 @@ fn rejects_windows_symlink_and_reparse_markers_without_skipping() {
 }
 
 #[cfg(windows)]
-fn create_windows_junction(target: &Path, link: &Path) {
+fn create_windows_junction_reparse_point(target: &Path, link: &Path) {
+    use std::os::windows::fs::MetadataExt;
+
     let output = std::process::Command::new("cmd.exe")
         .args(["/D", "/C", "mklink", "/J"])
         .arg(link)
@@ -390,25 +392,25 @@ fn create_windows_junction(target: &Path, link: &Path) {
     );
     let metadata = fs::symlink_metadata(link).expect("junction metadata");
     assert!(
-        !metadata.file_type().is_symlink(),
-        "this test requires a non-symlink reparse point"
+        metadata.file_attributes() & 0x0000_0400 != 0,
+        "mklink /J must create a reparse point"
     );
 }
 
 #[cfg(windows)]
 #[test]
-fn rejects_every_non_symlink_reparse_marker_before_wrong_type_classification() {
+fn rejects_junction_reparse_points_at_every_folderbase_marker() {
     let target = root_with_manifest(MANIFEST);
     let links = tempdir().expect("junction parent");
     let root_junction = links.path().join("root");
-    create_windows_junction(target.path(), &root_junction);
+    create_windows_junction_reparse_point(target.path(), &root_junction);
     assert!(matches!(
         attest_folderbase_root(&root_junction),
         Err(RootAttestationError::RootSymlink { root }) if root == root_junction
     ));
 
     let state_junction_root = tempdir().expect("state junction root");
-    create_windows_junction(
+    create_windows_junction_reparse_point(
         &target.path().join(".folderbase"),
         &state_junction_root.path().join(".folderbase"),
     );
@@ -427,7 +429,7 @@ fn rejects_every_non_symlink_reparse_marker_before_wrong_type_classification() {
     let directory_target = tempdir().expect("directory target");
     let manifest_junction_root = tempdir().expect("manifest junction root");
     fs::create_dir(manifest_junction_root.path().join(".folderbase")).expect("state");
-    create_windows_junction(
+    create_windows_junction_reparse_point(
         directory_target.path(),
         &manifest_junction_root
             .path()
@@ -452,7 +454,7 @@ fn rejects_every_non_symlink_reparse_marker_before_wrong_type_classification() {
         MANIFEST,
     )
     .expect("manifest");
-    create_windows_junction(
+    create_windows_junction_reparse_point(
         directory_target.path(),
         &entry_junction_root.path().join("FOLDERBASE.md"),
     );

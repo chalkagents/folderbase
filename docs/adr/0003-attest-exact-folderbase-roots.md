@@ -78,7 +78,7 @@ invalid nested folder fails locally even if its parent is valid.
 
 On Windows, every path and opened handle is additionally rejected when
 `FILE_ATTRIBUTE_REPARSE_POINT` is set, regardless of reparse tag. This includes
-non-symlink junctions and other reparse-point types at the exact root, state
+junctions and other reparse-point types at the exact root, state
 directory, manifest, or entry, both during initial opening and final
 revalidation.
 
