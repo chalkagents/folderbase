@@ -60,29 +60,52 @@ and executable fidelity remains in the single full-state Folderbase Version.
 
 Before installing an Object Version, Core durably journals every newly assigned
 stable Object ID, candidate Object Version ID, Folderbase Version ID, parent,
-timestamp, plan digest, and expected Local Head. A prior Object or Object Version
-may be reused only after the exact prior Local Head, complete Folderbase Version,
-immutable Object Version record, and content blob verify. Device-local physical
-identity records distinguish a same-inode update from a same-path recreation
-after the first verified binding. Missing identity evidence never authorizes
-reuse. Unix records bind device and inode; Windows records bind the volume
-serial number and complete 128-bit File ID obtained from the no-follow handle.
-A replacement after Head publication retains the identity of the sealed entry,
-so the next capture detects the mismatch and refuses until Tombstones exist.
-Capture continuity has one canonical capture-identity projection; the legacy
-workspace path-identity representation is not also written by the capture
-transaction.
+timestamp, plan digest, expected Local Head, and the complete sorted target
+Tombstone set. A prior Object or Object Version may be referenced only after the
+exact prior Local Head, complete Folderbase Version, immutable Object Version
+record, and content blob verify.
+
+Snapshot capture treats the same exact path with the same supported kind as
+logical Knowledge Object continuity by default. This is intentionally friendly
+to editors that implement save by atomically replacing a file. A content or
+executable-fidelity change creates a new Object Version under the same Object
+ID. A prior live path that is absent from the capture becomes a Tombstone. A
+same-path supported-kind replacement creates a Tombstone for the prior Object
+and a live binding with a new Object ID. Existing Tombstones are carried
+forward, with at most the newest deleted Object retained for one exact path.
+
+Device-local physical identity records remain race evidence for the exact
+planned read and a future cross-path move hint; they are not the sole authority
+for logical continuity across captures. Unix records bind device and inode;
+Windows records bind the volume serial number and complete 128-bit File ID
+obtained from the no-follow handle. Missing or changed physical-identity
+evidence forces byte verification and refreshes the derived identity record, but
+does not split a same-path, same-kind Knowledge Object. Capture continuity has
+one canonical capture-identity projection; the legacy workspace path-identity
+representation is not also written by the capture transaction.
 
 Unix device and inode identify one live filesystem object, but they are not a
 globally unique lifetime token: after every handle to an unlinked object closes,
-the filesystem may reuse its inode for a later file. The pre-Tombstone slice
-therefore cannot distinguish a same-path, same-kind delete-and-recreate that
-happens entirely between captures and receives the same device/inode from
-ordinary same-object continuity. The Tombstone lifecycle must close this gap
-with explicit deletion evidence rather than guessing from path metadata. Fault
-fixtures that claim to simulate a live replacement keep the removed object
-handle open until the replacement identity is observed, proving that the two
-objects coexist and cannot alias through immediate inode reuse.
+the filesystem may reuse its inode for a later file. More importantly, an
+atomic-save replacement usually has a deliberately different physical identity
+while remaining the same logical document. Core therefore never guesses
+cross-capture logical identity from inode or File ID alone.
+
+A same-path, same-kind delete-and-recreate that happens entirely between
+captures is logical continuity unless durable explicit deletion evidence says
+otherwise. A sealed intermediate capture with the path absent is such evidence:
+its Tombstone makes a later recreation a new Object. A future App filesystem
+event journal or explicit Core deletion operation may provide the same durable
+signal without an intermediate snapshot. Those evidence-intake surfaces are not
+part of this slice. Fault fixtures that claim to simulate distinct live objects
+still keep the removed object handle open until the replacement identity is
+observed so filesystem identity assertions themselves remain deterministic.
+
+Absence is not inferred when observation scope changed. If a prior live binding
+is newly hidden by `.folderbaseignore`, a nested Folderbase boundary, or a typed
+unsupported-node exclusion, sealing refuses before capture-journal or Local
+Head mutation. This prevents policy and boundary changes from being silently
+converted into deletions.
 
 Content blobs, immutable Object Version records, and the complete bounded
 Folderbase Version are installed append-only with temp-file fsync, atomic
@@ -109,9 +132,10 @@ cannot redirect publication through a symlink or junction.
 The active journal uses bounded streaming JSON encoding and the same explicit
 byte bound for write and restart read. Before publishing that journal or any
 immutable object, Core constructs and bounded-encodes the complete future
-Folderbase Version envelope. Its assignment count and every path, kind,
-observed identity, reused Object ID, prior Object Version, and root-manifest
-parent are matched exactly to the approved plan and verified prior Head.
+Folderbase Version envelope. Its assignment and Tombstone aggregate, every
+path, kind, observed identity, reused Object ID, prior Object Version,
+root-manifest parent, and complete sorted target Tombstone set are matched
+exactly to the approved plan and verified prior Head.
 Included content streams are capped at the exact approved length plus one byte:
 a growing source is refused as a concurrent state change and staging is
 removed, instead of reading an attacker-controlled stream to EOF. The active
@@ -124,10 +148,12 @@ journal, Object Version, Folderbase Version, Local Head, or cleanup boundaries
 converges on the exact journal-assigned version. A stale attempt may discard
 only its intent; verified immutable records remain safe, reusable orphans.
 
-This decision remains **Proposed**. This slice does not yet produce Tombstones,
-so deletion, same-path recreation, and kind replacement are refused without
-moving Local Head. It also does not implement full no-clobber restore
-reconstruction, restore crash recovery, filesystem/database snapshot
+This decision remains **Proposed**. Core now produces productive Tombstones for
+captured absence, preserves same-path/same-kind logical continuity, and records
+supported-kind replacement as Tombstone plus new identity. It does not yet
+ingest an App filesystem-event deletion journal or expose an explicit Core
+deletion operation, detect cross-path moves, or implement full no-clobber
+restore reconstruction, restore crash recovery, filesystem/database snapshot
 coordination, Remote Head publication, sync, sharing, authorization, or Cloud
-durability. Acceptance still requires the Tombstone and restore transactions to
-close the complete capture/restore lifecycle.
+durability. Acceptance still requires explicit deletion-evidence intake and the
+restore transaction to close the complete capture/restore lifecycle.

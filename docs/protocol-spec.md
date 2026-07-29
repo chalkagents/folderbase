@@ -771,14 +771,34 @@ portable-path, Unicode collision, depth, entry-count, and object-size limits.
 
 `FolderbaseVersionStore::seal_capture(plan)` first revalidates the complete plan,
 then durably journals every new stable Object ID, candidate Object Version ID,
-Folderbase Version ID, parent, timestamp, and expected Local Head. It may reuse
-identity only from a fully verified prior Local Head binding and a matching
-device-local physical-identity record. Missing evidence fails closed. Unix
-bindings use device/inode identity; Windows bindings use the volume serial and
-complete 128-bit File ID from the opened no-follow handle. All ordinary
-regular files are read as exact opaque bytes through root-relative no-follow
-capabilities and checked against planned metadata and physical identity before
-and after the read.
+Folderbase Version ID, parent, timestamp, expected Local Head, and the complete
+sorted target Tombstone set. The journal bounds assignments and Tombstones as
+one Folderbase Version entry aggregate.
+
+The same exact path and same supported kind continue one logical Knowledge
+Object by default, including atomic-save replacement. Changed content or
+executable fidelity creates a new Object Version under that Object ID. A prior
+live path absent from the capture creates a Tombstone; a supported-kind
+replacement creates a Tombstone for the old Object plus a new live Object ID.
+Tombstones carry forward with newest-deleted-Object-per-exact-path semantics.
+Recreation after a captured absence therefore receives a new Object ID.
+
+Physical identity is exact-read race evidence and a future move hint, not sole
+cross-capture logical identity authority. Unix observations use device/inode;
+Windows observations use the volume serial and complete 128-bit File ID from
+the opened no-follow handle. Missing or different physical identity causes full
+verification and derived-evidence refresh without splitting same-path,
+same-kind logical identity. A delete-and-recreate entirely between captures is
+continuity unless a prior Tombstone, a future App filesystem-event journal, or
+a future explicit Core deletion operation supplies durable deletion evidence.
+All ordinary regular files are read as exact opaque bytes through root-relative
+no-follow capabilities and checked against planned metadata and physical
+identity before and after the read.
+
+A prior live path newly hidden by ignore policy, a nested Folderbase boundary,
+or a typed unsupported-node exclusion is refused before capture-journal or
+Local Head mutation. Unobserved content is never silently interpreted as
+deleted content.
 
 Core installs content-addressed blobs and immutable Object Version records through
 the existing `LocalVersionStore`. It then constructs the one canonical
@@ -801,16 +821,19 @@ operations reuse that capability rather than re-entering through ambient paths.
 Mutating root openers reject Windows junctions and all other reparse points.
 
 The active journal's writer and restart reader share one explicit bound.
-Assignment cardinality and every planned path/kind/observation plus reused
-Object ID, prior Object Version, root-manifest lineage, and expected Head are
-matched to the approved plan and verified parent before object writes.
+Assignment and Tombstone aggregate cardinality, every planned
+path/kind/observation, reused Object ID, prior Object Version, root-manifest
+lineage, expected Head, and the complete sorted target Tombstone set are matched
+to the approved plan and verified parent before object writes.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 
-This remains Proposed because Tombstone-producing deletion/recreation
-transactions and full no-clobber restore/crash recovery are not implemented.
-Database snapshot coordination, Remote Head publication, sync, sharing,
-authorization, and Cloud behavior also remain out of scope.
+This remains Proposed. Productive captured-absence and supported-kind
+replacement Tombstones are implemented, including crash convergence. Durable
+App filesystem-event or explicit Core deletion evidence, cross-path moves, full
+no-clobber restore/crash recovery, database snapshot coordination, Remote Head
+publication, sync, sharing, authorization, and Cloud behavior remain out of
+scope.
 
 ## Checkout
 
