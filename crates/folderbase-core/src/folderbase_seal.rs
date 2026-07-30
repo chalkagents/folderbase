@@ -35,7 +35,7 @@ use crate::{
         ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
         ObjectLifecycle, ObjectProvenance, VersionId, safe_content_path,
     },
-    root_attestation::metadata_is_link_or_reparse,
+    root_attestation::{attest_folderbase_root, metadata_is_link_or_reparse},
 };
 
 const CAPTURE_TRANSACTION_FORMAT_V1: &str = "folderbase-capture-transaction-v1";
@@ -266,15 +266,18 @@ impl FolderbaseVersionStore {
             .to_str()
             .expect("safe content paths are UTF-8")
             .to_owned();
+        verify_restore_root_instance(self)?;
         let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
         let state = FolderbaseState::open_existing(&self.root_attestation.root)?;
         let _lock = local.acquire_transaction_lock_in(&state)?;
+        verify_restore_root_instance(self)?;
+        state.verify_still_attached()?;
         state.ensure_private_dir(Path::new(RESTORE_TRANSACTIONS_DIRECTORY))?;
         state.ensure_private_dir(Path::new(FOLDERBASE_VERSIONS_DIRECTORY))?;
         ensure_no_active_capture(&state)?;
 
         let active = read_active_restore_transaction(&state)?;
-        let (transaction, created) = match active {
+        let transaction = match active {
             Some(transaction) => {
                 validate_restore_transaction(self, &transaction)?;
                 if transaction.path != path_string {
@@ -282,7 +285,7 @@ impl FolderbaseVersionStore {
                         "a different Tombstone restore is pending",
                     ));
                 }
-                (transaction, false)
+                transaction
             }
             None => {
                 if !state.workspace_path_is_absent(&path)? {
@@ -320,11 +323,11 @@ impl FolderbaseVersionStore {
                     build_restore_transaction(self, &head, &current, tombstone, binding)?;
                 write_active_restore_transaction(&state, &transaction)?;
                 checkpoint(&RestoreCheckpoint::JournalDurable);
-                (transaction, true)
+                transaction
             }
         };
 
-        execute_restore_transaction(self, &local, &state, &transaction, created, &mut checkpoint)
+        execute_restore_transaction(self, &local, &state, &transaction, &mut checkpoint)
     }
 
     fn seal_capture_with_hook(
@@ -544,9 +547,8 @@ fn build_restore_transaction(
     tombstone: Tombstone,
     binding: PathBinding,
 ) -> Result<RestoreTransaction, FolderbaseCaptureError> {
-    let transaction_id = format!("fbrestore_{}", Uuid::now_v7());
-    let target_version_id = format!("fbversion_{}", Uuid::now_v7());
-    let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let (transaction_id, target_version_id, created_at) =
+        assigned_restore_identity(store, head, current, &tombstone, &binding)?;
     let target = restored_version(
         store,
         current,
@@ -572,6 +574,54 @@ fn build_restore_transaction(
     // Bound all serialized intent before any journal or workspace mutation.
     let _ = encode_restore_transaction(&transaction)?;
     Ok(transaction)
+}
+
+fn assigned_restore_identity(
+    store: &FolderbaseVersionStore,
+    head: &LocalHeadRecord,
+    current: &FolderbaseVersion,
+    tombstone: &Tombstone,
+    binding: &PathBinding,
+) -> Result<(String, String, String), FolderbaseCaptureError> {
+    #[derive(Serialize)]
+    struct RestoreAuthority<'a> {
+        format: &'static str,
+        folderbase_id: &'a str,
+        root_instance_sha256: &'a str,
+        expected_head: JournalHead,
+        tombstone: &'a Tombstone,
+        binding: &'a PathBinding,
+    }
+
+    let authority = serde_json::to_vec(&RestoreAuthority {
+        format: "folderbase-tombstone-restore-authority-v1",
+        folderbase_id: &store.root_attestation.folderbase_id,
+        root_instance_sha256: &store.root_attestation.root_instance_sha256,
+        expected_head: JournalHead::from(head),
+        tombstone,
+        binding,
+    })
+    .map_err(|source| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+            "restore authority encoding failed: {source}"
+        ))
+    })?;
+    let assigned_uuid = |domain: &[u8]| {
+        let mut digest = Sha256::new();
+        digest.update(domain);
+        digest.update(&authority);
+        let digest = digest.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes).hyphenated().to_string()
+    };
+    Ok((
+        format!("fbrestore_{}", assigned_uuid(b"transaction")),
+        format!("fbversion_{}", assigned_uuid(b"version")),
+        current.created_at().to_owned(),
+    ))
 }
 
 fn restored_version(
@@ -653,13 +703,9 @@ fn find_restore_binding_with_limit(
     }
     let mut expanded = BTreeSet::new();
     let mut visited = 0_usize;
-    let mut current_depth = 1_usize;
     let mut candidates = Vec::new();
+    let mut candidate_depth = None;
     while let Some((version_id, lineage, depth)) = queue.pop_front() {
-        if depth != current_depth && !candidates.is_empty() {
-            return unique_restore_candidate(candidates, tombstone);
-        }
-        current_depth = depth;
         if lineage.iter().any(|ancestor| ancestor == &version_id) {
             return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
                 "cycle reaches {version_id}"
@@ -684,7 +730,9 @@ fn find_restore_binding_with_limit(
             && binding.kind() == PathBindingKind::RegularFile
             && binding.object_id() == tombstone.object_id()
             && binding.object_version_id() == Some(expected_version)
+            && candidate_depth.is_none_or(|candidate_depth| candidate_depth == depth)
         {
+            candidate_depth.get_or_insert(depth);
             candidates.push(binding.clone());
         }
         let mut next_lineage = lineage;
@@ -729,9 +777,10 @@ fn execute_restore_transaction(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
-    _new_intent: bool,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+    verify_restore_root_instance(store)?;
+    state.verify_still_attached()?;
     validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
     let current_summary = JournalHead::from(&current_head);
@@ -752,7 +801,12 @@ fn execute_restore_transaction(
                 "committed target digest changed".to_owned(),
             ));
         }
-        finish_restore_materialization(store, local, state, transaction, checkpoint)?;
+        if let Err(error) =
+            finish_restore_materialization(store, local, state, transaction, checkpoint)
+        {
+            rollback_restore_head(state, transaction)?;
+            return Err(error);
+        }
         false
     } else if current_summary == transaction.expected_head {
         let parent = read_and_verify_folderbase_version(
@@ -786,6 +840,29 @@ fn execute_restore_transaction(
                 "restore journal fidelity differs from verified ancestry".to_owned(),
             ));
         }
+        let parent_head = LocalHeadRecord {
+            format: "folderbase-local-head-v1".to_owned(),
+            folderbase_id: transaction.folderbase_id.clone(),
+            root_instance_sha256: transaction.root_instance_sha256.clone(),
+            version_id: transaction.expected_head.version_id.clone(),
+            version_sha256: transaction.expected_head.version_sha256.clone(),
+            transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+        };
+        let (transaction_id, target_version_id, created_at) = assigned_restore_identity(
+            store,
+            &parent_head,
+            &parent,
+            parent_tombstone,
+            &authoritative,
+        )?;
+        if transaction.transaction_id != transaction_id
+            || transaction.target_version_id != target_version_id
+            || transaction.created_at != created_at
+        {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore assignment differs from verified immutable authority".to_owned(),
+            ));
+        }
         let target = restored_version(
             store,
             &parent,
@@ -813,6 +890,7 @@ fn execute_restore_transaction(
             ));
         }
         checkpoint(&RestoreCheckpoint::VersionDurable);
+        verify_restore_publication(store, state, transaction)?;
         compare_and_swap_restore_head(
             state,
             &transaction.expected_head,
@@ -826,6 +904,10 @@ fn execute_restore_transaction(
             },
         )?;
         checkpoint(&RestoreCheckpoint::HeadReplaced);
+        if let Err(error) = verify_restore_publication(store, state, transaction) {
+            rollback_restore_head(state, transaction)?;
+            return Err(error);
+        }
         finish_restore_projection(store, local, state, transaction)?;
         checkpoint(&RestoreCheckpoint::ProjectionDurable);
         true
@@ -850,6 +932,90 @@ fn execute_restore_transaction(
     })
 }
 
+fn verify_restore_root_instance(
+    store: &FolderbaseVersionStore,
+) -> Result<(), FolderbaseCaptureError> {
+    let observed = attest_folderbase_root(&store.root_attestation.root)
+        .map_err(|_| FolderbaseCaptureError::PlanStoreMismatch)?;
+    if observed.folderbase_id != store.root_attestation.folderbase_id
+        || observed.protocol_version != store.root_attestation.protocol_version
+        || observed.manifest_sha256 != store.root_attestation.manifest_sha256
+        || observed.root_instance_sha256 != store.root_attestation.root_instance_sha256
+    {
+        return Err(FolderbaseCaptureError::PlanStoreMismatch);
+    }
+    Ok(())
+}
+
+fn verify_restore_publication(
+    store: &FolderbaseVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    verify_restore_root_instance(store)?;
+    state.verify_still_attached()?;
+    let digest = transaction
+        .binding
+        .content_sha256()
+        .expect("validated regular binding");
+    let bytes = transaction
+        .binding
+        .bytes()
+        .expect("validated regular binding");
+    let executable = transaction
+        .binding
+        .executable()
+        .expect("validated regular binding");
+    state
+        .verify_workspace_restore(
+            &restore_stage_path(transaction),
+            Path::new(&transaction.path),
+            digest,
+            bytes,
+            executable,
+        )
+        .map_err(|error| match error {
+            FolderbaseError::WouldOverwrite(path) => {
+                FolderbaseCaptureError::RestoreTargetOccupied(path)
+            }
+            error => FolderbaseCaptureError::LocalStore(error),
+        })
+}
+
+fn rollback_restore_head(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let target = JournalHead {
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        transaction_sha256: restore_transaction_sha256(transaction)?,
+    };
+    let prior = LocalHeadRecord {
+        format: "folderbase-local-head-v1".to_owned(),
+        folderbase_id: transaction.folderbase_id.clone(),
+        root_instance_sha256: transaction.root_instance_sha256.clone(),
+        version_id: transaction.expected_head.version_id.clone(),
+        version_sha256: transaction.expected_head.version_sha256.clone(),
+        transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+    };
+    // Rollback deliberately uses the already-retained state capability rather
+    // than the ambient root path. If that path was swapped after the forward
+    // CAS, the exact original root still has to regain its prior Head while
+    // the replacement path remains untouched.
+    let current = read_head_record(state)?.ok_or(FolderbaseCaptureError::LocalHeadChanged)?;
+    if JournalHead::from(&current) != target {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    }
+    state.replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&prior)?)?;
+    if read_head_record(state)?.as_ref() != Some(&prior) {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "Local Head rollback did not verify".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn finish_restore_materialization(
     store: &FolderbaseVersionStore,
     local: &LocalVersionStore,
@@ -867,6 +1033,7 @@ fn finish_restore_materialization(
     }
     checkpoint(&RestoreCheckpoint::VersionDurable);
     checkpoint(&RestoreCheckpoint::HeadReplaced);
+    verify_restore_publication(store, state, transaction)?;
     finish_restore_projection(store, local, state, transaction)?;
     checkpoint(&RestoreCheckpoint::ProjectionDurable);
     Ok(())
@@ -3770,8 +3937,88 @@ mod tests {
     }
 
     #[test]
+    fn convergent_ancestor_dag_restores_from_one_shared_verified_candidate() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let genesis_version = store.read_version(genesis.version_id()).expect("genesis");
+        let original = genesis_version
+            .lookup_binding("active.bin")
+            .expect("active")
+            .clone();
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let surviving = genesis_version
+            .bindings()
+            .iter()
+            .filter(|binding| binding.path() != "active.bin")
+            .cloned()
+            .collect::<Vec<_>>();
+        let tombstones = vec![Tombstone::from_verified_producer(
+            original.path(),
+            original.object_id(),
+            DeletedKind::RegularFile,
+            original.object_version_id().map(str::to_owned),
+        )];
+        let branch = |version_id: String| {
+            FolderbaseVersion::from_verified_parts(
+                FolderbaseVersionParts::portable_v1_from_verified_producer(
+                    genesis_version.folderbase_id(),
+                    version_id,
+                    vec![genesis_version.version_id().to_owned()],
+                    genesis_version.created_at(),
+                    genesis_version.root_manifest().clone(),
+                    FolderbaseVersionEntries::from_verified_producer(
+                        surviving.clone(),
+                        tombstones.clone(),
+                        genesis_version.exclusions().to_vec(),
+                    ),
+                ),
+            )
+            .expect("branch")
+        };
+        let left = branch(format!("fbversion_{}", Uuid::now_v7()));
+        let right = branch(format!("fbversion_{}", Uuid::now_v7()));
+        install_test_version(root.path(), &left);
+        install_test_version(root.path(), &right);
+        let current = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                format!("fbversion_{}", Uuid::now_v7()),
+                vec![left.version_id().to_owned(), right.version_id().to_owned()],
+                genesis_version.created_at(),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    surviving,
+                    tombstones,
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("convergent current");
+        install_test_version(root.path(), &current);
+        point_test_head(root.path(), &current);
+
+        FolderbaseVersionStore::open(root.path())
+            .expect("reopen")
+            .restore_tombstone("active.bin")
+            .expect("restore through convergent DAG");
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("restored"),
+            b"first opaque bytes"
+        );
+    }
+
+    #[test]
     fn restore_revalidates_owned_target_and_boundary_before_and_after_head() {
-        for mutation in ["same-byte-replacement", "in-place", "late-boundary", "post-head"] {
+        for mutation in [
+            "same-byte-replacement",
+            "in-place",
+            "late-boundary",
+            "post-head",
+            "post-head-in-place",
+        ] {
             let root = folderbase();
             let store = FolderbaseVersionStore::open(root.path()).expect("open");
             store
@@ -3800,9 +4047,16 @@ mod tests {
                     }
                 }
                 if mutation == "post-head" && checkpoint == &RestoreCheckpoint::HeadReplaced {
-                    fs::remove_file(root.path().join("active.bin")).expect("unlink committed target");
+                    fs::remove_file(root.path().join("active.bin"))
+                        .expect("unlink committed target");
                     fs::write(root.path().join("active.bin"), b"first opaque bytes")
                         .expect("post-Head same-byte replacement");
+                }
+                if mutation == "post-head-in-place"
+                    && checkpoint == &RestoreCheckpoint::HeadReplaced
+                {
+                    fs::write(root.path().join("active.bin"), b"post-Head mutation")
+                        .expect("post-Head in-place mutation");
                 }
             });
             if mutation == "late-boundary" {
@@ -3839,8 +4093,7 @@ mod tests {
             .expect("deletion");
         let result = store.restore_tombstone_with_hook("client/active.bin", |checkpoint| {
             if checkpoint == &RestoreCheckpoint::TargetPublished {
-                fs::create_dir(root.path().join("client/.FOLDERBASE"))
-                    .expect("late nested state");
+                fs::create_dir(root.path().join("client/.FOLDERBASE")).expect("late nested state");
                 fs::write(
                     root.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
                     MANIFEST,
@@ -3853,6 +4106,45 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+
+        let root = folderbase();
+        fs::create_dir(root.path().join("client")).expect("client");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("client/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("client/active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("client/active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::HeadReplaced {
+                    panic!("crash after Head replacement");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        fs::create_dir(root.path().join("client/.FOLDERBASE")).expect("late nested state");
+        fs::write(
+            root.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
+            MANIFEST,
+        )
+        .expect("late nested manifest");
+        fs::write(root.path().join("client/FOLDERBASE.md"), "# Child\n")
+            .expect("late nested entry");
+        assert!(store.restore_tombstone("client/active.bin").is_err());
+        assert_eq!(
+            local_head(root.path())
+                .expect("rolled back deletion Head")
+                .version_id,
             deletion.version_id()
         );
     }
@@ -3875,9 +4167,38 @@ mod tests {
         assert!(store.restore_tombstone("active.bin").is_err());
         assert!(!root.path().join("active.bin").exists());
         assert_eq!(
-            local_head(root.path()).expect("copied deletion Head").version_id,
+            local_head(root.path())
+                .expect("copied deletion Head")
+                .version_id,
             deletion.version_id()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_head_root_swap_rolls_back_the_exact_detached_root() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let detached = root.path().with_extension("post-head-detached");
+        let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+            if checkpoint == &RestoreCheckpoint::HeadReplaced {
+                fs::rename(root.path(), &detached).expect("detach committed root");
+                copy_directory(&detached, root.path());
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            local_head(&detached).expect("detached prior Head").version_id,
+            deletion.version_id()
+        );
+        fs::remove_dir_all(&detached).expect("remove detached fixture");
     }
 
     #[cfg(unix)]
