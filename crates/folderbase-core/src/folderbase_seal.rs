@@ -5008,6 +5008,66 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn modified_restore_cleanup_retry_accepts_the_same_owned_inode_reverted_to_sealed_bytes() {
+        use std::{cell::RefCell, os::unix::fs::PermissionsExt};
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let transaction_directory = RefCell::new(None);
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::TargetPublished {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    let directory = root
+                        .path()
+                        .join(restore_transaction_directory(&transaction));
+                    transaction_directory.replace(Some(directory.clone()));
+                    fs::write(root.path().join("active.bin"), b"temporary user edit")
+                        .expect("edit restored target in place");
+                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
+                        .expect("deny private stage cleanup");
+                }
+            })
+            .expect_err("private-stage cleanup failure must be reported");
+
+        let transaction_directory = transaction_directory
+            .into_inner()
+            .expect("transaction directory");
+        fs::set_permissions(&transaction_directory, fs::Permissions::from_mode(0o700))
+            .expect("restore cleanup permissions");
+        fs::write(root.path().join("active.bin"), b"first opaque bytes")
+            .expect("revert the same restore-owned inode");
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh-process reopen");
+        assert!(matches!(
+            reopened.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == Path::new("active.bin")
+        ));
+        assert!(
+            !transaction_directory.exists(),
+            "durable modified ownership, not current bytes, must authorize private cleanup"
+        );
+        reopened
+            .seal_capture(reopened.plan_capture().expect("capture reverted file"))
+            .expect("completed cleanup must leave capture unblocked");
+    }
+
     #[test]
     fn successful_restore_retires_its_private_transaction_directory() {
         let root = folderbase();
