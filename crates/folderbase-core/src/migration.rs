@@ -6383,11 +6383,54 @@ fn cleanup_staging(root: &Path, migration_id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        io,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn same_inode_recovery_retains_both_identities_until_before_unlink() {
+        use std::os::fd::AsRawFd;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::write(&source, b"same inode\n").unwrap();
+        fs::hard_link(&source, &destination).unwrap();
+        let source_identity = RetainedPhysicalIdentity::from_path(&source).unwrap();
+        let destination_identity = RetainedPhysicalIdentity::from_path(&destination).unwrap();
+        let source_fd = source_identity.as_file().as_raw_fd();
+        let destination_fd = destination_identity.as_file().as_raw_fd();
+        assert_ne!(unsafe { libc::fcntl(source_fd, libc::F_GETFD) }, -1);
+        assert_ne!(unsafe { libc::fcntl(destination_fd, libc::F_GETFD) }, -1);
+
+        let result = remove_matching_destination_with(
+            source_identity,
+            destination_identity,
+            &destination,
+            || {
+                assert_eq!(unsafe { libc::fcntl(source_fd, libc::F_GETFD) }, -1);
+                assert_eq!(unsafe { libc::fcntl(destination_fd, libc::F_GETFD) }, -1);
+                Err(FolderbaseError::io(
+                    &destination,
+                    io::Error::other("injected unlink failure"),
+                ))
+            },
+        );
+
+        assert!(
+            matches!(result, Err(FolderbaseError::Io { ref source, .. })
+                if source.to_string() == "injected unlink failure"),
+            "{result:?}"
+        );
+        assert!(source.exists());
+        assert!(destination.exists());
+    }
 
     #[test]
     fn every_durable_apply_checkpoint_can_be_reopened_and_recovered() {

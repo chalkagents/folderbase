@@ -814,6 +814,49 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn released_windows_v1_root_identity_remains_compatible_without_weakening_v2() {
+        let first = windows_root_instance_authority(
+            0x1020_3040_5060_7080,
+            [
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x90, 0xa0, 0xb0, 0xc0, 0xd0,
+                0xe0, 0xf0, 0x01,
+            ],
+            0x1020_3040,
+            0x1122_3344_5566_7788,
+        );
+        let legacy_collision = windows_root_instance_authority(
+            0x1020_3040_5060_7080,
+            [
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10,
+            ],
+            0x1020_3040,
+            0x1122_3344_5566_7788,
+        );
+
+        assert_eq!(
+            first.current_sha256(),
+            "8ff64630529b2fbda0062c3c15b8109e050e99f905cf497ad3a864cc19db6b2c"
+        );
+        assert_eq!(
+            first.legacy_v1_sha256(),
+            Some("b3bd16243ce08bcb477e45af8682519dbbbeb3d33bd50d4a1660fe04a073bc03")
+        );
+        assert!(first.matches(first.current_sha256()));
+        assert!(first.matches(first.legacy_v1_sha256().unwrap()));
+        assert_ne!(
+            first.current_sha256(),
+            legacy_collision.current_sha256(),
+            "new Windows authority must reject a ReFS upper-bit collision"
+        );
+        assert!(!first.matches(legacy_collision.current_sha256()));
+        assert_eq!(
+            legacy_collision.current_sha256(),
+            "2afb8ccf76a5f517a400d52b539060d66a99ee816b9f2c94f63a7c3e2a32b6dc"
+        );
+    }
+
+    #[test]
     fn closed_marker_paths_are_stable() {
         let paths = [
             (FolderbaseRootMarker::StateDirectory, ".folderbase"),
