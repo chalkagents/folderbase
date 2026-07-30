@@ -130,6 +130,7 @@ enum RestoreCheckpoint {
     TargetPublished,
     VersionDurable,
     HeadReplaced,
+    PublicationVerified,
     ProjectionDurable,
     CleanupComplete,
 }
@@ -900,6 +901,7 @@ fn execute_restore_transaction(
             rollback_restore_head(store, state, transaction)?;
             return Err(error);
         }
+        checkpoint(&RestoreCheckpoint::PublicationVerified);
         finish_restore_projection(store, local, state, transaction)?;
         checkpoint(&RestoreCheckpoint::ProjectionDurable);
         true
@@ -1118,6 +1120,7 @@ fn finish_restore_materialization(
     checkpoint(&RestoreCheckpoint::VersionDurable);
     checkpoint(&RestoreCheckpoint::HeadReplaced);
     verify_restore_publication(store, state, transaction)?;
+    checkpoint(&RestoreCheckpoint::PublicationVerified);
     finish_restore_projection(store, local, state, transaction)?;
     checkpoint(&RestoreCheckpoint::ProjectionDurable);
     Ok(())
@@ -3434,6 +3437,7 @@ mod tests {
             RestoreCheckpoint::TargetPublished,
             RestoreCheckpoint::VersionDurable,
             RestoreCheckpoint::HeadReplaced,
+            RestoreCheckpoint::PublicationVerified,
             RestoreCheckpoint::ProjectionDurable,
             RestoreCheckpoint::CleanupComplete,
         ] {
@@ -4393,6 +4397,78 @@ mod tests {
                 "{mutation} must not leave the restore Head committed"
             );
         }
+    }
+
+    #[test]
+    fn projection_failure_after_head_restores_the_prior_head() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+
+        let error = store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::PublicationVerified {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    let identity = root.path().join(capture_identity_relative_path(
+                        transaction.binding.object_id(),
+                    ));
+                    fs::remove_file(&identity).expect("remove prior identity projection");
+                    fs::create_dir(&identity).expect("block identity projection");
+                }
+            })
+            .expect_err("projection failure after Head must fail the restore");
+
+        assert!(matches!(error, FolderbaseCaptureError::LocalStore(_)));
+        assert_eq!(
+            local_head(root.path())
+                .expect("rolled back deletion Head")
+                .version_id,
+            deletion.version_id()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projection_never_reopens_a_replacement_ambient_root() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let detached = root.path().with_extension("projection-detached");
+
+        let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+            if checkpoint == &RestoreCheckpoint::PublicationVerified {
+                fs::rename(root.path(), &detached).expect("detach retained root");
+                copy_directory(&detached, root.path());
+            }
+        });
+
+        assert!(
+            result.is_err(),
+            "replacement ambient root must revoke restore"
+        );
+        assert_eq!(
+            local_head(&detached)
+                .expect("retained root rolled back")
+                .version_id,
+            deletion.version_id()
+        );
+        fs::remove_dir_all(&detached).expect("remove detached fixture");
     }
 
     #[test]
