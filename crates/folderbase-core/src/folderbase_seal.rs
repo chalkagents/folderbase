@@ -5883,6 +5883,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn committed_cleanup_without_private_links_never_blesses_missing_or_foreign_publication() {
+        for replacement in ["missing", "foreign"] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            fs::remove_file(root.path().join("active.bin")).expect("delete");
+            store
+                .seal_capture(store.plan_capture().expect("deletion"))
+                .expect("deletion");
+
+            store
+                .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                    if checkpoint == &RestoreCheckpoint::AfterStageRetirement {
+                        let transaction = read_active_restore_transaction(
+                            &FolderbaseState::open(root.path()).expect("state"),
+                        )
+                        .expect("restore journal")
+                        .expect("active restore");
+                        fs::remove_file(root.path().join(restore_rescue_path(&transaction)))
+                            .expect("simulate crash after final private link removal");
+                    }
+                })
+                .expect_err("missing rescue must interrupt cleanup");
+            if replacement == "missing" {
+                fs::remove_file(root.path().join("active.bin")).expect("remove publication");
+            } else {
+                fs::remove_file(root.path().join("active.bin")).expect("remove publication");
+                fs::write(
+                    root.path().join("active.bin"),
+                    b"foreign workspace replacement",
+                )
+                .expect("foreign replacement");
+            }
+            drop(store);
+
+            let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh-process reopen");
+            reopened
+                .restore_tombstone("active.bin")
+                .expect_err("unproven publication must never return Restored");
+            assert!(
+                root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists(),
+                "{replacement}: unproven cleanup must retain active restore intent"
+            );
+            assert!(
+                root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists(),
+                "{replacement}: unproven cleanup must retain recovery evidence"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_receipt_survives_active_retirement_and_blocks_capture() {
