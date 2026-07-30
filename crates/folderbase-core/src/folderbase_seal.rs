@@ -3702,6 +3702,44 @@ mod tests {
     }
 
     #[test]
+    fn restore_never_crosses_a_case_folded_nested_folderbase_boundary() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("client")).expect("client");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("client/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("client/active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        fs::create_dir(root.path().join("client/.FOLDERBASE")).expect("nested state alias");
+        fs::write(
+            root.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
+            br#"{
+  "protocol_version": "0.4.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
+  }
+}
+"#,
+        )
+        .expect("nested manifest alias");
+
+        assert!(store.restore_tombstone("client/active.bin").is_err());
+        assert!(!root.path().join("client/active.bin").exists());
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+    }
+
+    #[test]
     fn every_persistence_checkpoint_reopens_and_converges_on_exact_assigned_version() {
         for fault in [
             CaptureCheckpoint::JournalDurable,

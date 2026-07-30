@@ -1137,6 +1137,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn nested_folderbase_marker_names_are_ascii_case_folded() {
+        assert!(is_folderbase_state_name(OsStr::new(".folderbase")));
+        assert!(is_folderbase_state_name(OsStr::new(".FOLDERBASE")));
+        assert!(is_folderbase_manifest_name(OsStr::new("manifest.json")));
+        assert!(is_folderbase_manifest_name(OsStr::new("MANIFEST.JSON")));
+        assert!(!is_folderbase_state_name(OsStr::new(".folderbase-other")));
+        assert!(!is_folderbase_manifest_name(OsStr::new(
+            "manifest.json.bak"
+        )));
+    }
+
     #[cfg(unix)]
     #[test]
     fn retained_parent_capability_never_redirects_publication_through_a_swapped_symlink() {
