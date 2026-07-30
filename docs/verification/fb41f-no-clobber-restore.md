@@ -43,6 +43,9 @@ blob named by the current Head Tombstone.
 - `20ecf87` strengthened journal tamper coverage by changing only executable
   fidelity and recomputing the target digest. It failed because recovery had
   not yet re-derived fidelity from verified ancestry.
+- `7ee012e` required case-folded `.folderbase/manifest.json` aliases to remain
+  nested restore boundaries on case-sensitive filesystems. The pure
+  case-folding seam failed to compile before the boundary matcher existed.
 
 ## GREEN behavior
 
@@ -60,6 +63,8 @@ blob named by the current Head Tombstone.
   Folderbase boundaries.
 - `8158080` binds pending journal fidelity back to the current verified
   Tombstone and nearest verified live ancestor before staging.
+- `c807298` discovers nested state and manifest components capability-relatively
+  with ASCII case folding and refuses ambiguous aliases.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -81,7 +86,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-576 passed; 3 ignored
+578 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
@@ -132,4 +137,3 @@ claim complete POSIX mode, ACL, xattr, Finder metadata, database snapshot
 coordination, directory restore, symlink restore, arbitrary-destination
 checkout, Remote Head, sync, sharing, authorization, Cloud durability, or
 hosted deployment.
-
