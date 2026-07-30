@@ -17,7 +17,6 @@ use crate::{
     root_attestation::{
         DEFAULT_V05_CAPTURE_IGNORE_RULES, MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile,
         PROTOCOL_UPGRADE_RECEIPT_FIELD, PROTOCOL_UPGRADE_RECEIPT_FORMAT,
-        attest_folderbase_root_with_profile,
         attest_folderbase_root_with_profile_allowing_upgrade_recovery,
         decode_manifest_protocol_profile,
     },
@@ -427,6 +426,16 @@ fn apply_protocol_upgrade_with_ack_hooks(
     ensure_no_pending_transactions(&state)?;
     let current = plan_protocol_upgrade(&plan.root)?;
     after_revalidation();
+    state.verify_still_attached()?;
+    if current.folderbase_id != plan.folderbase_id
+        || current.root_instance_sha256 != plan.root_instance_sha256
+        || current.attested_manifest_sha256 != plan.attested_manifest_sha256
+    {
+        return Err(FolderbaseError::ProtocolUpgradePlanChanged {
+            expected: expected.digest.clone(),
+            actual: "root_or_manifest_changed_at_acknowledgement".to_owned(),
+        });
+    }
     if current.plan_digest != *expected || current.plan_digest != plan.plan_digest {
         return Err(FolderbaseError::ProtocolUpgradePlanChanged {
             expected: expected.digest.clone(),
@@ -466,20 +475,7 @@ fn apply_protocol_upgrade_with_ack_hooks(
             other => other,
         })?;
     after_activation()?;
-    let activated_manifest = state
-        .read_bounded(Path::new("manifest.json"), MAX_FOLDERBASE_MANIFEST_BYTES)?
-        .ok_or_else(|| invalid_upgrade(&plan.root, "manifest disappeared after activation"))?;
-    let (attestation, profile) =
-        attest_protocol_upgrade_recovery_root(&state, &plan.root, &intent, &activated_manifest)?;
-    if attestation.protocol_version != "0.5.0"
-        || !matches!(profile, ManifestProtocolProfile::OrdinaryV05 { .. })
-        || activated_manifest != intent.target_bytes()
-    {
-        return Err(invalid_upgrade(
-            &plan.root,
-            "manifest activation did not produce the exact 0.5 profile",
-        ));
-    }
+    attest_exact_protocol_upgrade_target(&state, &plan.root, &intent)?;
     let current_ignore_snapshot = read_ignore_snapshot(&state, &plan.root);
     if !matches!(
         current_ignore_snapshot,
@@ -492,11 +488,10 @@ fn apply_protocol_upgrade_with_ack_hooks(
             actual: "ignore_policy_changed_at_activation".to_owned(),
         });
     }
+    before_final_ack();
+    attest_exact_protocol_upgrade_target(&state, &plan.root, &intent)?;
     state.verify_still_attached()?;
     state.remove_durable(Path::new(UPGRADE_INTENT_PATH))?;
-    before_final_ack();
-    attest_folderbase_root_with_profile(&plan.root)
-        .map_err(|source| invalid_upgrade(&plan.root, source.to_string()))?;
     Ok(upgrade_result(plan))
 }
 
@@ -970,6 +965,28 @@ fn attest_protocol_upgrade_recovery_root(
     Ok((attestation, profile))
 }
 
+fn attest_exact_protocol_upgrade_target(
+    state: &FolderbaseState,
+    root: &Path,
+    intent: &ProtocolUpgradeIntent,
+) -> Result<()> {
+    let manifest = state
+        .read_bounded(Path::new("manifest.json"), MAX_FOLDERBASE_MANIFEST_BYTES)?
+        .ok_or_else(|| invalid_upgrade(root, "manifest disappeared after activation"))?;
+    let (attestation, profile) =
+        attest_protocol_upgrade_recovery_root(state, root, intent, &manifest)?;
+    if attestation.protocol_version != "0.5.0"
+        || !matches!(profile, ManifestProtocolProfile::OrdinaryV05 { .. })
+        || manifest != intent.target_bytes()
+    {
+        return Err(invalid_upgrade(
+            root,
+            "manifest activation did not produce the exact 0.5 profile",
+        ));
+    }
+    Ok(())
+}
+
 fn read_ignore_snapshot(state: &FolderbaseState, root: &Path) -> Result<IgnorePolicySnapshot> {
     read_ignore_snapshot_with_hook(state, root, || {})
 }
@@ -1081,6 +1098,8 @@ mod tests {
     use std::fs;
 
     use tempfile::tempdir;
+
+    use crate::root_attestation::attest_folderbase_root_with_profile;
 
     use super::*;
 
