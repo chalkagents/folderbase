@@ -20,11 +20,13 @@ use crate::{
     FolderbaseError, FolderbaseKind, InitializationOptions, NestedFolderbaseBoundary,
     ReconstructableTree, Result, TemplateAnswerValue, TemplateArtifactKind, ValidationLevel,
     folder_analysis::{AnalyzedFile, analyze_folder, expand_reconstructable_tree},
+    folderbase_state::FolderbaseState,
     initialization::{initialize, plan_template_initialization},
-    local_versions::LocalVersionStore,
+    local_versions::{LocalVersionStore, StoreTransactionLock},
     physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity},
     root_attestation::metadata_is_link_or_reparse,
     template::load_builtin_template,
+    traversal_policy::NestedFolderbaseBoundaryKind,
     validation::validate,
     workspace::{has_nested_folderbase_marker, is_reserved_workspace_component},
 };
@@ -2344,11 +2346,27 @@ fn apply_migration_with_hook(
     if plan_digest(&in_memory_plan)? != approved.approval_digest {
         return Err(FolderbaseError::MigrationApprovalMismatch);
     }
-    let _transaction_lock =
-        acquire_existing_folderbase_transaction_lock_with_hook(&in_memory_plan.root, || {
+    let approved_root_identity = in_memory_plan
+        .root_identity
+        .as_ref()
+        .ok_or_else(|| FolderbaseError::MigrationSourceChanged(in_memory_plan.root.clone()))?
+        .identity();
+    let transaction_coordinator = acquire_existing_folderbase_transaction_lock_with_hook(
+        &in_memory_plan.root,
+        approved_root_identity,
+        || {
             checkpoint(ApplyCheckpoint::ExistingFolderbaseDetected);
-        })?;
+        },
+    )?;
     let mut plan = load_plan(&in_memory_plan.root, &in_memory_plan.id)?;
+    if plan.root_identity.as_ref().map(|root| root.identity()) != Some(approved_root_identity) {
+        return Err(FolderbaseError::MigrationSourceChanged(
+            in_memory_plan.root.clone(),
+        ));
+    }
+    if let Some(coordinator) = &transaction_coordinator {
+        coordinator.verify_still_attached()?;
+    }
     require_state(plan.state, MigrationState::Approved)?;
     if plan.approval_digest.as_deref() != Some(approved.approval_digest.as_str())
         || plan_digest(&plan)? != approved.approval_digest
@@ -2453,23 +2471,48 @@ fn apply_migration_with_hook(
     })
 }
 
+struct ExistingFolderbaseTransactionCoordinator {
+    state: FolderbaseState,
+    _lock: StoreTransactionLock,
+}
+
+impl ExistingFolderbaseTransactionCoordinator {
+    fn verify_still_attached(&self) -> Result<()> {
+        self.state.verify_still_attached()
+    }
+}
+
 fn acquire_existing_folderbase_transaction_lock(
     root: &Path,
-) -> Result<Option<crate::local_versions::StoreTransactionLock>> {
-    acquire_existing_folderbase_transaction_lock_with_hook(root, || {})
+    expected_root_identity: PhysicalIdentity,
+) -> Result<Option<ExistingFolderbaseTransactionCoordinator>> {
+    acquire_existing_folderbase_transaction_lock_with_hook(root, expected_root_identity, || {})
 }
 
 fn acquire_existing_folderbase_transaction_lock_with_hook(
     root: &Path,
+    expected_root_identity: PhysicalIdentity,
     after_marker_probe: impl FnOnce(),
-) -> Result<Option<crate::local_versions::StoreTransactionLock>> {
-    if !has_nested_folderbase_marker(root)? {
-        return Ok(None);
+) -> Result<Option<ExistingFolderbaseTransactionCoordinator>> {
+    let state = FolderbaseState::open_existing(root)?;
+    state.verify_root_identity(&expected_root_identity)?;
+    match state.classify_attached_root_boundary()? {
+        NestedFolderbaseBoundaryKind::None => return Ok(None),
+        NestedFolderbaseBoundaryKind::ExactBoundary => {}
+        NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+            return Err(FolderbaseError::UnsafePath(root.to_path_buf()));
+        }
     }
     after_marker_probe();
-    LocalVersionStore::open_read_only(root)?
-        .acquire_transaction_lock()
-        .map(Some)
+    state.verify_root_identity(&expected_root_identity)?;
+    let store = LocalVersionStore::open_read_only(root)?;
+    state.verify_still_attached()?;
+    let lock = store.acquire_transaction_lock_in(&state)?;
+    state.verify_still_attached()?;
+    Ok(Some(ExistingFolderbaseTransactionCoordinator {
+        state,
+        _lock: lock,
+    }))
 }
 
 fn record_unstarted_additive_rollback(
@@ -3268,9 +3311,15 @@ fn recover_migration_with_hook(
     after_transaction_coordinator: impl FnOnce(),
 ) -> Result<MigrationResult> {
     let root = canonical_root(root.as_ref())?;
-    let _transaction_lock = acquire_existing_folderbase_transaction_lock(&root)?;
+    let root_identity = RetainedPhysicalIdentity::from_path(&root)
+        .map_err(|source| FolderbaseError::io(&root, source))?;
+    let transaction_coordinator =
+        acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
     after_transaction_coordinator();
     let (journal_path, mut journal) = load_journal(&root, migration_id)?;
+    if let Some(coordinator) = &transaction_coordinator {
+        coordinator.verify_still_attached()?;
+    }
     if matches!(
         journal.state,
         MigrationState::Applying | MigrationState::RollingBack
@@ -3324,9 +3373,15 @@ fn rollback_migration_by_id_with_hook(
     after_transaction_coordinator: impl FnOnce(),
 ) -> Result<RollbackResult> {
     let root = canonical_root(root.as_ref())?;
-    let _transaction_lock = acquire_existing_folderbase_transaction_lock(&root)?;
+    let root_identity = RetainedPhysicalIdentity::from_path(&root)
+        .map_err(|source| FolderbaseError::io(&root, source))?;
+    let transaction_coordinator =
+        acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
     after_transaction_coordinator();
     let (journal_path, mut journal) = load_journal(&root, migration_id)?;
+    if let Some(coordinator) = &transaction_coordinator {
+        coordinator.verify_still_attached()?;
+    }
     require_state(journal.state, MigrationState::Verified)?;
     let result = if is_structural_journal(&journal) {
         rollback_structural_journal(&root, &journal_path, &mut journal)?
@@ -6846,10 +6901,8 @@ mod tests {
         .unwrap();
         let approved = approve_migration(migration).unwrap();
         let visible_root = root.path().to_path_buf();
-        let detached_root = visible_root.with_file_name(format!(
-            ".folderbase-detached-{}",
-            Uuid::now_v7()
-        ));
+        let detached_root =
+            visible_root.with_file_name(format!(".folderbase-detached-{}", Uuid::now_v7()));
 
         let result = apply_migration_with_hook(approved, |checkpoint| {
             if checkpoint == ApplyCheckpoint::ExistingFolderbaseDetected {
@@ -6865,7 +6918,10 @@ mod tests {
         fs::remove_dir_all(&visible_root).unwrap();
         fs::rename(&detached_root, &visible_root).unwrap();
 
-        assert!(result.is_err(), "the replaced root must lose apply authority");
+        assert!(
+            result.is_err(),
+            "the replaced root must lose apply authority"
+        );
         assert!(
             foreign_state_is_empty,
             "migration detection must not publish protocol state into a foreign replacement root"

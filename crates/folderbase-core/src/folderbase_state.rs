@@ -1546,6 +1546,18 @@ impl FolderbaseState {
         Ok(())
     }
 
+    pub(crate) fn verify_root_identity(&self, expected: &PhysicalIdentity) -> Result<()> {
+        if &self.root_identity != expected {
+            return Err(FolderbaseError::UnsafePath(self.display_root.clone()));
+        }
+        self.verify_still_attached()
+    }
+
+    pub(crate) fn classify_attached_root_boundary(&self) -> Result<NestedFolderbaseBoundaryKind> {
+        self.verify_still_attached()?;
+        classify_nested_folderbase_boundary(&self.root, &self.display_root)
+    }
+
     fn open_parent(&self, relative: &Path) -> Result<(Dir, OsString)> {
         let name = relative
             .file_name()
