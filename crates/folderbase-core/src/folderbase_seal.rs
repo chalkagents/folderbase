@@ -7334,6 +7334,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn restore_parent_detach_after_link_leaves_only_owned_orphan_and_never_moves_head() {
+        use std::os::unix::fs::MetadataExt;
+
         let root = folderbase();
         fs::create_dir(root.path().join("docs")).expect("docs");
         fs::rename(
@@ -7390,7 +7392,48 @@ mod tests {
         let transaction = read_active_restore_transaction(&state)
             .expect("active restore read")
             .expect("restore journal remains");
-        assert!(root.path().join(restore_stage_path(&transaction)).exists());
+        let stage = root.path().join(restore_stage_path(&transaction));
+        assert!(stage.exists());
+        let links_before_retry = fs::metadata(&stage).expect("stage metadata").nlink();
+        assert_eq!(
+            links_before_retry, 2,
+            "the stage and detached operation-owned publication are the only links"
+        );
+
+        assert!(matches!(
+            store.restore_tombstone("docs/active.bin"),
+            Err(FolderbaseCaptureError::RestoreNamespaceRepairRequired(path))
+                if path == Path::new("docs/active.bin")
+        ));
+        assert!(
+            !root.path().join("docs/active.bin").exists(),
+            "a refused retry must not add another publication link"
+        );
+        assert_eq!(
+            fs::metadata(&stage)
+                .expect("stage metadata after refused retry")
+                .nlink(),
+            links_before_retry,
+            "a refused retry must not grow the hard-link set"
+        );
+        assert_eq!(
+            local_head(root.path())
+                .expect("deletion Head still remains")
+                .version_id,
+            deletion.version_id()
+        );
+
+        fs::remove_dir_all(root.path().join("docs")).expect("remove replacement after inspection");
+        fs::rename(&detached, root.path().join("docs"))
+            .expect("explicitly return the operation-owned publication");
+        let restored = store
+            .restore_tombstone("docs/active.bin")
+            .expect("retry converges after explicit namespace repair");
+        assert_eq!(
+            fs::read(root.path().join("docs/active.bin")).expect("restored bytes"),
+            b"first opaque bytes"
+        );
+        assert_ne!(restored.version_id(), deletion.version_id());
     }
 
     #[test]

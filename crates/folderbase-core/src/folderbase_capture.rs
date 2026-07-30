@@ -584,6 +584,9 @@ pub enum FolderbaseCaptureError {
     )]
     RestoreAuthorityMaintenanceRequired { maximum: usize },
 
+    #[error("Tombstone restore namespace repair is required before retrying at: {0}")]
+    RestoreNamespaceRepairRequired(PathBuf),
+
     #[error("Tombstone restore refuses to overwrite the occupied path: {0}")]
     RestoreTargetOccupied(PathBuf),
 
