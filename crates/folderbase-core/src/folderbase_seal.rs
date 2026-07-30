@@ -5621,6 +5621,60 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn cleanup_receipt_identity_rejects_coordinated_same_byte_stage_and_destination_replacement() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let mut foreign_identity = None;
+
+        let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+            if checkpoint == &RestoreCheckpoint::CleanupRecoveryDurable {
+                let transaction = read_active_restore_transaction(
+                    &FolderbaseState::open(root.path()).expect("state"),
+                )
+                .expect("restore journal")
+                .expect("active restore");
+                let stage = root.path().join(restore_stage_path(&transaction));
+                let destination = root.path().join("active.bin");
+                let foreign = root.path().join("same-byte-foreign.bin");
+                fs::write(&foreign, b"first opaque bytes").expect("same-byte foreign file");
+                let metadata = fs::metadata(&foreign).expect("foreign metadata");
+                foreign_identity = Some((metadata.dev(), metadata.ino()));
+                fs::remove_file(&stage).expect("replace exact stage");
+                fs::remove_file(&destination).expect("replace exact destination");
+                fs::hard_link(&foreign, &stage).expect("foreign stage link");
+                fs::rename(&foreign, &destination).expect("foreign destination link");
+            }
+        });
+
+        result.expect_err("receipt identity must reject coordinated foreign hard links");
+        let transaction =
+            read_active_restore_transaction(&FolderbaseState::open(root.path()).expect("state"))
+                .expect("restore journal")
+                .expect("retained active restore");
+        for path in [
+            root.path().join(restore_stage_path(&transaction)),
+            root.path().join("active.bin"),
+        ] {
+            let metadata = fs::metadata(path).expect("foreign replacement preserved");
+            assert_eq!(
+                (metadata.dev(), metadata.ino()),
+                foreign_identity.expect("foreign identity")
+            );
+        }
+        assert!(root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists());
+    }
+
+    #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum CleanupBoundarySwap {
         Destination,
