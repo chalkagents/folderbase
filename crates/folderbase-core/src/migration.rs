@@ -6694,11 +6694,97 @@ fn cleanup_staging(root: &Path, migration_id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::mpsc,
+        thread,
+    };
 
     use tempfile::TempDir;
 
     use super::*;
+
+    const LEGACY_MANIFEST: &[u8] = br#"{
+  "$schema": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "protocol_version": "0.1.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475",
+    "name": "Legacy Migration Test",
+    "kind": "project",
+    "status": "active",
+    "created_at": "2026-07-26T00:00:00Z",
+    "entry": "FOLDERBASE.md"
+  },
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "approve",
+    "cloud_sync": "disabled"
+  }
+}
+"#;
+
+    #[test]
+    fn protocol_upgrade_serializes_behind_existing_folderbase_migration_apply() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let upgrade = crate::protocol_upgrade::plan_protocol_upgrade(root.path()).unwrap();
+        let migration = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let approved = approve_migration(migration).unwrap();
+        let (paused_sender, paused_receiver) = mpsc::sync_channel(0);
+        let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
+
+        let apply = thread::spawn(move || {
+            apply_migration_with_hook(approved, |checkpoint| {
+                if checkpoint == ApplyCheckpoint::JournalPrepared {
+                    paused_sender.send(()).unwrap();
+                    resume_receiver.recv().unwrap();
+                }
+            })
+        });
+        if paused_receiver.recv().is_err() {
+            panic!(
+                "migration stopped before the lock checkpoint: {:?}",
+                apply.join().unwrap()
+            );
+        }
+
+        let lock_path = root.path().join(".folderbase/locks/transactions.lock");
+        let transaction_is_locked = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .and_then(|file| match file.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+                Err(std::fs::TryLockError::Error(source)) => Err(source),
+                Ok(()) => {
+                    let _ = file.unlock();
+                    Err(io::Error::other(
+                        "migration did not hold the transaction lock",
+                    ))
+                }
+            })
+            .is_ok();
+
+        resume_sender.send(()).unwrap();
+        assert_eq!(
+            apply.join().unwrap().unwrap().state,
+            MigrationState::Verified
+        );
+        assert!(
+            transaction_is_locked,
+            "an existing-Folderbase migration must exclude protocol activation for its full apply"
+        );
+        crate::protocol_upgrade::apply_protocol_upgrade(&upgrade, upgrade.plan_digest()).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
@@ -7142,6 +7228,22 @@ mod tests {
         )
         .unwrap();
         crate::initialization::initialize(&initialization).unwrap();
+        root
+    }
+
+    fn legacy_structural_folderbase_fixture() -> TempDir {
+        let root = initialized_structural_folderbase_fixture();
+        fs::write(
+            root.path().join(".folderbase/manifest.json"),
+            LEGACY_MANIFEST,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("FOLDERBASE.md"),
+            b"# Legacy Folderbase\n\n## Purpose\nTest migration serialization.\n\n## Current state\nReady.\n\n## Navigate\nUse ordinary files.\n\n## Operating rules\nPreserve bytes.\n\n## Unresolved work\nNone.\n",
+        )
+        .unwrap();
+        fs::write(root.path().join(".folderbaseignore"), b"node_modules/\n").unwrap();
         root
     }
 
