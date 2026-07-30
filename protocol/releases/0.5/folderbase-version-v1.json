@@ -164,7 +164,7 @@
     },
     {
       "path": "crates/folderbase-core/src/local_versions.rs",
-      "sha256": "b334ff20dfbd4901c800979b11ab542e43d84bd4861c4641e0a6d9f5d9f1bf5c"
+      "sha256": "246c30b1e562313309f1f29f3a05e6edcec2ae9cb06379206651adca13a52986"
     },
     {
       "path": "crates/folderbase-core/src/migration.rs",
@@ -180,7 +180,7 @@
     },
     {
       "path": "crates/folderbase-core/src/protocol_upgrade.rs",
-      "sha256": "d724a9b90ec84df8712d64967dec6a193d9b0cce8b21c9dad8da15a3f60420ea"
+      "sha256": "56d8d325d1ab36956cb3de7addfc8b371a1875a8b6798bf523b324354a53f734"
     },
     {
       "path": "crates/folderbase-core/src/reorganization.rs",
@@ -228,7 +228,7 @@
     },
     {
       "path": "crates/folderbase-core/src/workspace.rs",
-      "sha256": "7c58e1902894b51efd0d3483aee2fadf906a1ec071be26dabbf05f3501d6fd8e"
+      "sha256": "14b7071d33ab897ae9d6e3db4b0ae5cf4f0ea6585a6244143091797e3be3ebdb"
     },
     {
       "path": "crates/folderbase-core/tests/change_set_conformance.rs",
@@ -320,7 +320,7 @@
     },
     {
       "path": "crates/folderbase-core/tests/workspace.rs",
-      "sha256": "45fa5f590f0005381bb547460b397738cc0946ba038b77fedca0c8ac14fbe106"
+      "sha256": "f2be8b2578d4a87b5e33a0e9eabd5b5a156cff0b32e1d6e21e03341fefd29318"
     },
     {
       "path": "docs/adr/0003-attest-exact-folderbase-roots.md",
@@ -567,12 +567,16 @@
       "sha256": "a3c287482cea76da2feacddcf6733284b12329e60c446f9476784871cb07ccee"
     },
     {
+      "path": "scripts/test-extracted-package-source-sensitivity.sh",
+      "sha256": "e256a9eea611fbecc8fe86889710799d7adbd63e3f810324af1a790813aaeaa4"
+    },
+    {
       "path": "scripts/test-extracted-packages.sh",
-      "sha256": "f219fdb4cbdd4d95796a8b37a7063f1aaec473e5e37904367e76d04df5792f2e"
+      "sha256": "c4c1cc5d3ec47d7147a376917872024279497c15d35ce7987c0fc455c57b459d"
     },
     {
       "path": "scripts/test-package-install.sh",
-      "sha256": "2e09e6050c1b615057b4ed9316993647304dc71ddcef343acf1b79807080a6c3"
+      "sha256": "4a4c267d72a67f948e361c72eb95e5263b1c16c51ae0fe98c4e84b00fb4ede9f"
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-digest-vectors.mjs",
@@ -580,7 +584,7 @@
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-distribution.mjs",
-      "sha256": "43463b8ca6995b7a4353ea4a277565dafbb8f4b64124368d3e0540fe2cf708ac"
+      "sha256": "fd27bda60e07f25f34e9cbff91af3b000efe15d00721e7c7b26a8cf5b57ba01b"
     }
   ]
 }
