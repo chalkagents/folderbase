@@ -5628,6 +5628,7 @@ mod tests {
     enum CleanupBoundarySwap {
         Destination,
         Stage,
+        Rescue,
     }
 
     #[cfg(unix)]
@@ -5676,6 +5677,7 @@ mod tests {
                 let target = match swap {
                     CleanupBoundarySwap::Destination => root.path().join("active.bin"),
                     CleanupBoundarySwap::Stage => directory.join("content"),
+                    CleanupBoundarySwap::Rescue => directory.join("content.rescue"),
                 };
                 fs::remove_file(&target).expect("remove exact cleanup-owned name");
                 fs::write(&target, competitor).expect("install unrelated boundary replacement");
@@ -5688,6 +5690,7 @@ mod tests {
             fs::read(match swap {
                 CleanupBoundarySwap::Destination => root.path().join("active.bin"),
                 CleanupBoundarySwap::Stage => transaction_directory.join("content"),
+                CleanupBoundarySwap::Rescue => transaction_directory.join("content.rescue"),
             })
             .expect("unrelated replacement"),
             competitor,
@@ -5746,6 +5749,18 @@ mod tests {
     #[test]
     fn committed_cleanup_rescue_survives_destination_swap_after_stage_unlink() {
         assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Destination, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modified_cleanup_never_unlinks_a_rescue_name_replacement() {
+        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Rescue, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_cleanup_never_unlinks_a_rescue_name_replacement() {
+        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Rescue, true);
     }
 
     #[test]

@@ -807,7 +807,6 @@ impl FolderbaseState {
         }
 
         if stage_file.is_some() {
-            checkpoint(false);
             if regular_file_identity(&stage_parent, &stage_name, &stage_display)?
                 != retained_identity
                 || regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
@@ -823,13 +822,13 @@ impl FolderbaseState {
                     message: "restore ownership changed at the retirement boundary".to_owned(),
                 });
             }
+            checkpoint(false);
             stage_parent
                 .remove_file(&stage_name)
                 .map_err(|source| FolderbaseError::io(&stage_display, source))?;
             sync_directory(&stage_parent, &stage_display)?;
         }
 
-        checkpoint(true);
         if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
             != retained_identity
             || regular_file_identity(&destination_parent, &destination_name, &destination_display)?
@@ -840,6 +839,7 @@ impl FolderbaseState {
                 message: "restore destination changed after private stage retirement".to_owned(),
             });
         }
+        checkpoint(true);
         rescue_parent
             .remove_file(&rescue_name)
             .map_err(|source| FolderbaseError::io(&rescue_display, source))?;
