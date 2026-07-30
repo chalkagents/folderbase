@@ -3770,6 +3770,7 @@ fn validate_committed_transaction(
     Ok(())
 }
 
+#[cfg(test)]
 fn read_active_transaction(
     state: &FolderbaseState,
 ) -> Result<Option<ActiveCaptureTransaction>, FolderbaseCaptureError> {
