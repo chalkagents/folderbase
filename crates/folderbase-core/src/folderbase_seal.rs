@@ -5895,6 +5895,49 @@ mod tests {
             .expect("advisory completion evidence must not block later work");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn completion_receipt_never_blesses_identical_bytes_from_a_foreign_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("completed restore");
+
+        let restored_metadata =
+            fs::metadata(root.path().join("active.bin")).expect("restored metadata");
+        fs::write(root.path().join("foreign.bin"), b"first opaque bytes")
+            .expect("write identical foreign file");
+        let foreign_metadata =
+            fs::metadata(root.path().join("foreign.bin")).expect("foreign metadata");
+        assert_ne!(
+            (restored_metadata.dev(), restored_metadata.ino()),
+            (foreign_metadata.dev(), foreign_metadata.ino()),
+            "fixture must use a distinct filesystem object"
+        );
+        fs::remove_file(root.path().join("active.bin")).expect("remove restored inode");
+        fs::rename(
+            root.path().join("foreign.bin"),
+            root.path().join("active.bin"),
+        )
+        .expect("publish identical-byte foreign inode");
+
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == Path::new("active.bin")
+        ));
+    }
+
     #[test]
     fn late_same_inode_edit_after_projection_retires_without_false_restore_success() {
         let root = folderbase();
