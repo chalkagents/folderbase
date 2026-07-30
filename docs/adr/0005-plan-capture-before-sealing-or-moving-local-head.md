@@ -151,7 +151,13 @@ capture journal remains until derived regular-file object projections and
 physical identity records are repaired. After Head publication, recovery first
 verifies the Head-anchored digest of the complete journal and requires the
 committed version's parents and timestamp to match that immutable intent before
-journal identity evidence can be projected. A retry after interruption at
+journal identity evidence can be projected. Released v1 non-genesis capture
+journals nested the prior Head authority in
+`expected_head.transaction_sha256`. Core bounded-decodes that exact closed wire,
+converts only its in-memory authority type, and retains the SHA-256 of the exact
+durable journal bytes for both pre-Head execution and committed-Head recovery.
+It never hashes the normalized representation where a released Head binds the
+original bytes. A retry after interruption at
 journal, Object Version, Folderbase Version, Local Head, or cleanup boundaries
 converges on the exact journal-assigned version. A stale attempt may discard
 only its intent; verified immutable records remain safe, reusable orphans.
@@ -212,12 +218,17 @@ Head, projection, or cleanup converges on the one assigned version without
 overwriting foreign content. Post-Head projection stays relative to the retained
 state capability; a projection failure restores the exact prior Head. If a user
 or agent edits the transaction-owned published file in place before cleanup,
-Core preserves those workspace bytes, retires restore ownership, and leaves the
-next capture unblocked. Successful cleanup first publishes one durable singleton
-receipt, then durably removes the private stage and per-transaction directory,
-then retires the active journal, and finally retires the receipt. A crash or
-cleanup error at any boundary reopens from the receipt and converges; capture is
-blocked while either active restore intent or cleanup receipt remains.
+Core preserves those workspace bytes. Cleanup first publishes one durable,
+closed singleton receipt with a `committed` or `modified` disposition. Committed
+cleanup removes the private stage and per-transaction directory. Modified
+cleanup revalidates that the visible file and stage still name the same modified
+filesystem object, removes only that exact private hard link and the empty
+transaction directory, and never unlinks the visible path. Both dispositions
+then retire the active journal and finally the receipt. A crash or cleanup error
+at any boundary reopens from the receipt and converges only while those ownership
+proofs remain true; capture is blocked while either active restore intent or
+cleanup receipt remains and becomes eligible only after private cleanup is
+complete.
 
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records

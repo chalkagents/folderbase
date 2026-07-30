@@ -856,6 +856,15 @@ of this object in the displayed field order:
 }
 ```
 
+Released v1 non-genesis capture journals stored the prior authority as
+`expected_head.transaction_sha256`. The bounded active-journal reader accepts
+that exact closed nested wire as capture authority, converts it to
+`capture_transaction_v1` only in memory, and separately retains SHA-256 of the
+exact journal bytes that were read. Pre-Head execution and committed-Head
+recovery both bind and compare that retained byte digest; normalized typed
+serialization is never substituted for a digest already named by a released
+Head.
+
 Sealing opens the existing retained state capability and re-attests the inert
 plan before any lock, layout, recovery, or capture publication. Capture-specific
 blob, Object Version, Folderbase Version, projection, identity, journal, and Head
@@ -914,14 +923,17 @@ digest. The rebound parent and restore-produced Heads are v2 records with
 prior Head digest that cannot be rederived after the prior Head is gone.
 Post-Head projection remains confined to the retained state capability, and
 projection failure restores the exact prior Head. An in-place edit of the
-transaction-owned published target preserves the user's bytes, retires restore
-ownership, and leaves capture unblocked. Cleanup publishes a durable singleton
-receipt before removing the private stage and transaction directory; that
-receipt survives active-journal retirement, blocks capture, and drives
-restartable cleanup convergence before it is itself removed. Unix staging
-explicitly applies its final `0700` or `0600` permissions after creation,
-independently of process umask. Directory and symlink Tombstone reconstruction
-remain outside v1 restore.
+transaction-owned published target preserves the user's bytes. Cleanup publishes
+a durable closed singleton receipt with `committed` or `modified` disposition
+before removing private state. Modified cleanup must re-prove that stage and
+visible path are the same modified filesystem object and removes only that exact
+private hard link plus the empty transaction directory. It never unlinks the
+visible path. The receipt survives active-journal retirement, blocks capture,
+and drives restartable cleanup convergence before it is itself removed; capture
+is eligible only after private cleanup completes. Unix staging explicitly
+applies its final `0700` or `0600` permissions after creation, independently of
+process umask. Directory and symlink Tombstone reconstruction remain outside v1
+restore.
 
 This remains Proposed. Productive captured-absence and supported-kind
 replacement Tombstones and exact ordinary-file no-clobber restore are

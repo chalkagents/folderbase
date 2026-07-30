@@ -253,6 +253,10 @@ The implementation proves:
 - bounded read compatibility for released v1 Local Heads, preserving
   `transaction_sha256` as capture authority and CAS-normalizing it under the
   transaction lock without changing its digest;
+- bounded compatibility for released non-genesis active capture journals whose
+  nested expected Head used `transaction_sha256`, retaining the SHA-256 of the
+  exact durable bytes across both pre-Head and committed-Head recovery instead
+  of hashing the normalized in-memory wire;
 - closed, independently checked `version_derived_v1` authority for rebound and
   restore-produced Heads, with unknown or mismatched discriminator refusal;
 - exact committed parent and timestamp validation before recovery may project

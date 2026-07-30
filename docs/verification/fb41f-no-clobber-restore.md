@@ -75,6 +75,13 @@ blob named by the current Head Tombstone.
 - `773955f` required captured and restore-derived Heads to carry different,
   closed authority meanings while released v1 capture Heads still recover. The
   old wire used one ambiguous `transaction_sha256` field for both meanings.
+- `5e8be93` denied private-stage unlink after an in-place target edit. The prior
+  order retired active intent first, so fresh-process capture saw an unsupported
+  multi-link file, omitted the preserved work, and leaked the transaction
+  directory.
+- `0689861` installed exact released-v1 non-genesis capture-journal bytes whose
+  nested expected Head used `transaction_sha256`. Both pre-Head and
+  committed-Head recovery initially rejected the old nested wire.
 
 ## GREEN behavior
 
@@ -126,6 +133,16 @@ blob named by the current Head Tombstone.
   verifies version-derived authority, rejects unknown or mismatched
   discriminators, and reads released v1 `transaction_sha256` only as capture
   authority before CAS normalization under the transaction lock.
+- `de81932` uses one closed cleanup receipt with `committed` or `modified`
+  disposition. Modified retirement publishes the receipt before cleanup,
+  revalidates the exact shared modified inode, removes only its private hard
+  link and empty transaction directory, retires active intent next, and removes
+  the receipt last. A fresh retry preserves visible bytes and capture becomes
+  eligible only after link count returns to one.
+- `b6e40bd` bounded-decodes the exact released non-genesis journal wire, converts
+  only its nested authority type, and retains SHA-256 of the original durable
+  bytes. Pre-Head execution and committed-Head recovery use that retained digest
+  rather than hashing normalized bytes.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -170,7 +187,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-596 passed; 3 ignored
+598 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
