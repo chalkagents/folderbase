@@ -6094,6 +6094,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn committed_cleanup_without_private_links_converges_only_for_exact_publication() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::AfterStageRetirement {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    fs::remove_file(root.path().join(restore_rescue_path(&transaction)))
+                        .expect("simulate crash after final private link removal");
+                }
+            })
+            .expect_err("missing rescue must interrupt cleanup");
+        drop(store);
+
+        let restored = FolderbaseVersionStore::open(root.path())
+            .expect("fresh-process reopen")
+            .restore_tombstone("active.bin")
+            .expect("exact publication identity and fidelity prove completed restore");
+        assert!(!restored.created());
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("restored bytes"),
+            b"first opaque bytes"
+        );
+        assert!(!root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists());
+        assert!(!root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_receipt_survives_active_retirement_and_blocks_capture() {
