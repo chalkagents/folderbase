@@ -46,6 +46,8 @@ const RESTORE_TRANSACTION_FORMAT_V1: &str = "folderbase-tombstone-restore-v1";
 const RESTORE_TRANSACTIONS_DIRECTORY: &str = ".folderbase/transactions/folderbase-version-restores";
 const ACTIVE_RESTORE_TRANSACTION_PATH: &str =
     ".folderbase/transactions/folderbase-version-restores/active.json";
+const RESTORE_CLEANUP_RECOVERY_PATH: &str =
+    ".folderbase/transactions/folderbase-version-restores/cleanup.json";
 const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
 const CAPTURE_IDENTITIES_DIRECTORY: &str = ".folderbase/local/capture-identities";
 const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
@@ -279,6 +281,25 @@ impl FolderbaseVersionStore {
         ensure_no_active_capture(&state)?;
 
         let active = read_active_restore_transaction(&state)?;
+        if let Some(recovery) = read_restore_cleanup_recovery(&state)? {
+            if recovery.path != path_string {
+                return Err(FolderbaseCaptureError::ConflictingTransaction(
+                    "a different Tombstone restore cleanup is pending",
+                ));
+            }
+            if active.as_ref().is_some_and(|active| active != &recovery) {
+                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "active restore and cleanup recovery name different transactions".to_owned(),
+                ));
+            }
+            return finish_restore_cleanup_recovery(
+                self,
+                &local,
+                &state,
+                &recovery,
+                &mut checkpoint,
+            );
+        }
         let transaction = match active {
             Some(transaction) => {
                 validate_restore_transaction(self, &transaction)?;
@@ -920,11 +941,13 @@ fn execute_restore_transaction(
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     };
 
-    remove_active_restore_transaction(state)?;
-    state.remove_durable(&restore_stage_path(transaction))?;
-    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    finish_restore_cleanup(state, transaction, checkpoint)?;
     checkpoint(&RestoreCheckpoint::CleanupComplete);
-    Ok(RestoredTombstone {
+    Ok(restored_tombstone(transaction, created))
+}
+
+fn restored_tombstone(transaction: &RestoreTransaction, created: bool) -> RestoredTombstone {
+    RestoredTombstone {
         path: PathBuf::from(&transaction.path),
         object_id: transaction.binding.object_id().to_owned(),
         object_version_id: transaction
@@ -935,7 +958,60 @@ fn execute_restore_transaction(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         created,
-    })
+    }
+}
+
+fn finish_restore_cleanup_recovery(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
+) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+    validate_restore_transaction(store, transaction)?;
+    let target = derive_authoritative_restore_target(store, local, state, transaction)?;
+    if target.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "cleanup recovery target digest changed".to_owned(),
+        ));
+    }
+    let target_head = JournalHead {
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        transaction_sha256: local_head_authority_sha256(
+            store,
+            &transaction.target_version_id,
+            &transaction.target_version_sha256,
+        )?,
+    };
+    let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+    if JournalHead::from(&current_head) != target_head {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    }
+    let installed =
+        read_and_verify_folderbase_version(store, local, state, &transaction.target_version_id)?;
+    if installed.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "cleanup recovery installed version changed".to_owned(),
+        ));
+    }
+
+    finish_restore_cleanup(state, transaction, checkpoint)?;
+    checkpoint(&RestoreCheckpoint::CleanupComplete);
+    Ok(restored_tombstone(transaction, false))
+}
+
+fn finish_restore_cleanup(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
+) -> Result<(), FolderbaseCaptureError> {
+    write_restore_cleanup_recovery(state, transaction)?;
+    checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
+    state.remove_durable(&restore_stage_path(transaction))?;
+    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    remove_active_restore_transaction(state)?;
+    remove_restore_cleanup_recovery(state)
 }
 
 fn derive_authoritative_restore_target(
@@ -2880,6 +2956,12 @@ fn ensure_no_active_restore(state: &FolderbaseState) -> Result<(), FolderbaseCap
             MAX_CAPTURE_TRANSACTION_BYTES,
         )?
         .is_some()
+        || state
+            .read_bounded(
+                Path::new(RESTORE_CLEANUP_RECOVERY_PATH),
+                MAX_CAPTURE_TRANSACTION_BYTES,
+            )?
+            .is_some()
     {
         return Err(FolderbaseCaptureError::ConflictingTransaction(
             "a Tombstone restore is pending",
@@ -2915,6 +2997,59 @@ fn write_active_restore_transaction(
     state
         .publish_new(Path::new(ACTIVE_RESTORE_TRANSACTION_PATH), &encoded)
         .map_err(Into::into)
+}
+
+fn read_restore_cleanup_recovery(
+    state: &FolderbaseState,
+) -> Result<Option<RestoreTransaction>, FolderbaseCaptureError> {
+    let relative = Path::new(RESTORE_CLEANUP_RECOVERY_PATH);
+    let Some(encoded) = state.read_bounded(relative, MAX_CAPTURE_TRANSACTION_BYTES)? else {
+        return Ok(None);
+    };
+    let transaction: RestoreTransaction = serde_json::from_slice(&encoded).map_err(|source| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+            "restore cleanup recovery is invalid JSON: {source}"
+        ))
+    })?;
+    Ok(Some(transaction))
+}
+
+fn write_restore_cleanup_recovery(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let relative = Path::new(RESTORE_CLEANUP_RECOVERY_PATH);
+    let encoded = encode_restore_transaction(transaction)?;
+    match state.publish_new(relative, &encoded) {
+        Ok(()) => Ok(()),
+        Err(FolderbaseError::WouldOverwrite(_)) => {
+            let existing = state
+                .read_bounded(relative, MAX_CAPTURE_TRANSACTION_BYTES)?
+                .ok_or_else(|| {
+                    FolderbaseCaptureError::InvalidRestoreTransaction(
+                        "restore cleanup recovery disappeared".to_owned(),
+                    )
+                })?;
+            if existing != encoded {
+                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "restore cleanup recovery slot names different bytes".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_restore_cleanup_recovery(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
+    let relative = Path::new(RESTORE_CLEANUP_RECOVERY_PATH);
+    match state.remove_durable(relative) {
+        Ok(()) => Ok(()),
+        Err(error) => match state.read_bounded(relative, MAX_CAPTURE_TRANSACTION_BYTES) {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) | Err(_) => Err(error.into()),
+        },
+    }
 }
 
 fn encode_restore_transaction(
@@ -3498,6 +3633,7 @@ mod tests {
             RestoreCheckpoint::HeadReplaced,
             RestoreCheckpoint::PublicationVerified,
             RestoreCheckpoint::ProjectionDurable,
+            RestoreCheckpoint::CleanupRecoveryDurable,
             RestoreCheckpoint::CleanupComplete,
         ] {
             let root = folderbase();
