@@ -480,6 +480,7 @@ fn derive_comparison(
         .and_then(Value::as_object)
     else {
         if history.is_empty() {
+            require_native_unmanaged_lineage(manifest, manifest_path)?;
             return Ok(Comparison {
                 template_id: template_id.to_owned(),
                 version: "0.0.0".to_owned(),
@@ -584,16 +585,21 @@ fn validate_application_history_chain(
 
         match record.comparison.source {
             TemplateComparisonSource::Unmanaged => {
-                if provenance.is_some()
+                if !manifest_is_native_v05(manifest)
+                    || provenance.is_some()
                     || record.comparison.version != "0.0.0"
                     || !origin_roots.insert(record.template.id.as_str())
                 {
                     return Err(FolderbaseError::InvalidRecord {
                         path: manifest_path.to_path_buf(),
-                        message: format!(
-                            "template application {} has invalid unmanaged origin",
-                            record.id
-                        ),
+                        message: if !manifest_is_native_v05(manifest) {
+                            "unmanaged template lineage requires native protocol 0.5.0".to_owned()
+                        } else {
+                            format!(
+                                "template application {} has invalid unmanaged origin",
+                                record.id
+                            )
+                        },
                     });
                 }
             }
@@ -670,6 +676,20 @@ fn validate_application_history_chain(
     }
 
     Ok(())
+}
+
+fn require_native_unmanaged_lineage(manifest: &Value, manifest_path: &Path) -> Result<()> {
+    if manifest_is_native_v05(manifest) {
+        return Ok(());
+    }
+    Err(FolderbaseError::InvalidRecord {
+        path: manifest_path.to_path_buf(),
+        message: "unmanaged template lineage requires native protocol 0.5.0".to_owned(),
+    })
+}
+
+fn manifest_is_native_v05(manifest: &Value) -> bool {
+    manifest.get("protocol_version").and_then(Value::as_str) == Some("0.5.0")
 }
 
 #[allow(clippy::too_many_arguments)]
