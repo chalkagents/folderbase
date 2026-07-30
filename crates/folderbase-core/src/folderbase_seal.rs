@@ -8512,6 +8512,76 @@ mod tests {
     }
 
     #[test]
+    fn same_count_authority_set_swap_after_byte_read_fails_without_head_movement() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let restored = store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+        fs::write(
+            root.path().join("active.bin"),
+            b"authority-bearing workspace edit",
+        )
+        .expect("same-inode edit requiring a new capture");
+        let plan = store.plan_capture().expect("authority-aware plan");
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let completion = read_restore_completion_receipt(&state)
+            .expect("completion")
+            .expect("completed restore");
+        let original_stage = root
+            .path()
+            .join(restore_stage_path(&completion.transaction));
+        let original_receipt = root.path().join(restore_authority_record_path(
+            &completion.transaction.transaction_id,
+        ));
+
+        let error = store
+            .seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::AfterObjectBytesRead("active.bin".to_owned()) {
+                    fs::remove_file(&original_stage).expect("retire original stage");
+                    fs::remove_file(&original_receipt).expect("retire original receipt");
+                    let mut replacement = completion.transaction.clone();
+                    replacement.transaction_id = format!("fbrestore_{}", Uuid::now_v7());
+                    fs::create_dir(
+                        root.path()
+                            .join(restore_transaction_directory(&replacement)),
+                    )
+                    .expect("replacement authority directory");
+                    fs::hard_link(
+                        root.path().join("active.bin"),
+                        root.path().join(restore_stage_path(&replacement)),
+                    )
+                    .expect("same-count replacement stage");
+                    write_restore_authority_record(
+                        &state,
+                        &replacement,
+                        &completion.published_identity_sha256,
+                    )
+                    .expect("replacement authority receipt");
+                }
+            })
+            .expect_err("a post-read exact authority-set swap must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::CaptureStateChanged(path)
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            local_head(root.path())
+                .expect("restored Local Head remains")
+                .version_id,
+            restored.version_id()
+        );
+    }
+
+    #[test]
     fn authority_bearing_capture_journal_recovers_with_exact_link_commitment() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
