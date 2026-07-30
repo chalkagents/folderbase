@@ -14,13 +14,13 @@ use std::{
 use cap_fs_ext::DirExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use same_file::Handle;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     FolderbaseError, Result,
     folderbase_restore_authority::{stable_file_identity_sha256, stable_file_link_count},
+    physical_identity::PhysicalIdentity,
     root_attestation::metadata_is_link_or_reparse,
 };
 
@@ -40,16 +40,16 @@ enum StateAccess {
 
 pub(crate) struct FolderbaseState {
     root: Dir,
-    root_identity: Handle,
+    root_identity: PhysicalIdentity,
     state: Dir,
-    state_identity: Handle,
+    state_identity: PhysicalIdentity,
     display_root: PathBuf,
     access: StateAccess,
 }
 
 struct WorkspaceTargetCapability {
     parent: Dir,
-    parent_identity: Handle,
+    parent_identity: PhysicalIdentity,
     relative: PathBuf,
     name: OsString,
     parent_display: PathBuf,
@@ -1649,7 +1649,7 @@ fn copy_exact_sha256(
     Ok(())
 }
 
-fn regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<Handle> {
+fn regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<PhysicalIdentity> {
     let file = open_regular_file_nofollow(parent, name, display)?;
     open_regular_file_identity(&file, display)
 }
@@ -1721,12 +1721,15 @@ fn open_regular_file_nofollow(
     Ok(file)
 }
 
-fn open_regular_file_identity(file: &cap_std::fs::File, display: &Path) -> Result<Handle> {
+fn open_regular_file_identity(
+    file: &cap_std::fs::File,
+    display: &Path,
+) -> Result<PhysicalIdentity> {
     let file = file
         .try_clone()
         .map_err(|source| FolderbaseError::io(display, source))?
         .into_std();
-    Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
+    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source))
 }
 
 fn verify_restore_retirement_publication(
@@ -2131,7 +2134,7 @@ fn open_directory_nofollow(
     Ok(Dir::from_std_file(file))
 }
 
-fn directory_identity(directory: &Dir, display: &Path) -> Result<Handle> {
+fn directory_identity(directory: &Dir, display: &Path) -> Result<PhysicalIdentity> {
     let file = directory
         .try_clone()
         .map_err(|source| FolderbaseError::io(display, source))?
@@ -2142,7 +2145,7 @@ fn directory_identity(directory: &Dir, display: &Path) -> Result<Handle> {
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }
-    Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
+    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source))
 }
 
 #[cfg(target_os = "linux")]
@@ -2160,11 +2163,8 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }
-    let observed_identity = Handle::from_file(
-        file.try_clone()
-            .map_err(|source| FolderbaseError::io(display, source))?,
-    )
-    .map_err(|source| FolderbaseError::io(display, source))?;
+    let observed_identity = PhysicalIdentity::from_file(&file)
+        .map_err(|source| FolderbaseError::io(display, source))?;
     if observed_identity != expected_identity {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }

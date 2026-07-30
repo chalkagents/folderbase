@@ -4,8 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::physical_identity::PhysicalIdentity;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 pub(crate) const RESTORE_AUTHORITIES_DIRECTORY: &str =
     ".folderbase/transactions/folderbase-version-restores";
@@ -39,67 +39,12 @@ pub(crate) fn restore_authority_record_path(transaction_id: &str) -> PathBuf {
 }
 
 pub(crate) fn stable_file_identity_sha256(file: &File) -> io::Result<String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let metadata = file.metadata()?;
-        Ok(stable_unix_file_identity_sha256(
-            metadata.dev(),
-            metadata.ino(),
-        ))
-    }
-
-    #[cfg(windows)]
-    {
-        use std::{mem::size_of, os::windows::io::AsRawHandle};
-        use windows_sys::Win32::{
-            Foundation::HANDLE,
-            Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx},
-        };
-
-        let mut information = FILE_ID_INFO::default();
-        if unsafe {
-            GetFileInformationByHandleEx(
-                file.as_raw_handle() as HANDLE,
-                FileIdInfo,
-                (&raw mut information).cast(),
-                size_of::<FILE_ID_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let mut digest = Sha256::new();
-        digest.update(b"folderbase-workspace-file-identity-v1");
-        digest.update([0]);
-        digest.update(b"windows");
-        digest.update([0]);
-        digest.update(information.VolumeSerialNumber.to_be_bytes());
-        digest.update(information.FileId.Identifier);
-        Ok(format!("{:x}", digest.finalize()))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = file;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "stable file identity is unavailable on this platform",
-        ))
-    }
+    Ok(PhysicalIdentity::from_file(file)?.stable_sha256())
 }
 
 #[cfg(unix)]
 pub(crate) fn stable_unix_file_identity_sha256(device: u64, inode: u64) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"folderbase-workspace-file-identity-v1");
-    digest.update([0]);
-    digest.update(b"unix");
-    digest.update([0]);
-    digest.update(device.to_be_bytes());
-    digest.update(inode.to_be_bytes());
-    format!("{:x}", digest.finalize())
+    PhysicalIdentity::Unix { device, inode }.stable_sha256()
 }
 
 pub(crate) fn stable_file_link_count(file: &File) -> io::Result<u64> {
