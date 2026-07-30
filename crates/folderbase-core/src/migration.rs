@@ -3312,6 +3312,7 @@ fn rollback_migration_by_id_with_hook(
     after_transaction_coordinator: impl FnOnce(),
 ) -> Result<RollbackResult> {
     let root = canonical_root(root.as_ref())?;
+    let _transaction_lock = acquire_existing_folderbase_transaction_lock(&root)?;
     after_transaction_coordinator();
     let (journal_path, mut journal) = load_journal(&root, migration_id)?;
     require_state(journal.state, MigrationState::Verified)?;
