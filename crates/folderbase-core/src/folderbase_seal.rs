@@ -1170,14 +1170,29 @@ fn execute_restore_transaction(
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     };
 
-    if finish_restore_cleanup(state, transaction, checkpoint)?
-        == RestoreCleanupOutcome::WorkspaceModified
+    let published_identity_sha256 = state.workspace_restore_identity_sha256(
+        &restore_stage_path(transaction),
+        Path::new(&transaction.path),
+    )?;
+    if finish_restore_cleanup_with_identity(
+        state,
+        transaction,
+        &published_identity_sha256,
+        checkpoint,
+    )? == RestoreCleanupOutcome::WorkspaceModified
     {
         return Err(FolderbaseCaptureError::RestoreTargetOccupied(
             PathBuf::from(&transaction.path),
         ));
     }
     checkpoint(&RestoreCheckpoint::CleanupComplete);
+    verify_restore_success_linearization(
+        store,
+        local,
+        state,
+        transaction,
+        &published_identity_sha256,
+    )?;
     Ok(restored_tombstone(transaction, created))
 }
 
@@ -1246,19 +1261,14 @@ fn finish_restore_cleanup_recovery(
         ));
     }
     checkpoint(&RestoreCheckpoint::CleanupComplete);
-    Ok(restored_tombstone(transaction, false))
-}
-
-fn finish_restore_cleanup(
-    state: &FolderbaseState,
-    transaction: &RestoreTransaction,
-    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
-) -> Result<RestoreCleanupOutcome, FolderbaseCaptureError> {
-    let published_identity_sha256 = state.workspace_restore_identity_sha256(
-        &restore_stage_path(transaction),
-        Path::new(&transaction.path),
+    verify_restore_success_linearization(
+        store,
+        local,
+        state,
+        transaction,
+        published_identity_sha256,
     )?;
-    finish_restore_cleanup_with_identity(state, transaction, &published_identity_sha256, checkpoint)
+    Ok(restored_tombstone(transaction, false))
 }
 
 fn finish_restore_cleanup_with_identity(
@@ -1697,6 +1707,123 @@ fn rederive_authoritative_restore_transaction(
     Ok(())
 }
 
+fn verify_restore_success_linearization(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
+) -> Result<(), FolderbaseCaptureError> {
+    verify_restore_root_instance(store)?;
+    state.verify_still_attached()?;
+    validate_restore_transaction(store, transaction)?;
+
+    let target = derive_authoritative_restore_target(store, local, state, transaction)?;
+    if target.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "final restore target digest changed".to_owned(),
+        ));
+    }
+    let installed =
+        read_and_verify_folderbase_version(store, local, state, &transaction.target_version_id)?;
+    if installed.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "final installed restore Version changed".to_owned(),
+        ));
+    }
+    let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+    let expected_head = JournalHead {
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
+    };
+    if JournalHead::from(&current_head) != expected_head {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    }
+
+    let expected_completion = RestoreCompletionReceipt {
+        format: RESTORE_COMPLETION_FORMAT_V2.to_owned(),
+        transaction: transaction.clone(),
+        published_identity_sha256: published_identity_sha256.to_owned(),
+    };
+    let expected_completion = encode_restore_completion_receipt(&expected_completion)?;
+    if state
+        .read_bounded(
+            Path::new(RESTORE_COMPLETION_PATH),
+            MAX_CAPTURE_TRANSACTION_BYTES,
+        )?
+        .as_deref()
+        != Some(expected_completion.as_slice())
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "final restore completion receipt changed".to_owned(),
+        ));
+    }
+    if state
+        .read_bounded(
+            Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+            MAX_CAPTURE_TRANSACTION_BYTES,
+        )?
+        .is_some()
+        || state
+            .read_bounded(
+                Path::new(RESTORE_CLEANUP_RECOVERY_PATH),
+                MAX_CAPTURE_TRANSACTION_BYTES,
+            )?
+            .is_some()
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "final restore still has mutable transaction state".to_owned(),
+        ));
+    }
+
+    let authority = restore_authority_record(transaction, published_identity_sha256);
+    let expected_authority = encode_restore_authority_record(&authority)?;
+    let authority_path = restore_authority_record_path(&transaction.transaction_id);
+    if state
+        .read_bounded(&authority_path, MAX_RESTORE_AUTHORITY_BYTES)?
+        .as_deref()
+        != Some(expected_authority.as_slice())
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "final restore authority path or exact bytes changed".to_owned(),
+        ));
+    }
+
+    let path = Path::new(&transaction.path);
+    let retained_identity =
+        state.workspace_restore_identity_sha256(&restore_stage_path(transaction), path)?;
+    if retained_identity != published_identity_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "final retained stage or destination identity changed".to_owned(),
+        ));
+    }
+    state.verify_workspace_regular_file_identity_and_fidelity(
+        path,
+        published_identity_sha256,
+        transaction
+            .binding
+            .content_sha256()
+            .expect("validated regular binding"),
+        transaction
+            .binding
+            .bytes()
+            .expect("validated regular binding"),
+        transaction
+            .binding
+            .executable()
+            .expect("validated regular binding"),
+    )?;
+    state.verify_still_attached()?;
+    Ok(())
+}
+
 fn completed_restore_result(
     store: &FolderbaseVersionStore,
     local: &LocalVersionStore,
@@ -1769,6 +1896,13 @@ fn completed_restore_result(
     {
         return Ok(None);
     }
+    verify_restore_success_linearization(
+        store,
+        local,
+        state,
+        transaction,
+        published_identity_sha256,
+    )?;
     Ok(Some(restored_tombstone(transaction, false)))
 }
 
@@ -3713,17 +3847,7 @@ fn write_restore_authority_record(
     published_identity_sha256: &str,
 ) -> Result<(), FolderbaseCaptureError> {
     let record = restore_authority_record(transaction, published_identity_sha256);
-    let mut encoded = serde_json::to_vec_pretty(&record).map_err(|source| {
-        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
-            "restore authority encoding failed: {source}"
-        ))
-    })?;
-    encoded.push(b'\n');
-    if encoded.len() as u64 > MAX_RESTORE_AUTHORITY_BYTES {
-        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-            "restore authority exceeds its bounded record limit".to_owned(),
-        ));
-    }
+    let encoded = encode_restore_authority_record(&record)?;
     let relative = restore_authority_record_path(&transaction.transaction_id);
     match state.publish_new(&relative, &encoded) {
         Ok(()) => Ok(()),
@@ -3742,6 +3866,23 @@ fn write_restore_authority_record(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn encode_restore_authority_record(
+    record: &RestoreAuthorityRecord,
+) -> Result<Vec<u8>, FolderbaseCaptureError> {
+    let mut encoded = serde_json::to_vec_pretty(record).map_err(|source| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+            "restore authority encoding failed: {source}"
+        ))
+    })?;
+    encoded.push(b'\n');
+    if encoded.len() as u64 > MAX_RESTORE_AUTHORITY_BYTES {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore authority exceeds its bounded record limit".to_owned(),
+        ));
+    }
+    Ok(encoded)
 }
 
 fn restore_authority_record(
@@ -3772,7 +3913,16 @@ fn write_restore_completion_receipt(
         transaction: transaction.clone(),
         published_identity_sha256: published_identity_sha256.to_owned(),
     };
-    let mut encoded = serde_json::to_vec_pretty(&completion).map_err(|source| {
+    let encoded = encode_restore_completion_receipt(&completion)?;
+    state
+        .replace(Path::new(RESTORE_COMPLETION_PATH), &encoded)
+        .map_err(Into::into)
+}
+
+fn encode_restore_completion_receipt(
+    completion: &RestoreCompletionReceipt,
+) -> Result<Vec<u8>, FolderbaseCaptureError> {
+    let mut encoded = serde_json::to_vec_pretty(completion).map_err(|source| {
         FolderbaseCaptureError::InvalidRestoreTransaction(format!(
             "restore completion receipt encoding failed: {source}"
         ))
@@ -3783,9 +3933,7 @@ fn write_restore_completion_receipt(
             "restore completion receipt exceeds its bounded record limit".to_owned(),
         ));
     }
-    state
-        .replace(Path::new(RESTORE_COMPLETION_PATH), &encoded)
-        .map_err(Into::into)
+    Ok(encoded)
 }
 
 fn encode_restore_transaction(
