@@ -1429,6 +1429,129 @@ pub struct RollbackResult {
     pub state: MigrationState,
 }
 
+/// The caller-selected Folderbase root for one migration command.
+///
+/// `Current` is the public command boundary. The approval-carrying variant is
+/// used only by the released `apply_migration` adapter so its already-retained
+/// root authority is not weakened while that adapter moves behind
+/// `MigrationExecution`.
+#[derive(Debug)]
+pub enum RootClaim<'a> {
+    Current {
+        display_root: &'a Path,
+    },
+    #[doc(hidden)]
+    Approved {
+        approved_migration: ApprovedMigration,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationCommand<'a> {
+    Apply {
+        migration_id: &'a str,
+        approval_digest: &'a str,
+    },
+    Recover {
+        migration_id: &'a str,
+    },
+    Rollback {
+        migration_id: &'a str,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationConflict {
+    pub operation_index: Option<usize>,
+    pub affected_paths: Vec<PathBuf>,
+    pub expected: String,
+    pub observed: String,
+    pub phase: String,
+    pub preserved_artifact: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub enum MigrationOutcome {
+    Applied(MigrationResult),
+    RolledBack(RollbackResult),
+    Conflicted {
+        migration_id: String,
+        conflicts: Vec<MigrationConflict>,
+    },
+}
+
+/// The single semantic execution boundary for apply, recovery, and rollback.
+pub struct MigrationExecution;
+
+impl MigrationExecution {
+    pub fn run(root: RootClaim<'_>, command: MigrationCommand<'_>) -> Result<MigrationOutcome> {
+        match (root, command) {
+            (
+                RootClaim::Current { display_root },
+                MigrationCommand::Apply {
+                    migration_id,
+                    approval_digest,
+                },
+            ) => {
+                let approved = ApprovedMigration::reopen(display_root, migration_id)?;
+                if approved.approval_digest != approval_digest {
+                    return Err(FolderbaseError::MigrationApprovalMismatch);
+                }
+                legacy_apply_migration_with_hook(approved, |_| {}).map(MigrationOutcome::Applied)
+            }
+            (
+                RootClaim::Approved { approved_migration },
+                MigrationCommand::Apply {
+                    migration_id,
+                    approval_digest,
+                },
+            ) => {
+                if approved_migration.plan.id != migration_id
+                    || approved_migration.approval_digest != approval_digest
+                {
+                    return Err(FolderbaseError::MigrationApprovalMismatch);
+                }
+                legacy_apply_migration_with_hook(approved_migration, |_| {})
+                    .map(MigrationOutcome::Applied)
+            }
+            (RootClaim::Current { display_root }, MigrationCommand::Recover { migration_id }) => {
+                let result = legacy_recover_migration_with_hook(display_root, migration_id, || {})?;
+                if result.state == MigrationState::RolledBack {
+                    Ok(MigrationOutcome::RolledBack(RollbackResult {
+                        migration_id: result.migration_id,
+                        removed_paths: Vec::new(),
+                        state: result.state,
+                    }))
+                } else {
+                    Ok(MigrationOutcome::Applied(result))
+                }
+            }
+            (RootClaim::Current { display_root }, MigrationCommand::Rollback { migration_id }) => {
+                legacy_rollback_migration_by_id_with_hook(display_root, migration_id, || {})
+                    .map(MigrationOutcome::RolledBack)
+            }
+            (
+                RootClaim::Approved { approved_migration },
+                MigrationCommand::Recover { migration_id },
+            ) => legacy_recover_migration_with_hook(
+                &approved_migration.plan.root,
+                migration_id,
+                || {},
+            )
+            .map(MigrationOutcome::Applied),
+            (
+                RootClaim::Approved { approved_migration },
+                MigrationCommand::Rollback { migration_id },
+            ) => legacy_rollback_migration_by_id_with_hook(
+                &approved_migration.plan.root,
+                migration_id,
+                || {},
+            )
+            .map(MigrationOutcome::RolledBack),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SourceFile {
     path: PathBuf,
@@ -2374,6 +2497,76 @@ enum StructuralRollbackCheckpoint {
 }
 
 fn apply_migration_with_hook(
+    approved: ApprovedMigration,
+    checkpoint: impl FnMut(ApplyCheckpoint),
+) -> Result<MigrationResult> {
+    let migration_id = approved.plan.id.clone();
+    let approval_digest = approved.approval_digest.clone();
+    match MigrationExecution::run_apply_with_hook(
+        RootClaim::Approved {
+            approved_migration: approved,
+        },
+        MigrationCommand::Apply {
+            migration_id: &migration_id,
+            approval_digest: &approval_digest,
+        },
+        checkpoint,
+    )? {
+        MigrationOutcome::Applied(result) => Ok(result),
+        MigrationOutcome::RolledBack(_) | MigrationOutcome::Conflicted { .. } => {
+            Err(FolderbaseError::InvalidMigrationState {
+                expected: MigrationState::Verified.as_str(),
+                actual: MigrationState::Conflicted.as_str().to_owned(),
+            })
+        }
+    }
+}
+
+impl MigrationExecution {
+    fn run_apply_with_hook(
+        root: RootClaim<'_>,
+        command: MigrationCommand<'_>,
+        checkpoint: impl FnMut(ApplyCheckpoint),
+    ) -> Result<MigrationOutcome> {
+        match (root, command) {
+            (
+                RootClaim::Approved { approved_migration },
+                MigrationCommand::Apply {
+                    migration_id,
+                    approval_digest,
+                },
+            ) => {
+                if approved_migration.plan.id != migration_id
+                    || approved_migration.approval_digest != approval_digest
+                {
+                    return Err(FolderbaseError::MigrationApprovalMismatch);
+                }
+                legacy_apply_migration_with_hook(approved_migration, checkpoint)
+                    .map(MigrationOutcome::Applied)
+            }
+            (
+                RootClaim::Current { display_root },
+                MigrationCommand::Apply {
+                    migration_id,
+                    approval_digest,
+                },
+            ) => {
+                let approved = ApprovedMigration::reopen(display_root, migration_id)?;
+                if approved.approval_digest != approval_digest {
+                    return Err(FolderbaseError::MigrationApprovalMismatch);
+                }
+                legacy_apply_migration_with_hook(approved, checkpoint)
+                    .map(MigrationOutcome::Applied)
+            }
+            (_, _) => Err(FolderbaseError::InvalidMigrationState {
+                expected: MigrationState::Approved.as_str(),
+                actual: "non_apply_command".to_owned(),
+            }),
+        }
+    }
+}
+
+fn legacy_apply_migration_with_hook(
     approved: ApprovedMigration,
     mut checkpoint: impl FnMut(ApplyCheckpoint),
 ) -> Result<MigrationResult> {
@@ -3948,16 +4141,52 @@ impl MigrationResult {
     /// conservatively rolled back; verified and rolled-back results are simply
     /// reopened.
     pub fn recover(root: impl AsRef<Path>, migration_id: &str) -> Result<Self> {
-        recover_migration_with_hook(root, migration_id, || {})
+        let root = root.as_ref();
+        match MigrationExecution::run(
+            RootClaim::Current { display_root: root },
+            MigrationCommand::Recover { migration_id },
+        )? {
+            MigrationOutcome::Applied(result) => Ok(result),
+            MigrationOutcome::RolledBack(_) => {
+                let root = canonical_root(root)?;
+                let (journal_path, journal) = load_journal(&root, migration_id)?;
+                Ok(result_from_journal(root, journal_path, &journal))
+            }
+            MigrationOutcome::Conflicted { .. } => Err(FolderbaseError::InvalidMigrationState {
+                expected: MigrationState::Verified.as_str(),
+                actual: MigrationState::Conflicted.as_str().to_owned(),
+            }),
+        }
     }
 
     /// Roll back a verified migration using only its durable ID.
     pub fn rollback_by_id(root: impl AsRef<Path>, migration_id: &str) -> Result<RollbackResult> {
-        rollback_migration_by_id_with_hook(root, migration_id, || {})
+        let root = root.as_ref();
+        match MigrationExecution::run(
+            RootClaim::Current { display_root: root },
+            MigrationCommand::Rollback { migration_id },
+        )? {
+            MigrationOutcome::RolledBack(result) => Ok(result),
+            MigrationOutcome::Applied(_) | MigrationOutcome::Conflicted { .. } => {
+                Err(FolderbaseError::InvalidMigrationState {
+                    expected: MigrationState::RolledBack.as_str(),
+                    actual: MigrationState::Conflicted.as_str().to_owned(),
+                })
+            }
+        }
     }
 }
 
+#[cfg(test)]
 fn recover_migration_with_hook(
+    root: impl AsRef<Path>,
+    migration_id: &str,
+    after_transaction_coordinator: impl FnOnce(),
+) -> Result<MigrationResult> {
+    legacy_recover_migration_with_hook(root, migration_id, after_transaction_coordinator)
+}
+
+fn legacy_recover_migration_with_hook(
     root: impl AsRef<Path>,
     migration_id: &str,
     after_transaction_coordinator: impl FnOnce(),
@@ -4017,7 +4246,16 @@ fn recover_migration_with_hook(
     Ok(result_from_journal(root, journal_path, &journal))
 }
 
+#[cfg(test)]
 fn rollback_migration_by_id_with_hook(
+    root: impl AsRef<Path>,
+    migration_id: &str,
+    after_transaction_coordinator: impl FnOnce(),
+) -> Result<RollbackResult> {
+    legacy_rollback_migration_by_id_with_hook(root, migration_id, after_transaction_coordinator)
+}
+
+fn legacy_rollback_migration_by_id_with_hook(
     root: impl AsRef<Path>,
     migration_id: &str,
     after_transaction_coordinator: impl FnOnce(),
