@@ -79,6 +79,11 @@ pub enum FolderbaseError {
         maximum: u64,
     },
 
+    #[error(
+        "nested Folderbase boundary inspection exceeded the shared entry-work limit of {maximum} at: {path}"
+    )]
+    NestedBoundaryWorkLimitExceeded { path: PathBuf, maximum: u64 },
+
     #[error("migration is not in the required state: expected {expected}, found {actual}")]
     InvalidMigrationState {
         expected: &'static str,

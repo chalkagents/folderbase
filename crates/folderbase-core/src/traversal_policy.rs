@@ -7,6 +7,8 @@ use cap_std::fs::Dir;
 
 use crate::{FolderbaseError, Result};
 
+pub(crate) const MAX_NESTED_BOUNDARY_ENTRY_WORK: usize = 16_384;
+
 pub(crate) const RECONSTRUCTABLE_DIRECTORIES: &[&str] = &[
     "node_modules",
     ".next",
@@ -76,13 +78,14 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
     display: &Path,
     mut observe_entry: impl FnMut() -> Result<()>,
 ) -> Result<NestedFolderbaseBoundaryKind> {
+    let mut shared_work = 0_usize;
     let mut exact_state = false;
     for entry in directory
         .entries()
         .map_err(|source| FolderbaseError::io(display, source))?
     {
         let entry = entry.map_err(|source| FolderbaseError::io(display, source))?;
-        observe_entry()?;
+        observe_boundary_entry(&mut shared_work, display, &mut observe_entry)?;
         let name = entry.file_name();
         if is_case_folded_alias(&name, ".folderbase") {
             return Ok(NestedFolderbaseBoundaryKind::UnsafeAliasShape);
@@ -113,7 +116,7 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
         .map_err(|source| FolderbaseError::io(&state_display, source))?
     {
         let entry = entry.map_err(|source| FolderbaseError::io(&state_display, source))?;
-        observe_entry()?;
+        observe_boundary_entry(&mut shared_work, display, &mut observe_entry)?;
         let name = entry.file_name();
         if is_case_folded_alias(&name, "manifest.json") {
             return Ok(NestedFolderbaseBoundaryKind::UnsafeAliasShape);
@@ -136,6 +139,21 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
     } else {
         NestedFolderbaseBoundaryKind::None
     })
+}
+
+fn observe_boundary_entry(
+    shared_work: &mut usize,
+    display: &Path,
+    observe_entry: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    *shared_work = shared_work.saturating_add(1);
+    if *shared_work > MAX_NESTED_BOUNDARY_ENTRY_WORK {
+        return Err(FolderbaseError::NestedBoundaryWorkLimitExceeded {
+            path: display.to_path_buf(),
+            maximum: MAX_NESTED_BOUNDARY_ENTRY_WORK as u64,
+        });
+    }
+    observe_entry()
 }
 
 fn is_case_folded_alias(name: &OsStr, exact: &str) -> bool {
@@ -195,5 +213,33 @@ mod tests {
             classify_nested_folderbase_boundary(&root, fixture.path()).is_err(),
             "the default observer must not make shared boundary classification unbounded"
         );
+    }
+
+    #[test]
+    fn caller_observer_can_impose_a_tighter_work_ceiling() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        for name in ["one", "two", "three"] {
+            fs::write(fixture.path().join(name), b"").expect("ordinary entry");
+        }
+        let root =
+            Dir::open_ambient_dir(fixture.path(), ambient_authority()).expect("root capability");
+        let mut observed = 0_u64;
+        let result =
+            classify_nested_folderbase_boundary_with_observer(&root, fixture.path(), || {
+                observed += 1;
+                if observed > 2 {
+                    return Err(FolderbaseError::NestedBoundaryWorkLimitExceeded {
+                        path: fixture.path().to_path_buf(),
+                        maximum: 2,
+                    });
+                }
+                Ok(())
+            });
+
+        assert!(matches!(
+            result,
+            Err(FolderbaseError::NestedBoundaryWorkLimitExceeded { maximum: 2, .. })
+        ));
+        assert_eq!(observed, 3);
     }
 }

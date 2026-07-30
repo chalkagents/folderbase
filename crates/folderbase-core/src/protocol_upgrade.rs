@@ -1,13 +1,16 @@
 //! Explicit, reviewable transition from legacy live-root semantics to 0.5.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    FolderbaseError, FolderbaseVersionStore, LocalVersionStore, Result,
+    FolderbaseError, FolderbaseVersionStore, LocalVersionStore, MAX_FOLDERBASEIGNORE_BYTES, Result,
     folderbase_state::FolderbaseState,
     root_attestation::{
         DEFAULT_V05_CAPTURE_IGNORE_RULES, MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile,
@@ -16,6 +19,7 @@ use crate::{
 };
 
 const MANIFEST_PATH: &str = ".folderbase/manifest.json";
+const IGNORE_POLICY_PATH: &str = ".folderbaseignore";
 const ACTIVE_CAPTURE_PATH: &str =
     ".folderbase/transactions/folderbase-version-captures/active.json";
 const ACTIVE_RESTORE_PATH: &str =
@@ -73,6 +77,8 @@ pub struct ProtocolUpgradePlan {
     attested_manifest: Vec<u8>,
     #[serde(skip_serializing)]
     attested_manifest_sha256: String,
+    #[serde(skip_serializing)]
+    attested_ignore_snapshot_sha256: Option<String>,
     #[serde(skip_serializing)]
     already_applied: bool,
 }
@@ -172,6 +178,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
                 attested_manifest: manifest_bytes.clone(),
                 upgraded_manifest: manifest_bytes,
                 attested_manifest_sha256: attestation.manifest_sha256,
+                attested_ignore_snapshot_sha256: None,
                 already_applied: true,
             });
         };
@@ -186,6 +193,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
             attested_manifest: manifest_bytes.clone(),
             upgraded_manifest: manifest_bytes,
             attested_manifest_sha256: attestation.manifest_sha256,
+            attested_ignore_snapshot_sha256: None,
             already_applied: true,
         });
     }
@@ -204,6 +212,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
     let capture = store
         .plan_capture()
         .map_err(|source| invalid_upgrade(&root, source.to_string()))?;
+    let ignore_snapshot_sha256 = read_ignore_snapshot_sha256(&state, &root)?;
     if let Some(head) = capture.current_local_head() {
         store
             .read_version(head.version_id())
@@ -250,6 +259,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
     update_bytes(&mut digest, attestation.root_instance_sha256.as_bytes());
     update_bytes(&mut digest, attestation.manifest_sha256.as_bytes());
     update_bytes(&mut digest, capture.ignore_policy_sha256().as_bytes());
+    update_bytes(&mut digest, ignore_snapshot_sha256.as_bytes());
     if let Some(head) = capture.current_local_head() {
         digest.update([1]);
         update_bytes(&mut digest, head.version_id().as_bytes());
@@ -295,6 +305,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
         upgraded_manifest,
         attested_manifest: manifest_bytes,
         attested_manifest_sha256: attestation.manifest_sha256,
+        attested_ignore_snapshot_sha256: Some(ignore_snapshot_sha256),
         already_applied: false,
     })
 }
@@ -353,6 +364,28 @@ fn apply_protocol_upgrade_with_hook(
             },
             other => other,
         })?;
+    if let Some(expected_ignore_snapshot) = &plan.attested_ignore_snapshot_sha256 {
+        let current_ignore_snapshot = read_ignore_snapshot_sha256(&state, &plan.root);
+        if !matches!(
+            current_ignore_snapshot,
+            Ok(ref actual) if actual == expected_ignore_snapshot
+        ) {
+            let rollback = state.compare_exchange_exact_with_hook(
+                Path::new(MANIFEST_PATH),
+                &plan.upgraded_manifest,
+                &plan.attested_manifest,
+                || {},
+            );
+            return Err(FolderbaseError::ProtocolUpgradePlanChanged {
+                expected: expected.digest.clone(),
+                actual: if rollback.is_ok() {
+                    "ignore_policy_changed_at_activation".to_owned()
+                } else {
+                    "ignore_policy_changed_and_manifest_rollback_failed".to_owned()
+                },
+            });
+        }
+    }
     let (attestation, _, profile) = attest_folderbase_root_with_profile(&plan.root)
         .map_err(|source| invalid_upgrade(&plan.root, source.to_string()))?;
     if attestation.protocol_version != "0.5.0"
@@ -493,6 +526,41 @@ fn upgrade_result(plan: &ProtocolUpgradePlan) -> ProtocolUpgradeResult {
 fn update_bytes(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_be_bytes());
     digest.update(bytes);
+}
+
+fn read_ignore_snapshot_sha256(state: &FolderbaseState, root: &Path) -> Result<String> {
+    state.verify_still_attached()?;
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-protocol-upgrade-ignore-snapshot-v1\0");
+    if state.workspace_path_is_absent(Path::new(IGNORE_POLICY_PATH))? {
+        digest.update(b"absent\0");
+    } else {
+        digest.update(b"present\0");
+        let mut file = state.open_workspace_regular_file(Path::new(IGNORE_POLICY_PATH))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(root.join(IGNORE_POLICY_PATH), source))?;
+        if metadata.len() > MAX_FOLDERBASEIGNORE_BYTES {
+            return Err(invalid_upgrade(
+                root,
+                "ignore policy changed beyond its byte bound",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(MAX_FOLDERBASEIGNORE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|source| FolderbaseError::io(root.join(IGNORE_POLICY_PATH), source))?;
+        if bytes.len() as u64 > MAX_FOLDERBASEIGNORE_BYTES {
+            return Err(invalid_upgrade(
+                root,
+                "ignore policy changed beyond its byte bound",
+            ));
+        }
+        update_bytes(&mut digest, &bytes);
+    }
+    state.verify_still_attached()?;
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn invalid_upgrade(root: &Path, message: impl Into<String>) -> FolderbaseError {
