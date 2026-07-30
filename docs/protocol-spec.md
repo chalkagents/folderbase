@@ -925,15 +925,23 @@ Post-Head projection remains confined to the retained state capability, and
 projection failure restores the exact prior Head. An in-place edit of the
 transaction-owned published target preserves the user's bytes. Cleanup publishes
 a durable closed singleton receipt with `committed` or `modified` disposition
-before removing private state. Modified cleanup must re-prove that stage and
-visible path are the same modified filesystem object and removes only that exact
-private hard link plus the empty transaction directory. It never unlinks the
-visible path. The receipt survives active-journal retirement, blocks capture,
-and drives restartable cleanup convergence before it is itself removed; capture
-is eligible only after private cleanup completes. Unix staging explicitly
-applies its final `0700` or `0600` permissions after creation, independently of
-process umask. Directory and symlink Tombstone reconstruction remain outside v1
-restore.
+before removing private state. Both cleanup dispositions rederive the exact
+deterministic transaction from the immutable parent, Tombstone, and ancestor
+binding. Before removing the ordinary private stage name, Core durably creates
+a transaction-owned rescue hard link. It re-proves the stage, rescue, and
+visible destination at the removal boundary, then re-proves rescue and
+destination after stage removal before the rescue may be removed. A replacement
+or uncertain identity retains the rescue and pending receipt. Modified cleanup
+uses the receipt's already-established same-inode ownership and does not require
+the user bytes to remain different from the sealed bytes. Cleanup never unlinks
+the visible path. The pending receipt survives active-journal retirement,
+blocks capture, and drives restartable convergence. Committed cleanup then
+atomically replaces one bounded device-local completion receipt before retiring
+the pending receipt. Completion evidence never blocks capture and returns an
+idempotent result only after exact immutable Head, installed Version, current
+bytes, and fidelity verification. Unix staging explicitly applies its final
+`0700` or `0600` permissions after creation, independently of process umask.
+Directory and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind
 replacement Tombstones and exact ordinary-file no-clobber restore are

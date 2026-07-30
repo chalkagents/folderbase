@@ -220,15 +220,22 @@ state capability; a projection failure restores the exact prior Head. If a user
 or agent edits the transaction-owned published file in place before cleanup,
 Core preserves those workspace bytes. Cleanup first publishes one durable,
 closed singleton receipt with a `committed` or `modified` disposition. Committed
-cleanup removes the private stage and per-transaction directory. Modified
-cleanup revalidates that the visible file and stage still name the same modified
-filesystem object, removes only that exact private hard link and the empty
-transaction directory, and never unlinks the visible path. Both dispositions
-then retire the active journal and finally the receipt. A crash or cleanup error
-at any boundary reopens from the receipt and converges only while those ownership
-proofs remain true; capture is blocked while either active restore intent or
-cleanup receipt remains and becomes eligible only after private cleanup is
-complete.
+and modified cleanup both rederive the exact deterministic restore transaction
+from the immutable parent, Tombstone, and ancestor binding. A durable
+transaction-owned rescue hard link protects the staged inode before its normal
+private name is removed. Core re-proves stage, rescue, and visible-destination
+identity at the removal boundary and again proves rescue and destination after
+stage removal; any replacement retains the rescue and pending cleanup instead
+of deleting uncertain bytes. Once a modified receipt is durable, later cleanup
+depends on same-inode ownership rather than the file remaining modified, so a
+same-inode revert cannot wedge recovery. Both dispositions remove only proven
+private links and the empty transaction directory, never the visible path, then
+retire the active journal. Successful committed cleanup atomically replaces one
+bounded device-local completion receipt before retiring pending cleanup. That
+receipt does not block capture and permits an exact retry result only while the
+immutable target Head, installed Version, and current workspace bytes and
+fidelity still match. A crash or cleanup error at any boundary therefore
+converges without unbounded receipts or a terminal lost acknowledgement.
 
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records

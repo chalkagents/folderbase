@@ -82,6 +82,19 @@ blob named by the current Head Tombstone.
 - `0689861` installed exact released-v1 non-genesis capture-journal bytes whose
   nested expected Head used `transaction_sha256`. Both pre-Head and
   committed-Head recovery initially rejected the old nested wire.
+- `5f4b416` reverted a durably modified restore-owned inode to its sealed bytes
+  before retry. The old modified cleanup required the bytes to remain changed
+  and wedged the pending restore.
+- `fcfc92a` coordinated rewrites of active intent and modified cleanup receipt
+  to one self-consistent forged transaction. The old recovery retired forged
+  state and global intent while stranding the real stage.
+- `c74fac1` replaced the visible destination or private stage at the exact
+  committed and modified unlink boundary. The old cleanup could delete the
+  stage inode's last name or unlink unrelated replacement state.
+- `5df80e7` terminated after `CleanupComplete` and required the same public
+  restore call to return its exact durable result after fresh-process reopen.
+  The old terminal retry returned target-occupied because every result record
+  had already been removed.
 
 ## GREEN behavior
 
@@ -143,6 +156,20 @@ blob named by the current Head Tombstone.
   only its nested authority type, and retains SHA-256 of the original durable
   bytes. Pre-Head execution and committed-Head recovery use that retained digest
   rather than hashing normalized bytes.
+- `bfd5ad6` treats a durable modified receipt as the proof that the shared inode
+  was edited, then retires its private ownership after exact stage/destination
+  identity proof even when the same inode was later reverted.
+- `86c8f90` rederives the exact deterministic modified restore transaction from
+  the current immutable parent, Tombstone, and ancestor binding before cleanup;
+  coordinated mutable-journal rewrites have no retirement authority.
+- `4ae2ad9` creates and syncs a transaction-owned rescue hard link before stage
+  removal, re-proves stage/rescue/destination at the unlink boundary, and
+  re-proves rescue/destination afterward. Pre- or post-unlink replacement keeps
+  the exact owned bytes and pending cleanup instead of deleting uncertain state.
+- `be02fbe` durably replaces one bounded device-local completion receipt before
+  retiring pending cleanup. It never blocks capture, survives terminal lost
+  acknowledgement, and yields a retry result only after immutable transaction,
+  target Head, installed Version, workspace bytes, and fidelity verification.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -172,11 +199,13 @@ root attachment, and nested-boundary proofs run immediately before and after
 Head CAS. Post-Head failure rolls the retained root back to its prior Head and
 never reports restore success. Projection uses the already-retained state
 capability. Cleanup records its obligation durably before removing the retained
-stage and per-transaction directory, retains that receipt through active-journal
-retirement, and resumes from either active intent or the singleton receipt after
-restart. If the published transaction-owned file is edited in place, Core
-preserves the edit, relinquishes its restore ownership, and permits the ordinary
-next capture.
+stage and per-transaction directory, rederives immutable cleanup authority, and
+places a durable rescue name around the unlink boundary. The pending receipt
+survives active-journal retirement and resumes exact cleanup after restart. A
+separate bounded singleton completion receipt survives the terminal return
+boundary without blocking capture. If the published transaction-owned file is
+edited in place, Core preserves the edit, relinquishes only proven private
+ownership, and permits the ordinary next capture.
 
 ## Gates
 
@@ -187,7 +216,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-598 passed; 3 ignored
+608 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
