@@ -183,7 +183,6 @@ pub(crate) fn render_template_for_capability_destination(
     destination_label: &Path,
     answers: &BTreeMap<String, TemplateAnswerValue>,
 ) -> Result<TemplateRenderPlan> {
-    validate_destination_root(destination_label)?;
     validate_runtime_package(destination_label, package)?;
     validate_answers(package, answers, destination_label)?;
 

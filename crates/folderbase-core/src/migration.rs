@@ -1591,6 +1591,12 @@ struct MigrationJournal {
     created_paths: Vec<PathBuf>,
     completed_operations: usize,
     in_flight_operation: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transaction_program_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    operation_precondition_identities: Vec<Option<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    operation_result_identities: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2612,7 +2618,7 @@ fn legacy_apply_migration_with_hook(
         validation?;
     }
     checkpoint(ApplyCheckpoint::MutationAuthorityBound);
-    let _transaction = prepare_transaction_v1(
+    let mut transaction = prepare_transaction_v1(
         &migration_filesystem,
         &plan,
         &approved.approval_digest,
@@ -2623,6 +2629,7 @@ fn legacy_apply_migration_with_hook(
             &migration_filesystem,
             plan,
             approved.approval_digest,
+            &mut transaction,
             &mut checkpoint,
         );
     }
@@ -2654,6 +2661,9 @@ fn legacy_apply_migration_with_hook(
         created_paths: Vec::new(),
         completed_operations: 0,
         in_flight_operation: None,
+        transaction_program_digest: Some(transaction.program_digest.clone()),
+        operation_precondition_identities: transaction.program.expected_source_identities(),
+        operation_result_identities: vec![None; transaction.program.operation_count()],
     };
     let journal_bytes = journal_bytes(&journal_absolute, &journal)?;
     migration_filesystem.publish_new_with_hook(&journal_path, &journal_bytes, || {
@@ -2670,6 +2680,12 @@ fn legacy_apply_migration_with_hook(
     checkpoint(ApplyCheckpoint::StagingCreated);
 
     for index in 0..journal.operations.len() {
+        let intent = transaction
+            .generations
+            .last()
+            .expect("prepared transaction has one journal generation")
+            .next_apply_intent(&transaction.program, index)?;
+        append_transaction_v1_generation(&migration_filesystem, &mut transaction, intent)?;
         journal.in_flight_operation = Some(index);
         if let Err(error) = persist_journal_in(&migration_filesystem, &journal) {
             let _ = rollback_journal_in(&migration_filesystem, &journal_absolute, &mut journal);
@@ -2688,6 +2704,20 @@ fn legacy_apply_migration_with_hook(
             let _ = persist_plan_in(&migration_filesystem, &plan);
             return Err(error);
         }
+        let published_identity = match &journal.operations[index] {
+            MigrationOperation::CopyFile {
+                destination_path, ..
+            } => Some(migration_filesystem.physical_identity_sha256(destination_path)?),
+            MigrationOperation::CreateFolder { .. } => None,
+            _ => None,
+        };
+        journal.operation_result_identities[index] = published_identity.clone();
+        let receipt = transaction
+            .generations
+            .last()
+            .expect("apply intent was persisted")
+            .next_apply_receipt(&transaction.program, index, published_identity)?;
+        append_transaction_v1_generation(&migration_filesystem, &mut transaction, receipt)?;
         journal.completed_operations = index + 1;
         journal.in_flight_operation = None;
         if let Err(error) = persist_journal_in(&migration_filesystem, &journal) {
@@ -2712,6 +2742,12 @@ fn legacy_apply_migration_with_hook(
         return Err(error);
     }
 
+    let applied = transaction
+        .generations
+        .last()
+        .expect("transaction contains operation receipts")
+        .next_applied(&transaction.program)?;
+    append_transaction_v1_generation(&migration_filesystem, &mut transaction, applied)?;
     journal.state = MigrationState::Verified;
     persist_journal_in(&migration_filesystem, &journal)?;
     plan.state = MigrationState::Verified;
@@ -2731,6 +2767,34 @@ struct PreparedTransactionV1 {
     program: MutationProgramV1,
     program_digest: String,
     generations: Vec<TransactionJournalGenerationV1>,
+}
+
+fn append_transaction_v1_generation(
+    filesystem: &MigrationFilesystem,
+    transaction: &mut PreparedTransactionV1,
+    generation: TransactionJournalGenerationV1,
+) -> Result<()> {
+    let journal_root = PathBuf::from(MIGRATIONS_DIR)
+        .join(transaction.program.transaction_id())
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let path = journal_root.join(generation.file_name());
+    let bytes = generation.encode(&filesystem.display(&path))?;
+    filesystem.publish_private_new(&path, &bytes)?;
+    let reopened_bytes = filesystem.read_regular_bounded(&path, MAX_JOURNAL_GENERATION_BYTES)?;
+    let reopened =
+        TransactionJournalGenerationV1::decode(&filesystem.display(&path), &reopened_bytes)?;
+    if reopened != generation {
+        return Err(FolderbaseError::MigrationVerificationFailed(
+            filesystem.display(&path),
+        ));
+    }
+    transaction.generations.push(reopened);
+    validate_chain(
+        &transaction.program,
+        &transaction.program_digest,
+        &transaction.generations,
+    )
 }
 
 fn prepare_transaction_v1(
@@ -2940,6 +3004,7 @@ fn apply_structural_migration(
     migration_filesystem: &MigrationFilesystem,
     mut plan: MigrationPlan,
     approval_digest: String,
+    transaction: &mut PreparedTransactionV1,
     checkpoint: &mut impl FnMut(ApplyCheckpoint),
 ) -> Result<MigrationResult> {
     preflight_structural_operations_in(migration_filesystem, &plan)?;
@@ -2966,6 +3031,9 @@ fn apply_structural_migration(
         created_paths: Vec::new(),
         completed_operations: 0,
         in_flight_operation: None,
+        transaction_program_digest: Some(transaction.program_digest.clone()),
+        operation_precondition_identities: transaction.program.expected_source_identities(),
+        operation_result_identities: vec![None; transaction.program.operation_count()],
     };
     if let Err(error) = publish_new_journal_in(migration_filesystem, &journal) {
         cleanup_staging_in(migration_filesystem, &plan.id);
@@ -2977,12 +3045,20 @@ fn apply_structural_migration(
     checkpoint(ApplyCheckpoint::JournalCreated);
 
     for index in 0..journal.operations.len() {
+        let intent = transaction
+            .generations
+            .last()
+            .expect("prepared transaction has one journal generation")
+            .next_apply_intent(&transaction.program, index)?;
+        append_transaction_v1_generation(migration_filesystem, transaction, intent)?;
         journal.in_flight_operation = Some(index);
         persist_journal_in(migration_filesystem, &journal)?;
         checkpoint(ApplyCheckpoint::OperationPlanned(index));
-        if let Err(error) =
-            apply_structural_operation_in(migration_filesystem, &journal.operations[index])
-        {
+        if let Err(error) = apply_structural_operation_in(
+            migration_filesystem,
+            &journal.operations[index],
+            journal.operation_precondition_identities[index].as_deref(),
+        ) {
             let rollback_error = rollback_structural_journal_in(
                 migration_filesystem,
                 &journal_absolute,
@@ -2997,6 +3073,16 @@ fn apply_structural_migration(
             let _ = persist_plan_in(migration_filesystem, &plan);
             return Err(rollback_error.unwrap_or(error));
         }
+        let result_path = structural_visible_result_path(&journal.operations[index]);
+        let result_identity = migration_filesystem.physical_identity_sha256(result_path)?;
+        journal.operation_result_identities[index] = Some(result_identity.clone());
+        let receipt = transaction
+            .generations
+            .last()
+            .expect("structural apply intent was persisted")
+            .next_apply_receipt(&transaction.program, index, Some(result_identity))?;
+        append_transaction_v1_generation(migration_filesystem, transaction, receipt)?;
+        persist_journal_in(migration_filesystem, &journal)?;
         checkpoint(ApplyCheckpoint::OperationApplied(index));
         journal.completed_operations = index + 1;
         journal.in_flight_operation = None;
@@ -3017,6 +3103,12 @@ fn apply_structural_migration(
         let _ = persist_plan_in(migration_filesystem, &plan);
         return Err(rollback_error.unwrap_or(error));
     }
+    let applied = transaction
+        .generations
+        .last()
+        .expect("transaction contains structural receipts")
+        .next_applied(&transaction.program)?;
+    append_transaction_v1_generation(migration_filesystem, transaction, applied)?;
     journal.state = MigrationState::Verified;
     persist_journal_in(migration_filesystem, &journal)?;
     plan.state = MigrationState::Verified;
@@ -3222,8 +3314,19 @@ fn apply_structural_operation(root: &Path, operation: &MigrationOperation) -> Re
 fn apply_structural_operation_in(
     filesystem: &MigrationFilesystem,
     operation: &MigrationOperation,
+    expected_source_identity: Option<&str>,
 ) -> Result<()> {
     refuse_structural_operation_boundaries_in(filesystem, operation)?;
+    if let Some(expected_identity) = expected_source_identity {
+        let source_path = operation
+            .structural_source_path()
+            .expect("structural operation has a source");
+        if filesystem.physical_identity_sha256(source_path)? != expected_identity {
+            return Err(FolderbaseError::MigrationSourceChanged(
+                filesystem.display(source_path),
+            ));
+        }
+    }
     match operation {
         MigrationOperation::MoveObject {
             source_path,
@@ -3263,6 +3366,13 @@ fn apply_structural_operation_in(
             "additive operation reached the structural apply path",
         )),
     }
+}
+
+fn structural_visible_result_path(operation: &MigrationOperation) -> &Path {
+    operation
+        .structural_destination_path()
+        .or_else(|| operation.structural_source_path())
+        .expect("structural operation has one visible result path")
 }
 
 #[cfg(test)]
@@ -3831,6 +3941,19 @@ fn materialize_folderbase_targets_in(
             }
             preserved_template_paths.insert(relative);
         }
+        for adapter_path in ["AGENTS.md", "CLAUDE.md"] {
+            let relative = path.join(adapter_path);
+            let Some(metadata) = filesystem.metadata(&relative)? else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: filesystem.display(&relative),
+                    message: "agent adapter exists with an incompatible filesystem kind".to_owned(),
+                });
+            }
+            preserved_template_paths.insert(relative);
+        }
         let folderbase_id = format!("folderbase_{}", Uuid::now_v7());
         let created_at = Utc::now().to_rfc3339();
         let manifest = serde_json::json!({
@@ -3902,11 +4025,13 @@ fn materialize_folderbase_targets_in(
                 )
             })
             .collect::<Vec<_>>();
-        writes.extend([
-            (path.join(".folderbase/manifest.json"), manifest_bytes),
-            (path.join("AGENTS.md"), adapter.clone()),
-            (path.join("CLAUDE.md"), adapter),
-        ]);
+        writes.push((path.join(".folderbase/manifest.json"), manifest_bytes));
+        for adapter_path in ["AGENTS.md", "CLAUDE.md"] {
+            let relative = path.join(adapter_path);
+            if !preserved_template_paths.contains(&relative) {
+                writes.push((relative, adapter.clone()));
+            }
+        }
         writes.sort_by(|left, right| left.0.cmp(&right.0));
         let created_files = writes
             .iter()
@@ -5488,6 +5613,24 @@ fn reconcile_structural_in_flight_in(
         .operations
         .get(index)
         .ok_or_else(|| invalid_journal(journal_path, "in-flight operation is out of range"))?;
+    let expected_precondition_identity = journal
+        .operation_precondition_identities
+        .get(index)
+        .and_then(|identity| identity.as_deref());
+    let expected_result_identity = journal
+        .operation_result_identities
+        .get(index)
+        .and_then(|identity| identity.as_deref());
+    let verify_identity = |path: &Path, expected: Option<&str>| -> Result<()> {
+        if let Some(expected) = expected
+            && filesystem.physical_identity_sha256(path)? != expected
+        {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                filesystem.display(path),
+            ));
+        }
+        Ok(())
+    };
     refuse_structural_operation_boundaries_in(filesystem, operation)?;
     let applied = match operation {
         MigrationOperation::MoveObject {
@@ -5504,6 +5647,8 @@ fn reconcile_structural_in_flight_in(
                         if source_digest == *expected_sha256
                             && destination_digest == *expected_sha256 =>
                     {
+                        verify_identity(source_path, expected_precondition_identity)?;
+                        verify_identity(destination_path, expected_result_identity)?;
                         let (source_capability, destination_capability) =
                             open_migration_leaf_pair_in(filesystem, source_path, destination_path)?;
                         if source_capability.identity == destination_capability.identity {
@@ -5515,7 +5660,10 @@ fn reconcile_structural_in_flight_in(
                         }
                         true
                     }
-                    (Some(source_digest), _) if source_digest == *expected_sha256 => true,
+                    (Some(source_digest), _) if source_digest == *expected_sha256 => {
+                        verify_identity(source_path, expected_precondition_identity)?;
+                        true
+                    }
                     (None, _) => false,
                     _ => {
                         return Err(FolderbaseError::MigrationVerificationFailed(
@@ -5525,14 +5673,20 @@ fn reconcile_structural_in_flight_in(
                 }
             } else {
                 match (source_digest, destination_digest) {
-                    (Some(source_digest), None) if source_digest == *expected_sha256 => false,
+                    (Some(source_digest), None) if source_digest == *expected_sha256 => {
+                        verify_identity(source_path, expected_precondition_identity)?;
+                        false
+                    }
                     (None, Some(destination_digest)) if destination_digest == *expected_sha256 => {
+                        verify_identity(destination_path, expected_result_identity)?;
                         true
                     }
                     (Some(source_digest), Some(destination_digest))
                         if source_digest == *expected_sha256
                             && destination_digest == *expected_sha256 =>
                     {
+                        verify_identity(source_path, expected_precondition_identity)?;
+                        verify_identity(destination_path, expected_result_identity)?;
                         let (source_capability, destination_capability) =
                             open_migration_leaf_pair_in(filesystem, source_path, destination_path)?;
                         if source_capability.identity != destination_capability.identity {
@@ -5568,8 +5722,10 @@ fn reconcile_structural_in_flight_in(
                 .expect("structural operation has a result digest");
             if journal.state == MigrationState::RollingBack {
                 if current == expected {
+                    verify_identity(source_path, expected_precondition_identity)?;
                     true
                 } else if current == result {
+                    verify_identity(source_path, expected_result_identity)?;
                     false
                 } else {
                     return Err(FolderbaseError::MigrationVerificationFailed(
@@ -5577,8 +5733,10 @@ fn reconcile_structural_in_flight_in(
                     ));
                 }
             } else if current == expected {
+                verify_identity(source_path, expected_precondition_identity)?;
                 false
             } else if current == result {
+                verify_identity(source_path, expected_result_identity)?;
                 true
             } else {
                 return Err(FolderbaseError::MigrationVerificationFailed(
@@ -6065,6 +6223,18 @@ fn rollback_structural_journal_in(
         refuse_structural_operation_boundaries_in(filesystem, &operation)?;
         journal.in_flight_operation = Some(index);
         persist_journal_in(filesystem, journal)?;
+        if let Some(expected_identity) = journal
+            .operation_result_identities
+            .get(index)
+            .and_then(|identity| identity.as_deref())
+        {
+            let result_path = structural_visible_result_path(&operation);
+            if filesystem.physical_identity_sha256(result_path)? != expected_identity {
+                return Err(FolderbaseError::MigrationVerificationFailed(
+                    filesystem.display(result_path),
+                ));
+            }
+        }
         match &operation {
             MigrationOperation::MoveObject {
                 source_path,
@@ -6190,6 +6360,19 @@ fn rollback_structural_journal_with_hook(
         journal.in_flight_operation = Some(index);
         persist_journal(journal_path, journal)?;
         checkpoint(StructuralRollbackCheckpoint::OperationPlanned(index));
+        if let Some(expected_identity) = journal
+            .operation_result_identities
+            .get(index)
+            .and_then(|identity| identity.as_deref())
+        {
+            let result_path = safe_join(root, structural_visible_result_path(&operation))?;
+            let current_identity = PhysicalIdentity::from_path(&result_path)
+                .map(PhysicalIdentity::stable_sha256)
+                .map_err(|source| FolderbaseError::io(&result_path, source))?;
+            if current_identity != expected_identity {
+                return Err(FolderbaseError::MigrationVerificationFailed(result_path));
+            }
+        }
         match &operation {
             MigrationOperation::MoveObject {
                 source_path,

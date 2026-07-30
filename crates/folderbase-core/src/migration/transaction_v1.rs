@@ -134,6 +134,13 @@ impl MutationProgramV1 {
         self.operations.len()
     }
 
+    pub(super) fn expected_source_identities(&self) -> Vec<Option<String>> {
+        self.operations
+            .iter()
+            .map(|operation| operation.expected_source_identity_sha256.clone())
+            .collect()
+    }
+
     fn validate(&self) -> Result<()> {
         let path = &self.folderbase_root;
         if self.format != PROGRAM_FORMAT
@@ -259,6 +266,112 @@ impl TransactionJournalGenerationV1 {
 
     pub(super) fn program_digest(&self) -> &str {
         &self.program_digest
+    }
+
+    pub(super) fn next_apply_intent(
+        &self,
+        program: &MutationProgramV1,
+        operation_index: usize,
+    ) -> Result<Self> {
+        if operation_index != self.operation_cursor || operation_index >= program.operation_count()
+        {
+            return Err(invalid(
+                Path::new("<migration-journal-v1>"),
+                "apply intent is outside the next program operation",
+            ));
+        }
+        self.next(
+            program,
+            TransactionDirectionV1::Apply,
+            TransactionPhaseV1::Applying,
+            operation_index,
+            Some(operation_index),
+            None,
+        )
+    }
+
+    pub(super) fn next_apply_receipt(
+        &self,
+        program: &MutationProgramV1,
+        operation_index: usize,
+        published_identity_sha256: Option<String>,
+    ) -> Result<Self> {
+        if self.in_flight_operation != Some(operation_index) {
+            return Err(invalid(
+                Path::new("<migration-journal-v1>"),
+                "apply receipt does not match the durable in-flight operation",
+            ));
+        }
+        self.next(
+            program,
+            TransactionDirectionV1::Apply,
+            TransactionPhaseV1::Applying,
+            operation_index + 1,
+            None,
+            Some(MutationReceiptV1 {
+                operation_index,
+                published_identity_sha256,
+            }),
+        )
+    }
+
+    pub(super) fn next_applied(&self, program: &MutationProgramV1) -> Result<Self> {
+        if self.operation_cursor != program.operation_count() || self.in_flight_operation.is_some()
+        {
+            return Err(invalid(
+                Path::new("<migration-journal-v1>"),
+                "applied state requires every program operation receipt",
+            ));
+        }
+        self.next(
+            program,
+            TransactionDirectionV1::Apply,
+            TransactionPhaseV1::Applied,
+            self.operation_cursor,
+            None,
+            None,
+        )
+    }
+
+    fn next(
+        &self,
+        program: &MutationProgramV1,
+        direction: TransactionDirectionV1,
+        phase: TransactionPhaseV1,
+        operation_cursor: usize,
+        in_flight_operation: Option<usize>,
+        receipt: Option<MutationReceiptV1>,
+    ) -> Result<Self> {
+        let mut receipts = self.receipts.clone();
+        if let Some(receipt) = receipt {
+            if receipts
+                .iter()
+                .any(|existing| existing.operation_index == receipt.operation_index)
+            {
+                return Err(invalid(
+                    Path::new("<migration-journal-v1>"),
+                    "journal contains a duplicate operation receipt",
+                ));
+            }
+            receipts.push(receipt);
+        }
+        let mut next = Self {
+            format: FORMAT.to_owned(),
+            transaction_id: self.transaction_id.clone(),
+            program_digest: self.program_digest.clone(),
+            generation: self.generation + 1,
+            previous_checksum: Some(self.checksum.clone()),
+            direction,
+            phase,
+            operation_cursor,
+            in_flight_operation,
+            receipts,
+            conflicts: self.conflicts.clone(),
+            checksum: String::new(),
+        };
+        next.checksum = next.calculate_checksum()?;
+        next.validate(program)?;
+        Ok(next)
     }
 
     fn calculate_checksum(&self) -> Result<String> {
