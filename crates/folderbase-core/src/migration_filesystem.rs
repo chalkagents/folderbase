@@ -200,18 +200,36 @@ impl MigrationFilesystem {
     }
 
     pub(crate) fn ensure_private_directory(&self, relative: &Path) -> Result<()> {
-        self.ensure_directory(relative)?;
+        validate_relative(relative, false)?;
+        let (parent, name) = self.open_parent(relative)?;
+        let display = self.display(relative);
+        let directory = match open_directory_nofollow(&parent, &name, &display) {
+            Ok(directory) => directory,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let builder = cap_std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                let builder = {
+                    use cap_std::fs::DirBuilderExt;
+
+                    let mut builder = builder;
+                    builder.mode(0o700);
+                    builder
+                };
+                parent
+                    .create_dir_with(&name, &builder)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+                sync_directory(&parent, &display)?;
+                open_directory_nofollow(&parent, &name, &display)
+                    .map_err(|source| FolderbaseError::io(&display, source))?
+            }
+            Err(source) => return Err(FolderbaseError::io(&display, source)),
+        };
         #[cfg(unix)]
         {
-            use cap_std::fs::{Permissions, PermissionsExt};
+            use cap_std::fs::PermissionsExt;
 
-            let (parent, name) = self.open_parent(relative)?;
-            let display = self.display(relative);
-            parent
-                .set_permissions(&name, Permissions::from_mode(0o700))
-                .map_err(|source| FolderbaseError::io(&display, source))?;
-            let mode = parent
-                .symlink_metadata(&name)
+            let mode = directory
+                .dir_metadata()
                 .map_err(|source| FolderbaseError::io(&display, source))?
                 .permissions()
                 .mode()
@@ -226,10 +244,34 @@ impl MigrationFilesystem {
         Ok(())
     }
 
-    pub(crate) fn set_private_regular_mode(&self, relative: &Path) -> Result<()> {
+    pub(crate) fn validate_private_directory(&self, relative: &Path) -> Result<()> {
+        let directory = self.open_directory(relative)?;
+        let display = self.display(relative);
         #[cfg(unix)]
         {
-            use cap_std::fs::{Permissions, PermissionsExt};
+            use cap_std::fs::PermissionsExt;
+
+            if directory
+                .dir_metadata()
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                .permissions()
+                .mode()
+                & 0o777
+                != 0o700
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private migration directory is not owner-only".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_private_regular_mode(&self, relative: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use cap_std::fs::PermissionsExt;
 
             let (parent, name) = self.open_parent(relative)?;
             let display = self.display(relative);
@@ -239,15 +281,7 @@ impl MigrationFilesystem {
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(FolderbaseError::UnsafePath(display));
             }
-            parent
-                .set_permissions(&name, Permissions::from_mode(0o600))
-                .map_err(|source| FolderbaseError::io(&display, source))?;
-            let mode = parent
-                .symlink_metadata(&name)
-                .map_err(|source| FolderbaseError::io(&display, source))?
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = metadata.permissions().mode() & 0o777;
             if mode != 0o600 {
                 return Err(FolderbaseError::InvalidRecord {
                     path: display,
@@ -268,7 +302,7 @@ impl MigrationFilesystem {
 
     pub(crate) fn publish_private_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
         self.publish_new(relative, bytes)?;
-        self.set_private_regular_mode(relative)
+        self.validate_private_regular_mode(relative)
     }
 
     pub(crate) fn publish_new_with_hook(
@@ -460,24 +494,58 @@ impl MigrationFilesystem {
         Ok(true)
     }
 
-    pub(crate) fn directory_file_names(&self, relative: &Path) -> Result<Vec<OsString>> {
+    pub(crate) fn closed_directory_entries(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<(OsString, bool)>> {
         let directory = self.open_directory(relative)?;
         let display = self.display(relative);
-        let mut names = Vec::new();
+        let mut entries = Vec::new();
         for entry in directory
             .read_dir(".")
             .map_err(|source| FolderbaseError::io(&display, source))?
         {
             let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
-            if entry
-                .file_type()
-                .map_err(|source| FolderbaseError::io(&display, source))?
-                .is_file()
-            {
-                names.push(entry.file_name());
+            if entries.len() == maximum_entries {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private migration directory exceeds its entry bound".to_owned(),
+                });
             }
+            let file_type = entry
+                .file_type()
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if !file_type.is_file() && !file_type.is_dir() {
+                return Err(FolderbaseError::UnsafePath(
+                    self.display(&relative.join(entry.file_name())),
+                ));
+            }
+            entries.push((entry.file_name(), file_type.is_dir()));
         }
-        Ok(names)
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries)
+    }
+
+    pub(crate) fn closed_regular_file_names(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        self.closed_directory_entries(relative, maximum_entries)?
+            .into_iter()
+            .map(|(name, is_directory)| {
+                if is_directory {
+                    Err(FolderbaseError::InvalidRecord {
+                        path: self.display(&relative.join(&name)),
+                        message: "private migration file directory contains a nested directory"
+                            .to_owned(),
+                    })
+                } else {
+                    Ok(name)
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn open_directory(&self, relative: &Path) -> Result<Dir> {

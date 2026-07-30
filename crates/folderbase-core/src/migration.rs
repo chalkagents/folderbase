@@ -2388,7 +2388,7 @@ fn prepare_structural_snapshots(plan: &mut MigrationPlan) -> Result<()> {
     }
     let temporary_relative = migration_relative.join(format!("snapshots.{}.tmp", Uuid::now_v7()));
     let temporary = safe_join(&plan.root, &temporary_relative)?;
-    fs::create_dir(&temporary).map_err(|source| FolderbaseError::io(&temporary, source))?;
+    create_private_directory_new(&temporary)?;
     sync_parent(&temporary)?;
 
     let result = (|| -> Result<()> {
@@ -2805,16 +2805,14 @@ fn prepare_transaction_v1(
 ) -> Result<PreparedTransactionV1> {
     let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&plan.id);
     let snapshots = migration_root.join("snapshots");
-    filesystem.ensure_private_directory(Path::new(STATE_DIR))?;
-    filesystem.ensure_private_directory(Path::new(MIGRATIONS_DIR))?;
-    filesystem.ensure_private_directory(&migration_root)?;
+    filesystem.ensure_directory(Path::new(STATE_DIR))?;
+    filesystem.ensure_directory(Path::new(MIGRATIONS_DIR))?;
+    filesystem.ensure_directory(&migration_root)?;
     if filesystem.metadata(&snapshots)?.is_some() {
-        filesystem.ensure_private_directory(&snapshots)?;
-        for name in filesystem.directory_file_names(&snapshots)? {
-            filesystem.set_private_regular_mode(&snapshots.join(name))?;
-        }
+        filesystem.ensure_directory(&snapshots)?;
+        let _ = filesystem
+            .closed_regular_file_names(&snapshots, plan.operations.len().saturating_add(1))?;
     }
-    filesystem.set_private_regular_mode(&migration_root.join("plan.json"))?;
     let manifest = Path::new(".folderbase/manifest.json");
     let manifest_sha256 = filesystem
         .sha256_regular_if_present(manifest)?
@@ -2878,14 +2876,59 @@ fn reopen_transaction_v1(
 ) -> Result<PreparedTransactionV1> {
     let transaction_root = migration_root.join(TRANSACTION_DIRECTORY);
     let program_path = transaction_root.join("program.json");
+    for directory in [
+        transaction_root.clone(),
+        transaction_root.join("journal"),
+        transaction_root.join("stages"),
+        transaction_root.join("claims"),
+        transaction_root.join("snapshots"),
+        transaction_root.join("receipts"),
+    ] {
+        filesystem.validate_private_directory(&directory)?;
+    }
+    let expected_root_entries = BTreeSet::from([
+        (OsString::from("claims"), true),
+        (OsString::from("journal"), true),
+        (OsString::from("program.json"), false),
+        (OsString::from("receipts"), true),
+        (OsString::from("snapshots"), true),
+        (OsString::from("stages"), true),
+    ]);
+    let actual_root_entries = filesystem
+        .closed_directory_entries(&transaction_root, expected_root_entries.len())?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if actual_root_entries != expected_root_entries {
+        return Err(FolderbaseError::InvalidRecord {
+            path: filesystem.display(&transaction_root),
+            message: "transaction-v1 root contains missing or unknown entries".to_owned(),
+        });
+    }
+    filesystem.validate_private_regular_mode(&program_path)?;
     let program_bytes = filesystem.read_regular_bounded(&program_path, MAX_PROGRAM_BYTES)?;
     let program = MutationProgramV1::decode(&filesystem.display(&program_path), &program_bytes)?;
     if expected_program.is_some_and(|expected| expected != &program) {
         return Err(FolderbaseError::MigrationApprovalMismatch);
     }
     let program_digest = program.digest(&filesystem.display(&program_path))?;
+    for directory in ["stages", "claims", "snapshots", "receipts"] {
+        let relative = transaction_root.join(directory);
+        let names = filesystem
+            .closed_regular_file_names(&relative, program.operation_count().saturating_add(1))?;
+        let allowed = program.allowed_private_file_names(directory);
+        for name in names {
+            if !allowed.contains(&name) {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: filesystem.display(&relative.join(name)),
+                    message: "transaction-v1 contains an unknown private artifact".to_owned(),
+                });
+            }
+            filesystem.validate_private_regular_mode(&relative.join(name))?;
+        }
+    }
     let journal_root = transaction_root.join("journal");
-    let mut generation_names = filesystem.directory_file_names(&journal_root)?;
+    let mut generation_names = filesystem
+        .closed_regular_file_names(&journal_root, program.maximum_journal_generations())?;
     generation_names.sort();
     let mut generations = Vec::with_capacity(generation_names.len());
     for (index, name) in generation_names.into_iter().enumerate() {
@@ -2897,6 +2940,7 @@ fn reopen_transaction_v1(
             });
         }
         let path = journal_root.join(&expected_name);
+        filesystem.validate_private_regular_mode(&path)?;
         let bytes = filesystem.read_regular_bounded(&path, MAX_JOURNAL_GENERATION_BYTES)?;
         generations.push(TransactionJournalGenerationV1::decode(
             &filesystem.display(&path),
@@ -4625,6 +4669,7 @@ fn create_migration_staging_in(filesystem: &MigrationFilesystem, migration_id: &
     filesystem.create_directory(&staging_relative)
 }
 
+#[cfg(test)]
 fn create_directory_if_missing(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
@@ -4635,6 +4680,53 @@ fn create_directory_if_missing(path: &Path) -> Result<()> {
         }
         Err(source) => Err(FolderbaseError::io(path, source)),
     }
+}
+
+fn create_private_directory_if_missing(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(FolderbaseError::WouldOverwrite(path.to_path_buf())),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            create_private_directory_new(path)
+        }
+        Err(source) => Err(FolderbaseError::io(path, source)),
+    }
+}
+
+fn create_private_directory_new(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::AlreadyExists {
+            FolderbaseError::WouldOverwrite(path.to_path_buf())
+        } else {
+            FolderbaseError::io(path, source)
+        }
+    })?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|source| FolderbaseError::io(path, source))?;
+    validate_private_directory_mode(path, &metadata)?;
+    sync_parent(path)
+}
+
+fn validate_private_directory_mode(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(FolderbaseError::InvalidRecord {
+                path: path.to_path_buf(),
+                message: "private migration directory is not owner-only".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6629,7 +6721,7 @@ fn refuse_tracked_move_path_in(filesystem: &MigrationFilesystem, path: &Path) ->
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(FolderbaseError::UnsafePath(filesystem.display(objects)));
     }
-    for name in filesystem.directory_file_names(objects)? {
+    for name in filesystem.closed_regular_file_names(objects, 65_536)? {
         if Path::new(&name)
             .extension()
             .and_then(|value| value.to_str())
@@ -7052,17 +7144,11 @@ fn migration_plan_relative(migration_id: &str) -> PathBuf {
 fn persist_new_plan(plan: &MigrationPlan) -> Result<()> {
     validate_plan(&plan.root, &plan.id, Path::new("plan.json"), plan)?;
     let state_dir = safe_join(&plan.root, Path::new(STATE_DIR))?;
-    create_directory_if_missing(&state_dir)?;
+    create_private_directory_if_missing(&state_dir)?;
     let migrations_dir = safe_join(&plan.root, Path::new(MIGRATIONS_DIR))?;
-    create_directory_if_missing(&migrations_dir)?;
+    create_private_directory_if_missing(&migrations_dir)?;
     let migration_dir = safe_join(&plan.root, &PathBuf::from(MIGRATIONS_DIR).join(&plan.id))?;
-    fs::create_dir(&migration_dir).map_err(|source| {
-        if source.kind() == std::io::ErrorKind::AlreadyExists {
-            FolderbaseError::WouldOverwrite(migration_dir.clone())
-        } else {
-            FolderbaseError::io(&migration_dir, source)
-        }
-    })?;
+    create_private_directory_new(&migration_dir)?;
     sync_parent(&migration_dir)?;
     write_json_new(&migration_dir.join("plan.json"), plan)
 }
@@ -8964,7 +9050,7 @@ fn cleanup_staging_in(filesystem: &MigrationFilesystem, migration_id: &str) {
     let staging_relative = PathBuf::from(MIGRATIONS_DIR)
         .join(migration_id)
         .join("staging");
-    if let Ok(names) = filesystem.directory_file_names(&staging_relative) {
+    if let Ok(names) = filesystem.closed_regular_file_names(&staging_relative, 65_536) {
         for name in names {
             let _ = filesystem.remove_file_if_present(&staging_relative.join(name));
         }

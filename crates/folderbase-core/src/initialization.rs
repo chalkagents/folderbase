@@ -725,7 +725,18 @@ pub fn initialize_with_expected_plan_digest(
 pub(crate) fn create_directory_no_clobber(root_dir: &Dir, root: &Path, path: &Path) -> Result<()> {
     ensure_safe_relative(path)?;
     let (parent, name) = open_parent_dir_nofollow(root_dir, root, path)?;
-    if let Err(source) = parent.create_dir(&name) {
+    let builder = cap_std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use cap_std::fs::DirBuilderExt;
+
+        let mut builder = builder;
+        if path.starts_with(".folderbase") {
+            builder.mode(0o700);
+        }
+        builder
+    };
+    if let Err(source) = parent.create_dir_with(&name, &builder) {
         return Err(if source.kind() == std::io::ErrorKind::AlreadyExists {
             FolderbaseError::WouldOverwrite(root.join(path))
         } else {
@@ -755,6 +766,14 @@ pub(crate) fn install_text_no_clobber(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+
+        if path.starts_with(".folderbase") {
+            options.mode(0o600);
+        }
+    }
     let mut staged = staging_parent
         .open_with(&staging_name, &options)
         .map_err(|source| FolderbaseError::io(root.join(&staged_path), source))?;

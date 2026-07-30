@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,6 +15,9 @@ pub(super) const PROGRAM_FORMAT: &str = "folderbase-mutation-program-v1";
 pub(super) const TRANSACTION_DIRECTORY: &str = "transaction-v1";
 pub(super) const MAX_PROGRAM_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_JOURNAL_GENERATION_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_JOURNAL_GENERATIONS: usize = 65_536;
+const JOURNAL_GENERATIONS_PER_OPERATION: usize = 4;
+const JOURNAL_GENERATION_OVERHEAD: usize = 6;
 
 const PROGRAM_DIGEST_DOMAIN: &[u8] = b"folderbase-mutation-program-v1";
 const JOURNAL_CHECKSUM_DOMAIN: &[u8] = b"folderbase-migration-journal-generation-v1";
@@ -104,6 +111,12 @@ impl MutationProgramV1 {
         let program: Self =
             serde_json::from_slice(bytes).map_err(|source| FolderbaseError::json(path, source))?;
         program.validate()?;
+        if program.encode(path)? != bytes {
+            return Err(invalid(
+                path,
+                "mutation program is not the exact canonical admitted encoding",
+            ));
+        }
         Ok(program)
     }
 
@@ -134,6 +147,14 @@ impl MutationProgramV1 {
         self.operations.len()
     }
 
+    pub(super) fn maximum_journal_generations(&self) -> usize {
+        self.operations
+            .len()
+            .saturating_mul(JOURNAL_GENERATIONS_PER_OPERATION)
+            .saturating_add(JOURNAL_GENERATION_OVERHEAD)
+            .min(MAX_JOURNAL_GENERATIONS)
+    }
+
     pub(super) fn expected_source_identities(&self) -> Vec<Option<String>> {
         self.operations
             .iter()
@@ -141,15 +162,39 @@ impl MutationProgramV1 {
             .collect()
     }
 
+    pub(super) fn allowed_private_file_names(&self, directory: &str) -> BTreeSet<OsString> {
+        self.operations
+            .iter()
+            .filter_map(|operation| {
+                let path = match directory {
+                    "stages" => &operation.private_stage_path,
+                    "claims" => &operation.private_claim_path,
+                    "snapshots" => &operation.private_snapshot_path,
+                    "receipts" => {
+                        return Some(OsString::from(format!("{:08}.receipt", operation.index)));
+                    }
+                    _ => return None,
+                };
+                path.file_name().map(OsString::from)
+            })
+            .collect()
+    }
+
     fn validate(&self) -> Result<()> {
         let path = &self.folderbase_root;
+        let journal_generation_bound = self
+            .operations
+            .len()
+            .checked_mul(JOURNAL_GENERATIONS_PER_OPERATION)
+            .and_then(|count| count.checked_add(JOURNAL_GENERATION_OVERHEAD));
         if self.format != PROGRAM_FORMAT
-            || self.transaction_id.is_empty()
+            || !self.transaction_id.starts_with("migration_")
             || !is_sha256(&self.approval_digest)
             || !is_sha256(&self.root_identity_sha256)
             || !is_sha256(&self.manifest_sha256)
             || self.path_profile != "folderbase-portable-path-v1"
             || self.durability_profile != durability_profile()
+            || journal_generation_bound.is_none_or(|count| count > MAX_JOURNAL_GENERATIONS)
             || self
                 .operations
                 .iter()
@@ -157,6 +202,48 @@ impl MutationProgramV1 {
                 .any(|(index, operation)| operation.index != index)
         {
             return Err(invalid(path, "mutation program metadata is inconsistent"));
+        }
+        for (index, operation) in self.operations.iter().enumerate() {
+            let operation_name = format!("{index:08}");
+            let expected_stage = PathBuf::from("stages").join(format!("{operation_name}.stage"));
+            let expected_claim = PathBuf::from("claims").join(format!("{operation_name}.claim"));
+            let expected_snapshot =
+                PathBuf::from("snapshots").join(format!("{operation_name}.snapshot"));
+            if operation.source_path != operation_source_path(&operation.operation)
+                || operation.destination_path != operation_destination_path(&operation.operation)
+                || operation.expected_source_sha256
+                    != operation_expected_source(&operation.operation)
+                || operation.expected_result_sha256
+                    != operation_expected_result(&operation.operation)
+                || operation.private_stage_path != expected_stage
+                || operation.private_claim_path != expected_claim
+                || operation.private_snapshot_path != expected_snapshot
+                || operation
+                    .source_path
+                    .as_deref()
+                    .is_some_and(|path| !safe_relative(path))
+                || operation
+                    .destination_path
+                    .as_deref()
+                    .is_some_and(|path| !safe_relative(path))
+                || !safe_relative(&operation.private_stage_path)
+                || !safe_relative(&operation.private_claim_path)
+                || !safe_relative(&operation.private_snapshot_path)
+                || operation
+                    .expected_source_sha256
+                    .as_deref()
+                    .is_some_and(|digest| !is_sha256(digest))
+                || operation
+                    .expected_result_sha256
+                    .as_deref()
+                    .is_some_and(|digest| !is_sha256(digest))
+                || operation
+                    .expected_source_identity_sha256
+                    .as_deref()
+                    .is_some_and(|digest| !is_sha256(digest))
+            {
+                return Err(invalid(path, "mutation program operation is inconsistent"));
+            }
         }
         Ok(())
     }
@@ -240,7 +327,15 @@ impl TransactionJournalGenerationV1 {
         if bytes.len() as u64 > MAX_JOURNAL_GENERATION_BYTES {
             return Err(invalid(path, "journal generation exceeds its byte bound"));
         }
-        serde_json::from_slice(bytes).map_err(|source| FolderbaseError::json(path, source))
+        let generation: Self =
+            serde_json::from_slice(bytes).map_err(|source| FolderbaseError::json(path, source))?;
+        if generation.encode(path)? != bytes {
+            return Err(invalid(
+                path,
+                "journal generation is not the exact canonical admitted encoding",
+            ));
+        }
+        Ok(generation)
     }
 
     pub(super) fn encode(&self, path: &Path) -> Result<Vec<u8>> {
@@ -411,6 +506,18 @@ impl TransactionJournalGenerationV1 {
                 .receipts
                 .iter()
                 .any(|receipt| receipt.operation_index >= program.operation_count())
+            || self
+                .receipts
+                .iter()
+                .enumerate()
+                .any(|(index, receipt)| receipt.operation_index != index)
+            || self.receipts.len() != self.operation_cursor
+            || self.receipts.iter().any(|receipt| {
+                receipt
+                    .published_identity_sha256
+                    .as_deref()
+                    .is_some_and(|digest| !is_sha256(digest))
+            })
             || self.checksum != self.calculate_checksum()?
         {
             return Err(invalid(path, "journal generation is inconsistent"));
@@ -424,7 +531,7 @@ pub(super) fn validate_chain(
     program_digest: &str,
     generations: &[TransactionJournalGenerationV1],
 ) -> Result<()> {
-    if generations.is_empty() {
+    if generations.is_empty() || generations.len() > program.maximum_journal_generations() {
         return Err(invalid(
             Path::new("<migration-journal-v1>"),
             "journal chain is empty",
@@ -443,8 +550,72 @@ pub(super) fn validate_chain(
             ));
         }
         previous = Some(generation.checksum());
+        if index == 0 {
+            if generation.direction != TransactionDirectionV1::Apply
+                || generation.phase != TransactionPhaseV1::Prepared
+                || generation.operation_cursor != 0
+                || generation.in_flight_operation.is_some()
+                || !generation.receipts.is_empty()
+                || !generation.conflicts.is_empty()
+            {
+                return Err(invalid(
+                    Path::new("<migration-journal-v1>"),
+                    "journal does not begin with the prepared state",
+                ));
+            }
+        } else {
+            validate_transition(&generations[index - 1], generation, program)?;
+        }
     }
     Ok(())
+}
+
+fn validate_transition(
+    previous: &TransactionJournalGenerationV1,
+    next: &TransactionJournalGenerationV1,
+    program: &MutationProgramV1,
+) -> Result<()> {
+    let apply_intent = next.direction == TransactionDirectionV1::Apply
+        && next.phase == TransactionPhaseV1::Applying
+        && next.operation_cursor == previous.operation_cursor
+        && next.in_flight_operation == Some(previous.operation_cursor)
+        && next.receipts == previous.receipts
+        && previous.in_flight_operation.is_none()
+        && previous.operation_cursor < program.operation_count()
+        && matches!(
+            previous.phase,
+            TransactionPhaseV1::Prepared | TransactionPhaseV1::Applying
+        );
+    let apply_receipt = next.direction == TransactionDirectionV1::Apply
+        && next.phase == TransactionPhaseV1::Applying
+        && previous.phase == TransactionPhaseV1::Applying
+        && previous.in_flight_operation == Some(previous.operation_cursor)
+        && next.in_flight_operation.is_none()
+        && next.operation_cursor == previous.operation_cursor + 1
+        && next.receipts.len() == previous.receipts.len() + 1
+        && next.receipts[..previous.receipts.len()] == previous.receipts
+        && next
+            .receipts
+            .last()
+            .is_some_and(|receipt| receipt.operation_index == previous.operation_cursor);
+    let applied = next.direction == TransactionDirectionV1::Apply
+        && next.phase == TransactionPhaseV1::Applied
+        && next.in_flight_operation.is_none()
+        && next.operation_cursor == program.operation_count()
+        && next.receipts == previous.receipts
+        && previous.operation_cursor == program.operation_count()
+        && previous.in_flight_operation.is_none()
+        && matches!(
+            previous.phase,
+            TransactionPhaseV1::Prepared | TransactionPhaseV1::Applying
+        );
+    if apply_intent || apply_receipt || applied {
+        return Ok(());
+    }
+    Err(invalid(
+        Path::new("<migration-journal-v1>"),
+        "journal contains an illegal state transition",
+    ))
 }
 
 fn operation_source_path(operation: &MigrationOperation) -> Option<PathBuf> {
@@ -504,12 +675,20 @@ fn durability_profile() -> &'static str {
     }
     #[cfg(windows)]
     {
-        "folderbase-windows-flush-v1"
+        "folderbase-windows-same-volume-no-directory-fsync-v1"
     }
     #[cfg(not(any(unix, windows)))]
     {
         "folderbase-generic-sync-v1"
     }
+}
+
+fn safe_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn is_sha256(value: &str) -> bool {

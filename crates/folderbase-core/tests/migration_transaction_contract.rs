@@ -40,6 +40,33 @@ fn approved_move(root: &Path) -> (String, ApprovedMigration) {
     (migration_id, approved)
 }
 
+fn applied_move(root: &Path) -> String {
+    let (migration_id, approved) = approved_move(root);
+    apply_migration(approved).expect("apply");
+    migration_id
+}
+
+fn transaction_root(root: &Path, migration_id: &str) -> std::path::PathBuf {
+    root.join(".folderbase/migrations")
+        .join(migration_id)
+        .join("transaction-v1")
+}
+
+fn assert_recovery_fails_closed(root: &Path, migration_id: &str) {
+    let error = MigrationResult::recover(root, migration_id)
+        .expect_err("invalid private transaction state must fail closed");
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::InvalidRecord { .. }
+            | folderbase_core::FolderbaseError::UnsafePath(_)
+            | folderbase_core::FolderbaseError::Io { .. }
+    ));
+    assert_eq!(
+        fs::read(root.join("Archive/notes.md")).expect("visible result"),
+        b"approved bytes\n"
+    );
+}
+
 #[test]
 fn compatibility_surface_keeps_one_apply_recover_and_rollback_entry_each() {
     fn recover(root: &Path, migration_id: &str) -> folderbase_core::Result<MigrationResult> {
@@ -52,6 +79,114 @@ fn compatibility_surface_keeps_one_apply_recover_and_rollback_entry_each() {
     let _: fn(ApprovedMigration) -> folderbase_core::Result<MigrationResult> = apply_migration;
     let _: fn(&Path, &str) -> folderbase_core::Result<MigrationResult> = recover;
     let _: fn(&Path, &str) -> folderbase_core::Result<RollbackResult> = rollback;
+}
+
+#[test]
+fn transaction_v1_rejects_noncanonical_program_bytes_before_recovery() {
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    let program = transaction_root(root.path(), &migration_id).join("program.json");
+    let mut bytes = fs::read(&program).expect("program");
+    bytes.push(b'\n');
+    fs::write(&program, bytes).expect("noncanonical program");
+
+    assert_recovery_fails_closed(root.path(), &migration_id);
+}
+
+#[test]
+fn transaction_v1_rejects_noncanonical_journal_generation_bytes() {
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    let generation =
+        transaction_root(root.path(), &migration_id).join("journal/00000000000000000000.json");
+    let mut bytes = fs::read(&generation).expect("generation");
+    bytes.push(b'\n');
+    fs::write(&generation, bytes).expect("noncanonical generation");
+
+    assert_recovery_fails_closed(root.path(), &migration_id);
+}
+
+#[test]
+fn transaction_v1_rejects_unknown_entries_and_directory_kinds() {
+    for unknown_is_directory in [false, true] {
+        let root = initialized_folderbase();
+        let migration_id = applied_move(root.path());
+        let unknown = transaction_root(root.path(), &migration_id).join("unknown");
+        if unknown_is_directory {
+            fs::create_dir(&unknown).expect("unknown directory");
+        } else {
+            fs::write(&unknown, b"unknown\n").expect("unknown file");
+        }
+
+        assert_recovery_fails_closed(root.path(), &migration_id);
+    }
+}
+
+#[test]
+fn transaction_v1_rejects_missing_and_inner_wrong_kind_entries() {
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    fs::remove_dir(transaction_root(root.path(), &migration_id).join("receipts"))
+        .expect("remove expected directory");
+    assert_recovery_fails_closed(root.path(), &migration_id);
+
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    fs::create_dir(transaction_root(root.path(), &migration_id).join("journal/unknown"))
+        .expect("wrong-kind journal entry");
+    assert_recovery_fails_closed(root.path(), &migration_id);
+}
+
+#[test]
+fn transaction_v1_journal_bound_is_derived_from_the_operation_count() {
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    let journal = transaction_root(root.path(), &migration_id).join("journal");
+    let bytes = fs::read(journal.join("00000000000000000003.json")).expect("terminal generation");
+    // One operation admits at most 4(1)+6 = 10 generations, far below the
+    // process-wide defensive ceiling.
+    for generation in 4..=10 {
+        fs::write(journal.join(format!("{generation:020}.json")), &bytes)
+            .expect("surplus generation");
+    }
+
+    assert_recovery_fails_closed(root.path(), &migration_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_v1_rejects_insecure_reopened_private_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (relative, mode) in [
+        ("", 0o755),
+        ("program.json", 0o644),
+        ("journal/00000000000000000000.json", 0o644),
+    ] {
+        let root = initialized_folderbase();
+        let migration_id = applied_move(root.path());
+        let transaction = transaction_root(root.path(), &migration_id);
+        fs::set_permissions(transaction.join(relative), fs::Permissions::from_mode(mode))
+            .expect("weaken private mode");
+        assert_recovery_fails_closed(root.path(), &migration_id);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_v1_rejects_an_inner_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    let transaction = transaction_root(root.path(), &migration_id);
+    symlink(
+        transaction.join("program.json"),
+        transaction.join("stages/00000000.stage"),
+    )
+    .expect("inner symlink");
+
+    assert_recovery_fails_closed(root.path(), &migration_id);
 }
 
 #[cfg(unix)]
