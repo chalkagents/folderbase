@@ -6,7 +6,6 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -18,6 +17,7 @@ use crate::{
     folder_analysis::{AnalyzedFile, analyze_folder, expand_reconstructable_tree},
     initialization::{initialize, plan_template_initialization},
     local_versions::LocalVersionStore,
+    physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity},
     template::load_builtin_template,
     validation::validate,
     workspace::{has_nested_folderbase_marker, is_reserved_workspace_component},
@@ -56,7 +56,7 @@ pub struct MigrationAnalysis {
     #[serde(skip)]
     files: Vec<AnalyzedFile>,
     #[serde(skip)]
-    root_identity: Option<Handle>,
+    root_identity: Option<RetainedPhysicalIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,7 +162,7 @@ pub struct MigrationPlan {
     #[serde(default, flatten)]
     extensions: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
-    root_identity: Option<Handle>,
+    root_identity: Option<RetainedPhysicalIdentity>,
 }
 
 impl PartialEq for MigrationPlan {
@@ -225,8 +225,8 @@ impl MigrationPlan {
             });
         }
 
-        let root_handle =
-            Handle::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
+        let root_identity = RetainedPhysicalIdentity::from_path(&root)
+            .map_err(|source| FolderbaseError::io(&root, source))?;
         let mut source_files = Vec::with_capacity(operations.len());
         let mut source_keys = BTreeSet::new();
         let mut move_destinations = BTreeSet::new();
@@ -341,7 +341,7 @@ impl MigrationPlan {
             exclusions: Vec::new(),
             approval_digest: None,
             extensions,
-            root_identity: Some(root_handle),
+            root_identity: Some(root_identity),
         };
         persist_new_plan(&plan)?;
         Ok(plan)
@@ -1567,8 +1567,8 @@ impl ParsedMigrationAnswers {
 /// Analyze a folder without changing it.
 pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
     let root = canonical_root(root.as_ref())?;
-    let root_handle =
-        Handle::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
+    let root_identity = RetainedPhysicalIdentity::from_path(&root)
+        .map_err(|source| FolderbaseError::io(&root, source))?;
     let folder = analyze_folder(&root)?;
     let files = folder.files;
     let mut proposed_boundaries = folder
@@ -1751,7 +1751,7 @@ pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
         reconstructable_trees: folder.reconstructable_trees,
         nested_folderbases: folder.nested_folderbases,
         files,
-        root_identity: Some(root_handle),
+        root_identity: Some(root_identity),
     })
 }
 
@@ -1767,9 +1767,9 @@ pub fn plan_migration(
 ) -> Result<MigrationPlan> {
     let destination_folder = destination_folder.as_ref().to_path_buf();
     ensure_safe_relative(&destination_folder)?;
-    let current_root = Handle::from_path(&analysis.root)
+    let current_root = PhysicalIdentity::from_path(&analysis.root)
         .map_err(|source| FolderbaseError::io(&analysis.root, source))?;
-    if analysis.root_identity.as_ref() != Some(&current_root) {
+    if analysis.root_identity.as_ref().map(|root| root.identity()) != Some(current_root) {
         return Err(FolderbaseError::MigrationSourceChanged(
             analysis.root.clone(),
         ));
@@ -3678,9 +3678,9 @@ fn observe_structural_disk_state(
                 (Some(source_digest), Some(destination_digest))
                     if source_digest == *expected_sha256
                         && destination_digest == *expected_sha256
-                        && Handle::from_path(&source)
+                        && PhysicalIdentity::from_path(&source)
                             .map_err(|error| FolderbaseError::io(&source, error))?
-                            == Handle::from_path(&destination)
+                            == PhysicalIdentity::from_path(&destination)
                                 .map_err(|error| FolderbaseError::io(&destination, error))? =>
                 {
                     Ok(StructuralDiskState::PartialSameInode)
@@ -4062,11 +4062,11 @@ fn reconcile_structural_in_flight(
                     (Some(source_digest), Some(destination_digest))
                         if source_digest == *expected_sha256
                             && destination_digest == *expected_sha256
-                            && Handle::from_path(&source)
+                            && PhysicalIdentity::from_path(&source)
                                 .map_err(|error| FolderbaseError::io(&source, error))?
-                                == Handle::from_path(&destination).map_err(|error| {
-                                    FolderbaseError::io(&destination, error)
-                                })? =>
+                                == PhysicalIdentity::from_path(&destination).map_err(
+                                    |error| FolderbaseError::io(&destination, error),
+                                )? =>
                     {
                         fs::remove_file(&destination)
                             .map_err(|error| FolderbaseError::io(&destination, error))?;
@@ -4088,11 +4088,11 @@ fn reconcile_structural_in_flight(
                     (true, true)
                         if sha256_path(&source)? == *expected_sha256
                             && sha256_path(&destination)? == *expected_sha256
-                            && Handle::from_path(&source)
+                            && PhysicalIdentity::from_path(&source)
                                 .map_err(|error| FolderbaseError::io(&source, error))?
-                                == Handle::from_path(&destination).map_err(|error| {
-                                    FolderbaseError::io(&destination, error)
-                                })? =>
+                                == PhysicalIdentity::from_path(&destination).map_err(
+                                    |error| FolderbaseError::io(&destination, error),
+                                )? =>
                     {
                         fs::remove_file(&destination)
                             .map_err(|error| FolderbaseError::io(&destination, error))?;
@@ -4654,8 +4654,10 @@ fn load_plan(root: &Path, migration_id: &str) -> Result<MigrationPlan> {
     let mut plan: MigrationPlan = serde_json::from_slice(&bytes)
         .map_err(|source| FolderbaseError::json(&plan_path, source))?;
     validate_plan(root, migration_id, &plan_path, &plan)?;
-    plan.root_identity =
-        Some(Handle::from_path(root).map_err(|source| FolderbaseError::io(root, source))?);
+    plan.root_identity = Some(
+        RetainedPhysicalIdentity::from_path(root)
+            .map_err(|source| FolderbaseError::io(root, source))?,
+    );
     Ok(plan)
 }
 
@@ -6043,9 +6045,9 @@ fn verify_expanded_reconstructable_trees(plan: &MigrationPlan) -> Result<()> {
 }
 
 fn verify_root_identity(plan: &MigrationPlan) -> Result<()> {
-    let current =
-        Handle::from_path(&plan.root).map_err(|source| FolderbaseError::io(&plan.root, source))?;
-    if plan.root_identity.as_ref() != Some(&current) {
+    let current = PhysicalIdentity::from_path(&plan.root)
+        .map_err(|source| FolderbaseError::io(&plan.root, source))?;
+    if plan.root_identity.as_ref().map(|root| root.identity()) != Some(current) {
         return Err(FolderbaseError::MigrationSourceChanged(plan.root.clone()));
     }
     Ok(())

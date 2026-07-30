@@ -15,7 +15,6 @@ use std::{
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirEntry, Metadata, OpenOptions, ReadDir};
 use ignore::{Match, gitignore::GitignoreBuilder};
-use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -33,6 +32,7 @@ use crate::{
         FolderbaseVersionError, MAX_OBJECT_BYTES, MAX_VERSION_ENTRIES, validate_capture_path,
         validate_capture_sha256, validate_capture_symlink_targets, validate_capture_version_id,
     },
+    physical_identity::PhysicalIdentity,
     traversal_policy::{RECONSTRUCTABLE_DIRECTORIES, is_folderbase_state_component},
 };
 
@@ -1004,7 +1004,7 @@ struct CaptureDirectoryFrame {
 
 struct CaptureChildVerification {
     name: OsString,
-    identity: Handle,
+    identity: PhysicalIdentity,
     display_path: PathBuf,
 }
 
@@ -1614,7 +1614,7 @@ fn std_metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 fn directory_identity(
     directory: &Dir,
     display_path: &Path,
-) -> Result<Handle, FolderbaseCaptureError> {
+) -> Result<PhysicalIdentity, FolderbaseCaptureError> {
     let file = directory
         .try_clone()
         .map_err(|source| FolderbaseCaptureError::Io {
@@ -1622,7 +1622,7 @@ fn directory_identity(
             source,
         })?
         .into_std_file();
-    Handle::from_file(file).map_err(|source| FolderbaseCaptureError::Io {
+    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseCaptureError::Io {
         path: display_path.to_path_buf(),
         source,
     })
@@ -1641,7 +1641,7 @@ fn open_stable_child(
     parent: &Dir,
     name: &OsStr,
     display_path: &Path,
-) -> Result<(Dir, Handle), FolderbaseCaptureError> {
+) -> Result<(Dir, PhysicalIdentity), FolderbaseCaptureError> {
     let child = parent
         .open_dir_nofollow(name)
         .map_err(|source| FolderbaseCaptureError::Io {
@@ -1656,7 +1656,7 @@ fn open_stable_child(
 fn verify_child_identity(
     parent: &Dir,
     name: &OsStr,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
     display_path: &Path,
 ) -> Result<(), FolderbaseCaptureError> {
     let reopened = parent

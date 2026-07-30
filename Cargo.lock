@@ -552,7 +552,6 @@ dependencies = [
  "ignore",
  "jsonschema",
  "libc",
- "same-file",
  "semver",
  "serde",
  "serde_json",

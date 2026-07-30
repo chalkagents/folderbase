@@ -6,7 +6,6 @@ use std::{
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
-use same_file::Handle;
 use semver::Version;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
@@ -16,6 +15,8 @@ use serde::{
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::physical_identity::PhysicalIdentity;
 
 /// Largest manifest accepted by the root-attestation seam.
 pub const MAX_FOLDERBASE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -162,7 +163,7 @@ impl RootAttestationError {
 }
 
 struct OpenedMarker {
-    identity: Handle,
+    identity: PhysicalIdentity,
     snapshot: FileSnapshot,
     file: fs::File,
 }
@@ -214,15 +215,7 @@ fn attest_folderbase_root_inner(
         });
     }
     let root_identity =
-        Handle::from_file(
-            root_file
-                .try_clone()
-                .map_err(|source| RootAttestationError::Io {
-                    path: root.to_path_buf(),
-                    source,
-                })?,
-        )
-        .map_err(|source| RootAttestationError::Io {
+        PhysicalIdentity::from_file(&root_file).map_err(|source| RootAttestationError::Io {
             path: root.to_path_buf(),
             source,
         })?;
@@ -273,7 +266,7 @@ fn attest_folderbase_root_inner(
         });
     }
     let state_identity =
-        Handle::from_file(state_file).map_err(|source| RootAttestationError::Io {
+        PhysicalIdentity::from_file(&state_file).map_err(|source| RootAttestationError::Io {
             path: root.join(STATE_DIRECTORY),
             source,
         })?;
@@ -496,14 +489,7 @@ fn open_regular_marker(
         return Err(RootAttestationError::MarkerWrongType { marker });
     }
     let identity =
-        Handle::from_file(
-            file.try_clone()
-                .map_err(|source| RootAttestationError::Io {
-                    path: root.join(marker.relative_path()),
-                    source,
-                })?,
-        )
-        .map_err(|source| RootAttestationError::Io {
+        PhysicalIdentity::from_file(&file).map_err(|source| RootAttestationError::Io {
             path: root.join(marker.relative_path()),
             source,
         })?;
@@ -535,7 +521,7 @@ fn read_manifest_bounded(
     Ok(bytes)
 }
 
-fn revalidate_root(root: &Path, expected: &Handle) -> Result<Dir, RootAttestationError> {
+fn revalidate_root(root: &Path, expected: &PhysicalIdentity) -> Result<Dir, RootAttestationError> {
     let reopened =
         open_root_nofollow(root).map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     let metadata = reopened
@@ -544,12 +530,8 @@ fn revalidate_root(root: &Path, expected: &Handle) -> Result<Dir, RootAttestatio
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
-    let actual = Handle::from_file(
-        reopened
-            .try_clone()
-            .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?,
-    )
-    .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let actual = PhysicalIdentity::from_file(&reopened)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &actual != expected {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
@@ -560,7 +542,7 @@ fn revalidate_directory(
     parent: &Dir,
     name: &str,
     _marker: FolderbaseRootMarker,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
 ) -> Result<Dir, RootAttestationError> {
     let directory = parent
         .open_dir_nofollow(name)
@@ -575,7 +557,7 @@ fn revalidate_directory(
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
-    let actual = Handle::from_file(reopened)
+    let actual = PhysicalIdentity::from_file(&reopened)
         .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &actual != expected {
         return Err(RootAttestationError::RootChangedDuringAttestation);
@@ -587,7 +569,7 @@ fn revalidate_file(
     parent: &Dir,
     name: &str,
     marker: FolderbaseRootMarker,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
     expected_snapshot: Option<&FileSnapshot>,
     root: &Path,
 ) -> Result<(), RootAttestationError> {
@@ -605,7 +587,7 @@ fn revalidate_manifest(
     parent: &Dir,
     name: &str,
     marker: FolderbaseRootMarker,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
     expected_sha256: &str,
     root: &Path,
 ) -> Result<(), RootAttestationError> {

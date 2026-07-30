@@ -28,7 +28,6 @@ cap-fs-ext.workspace = true
 chrono.workspace = true
 ignore.workspace = true
 libc.workspace = true
-same-file.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

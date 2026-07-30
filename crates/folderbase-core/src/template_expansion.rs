@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 
 use cap_std::fs::Dir;
 use chrono::{DateTime, Utc};
-use same_file::Handle;
 use semver::Version;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -19,6 +18,7 @@ use crate::initialization::{
     validate_template_paths_against_existing_casefold,
 };
 use crate::model::{AppliedTemplate, TemplateApplicationComparison, TemplateExpansionPrecondition};
+use crate::physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity};
 use crate::template::{template_package_sha256, validate_runtime_package};
 use crate::{
     FolderbaseError, PlannedTemplateAddition, Result, TemplateAnswerValue,
@@ -43,8 +43,8 @@ pub fn plan_template_expansion(
     validate_folderbase_root(&root)?;
     validate_runtime_package(&root, target)?;
 
-    let root_handle =
-        Handle::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
+    let root_identity = RetainedPhysicalIdentity::from_path(&root)
+        .map_err(|source| FolderbaseError::io(&root, source))?;
     let manifest_path = root.join(MANIFEST);
     let manifest_bytes =
         fs::read(&manifest_path).map_err(|source| FolderbaseError::io(&manifest_path, source))?;
@@ -65,7 +65,7 @@ pub fn plan_template_expansion(
     if comparison.template_id != target.id() {
         return build_plan(
             root,
-            root_handle,
+            root_identity,
             folderbase_id,
             target,
             package_digest,
@@ -102,7 +102,7 @@ pub fn plan_template_expansion(
         }
         return build_plan(
             root,
-            root_handle,
+            root_identity,
             folderbase_id,
             target,
             package_digest,
@@ -160,7 +160,7 @@ pub fn plan_template_expansion(
     if !structural_changes.is_empty() {
         return build_plan(
             root,
-            root_handle,
+            root_identity,
             folderbase_id,
             target,
             package_digest,
@@ -218,7 +218,7 @@ pub fn plan_template_expansion(
             blocked_paths.push(path);
             continue;
         }
-        let handle = Handle::from_path(&destination)
+        let identity = RetainedPhysicalIdentity::from_path(&destination)
             .map_err(|source| FolderbaseError::io(&destination, source))?;
         let sha256 = if artifact.kind == TemplateArtifactKind::Text {
             Some(sha256_path(&destination)?)
@@ -230,7 +230,7 @@ pub fn plan_template_expansion(
             path,
             kind: artifact.kind,
             sha256,
-            handle,
+            identity,
         });
     }
     preserved_paths.sort();
@@ -239,7 +239,7 @@ pub fn plan_template_expansion(
 
     build_plan(
         root,
-        root_handle,
+        root_identity,
         folderbase_id,
         target,
         package_digest,
@@ -267,9 +267,9 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
     }
 
     let root = canonical_directory(&plan.root)?;
-    let current_handle =
-        Handle::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    if root != plan.root || current_handle != plan.root_handle {
+    let current_identity =
+        PhysicalIdentity::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
+    if root != plan.root || current_identity != plan.root_identity.identity() {
         return Err(FolderbaseError::PlanRootIdentityChanged(root));
     }
     validate_folderbase_root(&root)?;
@@ -622,7 +622,7 @@ fn validate_application_history_chain(
 #[allow(clippy::too_many_arguments)]
 fn build_plan(
     root: PathBuf,
-    root_handle: Handle,
+    root_identity: RetainedPhysicalIdentity,
     folderbase_id: String,
     target: &TemplatePackage,
     template_package_digest: TemplatePlanDigest,
@@ -660,7 +660,7 @@ fn build_plan(
         manifest_sha256,
         history_sha256,
         preserved_preconditions: Vec::new(),
-        root_handle,
+        root_identity,
     };
     plan.plan_digest = digest_plan(&plan);
     Ok(plan)
@@ -805,9 +805,9 @@ fn verify_preserved_preconditions(plan: &TemplateExpansionPlan) -> Result<()> {
                 precondition.path.clone(),
             ));
         }
-        let handle = Handle::from_path(&destination)
+        let identity = PhysicalIdentity::from_path(&destination)
             .map_err(|_| FolderbaseError::PlanPreconditionChanged(precondition.path.clone()))?;
-        if handle != precondition.handle {
+        if identity != precondition.identity.identity() {
             return Err(FolderbaseError::PlanPreconditionChanged(
                 precondition.path.clone(),
             ));

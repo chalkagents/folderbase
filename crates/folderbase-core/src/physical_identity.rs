@@ -1,18 +1,62 @@
-use std::{fs::File, io};
+use std::{
+    fs::{self, File},
+    io,
+    path::Path,
+};
 
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PhysicalIdentity {
-    Unix {
-        device: u64,
-        inode: u64,
-    },
+    #[cfg_attr(windows, allow(dead_code))]
+    Unix { device: u64, inode: u64 },
+    #[cfg_attr(not(windows), allow(dead_code))]
     Windows {
         volume_serial: u64,
         file_id: [u8; 16],
     },
 }
+
+pub(crate) struct RetainedPhysicalIdentity {
+    identity: PhysicalIdentity,
+    file: File,
+}
+
+impl RetainedPhysicalIdentity {
+    pub(crate) fn from_file(file: File) -> io::Result<Self> {
+        let identity = PhysicalIdentity::from_file(&file)?;
+        Ok(Self { identity, file })
+    }
+
+    pub(crate) fn from_path(path: &Path) -> io::Result<Self> {
+        Self::from_file(open_path_nofollow(path)?)
+    }
+
+    pub(crate) fn identity(&self) -> PhysicalIdentity {
+        self.identity
+    }
+
+    pub(crate) fn as_file_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+
+impl std::fmt::Debug for RetainedPhysicalIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RetainedPhysicalIdentity")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RetainedPhysicalIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+
+impl Eq for RetainedPhysicalIdentity {}
 
 impl PhysicalIdentity {
     #[cfg(unix)]
@@ -84,6 +128,10 @@ impl PhysicalIdentity {
         format!("{:x}", digest.finalize())
     }
 
+    pub(crate) fn from_path(path: &Path) -> io::Result<Self> {
+        RetainedPhysicalIdentity::from_path(path).map(|retained| retained.identity())
+    }
+
     #[cfg(test)]
     fn windows(volume_serial: u64, file_id: [u8; 16]) -> Self {
         Self::Windows {
@@ -96,6 +144,36 @@ impl PhysicalIdentity {
     fn unix(device: u64, inode: u64) -> Self {
         Self::Unix { device, inode }
     }
+}
+
+#[cfg(unix)]
+fn open_path_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_path_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_path_nofollow(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 #[cfg(test)]
