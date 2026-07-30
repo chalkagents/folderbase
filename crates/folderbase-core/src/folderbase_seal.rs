@@ -135,6 +135,7 @@ enum RestoreCheckpoint {
     PublicationVerified,
     ProjectionDurable,
     CleanupRecoveryDurable,
+    CleanupIntentRetired,
     CleanupComplete,
 }
 
@@ -4737,6 +4738,57 @@ mod tests {
         assert!(
             !transaction_directory.exists(),
             "retry must finish private cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_receipt_survives_active_retirement_and_blocks_capture() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let restore_transactions = root.path().join(RESTORE_TRANSACTIONS_DIRECTORY);
+
+        let cleanup_error = store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::CleanupIntentRetired {
+                    fs::set_permissions(&restore_transactions, fs::Permissions::from_mode(0o500))
+                        .expect("deny cleanup receipt removal");
+                }
+            })
+            .expect_err("receipt cleanup failure must be reported");
+        assert!(matches!(
+            cleanup_error,
+            FolderbaseCaptureError::LocalStore(FolderbaseError::Io { .. })
+        ));
+        assert!(matches!(
+            store.seal_capture(store.plan_capture().expect("capture plan")),
+            Err(FolderbaseCaptureError::ConflictingTransaction(message))
+                if message.contains("restore")
+        ));
+        fs::set_permissions(&restore_transactions, fs::Permissions::from_mode(0o700))
+            .expect("restore transaction permissions");
+        drop(store);
+
+        let restored = FolderbaseVersionStore::open(root.path())
+            .expect("reopen")
+            .restore_tombstone("active.bin")
+            .expect("cleanup receipt retry");
+        assert!(!restored.created());
+        assert!(
+            fs::read_dir(&restore_transactions)
+                .expect("restore transactions")
+                .next()
+                .is_none(),
+            "receipt retry must leave no private transaction state"
         );
     }
 
