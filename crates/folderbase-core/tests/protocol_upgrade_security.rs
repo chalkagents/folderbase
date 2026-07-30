@@ -124,13 +124,37 @@ fn legacy_upgrade_preserves_an_unknown_vendor_extension() {
 }
 
 #[test]
+fn native_v05_rejects_a_malformed_namespaced_upgrade_receipt() {
+    let root = tempdir().expect("ordinary root");
+    let initialization =
+        plan_initialization(root.path(), InitializationOptions::default()).expect("init plan");
+    initialize(&initialization).expect("initialize");
+    let path = root.path().join(".folderbase/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("manifest JSON");
+    manifest["folderbase_protocol_upgrade"] = serde_json::json!({
+        "format": "folderbase-protocol-upgrade-receipt-v1",
+        "vendor": "not-a-closed-receipt"
+    });
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("malformed receipt");
+
+    assert!(
+        plan_protocol_upgrade(root.path()).is_err(),
+        "the reserved receipt namespace must be a closed validated record"
+    );
+}
+
+#[test]
 fn legacy_upgrade_refuses_a_reserved_capture_ignore_collision() {
     let root = legacy_root();
     let path = root.path().join(".folderbase/manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest");
-    manifest["policies"]["capture_ignore"] =
-        serde_json::json!({"format":"foreign","rules":[]});
+    manifest["policies"]["capture_ignore"] = serde_json::json!({"format":"foreign","rules":[]});
     let bytes = format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap());
     fs::write(&path, &bytes).expect("colliding legacy extension");
 
