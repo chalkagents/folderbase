@@ -548,6 +548,138 @@ impl FolderbaseState {
         Ok(modified)
     }
 
+    /// Return a durable device-local identity for the exact inode shared by a
+    /// restore stage and its visible workspace publication.
+    pub(crate) fn workspace_restore_identity_sha256(
+        &self,
+        stage: &Path,
+        destination: &Path,
+    ) -> Result<String> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let stage_file = open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if open_regular_file_identity(&destination_file, &destination_display)? != stage_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "restore destination no longer names the staged file".to_owned(),
+            });
+        }
+        let stage_stable = stable_regular_file_identity_sha256(&stage_file, &stage_display)?;
+        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+            != stage_stable
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "restore destination stable identity changed".to_owned(),
+            });
+        }
+        self.verify_still_attached()?;
+        Ok(stage_stable)
+    }
+
+    /// Verify that a workspace path still names the exact durable device-local
+    /// inode recorded by a restore cleanup receipt.
+    pub(crate) fn verify_workspace_regular_file_identity(
+        &self,
+        destination: &Path,
+        expected_identity_sha256: &str,
+    ) -> Result<()> {
+        self.verify_workspace_regular_file_identity_inner(
+            destination,
+            expected_identity_sha256,
+            None,
+        )
+    }
+
+    /// Verify both exact publication identity and sealed file fidelity when
+    /// every private hard link has already been retired.
+    pub(crate) fn verify_workspace_regular_file_identity_and_fidelity(
+        &self,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<()> {
+        self.verify_workspace_regular_file_identity_inner(
+            destination,
+            expected_identity_sha256,
+            Some((digest, bytes, executable)),
+        )
+    }
+
+    fn verify_workspace_regular_file_identity_inner(
+        &self,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        expected_fidelity: Option<(&str, u64, bool)>,
+    ) -> Result<()> {
+        let destination = safe_workspace_relative(destination)?;
+        self.verify_still_attached()?;
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let mut destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "workspace file no longer has the restore publication identity".to_owned(),
+            });
+        }
+        if let Some((digest, bytes, executable)) = expected_fidelity {
+            verify_open_regular_file(
+                &mut destination_file,
+                digest,
+                bytes,
+                executable,
+                &destination_display,
+            )?;
+        }
+
+        let mut visible_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if stable_regular_file_identity_sha256(&visible_file, &destination_display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "workspace file identity changed during restore verification".to_owned(),
+            });
+        }
+        if let Some((digest, bytes, executable)) = expected_fidelity {
+            verify_open_regular_file(
+                &mut visible_file,
+                digest,
+                bytes,
+                executable,
+                &destination_display,
+            )?;
+        }
+        self.verify_still_attached()
+    }
+
     /// Retire only the exact private stage for a restore-owned workspace file.
     ///
     /// A transaction-owned rescue hard link protects the staged inode across
@@ -1182,6 +1314,50 @@ fn open_regular_file_identity(file: &cap_std::fs::File, display: &Path) -> Resul
         .map_err(|source| FolderbaseError::io(display, source))?
         .into_std();
     Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
+}
+
+fn stable_regular_file_identity_sha256(file: &cap_std::fs::File, display: &Path) -> Result<String> {
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-workspace-file-identity-v1");
+    digest.update([0]);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(display, source))?;
+        digest.update(b"unix");
+        digest.update([0]);
+        digest.update(metadata.dev().to_be_bytes());
+        digest.update(metadata.ino().to_be_bytes());
+    }
+
+    #[cfg(windows)]
+    {
+        let information = winapi_util::file::information(&file)
+            .map_err(|source| FolderbaseError::io(display, source))?;
+        digest.update(b"windows");
+        digest.update([0]);
+        digest.update((information.volume_serial_number() as u32).to_be_bytes());
+        digest.update(information.file_index().to_be_bytes());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "stable file identity is unavailable on this platform".to_owned(),
+        });
+    }
+
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn verify_regular_file(

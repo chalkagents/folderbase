@@ -50,7 +50,7 @@ const ACTIVE_RESTORE_TRANSACTION_PATH: &str =
     ".folderbase/transactions/folderbase-version-restores/active.json";
 const RESTORE_CLEANUP_RECOVERY_PATH: &str =
     ".folderbase/transactions/folderbase-version-restores/cleanup.json";
-const RESTORE_CLEANUP_RECOVERY_FORMAT_V1: &str = "folderbase-restore-cleanup-v1";
+const RESTORE_CLEANUP_RECOVERY_FORMAT_V2: &str = "folderbase-restore-cleanup-v2";
 const RESTORE_COMPLETION_PATH: &str = ".folderbase/local/completed-restore.json";
 const RESTORE_COMPLETION_FORMAT_V1: &str = "folderbase-restore-completion-v1";
 const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
@@ -299,6 +299,7 @@ struct RestoreCleanupRecovery {
     format: String,
     disposition: RestoreCleanupDisposition,
     transaction: RestoreTransaction,
+    published_identity_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +436,7 @@ impl FolderbaseVersionStore {
                     &local,
                     &state,
                     &recovery.transaction,
+                    &recovery.published_identity_sha256,
                     &mut checkpoint,
                 ),
                 RestoreCleanupDisposition::Modified => {
@@ -443,6 +445,7 @@ impl FolderbaseVersionStore {
                         &local,
                         &state,
                         &recovery.transaction,
+                        &recovery.published_identity_sha256,
                         &mut checkpoint,
                     )?;
                     Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
@@ -453,6 +456,7 @@ impl FolderbaseVersionStore {
                         &local,
                         &state,
                         &recovery.transaction,
+                        &recovery.published_identity_sha256,
                         &mut checkpoint,
                     )?;
                     Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
@@ -1157,6 +1161,7 @@ fn finish_restore_cleanup_recovery(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
     validate_restore_transaction(store, transaction)?;
@@ -1189,8 +1194,12 @@ fn finish_restore_cleanup_recovery(
         ));
     }
 
-    if finish_restore_cleanup(state, transaction, checkpoint)?
-        == RestoreCleanupOutcome::WorkspaceModified
+    if finish_restore_cleanup_with_identity(
+        state,
+        transaction,
+        published_identity_sha256,
+        checkpoint,
+    )? == RestoreCleanupOutcome::WorkspaceModified
     {
         return Err(FolderbaseCaptureError::RestoreTargetOccupied(
             PathBuf::from(&transaction.path),
@@ -1205,10 +1214,24 @@ fn finish_restore_cleanup(
     transaction: &RestoreTransaction,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<RestoreCleanupOutcome, FolderbaseCaptureError> {
+    let published_identity_sha256 = state.workspace_restore_identity_sha256(
+        &restore_stage_path(transaction),
+        Path::new(&transaction.path),
+    )?;
+    finish_restore_cleanup_with_identity(state, transaction, &published_identity_sha256, checkpoint)
+}
+
+fn finish_restore_cleanup_with_identity(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
+) -> Result<RestoreCleanupOutcome, FolderbaseCaptureError> {
     let committed = RestoreCleanupRecovery {
-        format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
+        format: RESTORE_CLEANUP_RECOVERY_FORMAT_V2.to_owned(),
         disposition: RestoreCleanupDisposition::Committed,
         transaction: transaction.clone(),
+        published_identity_sha256: published_identity_sha256.to_owned(),
     };
     write_restore_cleanup_recovery(state, &committed)?;
     checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
@@ -1224,7 +1247,7 @@ fn finish_restore_cleanup(
         .binding
         .executable()
         .expect("validated regular binding");
-    let retirement = state.retire_workspace_restore_stage_with_hook(
+    let retirement = match state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
@@ -1236,32 +1259,45 @@ fn finish_restore_cleanup(
                 &RestoreCheckpoint::BeforeStageRetirement
             });
         },
-    );
-    if let Err(error) = retirement {
-        if matches!(
-            state.workspace_restore_was_modified_in_place(
-                &restore_stage_path(transaction),
-                Path::new(&transaction.path),
-                digest,
-                bytes,
-                executable,
-            ),
-            Ok(true)
-        ) {
-            let modified = RestoreCleanupRecovery {
-                format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
-                disposition: RestoreCleanupDisposition::CommittedModified,
-                transaction: transaction.clone(),
-            };
-            replace_restore_cleanup_recovery(state, &committed, &modified)?;
-            finish_committed_modified_restore_cleanup_recovery_stage(
-                state,
-                transaction,
-                checkpoint,
-            )?;
-            return Ok(RestoreCleanupOutcome::WorkspaceModified);
+    ) {
+        Ok(retired) => retired,
+        Err(error) => {
+            if matches!(
+                state.workspace_restore_was_modified_in_place(
+                    &restore_stage_path(transaction),
+                    Path::new(&transaction.path),
+                    digest,
+                    bytes,
+                    executable,
+                ),
+                Ok(true)
+            ) {
+                let modified = RestoreCleanupRecovery {
+                    format: RESTORE_CLEANUP_RECOVERY_FORMAT_V2.to_owned(),
+                    disposition: RestoreCleanupDisposition::CommittedModified,
+                    transaction: transaction.clone(),
+                    published_identity_sha256: published_identity_sha256.to_owned(),
+                };
+                replace_restore_cleanup_recovery(state, &committed, &modified)?;
+                finish_committed_modified_restore_cleanup_recovery_stage(
+                    state,
+                    transaction,
+                    published_identity_sha256,
+                    checkpoint,
+                )?;
+                return Ok(RestoreCleanupOutcome::WorkspaceModified);
+            }
+            return Err(error.into());
         }
-        return Err(error.into());
+    };
+    if !retirement {
+        state.verify_workspace_regular_file_identity_and_fidelity(
+            Path::new(&transaction.path),
+            published_identity_sha256,
+            digest,
+            bytes,
+            executable,
+        )?;
     }
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
@@ -1449,16 +1485,28 @@ fn retire_modified_restore(
         return Ok(false);
     }
 
+    let published_identity_sha256 = state.workspace_restore_identity_sha256(
+        &restore_stage_path(transaction),
+        Path::new(&transaction.path),
+    )?;
     write_restore_cleanup_recovery(
         state,
         &RestoreCleanupRecovery {
-            format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
+            format: RESTORE_CLEANUP_RECOVERY_FORMAT_V2.to_owned(),
             disposition: RestoreCleanupDisposition::Modified,
             transaction: transaction.clone(),
+            published_identity_sha256: published_identity_sha256.clone(),
         },
     )?;
     checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
-    finish_modified_restore_cleanup_recovery(store, local, state, transaction, checkpoint)?;
+    finish_modified_restore_cleanup_recovery(
+        store,
+        local,
+        state,
+        transaction,
+        &published_identity_sha256,
+        checkpoint,
+    )?;
     Ok(true)
 }
 
@@ -1467,10 +1515,11 @@ fn finish_modified_restore_cleanup_recovery(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
-    state.retire_workspace_restore_stage_with_hook(
+    let retired = state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
@@ -1483,6 +1532,12 @@ fn finish_modified_restore_cleanup_recovery(
             });
         },
     )?;
+    if !retired {
+        state.verify_workspace_regular_file_identity(
+            Path::new(&transaction.path),
+            published_identity_sha256,
+        )?;
+    }
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     remove_restore_cleanup_recovery(state)
@@ -1493,6 +1548,7 @@ fn finish_committed_modified_restore_cleanup_recovery(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     validate_restore_transaction(store, transaction)?;
@@ -1524,15 +1580,21 @@ fn finish_committed_modified_restore_cleanup_recovery(
             "committed-modified cleanup installed version changed".to_owned(),
         ));
     }
-    finish_committed_modified_restore_cleanup_recovery_stage(state, transaction, checkpoint)
+    finish_committed_modified_restore_cleanup_recovery_stage(
+        state,
+        transaction,
+        published_identity_sha256,
+        checkpoint,
+    )
 }
 
 fn finish_committed_modified_restore_cleanup_recovery_stage(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
-    state.retire_workspace_restore_stage_with_hook(
+    let retired = state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
@@ -1545,6 +1607,12 @@ fn finish_committed_modified_restore_cleanup_recovery_stage(
             });
         },
     )?;
+    if !retired {
+        state.verify_workspace_regular_file_identity(
+            Path::new(&transaction.path),
+            published_identity_sha256,
+        )?;
+    }
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     remove_restore_cleanup_recovery(state)
@@ -3505,9 +3573,11 @@ fn read_restore_cleanup_recovery(
             "restore cleanup recovery is invalid JSON: {source}"
         ))
     })?;
-    if recovery.format != RESTORE_CLEANUP_RECOVERY_FORMAT_V1 {
+    if recovery.format != RESTORE_CLEANUP_RECOVERY_FORMAT_V2
+        || !is_lowercase_sha256(&recovery.published_identity_sha256)
+    {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-            "restore cleanup recovery format is unsupported".to_owned(),
+            "restore cleanup recovery format or publication identity is invalid".to_owned(),
         ));
     }
     Ok(Some(recovery))
@@ -3680,12 +3750,6 @@ fn validate_restore_transaction(
             "restore path is not an ordinary portable content path".to_owned(),
         )
     })?;
-    let valid_hex = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
     if transaction.format != RESTORE_TRANSACTION_FORMAT_V1
         || transaction.folderbase_id != store.root_attestation.folderbase_id
         || transaction.root_instance_sha256 != store.root_attestation.root_instance_sha256
@@ -3698,9 +3762,9 @@ fn validate_restore_transaction(
                 .unwrap_or_default(),
         )
         .is_err()
-        || !valid_hex(&transaction.expected_head.version_sha256)
-        || !valid_hex(transaction.expected_head.authority.sha256())
-        || !valid_hex(&transaction.target_version_sha256)
+        || !is_lowercase_sha256(&transaction.expected_head.version_sha256)
+        || !is_lowercase_sha256(transaction.expected_head.authority.sha256())
+        || !is_lowercase_sha256(&transaction.target_version_sha256)
     {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
             "restore journal identity or digest fields are invalid".to_owned(),
@@ -3732,6 +3796,13 @@ fn validate_restore_transaction(
             .to_owned(),
     )?;
     Ok(())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn compare_and_swap_restore_head(
@@ -5509,13 +5580,20 @@ mod tests {
                 &encode_restore_transaction(&forged).expect("forged active bytes"),
             )
             .expect("coordinated active rewrite");
+        let forged_identity_sha256 = state
+            .workspace_restore_identity_sha256(
+                &restore_stage_path(&forged),
+                Path::new(&forged.path),
+            )
+            .expect("forged publication identity");
         state
             .replace(
                 Path::new(RESTORE_CLEANUP_RECOVERY_PATH),
                 &encode_restore_cleanup_recovery(&RestoreCleanupRecovery {
-                    format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
+                    format: RESTORE_CLEANUP_RECOVERY_FORMAT_V2.to_owned(),
                     disposition: RestoreCleanupDisposition::Modified,
                     transaction: forged.clone(),
+                    published_identity_sha256: forged_identity_sha256,
                 })
                 .expect("forged cleanup bytes"),
             )
