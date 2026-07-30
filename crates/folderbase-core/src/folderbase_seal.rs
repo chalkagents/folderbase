@@ -1742,6 +1742,21 @@ fn completed_restore_result(
         .binding
         .executable()
         .expect("validated regular binding");
+    let expected_authority = restore_authority_record(transaction, published_identity_sha256);
+    let authority_path = restore_authority_record_path(&transaction.transaction_id);
+    let authority = state
+        .read_bounded(&authority_path, MAX_RESTORE_AUTHORITY_BYTES)?
+        .and_then(|encoded| serde_json::from_slice::<RestoreAuthorityRecord>(&encoded).ok());
+    let retained_identity =
+        state.workspace_restore_identity_sha256(&restore_stage_path(transaction), path);
+    if authority.as_ref() != Some(&expected_authority)
+        || !matches!(
+            retained_identity,
+            Ok(observed) if observed == published_identity_sha256
+        )
+    {
+        return Ok(None);
+    }
     if state
         .verify_workspace_regular_file_identity_and_fidelity(
             path,
@@ -3697,18 +3712,7 @@ fn write_restore_authority_record(
     transaction: &RestoreTransaction,
     published_identity_sha256: &str,
 ) -> Result<(), FolderbaseCaptureError> {
-    let record = RestoreAuthorityRecord {
-        format: RESTORE_AUTHORITY_FORMAT_V1.to_owned(),
-        folderbase_id: transaction.folderbase_id.clone(),
-        root_instance_sha256: transaction.root_instance_sha256.clone(),
-        transaction_id: transaction.transaction_id.clone(),
-        workspace_path: transaction.path.clone(),
-        private_stage_path: restore_stage_path(transaction)
-            .to_str()
-            .expect("validated restore stage paths are UTF-8")
-            .to_owned(),
-        published_identity_sha256: published_identity_sha256.to_owned(),
-    };
+    let record = restore_authority_record(transaction, published_identity_sha256);
     let mut encoded = serde_json::to_vec_pretty(&record).map_err(|source| {
         FolderbaseCaptureError::InvalidRestoreTransaction(format!(
             "restore authority encoding failed: {source}"
@@ -3737,6 +3741,24 @@ fn write_restore_authority_record(
             }
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+fn restore_authority_record(
+    transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
+) -> RestoreAuthorityRecord {
+    RestoreAuthorityRecord {
+        format: RESTORE_AUTHORITY_FORMAT_V1.to_owned(),
+        folderbase_id: transaction.folderbase_id.clone(),
+        root_instance_sha256: transaction.root_instance_sha256.clone(),
+        transaction_id: transaction.transaction_id.clone(),
+        workspace_path: transaction.path.clone(),
+        private_stage_path: restore_stage_path(transaction)
+            .to_str()
+            .expect("validated restore stage paths are UTF-8")
+            .to_owned(),
+        published_identity_sha256: published_identity_sha256.to_owned(),
     }
 }
 
@@ -6215,6 +6237,41 @@ mod tests {
             Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
                 if path == Path::new("active.bin")
         ));
+    }
+
+    #[test]
+    fn completion_receipt_requires_its_retained_authority_link() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("completed restore");
+        let completion =
+            read_restore_completion_receipt(&FolderbaseState::open(root.path()).expect("state"))
+                .expect("completion receipt")
+                .expect("completed restore");
+        fs::remove_file(
+            root.path()
+                .join(restore_stage_path(&completion.transaction)),
+        )
+        .expect("remove retained authority link");
+
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("workspace file preserved"),
+            b"first opaque bytes"
+        );
     }
 
     #[test]
