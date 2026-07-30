@@ -13,6 +13,7 @@ keywords = ["agents", "filesystem", "local-first", "knowledge"]
 categories = ["filesystem", "data-structures"]
 exclude = [
   "tests/change_set_conformance.rs",
+  "tests/fb41h_optional_narratives.rs",
   "tests/folderbase_version_conformance.rs",
   "tests/inspection.rs",
   "tests/migration.rs",
