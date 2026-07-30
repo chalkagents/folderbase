@@ -41,6 +41,7 @@ test ! -e "$core_source/protocol"
 test ! -e "$core_source/tests/folderbase_version_conformance.rs"
 grep -Fq 'contract = "folderbase-version-v1"' "$core_source/Cargo.toml"
 grep -Fq 'protocol-version = "0.4"' "$core_source/Cargo.toml"
+grep -Fq 'candidate-protocol-version = "0.5"' "$core_source/Cargo.toml"
 grep -Fq 'distribution = "repository-tag-source-archive"' "$core_source/Cargo.toml"
 grep -Fq 'cargo-package-role = "runtime-implementation-only"' "$core_source/Cargo.toml"
 

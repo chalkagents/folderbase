@@ -117,6 +117,33 @@ if (
 }
 
 const exactConformanceFiles = walk(conformanceRoot).sort();
+const implementingRustFiles = [
+  "crates/folderbase-cli/src/main.rs",
+  "crates/folderbase-cli/tests/cli.rs",
+  "crates/folderbase-core/Cargo.toml",
+  "crates/folderbase-core/src/error.rs",
+  "crates/folderbase-core/src/folder_analysis.rs",
+  "crates/folderbase-core/src/folderbase_capture.rs",
+  "crates/folderbase-core/src/folderbase_seal.rs",
+  "crates/folderbase-core/src/folderbase_state.rs",
+  "crates/folderbase-core/src/folderbase_version.rs",
+  "crates/folderbase-core/src/initialization.rs",
+  "crates/folderbase-core/src/lib.rs",
+  "crates/folderbase-core/src/local_versions.rs",
+  "crates/folderbase-core/src/migration.rs",
+  "crates/folderbase-core/src/model.rs",
+  "crates/folderbase-core/src/protocol_upgrade.rs",
+  "crates/folderbase-core/src/reorganization.rs",
+  "crates/folderbase-core/src/root_attestation.rs",
+  "crates/folderbase-core/src/template_expansion.rs",
+  "crates/folderbase-core/src/transfer_source.rs",
+  "crates/folderbase-core/src/traversal_policy.rs",
+  "crates/folderbase-core/src/validation.rs",
+  "crates/folderbase-core/src/workspace.rs",
+  "crates/folderbase-core/tests/fb41h_optional_narratives.rs",
+  "crates/folderbase-core/tests/folderbase_version_05_conformance.rs",
+  "crates/folderbase-core/tests/protocol_upgrade_security.rs",
+];
 const requiredNonConformanceFiles = [
   ".github/workflows/ci.yml",
   "README.md",
@@ -139,6 +166,7 @@ const requiredNonConformanceFiles = [
 ];
 const expectedPaths = [
   ...exactConformanceFiles,
+  ...implementingRustFiles,
   ...requiredNonConformanceFiles,
 ].sort();
 if (JSON.stringify(declaredPaths) !== JSON.stringify(expectedPaths)) {
