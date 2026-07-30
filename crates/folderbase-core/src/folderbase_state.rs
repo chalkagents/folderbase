@@ -6,7 +6,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -14,11 +14,15 @@ use std::{
 use cap_fs_ext::DirExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use same_file::Handle;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{FolderbaseError, Result, root_attestation::metadata_is_link_or_reparse};
+use crate::{
+    FolderbaseError, Result,
+    folderbase_restore_authority::{stable_file_identity_sha256, stable_file_link_count},
+    physical_identity::PhysicalIdentity,
+    root_attestation::metadata_is_link_or_reparse,
+};
 
 const STATE_COMPONENT: &str = ".folderbase";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -36,10 +40,20 @@ enum StateAccess {
 
 pub(crate) struct FolderbaseState {
     root: Dir,
+    root_identity: PhysicalIdentity,
     state: Dir,
-    state_identity: Handle,
+    state_identity: PhysicalIdentity,
     display_root: PathBuf,
     access: StateAccess,
+}
+
+struct WorkspaceTargetCapability {
+    parent: Dir,
+    parent_identity: PhysicalIdentity,
+    relative: PathBuf,
+    name: OsString,
+    parent_display: PathBuf,
+    display: PathBuf,
 }
 
 impl FolderbaseState {
@@ -74,9 +88,11 @@ impl FolderbaseState {
                 return Err(FolderbaseError::io(root.join(STATE_COMPONENT), source));
             }
         };
+        let root_identity = directory_identity(&root_cap, root)?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
         Ok(Self {
             root: root_cap,
+            root_identity,
             state,
             state_identity,
             display_root: root.to_path_buf(),
@@ -101,9 +117,11 @@ impl FolderbaseState {
             access,
         )
         .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?;
+        let root_identity = directory_identity(&root_cap, root)?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
         Ok(Self {
             root: root_cap,
+            root_identity,
             state,
             state_identity,
             display_root: root.to_path_buf(),
@@ -180,6 +198,31 @@ impl FolderbaseState {
             });
         }
         Ok(Some(bytes))
+    }
+
+    pub(crate) fn private_directory_names(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        let relative = state_relative(relative)?;
+        let directory = self.open_dir(&relative)?;
+        let display = self.display_path(&relative);
+        let mut names = Vec::new();
+        for entry in directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+            if names.len() >= maximum_entries {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private directory exceeds its bounded entry limit".to_owned(),
+                });
+            }
+            names.push(entry.file_name());
+        }
+        Ok(names)
     }
 
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
@@ -319,6 +362,905 @@ impl FolderbaseState {
         )
     }
 
+    /// Copy one verified immutable content blob into a private restore stage.
+    ///
+    /// The copy intentionally receives its own inode so applying executable
+    /// fidelity cannot mutate the content-addressed source blob.
+    pub(crate) fn stage_restore_blob(
+        &self,
+        source: &Path,
+        stage: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<()> {
+        let source = state_relative(source)?;
+        let stage = state_relative(stage)?;
+        self.require_mutable(&stage)?;
+        let (source_parent, source_name) = self.open_parent(&source)?;
+        let source_display = self.display_path(&source);
+        let mut read_options = CapOpenOptions::new();
+        read_options.read(true).follow(FollowSymlinks::No);
+        let mut source_file = source_parent
+            .open_with(&source_name, &read_options)
+            .map_err(|source| FolderbaseError::io(&source_display, source))?;
+        verify_open_regular_metadata(&source_file, bytes, &source_display)?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut write_options = CapOpenOptions::new();
+        write_options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            write_options.mode(if executable { 0o700 } else { 0o600 });
+        }
+        match stage_parent.open_with(&stage_name, &write_options) {
+            Ok(mut staged) => {
+                let copy_result =
+                    copy_exact_sha256(
+                        &mut source_file,
+                        &mut staged,
+                        bytes,
+                        digest,
+                        &source_display,
+                        &stage_display,
+                    )
+                    .and_then(|()| {
+                        #[cfg(unix)]
+                        {
+                            use cap_std::fs::PermissionsExt;
+
+                            staged
+                                .set_permissions(cap_std::fs::Permissions::from_mode(
+                                    if executable { 0o700 } else { 0o600 },
+                                ))
+                                .map_err(|source| FolderbaseError::io(&stage_display, source))?;
+                        }
+                        staged
+                            .sync_all()
+                            .map_err(|source| FolderbaseError::io(&stage_display, source))
+                    });
+                drop(staged);
+                if let Err(error) = copy_result {
+                    let _ = stage_parent.remove_file(&stage_name);
+                    return Err(error);
+                }
+                sync_directory(&stage_parent, &stage_display)?;
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(FolderbaseError::io(stage_display, source)),
+        }
+        verify_regular_file(
+            &stage_parent,
+            &stage_name,
+            digest,
+            bytes,
+            executable,
+            &stage_display,
+        )
+    }
+
+    /// Hard-link a retained private stage into an absent workspace path.
+    ///
+    /// An existing destination is accepted only when it is the exact same
+    /// filesystem object as the retained stage. This permits durable retry
+    /// without treating same-byte foreign content as transaction-owned.
+    #[cfg(test)]
+    pub(crate) fn publish_workspace_restore(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<bool> {
+        self.publish_workspace_restore_with_hook(
+            stage,
+            destination,
+            digest,
+            bytes,
+            executable,
+            |_| {},
+        )
+    }
+
+    pub(crate) fn publish_workspace_restore_with_hook(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+        mut checkpoint: impl FnMut(bool),
+    ) -> Result<bool> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut stage_file =
+            open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display)?;
+        let target = self.open_workspace_target_capability(&destination)?;
+        checkpoint(false);
+        let visible_parent = self.reopen_workspace_target_capability(&target)?;
+        match visible_parent.symlink_metadata(&target.name) {
+            Ok(_) => {
+                let destination_identity =
+                    regular_file_identity(&visible_parent, &target.name, &target.display)
+                        .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+                if open_regular_file_identity(&stage_file, &stage_display)? != destination_identity
+                {
+                    return Err(FolderbaseError::WouldOverwrite(target.display));
+                }
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                verify_regular_file(
+                    &visible_parent,
+                    &target.name,
+                    digest,
+                    bytes,
+                    executable,
+                    &target.display,
+                )?;
+                self.reopen_workspace_target_capability(&target)?;
+                return Ok(false);
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(FolderbaseError::io(&target.display, source)),
+        }
+        require_restore_link_count(&stage_file, 1, &target.display)?;
+        match stage_parent.hard_link(&stage_name, &target.parent, &target.name) {
+            Ok(()) => {
+                checkpoint(true);
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                sync_directory(&target.parent, &target.display)?;
+                let visible_parent = self.reopen_workspace_target_capability(&target)?;
+                verify_regular_file(
+                    &visible_parent,
+                    &target.name,
+                    digest,
+                    bytes,
+                    executable,
+                    &target.display,
+                )?;
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                self.reopen_workspace_target_capability(&target)?;
+                Ok(true)
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                let stage_identity =
+                    regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
+                let visible_parent = self.reopen_workspace_target_capability(&target)?;
+                let destination_identity =
+                    regular_file_identity(&visible_parent, &target.name, &target.display)
+                        .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+                if stage_identity != destination_identity {
+                    return Err(FolderbaseError::WouldOverwrite(target.display));
+                }
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                verify_regular_file(
+                    &visible_parent,
+                    &target.name,
+                    digest,
+                    bytes,
+                    executable,
+                    &target.display,
+                )?;
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                self.reopen_workspace_target_capability(&target)?;
+                Ok(false)
+            }
+            Err(source) => Err(FolderbaseError::io(target.display, source)),
+        }
+    }
+
+    pub(crate) fn workspace_path_is_absent(&self, relative: &Path) -> Result<bool> {
+        let relative = safe_workspace_relative(relative)?;
+        let target = self.open_workspace_target_capability(&relative)?;
+        let absent = match target.parent.symlink_metadata(&target.name) {
+            Ok(_) => false,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => true,
+            Err(source) => return Err(FolderbaseError::io(&target.display, source)),
+        };
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(absent)
+    }
+
+    /// Open one ordinary workspace file through the retained physical-root
+    /// capability without consulting the ambient root path.
+    pub(crate) fn open_workspace_regular_file(&self, relative: &Path) -> Result<File> {
+        let relative = safe_workspace_relative(relative)?;
+        let target = self.open_workspace_target_capability(&relative)?;
+        let file = open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(file.into_std())
+    }
+
+    /// Detect a user edit made through the exact workspace object published
+    /// by a restore transaction. A separately-created replacement is never
+    /// classified as transaction-owned, even when its bytes happen to match.
+    pub(crate) fn workspace_restore_was_modified_in_place(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<bool> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut stage_file =
+            open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+
+        let target = self.open_workspace_target_capability(&destination)?;
+        let destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        let destination_identity = open_regular_file_identity(&destination_file, &target.display)?;
+        if destination_identity != stage_identity {
+            self.reopen_workspace_target_capability(&target)?;
+            return Ok(false);
+        }
+
+        let modified = match verify_open_regular_file(
+            &mut stage_file,
+            digest,
+            bytes,
+            executable,
+            &stage_display,
+        ) {
+            Ok(()) => false,
+            Err(FolderbaseError::InvalidRecord { .. }) => true,
+            Err(error) => return Err(error),
+        };
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(modified)
+    }
+
+    /// Return a durable device-local identity for the exact inode shared by a
+    /// restore stage and its visible workspace publication.
+    pub(crate) fn workspace_restore_identity_sha256(
+        &self,
+        stage: &Path,
+        destination: &Path,
+    ) -> Result<String> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let stage_file = open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+
+        let target = self.open_workspace_target_capability(&destination)?;
+        let destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        if open_regular_file_identity(&destination_file, &target.display)? != stage_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: target.display,
+                message: "restore destination no longer names the staged file".to_owned(),
+            });
+        }
+        let stage_stable = stable_regular_file_identity_sha256(&stage_file, &stage_display)?;
+        if stable_regular_file_identity_sha256(&destination_file, &target.display)? != stage_stable
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: target.display,
+                message: "restore destination stable identity changed".to_owned(),
+            });
+        }
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(stage_stable)
+    }
+
+    /// Inspect the exact retained-stage/workspace inode relationship during
+    /// capture planning without requesting access to either file's content.
+    pub(crate) fn planned_workspace_restore_identity_sha256(
+        &self,
+        stage: &Path,
+        destination: &Path,
+    ) -> Result<String> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let stage_identity =
+            planning_regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
+
+        let target = self.open_workspace_target_capability(&destination)?;
+        let destination_identity =
+            planning_regular_file_identity(&target.parent, &target.name, &target.display)?;
+        if destination_identity != stage_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: target.display.clone(),
+                message: "restore destination no longer names the staged file".to_owned(),
+            });
+        }
+
+        let rechecked_stage =
+            planning_regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
+        let rechecked_destination =
+            planning_regular_file_identity(&target.parent, &target.name, &target.display)?;
+        if rechecked_stage != stage_identity || rechecked_destination != destination_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: target.display,
+                message: "restore destination identity changed during planning".to_owned(),
+            });
+        }
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(stage_identity)
+    }
+
+    /// Verify both exact publication identity and sealed file fidelity when
+    /// every private hard link has already been retired.
+    pub(crate) fn verify_workspace_regular_file_identity_and_fidelity(
+        &self,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<()> {
+        self.verify_workspace_regular_file_identity_inner(
+            destination,
+            expected_identity_sha256,
+            Some((digest, bytes, executable)),
+        )
+    }
+
+    fn verify_workspace_regular_file_identity_inner(
+        &self,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        expected_fidelity: Option<(&str, u64, bool)>,
+    ) -> Result<()> {
+        let destination = safe_workspace_relative(destination)?;
+        let target = self.open_workspace_target_capability(&destination)?;
+        let mut destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        if stable_regular_file_identity_sha256(&destination_file, &target.display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: target.display,
+                message: "workspace file no longer has the restore publication identity".to_owned(),
+            });
+        }
+        if let Some((digest, bytes, executable)) = expected_fidelity {
+            verify_open_regular_file(
+                &mut destination_file,
+                digest,
+                bytes,
+                executable,
+                &target.display,
+            )?;
+        }
+
+        let visible_parent = self.reopen_workspace_target_capability(&target)?;
+        let mut visible_file =
+            open_regular_file_nofollow(&visible_parent, &target.name, &target.display)?;
+        if stable_regular_file_identity_sha256(&visible_file, &target.display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: target.display,
+                message: "workspace file identity changed during restore verification".to_owned(),
+            });
+        }
+        if let Some((digest, bytes, executable)) = expected_fidelity {
+            verify_open_regular_file(
+                &mut visible_file,
+                digest,
+                bytes,
+                executable,
+                &target.display,
+            )?;
+        }
+        self.reopen_workspace_target_capability(&target).map(drop)
+    }
+
+    /// Retain and revalidate the exact private authority link for a restore.
+    ///
+    /// This performs no rename or unlink. The transaction-unique stage stays
+    /// linked to the visible workspace file so later capture can distinguish
+    /// one Folderbase authority link from ordinary user-created hard links.
+    pub(crate) fn retain_workspace_restore_authority_with_hook(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        expected_fidelity: Option<(&str, u64, bool)>,
+        mut checkpoint: impl FnMut(bool),
+    ) -> Result<()> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let stage_file = open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let target = self.open_workspace_target_capability(&destination)?;
+
+        for after_stage_boundary in [false, true] {
+            verify_restore_retained_stage(
+                &stage_parent,
+                &stage_name,
+                &stage_display,
+                &stage_file,
+                expected_identity_sha256,
+            )?;
+            verify_restore_retirement_publication(
+                &stage_file,
+                &stage_display,
+                &target.parent,
+                &target.name,
+                &target.display,
+                expected_identity_sha256,
+                expected_fidelity,
+            )?;
+            checkpoint(after_stage_boundary);
+            self.reopen_workspace_target_capability(&target)?;
+        }
+        verify_restore_retained_stage(
+            &stage_parent,
+            &stage_name,
+            &stage_display,
+            &stage_file,
+            expected_identity_sha256,
+        )?;
+        verify_restore_retirement_publication(
+            &stage_file,
+            &stage_display,
+            &target.parent,
+            &target.name,
+            &target.display,
+            expected_identity_sha256,
+            expected_fidelity,
+        )?;
+        self.reopen_workspace_target_capability(&target).map(drop)
+    }
+
+    /// Legacy destructive retirement is compiled out. Restore authorities are
+    /// retained until a future explicit maintenance protocol can prune them
+    /// without reintroducing pathname overwrite or check-then-unlink races.
+    #[cfg(any())]
+    #[allow(dead_code)]
+    /// Retire only the exact private stage for a restore-owned workspace file.
+    ///
+    /// A transaction-owned rescue hard link protects the staged inode across
+    /// the unlink boundary. Both private names and the visible destination are
+    /// revalidated through retained directory capabilities. Any replacement or
+    /// uncertainty fails closed while the rescue remains durable.
+    pub(crate) fn retire_workspace_restore_stage_with_hook(
+        &self,
+        stage: &Path,
+        rescue: &Path,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        expected_fidelity: Option<(&str, u64, bool)>,
+        mut checkpoint: impl FnMut(bool),
+    ) -> Result<bool> {
+        let stage = state_relative(stage)?;
+        let rescue = state_relative(rescue)?;
+        let mut stage_quarantine_name = stage
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(self.display_path(&stage)))?
+            .to_os_string();
+        stage_quarantine_name.push(".folderbase-quarantine");
+        let stage_quarantine = stage.with_file_name(stage_quarantine_name);
+        let mut rescue_quarantine_name = rescue
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(self.display_path(&rescue)))?
+            .to_os_string();
+        rescue_quarantine_name.push(".folderbase-quarantine");
+        let rescue_quarantine = rescue.with_file_name(rescue_quarantine_name);
+        let destination = safe_workspace_relative(destination)?;
+        for private in [&stage, &stage_quarantine, &rescue, &rescue_quarantine] {
+            self.require_mutable(private)?;
+        }
+        let private_parent = stage.parent();
+        if private_parent != stage_quarantine.parent()
+            || private_parent != rescue.parent()
+            || private_parent != rescue_quarantine.parent()
+            || stage == stage_quarantine
+            || stage == rescue
+            || stage == rescue_quarantine
+            || stage_quarantine == rescue
+            || stage_quarantine == rescue_quarantine
+            || rescue == rescue_quarantine
+        {
+            return Err(FolderbaseError::UnsafePath(self.display_path(&rescue)));
+        }
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = match self.open_parent(&stage) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let (stage_quarantine_parent, stage_quarantine_name) =
+            self.open_parent(&stage_quarantine)?;
+        let (rescue_parent, rescue_name) = self.open_parent(&rescue)?;
+        let (rescue_quarantine_parent, rescue_quarantine_name) =
+            self.open_parent(&rescue_quarantine)?;
+        let stage_display = self.display_path(&stage);
+        let stage_quarantine_display = self.display_path(&stage_quarantine);
+        let rescue_display = self.display_path(&rescue);
+        let rescue_quarantine_display = self.display_path(&rescue_quarantine);
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+
+        let open_optional =
+            |parent: &Dir, name: &OsStr, display: &Path| match open_regular_file_nofollow(
+                parent, name, display,
+            ) {
+                Ok(file) => Ok(Some(file)),
+                Err(FolderbaseError::Io { source, .. })
+                    if source.kind() == io::ErrorKind::NotFound =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            };
+        let stage_file = open_optional(&stage_parent, &stage_name, &stage_display)?;
+        let stage_quarantine_file = open_optional(
+            &stage_quarantine_parent,
+            &stage_quarantine_name,
+            &stage_quarantine_display,
+        )?;
+        let rescue_file = open_optional(&rescue_parent, &rescue_name, &rescue_display)?;
+        let rescue_quarantine_file = open_optional(
+            &rescue_quarantine_parent,
+            &rescue_quarantine_name,
+            &rescue_quarantine_display,
+        )?;
+
+        let retained_file = stage_file
+            .as_ref()
+            .or(stage_quarantine_file.as_ref())
+            .or(rescue_file.as_ref())
+            .or(rescue_quarantine_file.as_ref());
+        let Some(retained_file) = retained_file else {
+            return Ok(false);
+        };
+        let retained_display = if stage_file.is_some() {
+            &stage_display
+        } else if stage_quarantine_file.is_some() {
+            &stage_quarantine_display
+        } else if rescue_file.is_some() {
+            &rescue_display
+        } else {
+            &rescue_quarantine_display
+        };
+        let retained_identity = open_regular_file_identity(retained_file, retained_display)?;
+        for (file, display) in [
+            (stage_file.as_ref(), &stage_display),
+            (stage_quarantine_file.as_ref(), &stage_quarantine_display),
+            (rescue_file.as_ref(), &rescue_display),
+            (rescue_quarantine_file.as_ref(), &rescue_quarantine_display),
+        ] {
+            if let Some(file) = file {
+                if open_regular_file_identity(file, display)? != retained_identity {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: display.to_path_buf(),
+                        message: "restore private names do not share one retained inode".to_owned(),
+                    });
+                }
+                if stable_regular_file_identity_sha256(file, display)? != expected_identity_sha256 {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: display.to_path_buf(),
+                        message: "restore private name no longer has the published identity"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+
+        let destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if open_regular_file_identity(&destination_file, &destination_display)? != retained_identity
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: retained_display.to_path_buf(),
+                message: "restore private state no longer owns the workspace file".to_owned(),
+            });
+        }
+        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "workspace file no longer has the restore publication identity".to_owned(),
+            });
+        }
+        if let Some((digest, bytes, executable)) = expected_fidelity {
+            let mut fidelity_file = retained_file
+                .try_clone()
+                .map_err(|source| FolderbaseError::io(retained_display.to_path_buf(), source))?;
+            verify_open_regular_file(
+                &mut fidelity_file,
+                digest,
+                bytes,
+                executable,
+                retained_display,
+            )?;
+        }
+
+        if rescue_file.is_none() && rescue_quarantine_file.is_none() {
+            let (source_parent, source_name) = if stage_file.is_some() {
+                (&stage_parent, &stage_name)
+            } else {
+                (&stage_quarantine_parent, &stage_quarantine_name)
+            };
+            match source_parent.hard_link(source_name, &rescue_parent, &rescue_name) {
+                Ok(()) => sync_directory(&rescue_parent, &rescue_display)?,
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => return Err(FolderbaseError::io(&rescue_display, source)),
+            }
+            if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: rescue_display,
+                    message: "restore rescue captured a different filesystem object".to_owned(),
+                });
+            }
+        }
+
+        if stage_file.is_some() && stage_quarantine_file.is_some() {
+            return Err(FolderbaseError::InvalidRecord {
+                path: stage_quarantine_display,
+                message: "restore stage and quarantine both exist".to_owned(),
+            });
+        }
+        if stage_file.is_some() {
+            if regular_file_identity(&stage_parent, &stage_name, &stage_display)?
+                != retained_identity
+                || regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                    != retained_identity
+                || regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: stage_display,
+                    message: "restore ownership changed before stage quarantine".to_owned(),
+                });
+            }
+            checkpoint(false);
+            verify_restore_retirement_publication(
+                retained_file,
+                retained_display,
+                &destination_parent,
+                &destination_name,
+                &destination_display,
+                expected_identity_sha256,
+                expected_fidelity,
+            )?;
+            stage_parent
+                .rename(
+                    &stage_name,
+                    &stage_quarantine_parent,
+                    &stage_quarantine_name,
+                )
+                .map_err(|source| FolderbaseError::io(&stage_quarantine_display, source))?;
+            sync_directory(&stage_parent, &stage_display)?;
+            if regular_file_identity(
+                &stage_quarantine_parent,
+                &stage_quarantine_name,
+                &stage_quarantine_display,
+            )? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: stage_quarantine_display,
+                    message: "restore stage quarantine preserved a replacement".to_owned(),
+                });
+            }
+        }
+
+        let stage_is_quarantined = stage_file.is_some() || stage_quarantine_file.is_some();
+        if stage_is_quarantined
+            && (regular_file_identity(
+                &stage_quarantine_parent,
+                &stage_quarantine_name,
+                &stage_quarantine_display,
+            )? != retained_identity
+                || regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                    != retained_identity
+                || regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )? != retained_identity)
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: stage_quarantine_display,
+                message: "restore ownership changed after stage quarantine".to_owned(),
+            });
+        }
+        if stage_is_quarantined {
+            stage_quarantine_parent
+                .remove_file(&stage_quarantine_name)
+                .map_err(|source| FolderbaseError::io(&stage_quarantine_display, source))?;
+            sync_directory(&stage_quarantine_parent, &stage_quarantine_display)?;
+        }
+
+        if rescue_file.is_some() && rescue_quarantine_file.is_some() {
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_quarantine_display,
+                message: "restore rescue and quarantine both exist".to_owned(),
+            });
+        }
+        let rescue_is_normal = rescue_file.is_some() || rescue_quarantine_file.is_none();
+        if rescue_is_normal {
+            if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                != retained_identity
+                || regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: rescue_display,
+                    message: "restore ownership changed before rescue quarantine".to_owned(),
+                });
+            }
+            checkpoint(true);
+            verify_restore_retirement_publication(
+                retained_file,
+                retained_display,
+                &destination_parent,
+                &destination_name,
+                &destination_display,
+                expected_identity_sha256,
+                expected_fidelity,
+            )?;
+            rescue_parent
+                .rename(
+                    &rescue_name,
+                    &rescue_quarantine_parent,
+                    &rescue_quarantine_name,
+                )
+                .map_err(|source| FolderbaseError::io(&rescue_quarantine_display, source))?;
+            sync_directory(&rescue_parent, &rescue_display)?;
+        }
+
+        let moved_rescue_identity = regular_file_identity(
+            &rescue_quarantine_parent,
+            &rescue_quarantine_name,
+            &rescue_quarantine_display,
+        )?;
+        if moved_rescue_identity != retained_identity {
+            if regular_file_identity(&destination_parent, &destination_name, &destination_display)?
+                == retained_identity
+            {
+                match destination_parent.hard_link(&destination_name, &rescue_parent, &rescue_name)
+                {
+                    Ok(()) => sync_directory(&rescue_parent, &rescue_display)?,
+                    Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(source) => return Err(FolderbaseError::io(&rescue_display, source)),
+                }
+            }
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_quarantine_display,
+                message: "restore rescue quarantine preserved a replacement".to_owned(),
+            });
+        }
+        if regular_file_identity(&destination_parent, &destination_name, &destination_display)?
+            != retained_identity
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_quarantine_display,
+                message: "restore destination changed after rescue quarantine".to_owned(),
+            });
+        }
+        rescue_quarantine_parent
+            .remove_file(&rescue_quarantine_name)
+            .map_err(|source| FolderbaseError::io(&rescue_quarantine_display, source))?;
+        sync_directory(&rescue_quarantine_parent, &rescue_quarantine_display)?;
+        let destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "workspace file identity changed during restore retirement".to_owned(),
+            });
+        }
+        self.verify_still_attached()?;
+        Ok(true)
+    }
+
+    /// Revalidate one published restore against its retained private stage.
+    ///
+    /// Success proves that the ambient Folderbase root is still the retained
+    /// physical root, every destination ancestor remains inside this
+    /// Folderbase boundary, and the destination still names the exact staged
+    /// filesystem object with its sealed bytes and executable fidelity.
+    pub(crate) fn verify_workspace_restore(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<()> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut stage_file =
+            open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+        verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display)?;
+
+        let target = self.open_workspace_target_capability(&destination)?;
+        let mut destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+        let destination_identity =
+            open_regular_file_identity(&destination_file, &target.display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+        if destination_identity != stage_identity {
+            return Err(FolderbaseError::WouldOverwrite(target.display));
+        }
+        verify_open_regular_file(
+            &mut destination_file,
+            digest,
+            bytes,
+            executable,
+            &target.display,
+        )?;
+
+        // Reopen through the retained root after byte verification. This
+        // closes over ordinary replacement races and repeats the boundary
+        // walk immediately before the coordinator advances durable state.
+        let visible_parent = self.reopen_workspace_target_capability(&target)?;
+        let mut visible_file =
+            open_regular_file_nofollow(&visible_parent, &target.name, &target.display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+        let visible_identity = open_regular_file_identity(&visible_file, &target.display)
+            .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+        if visible_identity != stage_identity {
+            return Err(FolderbaseError::WouldOverwrite(target.display));
+        }
+        verify_open_regular_file(
+            &mut visible_file,
+            digest,
+            bytes,
+            executable,
+            &target.display,
+        )?;
+        self.reopen_workspace_target_capability(&target).map(drop)
+    }
+
     #[cfg(test)]
     fn verify_sha256_blob_with_hook(
         &self,
@@ -388,7 +1330,15 @@ impl FolderbaseState {
     pub(crate) fn remove_durable(&self, relative: &Path) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
-        let (parent, name) = self.open_parent(&relative)?;
+        let (parent, name) = match self.open_parent(&relative) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let display = self.display_path(&relative);
         match parent.remove_file(&name) {
             Ok(()) => sync_directory(&parent, &display),
@@ -398,8 +1348,13 @@ impl FolderbaseState {
     }
 
     pub(crate) fn verify_still_attached(&self) -> Result<()> {
+        let visible_root = open_root_nofollow(&self.display_root, self.access)?;
+        let visible_root_identity = directory_identity(&visible_root, &self.display_root)?;
+        if visible_root_identity != self.root_identity {
+            return Err(FolderbaseError::UnsafePath(self.display_root.clone()));
+        }
         let visible = open_directory_nofollow(
-            &self.root,
+            &visible_root,
             OsStr::new(STATE_COMPONENT),
             &self.display_root.join(STATE_COMPONENT),
             self.access,
@@ -453,6 +1408,69 @@ impl FolderbaseState {
         Ok(directory)
     }
 
+    fn open_workspace_parent(&self, relative: &Path) -> Result<(Dir, OsString)> {
+        let name = relative
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(relative.to_path_buf()))?
+            .to_os_string();
+        let mut directory = self
+            .root
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(&self.display_root, source))?;
+        let mut display = self.display_root.clone();
+        if let Some(parent) = relative.parent() {
+            for component in parent.components() {
+                let Component::Normal(component) = component else {
+                    return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
+                };
+                display.push(component);
+                directory = open_directory_nofollow(&directory, component, &display, self.access)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+                if contains_folderbase_marker(&directory, &display)? {
+                    return Err(FolderbaseError::UnsafePath(display));
+                }
+            }
+        }
+        Ok((directory, name))
+    }
+
+    fn open_workspace_target_capability(
+        &self,
+        relative: &Path,
+    ) -> Result<WorkspaceTargetCapability> {
+        self.verify_still_attached()?;
+        let (parent, name) = self.open_workspace_parent(relative)?;
+        let parent_display = relative.parent().map_or_else(
+            || self.display_root.clone(),
+            |path| self.display_root.join(path),
+        );
+        let parent_identity = directory_identity(&parent, &parent_display)?;
+        self.verify_still_attached()?;
+        Ok(WorkspaceTargetCapability {
+            parent,
+            parent_identity,
+            relative: relative.to_path_buf(),
+            name,
+            parent_display,
+            display: self.display_root.join(relative),
+        })
+    }
+
+    fn reopen_workspace_target_capability(
+        &self,
+        target: &WorkspaceTargetCapability,
+    ) -> Result<Dir> {
+        self.verify_still_attached()?;
+        let (parent, name) = self.open_workspace_parent(&target.relative)?;
+        if name != target.name
+            || directory_identity(&parent, &target.parent_display)? != target.parent_identity
+        {
+            return Err(FolderbaseError::UnsafePath(target.parent_display.clone()));
+        }
+        self.verify_still_attached()?;
+        Ok(parent)
+    }
+
     fn require_mutable(&self, relative: &Path) -> Result<()> {
         if self.access == StateAccess::Mutable {
             return Ok(());
@@ -484,6 +1502,407 @@ fn state_relative(path: &Path) -> Result<PathBuf> {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }
     Ok(relative)
+}
+
+fn safe_workspace_relative(path: &Path) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() || path.is_absolute() || path.to_str().is_none() {
+        return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+    }
+    let mut safe = PathBuf::new();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+        };
+        if name
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(STATE_COMPONENT))
+        {
+            return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+        }
+        safe.push(name);
+    }
+    Ok(safe)
+}
+
+fn contains_folderbase_marker(directory: &Dir, display: &Path) -> Result<bool> {
+    let Some(state_name) = unique_matching_child(directory, display, is_folderbase_state_name)?
+    else {
+        return Ok(false);
+    };
+    let state_display = display.join(&state_name);
+    let state = match open_directory_nofollow(
+        directory,
+        &state_name,
+        &state_display,
+        StateAccess::ReadOnly,
+    ) {
+        Ok(state) => state,
+        Err(source) => return Err(FolderbaseError::io(state_display, source)),
+    };
+    let Some(marker) = unique_matching_child(&state, &state_display, is_folderbase_manifest_name)?
+    else {
+        return Ok(false);
+    };
+    let marker_display = state_display.join(&marker);
+    let metadata = match state.symlink_metadata(marker) {
+        Ok(metadata) => metadata,
+        Err(source) => return Err(FolderbaseError::io(marker_display, source)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(marker_display));
+    }
+    Ok(true)
+}
+
+fn unique_matching_child(
+    directory: &Dir,
+    display: &Path,
+    matches: impl Fn(&OsStr) -> bool,
+) -> Result<Option<OsString>> {
+    let mut found = None;
+    for entry in directory
+        .entries()
+        .map_err(|source| FolderbaseError::io(display, source))?
+    {
+        let entry = entry.map_err(|source| FolderbaseError::io(display, source))?;
+        let name = entry.file_name();
+        if matches(&name) {
+            if found.is_some() {
+                return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+            }
+            found = Some(name);
+        }
+    }
+    Ok(found)
+}
+
+fn is_folderbase_state_name(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(STATE_COMPONENT))
+}
+
+fn is_folderbase_manifest_name(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
+}
+
+fn verify_open_regular_metadata(
+    file: &cap_std::fs::File,
+    bytes: u64,
+    display: &Path,
+) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != bytes {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "restore source metadata does not match".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn copy_exact_sha256(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    bytes: u64,
+    digest: &str,
+    source_display: &Path,
+    destination_display: &Path,
+) -> Result<()> {
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut bounded = reader.take(bytes.saturating_add(1));
+    loop {
+        let read = bounded
+            .read(&mut buffer)
+            .map_err(|source| FolderbaseError::io(source_display, source))?;
+        if read == 0 {
+            break;
+        }
+        observed =
+            observed
+                .checked_add(read as u64)
+                .ok_or_else(|| FolderbaseError::InvalidRecord {
+                    path: source_display.to_path_buf(),
+                    message: "restore source length exceeds supported range".to_owned(),
+                })?;
+        if observed > bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: source_display.to_path_buf(),
+                message: "restore source grew beyond its sealed byte length".to_owned(),
+            });
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|source| FolderbaseError::io(destination_display, source))?;
+        hasher.update(&buffer[..read]);
+    }
+    if observed != bytes || format!("{:x}", hasher.finalize()) != digest {
+        return Err(FolderbaseError::InvalidRecord {
+            path: source_display.to_path_buf(),
+            message: "restore source bytes do not match the sealed digest".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<PhysicalIdentity> {
+    let file = open_regular_file_nofollow(parent, name, display)?;
+    open_regular_file_identity(&file, display)
+}
+
+#[cfg(unix)]
+fn planning_regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<String> {
+    use cap_std::fs::MetadataExt;
+
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    Ok(
+        crate::folderbase_restore_authority::stable_unix_file_identity_sha256(
+            metadata.dev(),
+            metadata.ino(),
+        ),
+    )
+}
+
+#[cfg(windows)]
+fn planning_regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<String> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    stable_file_identity_sha256(&file).map_err(|source| FolderbaseError::io(display, source))
+}
+
+fn open_regular_file_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> Result<cap_std::fs::File> {
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    let metadata = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std()
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    Ok(file)
+}
+
+fn open_regular_file_identity(
+    file: &cap_std::fs::File,
+    display: &Path,
+) -> Result<PhysicalIdentity> {
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source))
+}
+
+fn verify_restore_retirement_publication(
+    retained_file: &cap_std::fs::File,
+    retained_display: &Path,
+    destination_parent: &Dir,
+    destination_name: &OsStr,
+    destination_display: &Path,
+    expected_identity_sha256: &str,
+    expected_fidelity: Option<(&str, u64, bool)>,
+) -> Result<()> {
+    if stable_regular_file_identity_sha256(retained_file, retained_display)?
+        != expected_identity_sha256
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: retained_display.to_path_buf(),
+            message: "restore private state no longer has the published identity".to_owned(),
+        });
+    }
+    let mut retained_fidelity = retained_file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(retained_display, source))?;
+    if let Some((digest, bytes, executable)) = expected_fidelity {
+        verify_open_regular_file(
+            &mut retained_fidelity,
+            digest,
+            bytes,
+            executable,
+            retained_display,
+        )?;
+    }
+
+    let mut destination_file =
+        open_regular_file_nofollow(destination_parent, destination_name, destination_display)?;
+    if stable_regular_file_identity_sha256(&destination_file, destination_display)?
+        != expected_identity_sha256
+        || open_regular_file_identity(&destination_file, destination_display)?
+            != open_regular_file_identity(retained_file, retained_display)?
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: destination_display.to_path_buf(),
+            message: "workspace file no longer has the restore publication identity".to_owned(),
+        });
+    }
+    if let Some((digest, bytes, executable)) = expected_fidelity {
+        verify_open_regular_file(
+            &mut destination_file,
+            digest,
+            bytes,
+            executable,
+            destination_display,
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_restore_retained_stage(
+    stage_parent: &Dir,
+    stage_name: &OsStr,
+    stage_display: &Path,
+    retained_file: &cap_std::fs::File,
+    expected_identity_sha256: &str,
+) -> Result<()> {
+    let visible_stage = open_regular_file_nofollow(stage_parent, stage_name, stage_display)?;
+    if open_regular_file_identity(&visible_stage, stage_display)?
+        != open_regular_file_identity(retained_file, stage_display)?
+        || stable_regular_file_identity_sha256(&visible_stage, stage_display)?
+            != expected_identity_sha256
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: stage_display.to_path_buf(),
+            message: "restore authority path no longer names the retained stage".to_owned(),
+        });
+    }
+    require_restore_link_count(retained_file, 2, stage_display)?;
+    Ok(())
+}
+
+fn require_restore_link_count(
+    file: &cap_std::fs::File,
+    expected: u64,
+    display: &Path,
+) -> Result<()> {
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let actual =
+        stable_file_link_count(&file).map_err(|source| FolderbaseError::io(display, source))?;
+    if actual != expected {
+        return Err(FolderbaseError::RestoreNamespaceRepairRequired(
+            display.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn stable_regular_file_identity_sha256(file: &cap_std::fs::File, display: &Path) -> Result<String> {
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    stable_file_identity_sha256(&file).map_err(|source| FolderbaseError::io(display, source))
+}
+
+fn verify_regular_file(
+    parent: &Dir,
+    name: &OsStr,
+    digest: &str,
+    bytes: u64,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
+    let mut file = open_regular_file_nofollow(parent, name, display)?;
+    verify_open_regular_file(&mut file, digest, bytes, executable, display)
+}
+
+fn verify_open_regular_file(
+    file: &mut cap_std::fs::File,
+    digest: &str,
+    bytes: u64,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    #[cfg(not(unix))]
+    let _ = executable;
+    verify_open_regular_metadata(file, bytes, display)?;
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt;
+        let observed = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(display, source))?
+            .permissions()
+            .mode()
+            & 0o111
+            != 0;
+        if observed != executable {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "restore executable fidelity does not match".to_owned(),
+            });
+        }
+    }
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let mut bounded = Read::by_ref(file).take(bytes.saturating_add(1));
+    loop {
+        let read = bounded
+            .read(&mut buffer)
+            .map_err(|source| FolderbaseError::io(display, source))?;
+        if read == 0 {
+            break;
+        }
+        observed += read as u64;
+        if observed > bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "restore file grew beyond its sealed byte length".to_owned(),
+            });
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if observed != bytes || format!("{:x}", hasher.finalize()) != digest {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "restore file bytes do not match the sealed digest".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn private_directory_builder() -> cap_std::fs::DirBuilder {
@@ -715,7 +2134,7 @@ fn open_directory_nofollow(
     Ok(Dir::from_std_file(file))
 }
 
-fn directory_identity(directory: &Dir, display: &Path) -> Result<Handle> {
+fn directory_identity(directory: &Dir, display: &Path) -> Result<PhysicalIdentity> {
     let file = directory
         .try_clone()
         .map_err(|source| FolderbaseError::io(display, source))?
@@ -726,7 +2145,7 @@ fn directory_identity(directory: &Dir, display: &Path) -> Result<Handle> {
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }
-    Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
+    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source))
 }
 
 #[cfg(target_os = "linux")]
@@ -744,11 +2163,8 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }
-    let observed_identity = Handle::from_file(
-        file.try_clone()
-            .map_err(|source| FolderbaseError::io(display, source))?,
-    )
-    .map_err(|source| FolderbaseError::io(display, source))?;
+    let observed_identity = PhysicalIdentity::from_file(&file)
+        .map_err(|source| FolderbaseError::io(display, source))?;
     if observed_identity != expected_identity {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }
@@ -770,9 +2186,257 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
 mod tests {
     use std::{fs, io};
 
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
+
+    const RESTORE_SOURCE: &str = ".folderbase/source";
+    const RESTORE_STAGE: &str = ".folderbase/transactions/restore-stage";
+    const RESTORE_DESTINATION: &str = "project/restored.bin";
+
+    fn prepared_workspace_restore(
+        expected: &[u8],
+        executable: bool,
+    ) -> (TempDir, FolderbaseState, String) {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/transactions")).expect("transactions");
+        fs::create_dir(fixture.path().join("project")).expect("workspace parent");
+        fs::write(fixture.path().join(RESTORE_SOURCE), expected).expect("restore source");
+        let digest = format!("{:x}", Sha256::digest(expected));
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        state
+            .stage_restore_blob(
+                Path::new(RESTORE_SOURCE),
+                Path::new(RESTORE_STAGE),
+                &digest,
+                expected.len() as u64,
+                executable,
+            )
+            .expect("private restore stage");
+        state
+            .publish_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                executable,
+            )
+            .expect("workspace restore");
+        (fixture, state, digest)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_restore_stage_fidelity_is_independent_of_process_umask() {
+        const CHILD_MARKER: &str = "FOLDERBASE_RESTRICTIVE_UMASK_CHILD";
+        const TEST_NAME: &str = "folderbase_state::tests::executable_restore_stage_fidelity_is_independent_of_process_umask";
+
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("current unit-test executable"),
+            )
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD_MARKER, "1")
+            .output()
+            .expect("run restrictive-umask test in an isolated serial process");
+            assert!(
+                output.status.success(),
+                "restrictive-umask child failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        struct ScopedUmask(libc::mode_t);
+
+        impl ScopedUmask {
+            fn replace(mask: libc::mode_t) -> Self {
+                // SAFETY: this runs in an isolated single-test child process,
+                // and Drop restores the previous process-global mask.
+                Self(unsafe { libc::umask(mask) })
+            }
+        }
+
+        impl Drop for ScopedUmask {
+            fn drop(&mut self) {
+                // SAFETY: this restores the mask captured by `replace` in the
+                // same isolated process before it exits.
+                unsafe {
+                    libc::umask(self.0);
+                }
+            }
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir(fixture.path().join(".folderbase/transactions")).expect("transactions");
+        let expected = b"#!/bin/sh\nexit 0\n";
+        fs::write(fixture.path().join(RESTORE_SOURCE), expected).expect("restore source");
+        let digest = format!("{:x}", Sha256::digest(expected));
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+        let _umask = ScopedUmask::replace(0o777);
+        state
+            .stage_restore_blob(
+                Path::new(RESTORE_SOURCE),
+                Path::new(RESTORE_STAGE),
+                &digest,
+                expected.len() as u64,
+                true,
+            )
+            .expect("executable staging is independent of the creation mask");
+
+        let mode = fs::metadata(fixture.path().join(RESTORE_STAGE))
+            .expect("staged metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_accepts_the_exact_retained_stage() {
+        let expected = b"sealed opaque bytes\0\xff";
+        let (_fixture, state, digest) = prepared_workspace_restore(expected, false);
+
+        state
+            .verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            )
+            .expect("exact retained restore");
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_rejects_a_same_byte_replacement() {
+        let expected = b"sealed opaque bytes";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, false);
+        let destination = fixture.path().join(RESTORE_DESTINATION);
+        fs::remove_file(&destination).expect("remove transaction-owned link");
+        fs::write(&destination, expected).expect("foreign same-byte replacement");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            ),
+            Err(FolderbaseError::WouldOverwrite(path)) if path == destination
+        ));
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_rejects_in_place_byte_mutation() {
+        let expected = b"sealed opaque bytes";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, false);
+        fs::write(
+            fixture.path().join(RESTORE_DESTINATION),
+            b"mutated opaque byte",
+        )
+        .expect("mutate retained inode in place");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            ),
+            Err(FolderbaseError::InvalidRecord { message, .. })
+                if message.contains("restore file")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_restore_revalidation_rejects_executable_fidelity_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let expected = b"#!/bin/sh\nexit 0\n";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, true);
+        let destination = fixture.path().join(RESTORE_DESTINATION);
+        let mut permissions = fs::metadata(&destination).expect("metadata").permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&destination, permissions).expect("remove executable fidelity");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                true,
+            ),
+            Err(FolderbaseError::InvalidRecord { message, .. })
+                if message.contains("executable fidelity")
+        ));
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_rejects_a_new_case_folded_nested_boundary() {
+        let expected = b"sealed opaque bytes";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, false);
+        fs::create_dir(fixture.path().join("project/.FOLDERBASE")).expect("nested state");
+        fs::write(
+            fixture.path().join("project/.FOLDERBASE/MANIFEST.JSON"),
+            b"{}",
+        )
+        .expect("nested manifest");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            ),
+            Err(FolderbaseError::UnsafePath(path))
+                if path == fixture.path().join("project")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachment_revalidation_rejects_an_ambient_replacement_root() {
+        let fixture = tempdir().expect("fixture");
+        let root = fixture.path().join("live");
+        let detached = fixture.path().join("detached");
+        fs::create_dir(&root).expect("root");
+        fs::create_dir(root.join(".folderbase")).expect("state");
+        let state = FolderbaseState::open_existing(&root).expect("state capability");
+
+        fs::rename(&root, &detached).expect("detach retained physical root");
+        fs::create_dir(&root).expect("replacement root");
+        fs::create_dir(root.join(".folderbase")).expect("replacement state");
+
+        assert!(matches!(
+            state.verify_still_attached(),
+            Err(FolderbaseError::UnsafePath(path)) if path == root
+        ));
+    }
+
+    #[test]
+    fn nested_folderbase_marker_names_are_ascii_case_folded() {
+        assert!(is_folderbase_state_name(OsStr::new(".folderbase")));
+        assert!(is_folderbase_state_name(OsStr::new(".FOLDERBASE")));
+        assert!(is_folderbase_manifest_name(OsStr::new("manifest.json")));
+        assert!(is_folderbase_manifest_name(OsStr::new("MANIFEST.JSON")));
+        assert!(!is_folderbase_state_name(OsStr::new(".folderbase-other")));
+        assert!(!is_folderbase_manifest_name(OsStr::new(
+            "manifest.json.bak"
+        )));
+    }
 
     #[cfg(unix)]
     #[test]

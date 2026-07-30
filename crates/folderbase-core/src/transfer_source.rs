@@ -14,12 +14,12 @@ use std::{
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
-use same_file::Handle;
 use sha2::{Digest, Sha256};
 
 use crate::{
     FolderbaseError, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId, VersionId,
     local_versions::{folderbase_id_from_manifest_bytes, validate_chunk_transfer_receipt_bytes},
+    physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity},
     transfer_manifest::{
         ChunkManifest, LARGE_PROFILE_V1, MAX_OBJECT_BYTES, ManifestViolation,
         ObjectVerificationError, STANDARD_PROFILE_V1, is_sha256, plan_streamed_manifest,
@@ -146,10 +146,10 @@ pub enum TransferSourceError {
 pub struct ChunkTransferSource {
     store: LocalVersionStore,
     root_dir: Dir,
-    root_identity: Handle,
-    version_record_identity: Handle,
+    root_identity: PhysicalIdentity,
+    version_record_identity: RetainedPhysicalIdentity,
     version_record_snapshot: FileSnapshot,
-    blob: Handle,
+    blob: RetainedPhysicalIdentity,
     blob_snapshot: FileSnapshot,
     version: LocalVersionRecord,
     manifest: ChunkManifest,
@@ -197,13 +197,12 @@ impl ChunkTransferSource {
         VersionId::parse(version_id.as_str().to_owned())?;
         let root_file = open_root_nofollow(store.root()).map_err(TransferSourceError::Io)?;
         let root_dir = Dir::from_std_file(root_file);
-        let root_identity = Handle::from_file(
-            root_dir
-                .try_clone()
-                .map_err(TransferSourceError::Io)?
-                .into_std_file(),
-        )
-        .map_err(TransferSourceError::Io)?;
+        let root_guard = root_dir
+            .try_clone()
+            .map_err(TransferSourceError::Io)?
+            .into_std_file();
+        let root_identity =
+            PhysicalIdentity::from_file(&root_guard).map_err(TransferSourceError::Io)?;
         let (version, _object, version_record) = read_bound_records(&store, &root_dir, version_id)?;
         if version.content.bytes > MAX_OBJECT_BYTES {
             return Err(TransferSourceError::ObjectTooLarge {
@@ -213,7 +212,7 @@ impl ChunkTransferSource {
         let version_record_snapshot =
             FileSnapshot::read(&version_record).map_err(TransferSourceError::Io)?;
         let version_record_identity =
-            Handle::from_file(version_record).map_err(TransferSourceError::Io)?;
+            RetainedPhysicalIdentity::from_file(version_record).map_err(TransferSourceError::Io)?;
 
         let blob_relative = store.blob_relative_path(&version.content.digest);
         let blob_file =
@@ -222,7 +221,8 @@ impl ChunkTransferSource {
         if blob_snapshot.bytes != version.content.bytes {
             return Err(TransferSourceError::SourceChanged);
         }
-        let mut blob = Handle::from_file(blob_file).map_err(TransferSourceError::Io)?;
+        let mut blob =
+            RetainedPhysicalIdentity::from_file(blob_file).map_err(TransferSourceError::Io)?;
         let resolved = profile.resolve(version.content.bytes);
         let manifest = plan_manifest(blob.as_file_mut(), &version, resolved)?;
         let manifest_digest = manifest.canonical_digest()?;
@@ -317,10 +317,10 @@ impl ChunkTransferSource {
     }
 
     fn verify_binding(&mut self) -> Result<(), TransferSourceError> {
-        let current_root = Handle::from_file(
-            open_root_nofollow(self.store.root()).map_err(TransferSourceError::Io)?,
-        )
-        .map_err(TransferSourceError::Io)?;
+        let current_root_file =
+            open_root_nofollow(self.store.root()).map_err(TransferSourceError::Io)?;
+        let current_root =
+            PhysicalIdentity::from_file(&current_root_file).map_err(TransferSourceError::Io)?;
         if current_root != self.root_identity {
             return Err(TransferSourceError::SourceChanged);
         }
@@ -336,8 +336,8 @@ impl ChunkTransferSource {
             return Err(TransferSourceError::SourceChanged);
         }
         let current_record =
-            Handle::from_file(current_version_file).map_err(TransferSourceError::Io)?;
-        if current_record != self.version_record_identity {
+            PhysicalIdentity::from_file(&current_version_file).map_err(TransferSourceError::Io)?;
+        if current_record != self.version_record_identity.identity() {
             return Err(TransferSourceError::SourceChanged);
         }
 
@@ -350,15 +350,16 @@ impl ChunkTransferSource {
         {
             return Err(TransferSourceError::SourceChanged);
         }
-        let current_blob = Handle::from_file(current_blob).map_err(TransferSourceError::Io)?;
-        if current_blob != self.blob {
+        let current_blob =
+            PhysicalIdentity::from_file(&current_blob).map_err(TransferSourceError::Io)?;
+        if current_blob != self.blob.identity() {
             return Err(TransferSourceError::SourceChanged);
         }
 
-        let final_root = Handle::from_file(
-            open_root_nofollow(self.store.root()).map_err(TransferSourceError::Io)?,
-        )
-        .map_err(TransferSourceError::Io)?;
+        let final_root_file =
+            open_root_nofollow(self.store.root()).map_err(TransferSourceError::Io)?;
+        let final_root =
+            PhysicalIdentity::from_file(&final_root_file).map_err(TransferSourceError::Io)?;
         if final_root != self.root_identity {
             return Err(TransferSourceError::SourceChanged);
         }

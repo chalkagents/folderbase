@@ -9,6 +9,7 @@ pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
 mod folderbase_capture;
+mod folderbase_restore_authority;
 mod folderbase_seal;
 mod folderbase_state;
 pub mod folderbase_version;
@@ -20,6 +21,7 @@ mod inspection;
 mod local_versions;
 mod migration;
 mod model;
+mod physical_identity;
 mod reorganization;
 mod root_attestation;
 mod sharing;
@@ -37,10 +39,10 @@ pub use error::{FolderbaseError, InitializationInventoryLimitKind, Result};
 pub use folderbase_capture::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureIgnoredPath,
     CaptureLocalHead, CapturePlan, CapturePlanEntry, CapturePlanExclusion, CapturePlanLimitKind,
-    FolderbaseCaptureError, FolderbaseVersionStore, MAX_CAPTURE_PLAN_RECORDS,
+    FolderbaseCaptureError, FolderbaseVersionStore, LocalHeadAuthority, MAX_CAPTURE_PLAN_RECORDS,
     MAX_FOLDERBASEIGNORE_BYTES, MAX_LOCAL_HEAD_BYTES,
 };
-pub use folderbase_seal::SealedCapture;
+pub use folderbase_seal::{RestoredTombstone, SealedCapture};
 pub use folderbase_version::PathBindingKind;
 pub use initialization::{
     initialize, initialize_with_expected_plan_digest, plan_initialization,
@@ -84,7 +86,7 @@ pub use reorganization::{
 };
 pub use root_attestation::{
     FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES,
-    ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
+    ROOT_INSTANCE_FORMAT_V1, ROOT_INSTANCE_FORMAT_V2, RootAttestationError, attest_folderbase_root,
 };
 pub use sharing::{
     AccessDecision, AccessReason, AccessRequest, FolderbaseRegistration, ShareGrant,

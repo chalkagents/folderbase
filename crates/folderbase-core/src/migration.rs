@@ -1,12 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::{OsStr, OsString},
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(unix)]
+use cap_fs_ext::DirExt;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use chrono::{DateTime, Utc};
-use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -18,6 +22,8 @@ use crate::{
     folder_analysis::{AnalyzedFile, analyze_folder, expand_reconstructable_tree},
     initialization::{initialize, plan_template_initialization},
     local_versions::LocalVersionStore,
+    physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity},
+    root_attestation::metadata_is_link_or_reparse,
     template::load_builtin_template,
     validation::validate,
     workspace::{has_nested_folderbase_marker, is_reserved_workspace_component},
@@ -56,7 +62,7 @@ pub struct MigrationAnalysis {
     #[serde(skip)]
     files: Vec<AnalyzedFile>,
     #[serde(skip)]
-    root_identity: Option<Handle>,
+    root_identity: Option<RetainedPhysicalIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,7 +168,7 @@ pub struct MigrationPlan {
     #[serde(default, flatten)]
     extensions: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
-    root_identity: Option<Handle>,
+    root_identity: Option<RetainedPhysicalIdentity>,
 }
 
 impl PartialEq for MigrationPlan {
@@ -225,8 +231,8 @@ impl MigrationPlan {
             });
         }
 
-        let root_handle =
-            Handle::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
+        let root_identity = RetainedPhysicalIdentity::from_path(&root)
+            .map_err(|source| FolderbaseError::io(&root, source))?;
         let mut source_files = Vec::with_capacity(operations.len());
         let mut source_keys = BTreeSet::new();
         let mut move_destinations = BTreeSet::new();
@@ -341,7 +347,7 @@ impl MigrationPlan {
             exclusions: Vec::new(),
             approval_digest: None,
             extensions,
-            root_identity: Some(root_handle),
+            root_identity: Some(root_identity),
         };
         persist_new_plan(&plan)?;
         Ok(plan)
@@ -1567,8 +1573,8 @@ impl ParsedMigrationAnswers {
 /// Analyze a folder without changing it.
 pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
     let root = canonical_root(root.as_ref())?;
-    let root_handle =
-        Handle::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
+    let root_identity = RetainedPhysicalIdentity::from_path(&root)
+        .map_err(|source| FolderbaseError::io(&root, source))?;
     let folder = analyze_folder(&root)?;
     let files = folder.files;
     let mut proposed_boundaries = folder
@@ -1751,7 +1757,7 @@ pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
         reconstructable_trees: folder.reconstructable_trees,
         nested_folderbases: folder.nested_folderbases,
         files,
-        root_identity: Some(root_handle),
+        root_identity: Some(root_identity),
     })
 }
 
@@ -1767,9 +1773,9 @@ pub fn plan_migration(
 ) -> Result<MigrationPlan> {
     let destination_folder = destination_folder.as_ref().to_path_buf();
     ensure_safe_relative(&destination_folder)?;
-    let current_root = Handle::from_path(&analysis.root)
+    let current_root = PhysicalIdentity::from_path(&analysis.root)
         .map_err(|source| FolderbaseError::io(&analysis.root, source))?;
-    if analysis.root_identity.as_ref() != Some(&current_root) {
+    if analysis.root_identity.as_ref().map(|root| root.identity()) != Some(current_root) {
         return Err(FolderbaseError::MigrationSourceChanged(
             analysis.root.clone(),
         ));
@@ -3677,13 +3683,15 @@ fn observe_structural_disk_state(
                 (None, Some(_)) if !source.exists() => Ok(StructuralDiskState::Applied),
                 (Some(source_digest), Some(destination_digest))
                     if source_digest == *expected_sha256
-                        && destination_digest == *expected_sha256
-                        && Handle::from_path(&source)
-                            .map_err(|error| FolderbaseError::io(&source, error))?
-                            == Handle::from_path(&destination)
-                                .map_err(|error| FolderbaseError::io(&destination, error))? =>
+                        && destination_digest == *expected_sha256 =>
                 {
-                    Ok(StructuralDiskState::PartialSameInode)
+                    let (source_capability, destination_capability) =
+                        open_migration_leaf_pair(root, source_path, destination_path)?;
+                    if source_capability.identity == destination_capability.identity {
+                        Ok(StructuralDiskState::PartialSameInode)
+                    } else {
+                        Ok(StructuralDiskState::RestoredWithPreservedDestination)
+                    }
                 }
                 (Some(source_digest), Some(_)) if source_digest == *expected_sha256 => {
                     Ok(StructuralDiskState::RestoredWithPreservedDestination)
@@ -4037,6 +4045,15 @@ fn reconcile_structural_in_flight(
     journal_path: &Path,
     journal: &mut MigrationJournal,
 ) -> Result<()> {
+    reconcile_structural_in_flight_with_hook(root, journal_path, journal, |_| {})
+}
+
+fn reconcile_structural_in_flight_with_hook(
+    root: &Path,
+    journal_path: &Path,
+    journal: &mut MigrationJournal,
+    mut before_final_destination_revalidation: impl FnMut(&Path),
+) -> Result<()> {
     let Some(index) = journal.in_flight_operation else {
         return Ok(());
     };
@@ -4061,16 +4078,17 @@ fn reconcile_structural_in_flight(
                 ) {
                     (Some(source_digest), Some(destination_digest))
                         if source_digest == *expected_sha256
-                            && destination_digest == *expected_sha256
-                            && Handle::from_path(&source)
-                                .map_err(|error| FolderbaseError::io(&source, error))?
-                                == Handle::from_path(&destination).map_err(|error| {
-                                    FolderbaseError::io(&destination, error)
-                                })? =>
+                            && destination_digest == *expected_sha256 =>
                     {
-                        fs::remove_file(&destination)
-                            .map_err(|error| FolderbaseError::io(&destination, error))?;
-                        sync_parent(&destination)?;
+                        let (source_capability, destination_capability) =
+                            open_migration_leaf_pair(root, source_path, destination_path)?;
+                        if source_capability.identity == destination_capability.identity {
+                            remove_matching_destination_with(
+                                source_capability,
+                                destination_capability,
+                                &mut before_final_destination_revalidation,
+                            )?;
+                        }
                         true
                     }
                     (Some(source_digest), _) if source_digest == *expected_sha256 => true,
@@ -4087,16 +4105,20 @@ fn reconcile_structural_in_flight(
                     (false, true) if sha256_path(&destination)? == *expected_sha256 => true,
                     (true, true)
                         if sha256_path(&source)? == *expected_sha256
-                            && sha256_path(&destination)? == *expected_sha256
-                            && Handle::from_path(&source)
-                                .map_err(|error| FolderbaseError::io(&source, error))?
-                                == Handle::from_path(&destination).map_err(|error| {
-                                    FolderbaseError::io(&destination, error)
-                                })? =>
+                            && sha256_path(&destination)? == *expected_sha256 =>
                     {
-                        fs::remove_file(&destination)
-                            .map_err(|error| FolderbaseError::io(&destination, error))?;
-                        sync_parent(&destination)?;
+                        let (source_capability, destination_capability) =
+                            open_migration_leaf_pair(root, source_path, destination_path)?;
+                        if source_capability.identity != destination_capability.identity {
+                            return Err(FolderbaseError::MigrationVerificationFailed(
+                                destination_path.clone(),
+                            ));
+                        }
+                        remove_matching_destination_with(
+                            source_capability,
+                            destination_capability,
+                            &mut before_final_destination_revalidation,
+                        )?;
                         false
                     }
                     _ => {
@@ -4149,6 +4171,293 @@ fn reconcile_structural_in_flight(
     }
     journal.in_flight_operation = None;
     persist_journal(journal_path, journal)
+}
+
+struct MigrationLeafCapability {
+    root: Dir,
+    root_display: PathBuf,
+    _parent: Dir,
+    parent_identity: PhysicalIdentity,
+    parent_relative: PathBuf,
+    name: OsString,
+    display: PathBuf,
+    identity: RetainedPhysicalIdentity,
+}
+
+fn open_migration_leaf_pair(
+    root: &Path,
+    source: &Path,
+    destination: &Path,
+) -> Result<(MigrationLeafCapability, MigrationLeafCapability)> {
+    let root_capability = open_migration_root_nofollow(root)?;
+    Ok((
+        open_migration_leaf_from_root(&root_capability, root, source)?,
+        open_migration_leaf_from_root(&root_capability, root, destination)?,
+    ))
+}
+
+fn open_migration_leaf_from_root(
+    root_capability: &Dir,
+    root: &Path,
+    relative: &Path,
+) -> Result<MigrationLeafCapability> {
+    let name = relative
+        .file_name()
+        .ok_or_else(|| FolderbaseError::UnsafePath(relative.to_path_buf()))?
+        .to_os_string();
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_migration_directory_from_root(root_capability, parent_relative, root)?;
+    let parent_identity = migration_directory_identity(&parent, &root.join(parent_relative))?;
+    let display = root.join(relative);
+    let identity = open_migration_regular_identity(&parent, &name, &display)?;
+    Ok(MigrationLeafCapability {
+        root: root_capability
+            .try_clone()
+            .map_err(|error| FolderbaseError::io(root, error))?,
+        root_display: root.to_path_buf(),
+        _parent: parent,
+        parent_identity,
+        parent_relative: parent_relative.to_path_buf(),
+        name,
+        display,
+        identity,
+    })
+}
+
+fn open_migration_root_nofollow(root: &Path) -> Result<Dir> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+
+        options
+            .access_mode(GENERIC_READ | GENERIC_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = options
+        .open(root)
+        .map_err(|error| FolderbaseError::io(root, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| FolderbaseError::io(root, error))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(FolderbaseError::UnsafePath(root.to_path_buf()));
+    }
+    Ok(Dir::from_std_file(file))
+}
+
+fn open_migration_directory_from_root(
+    root: &Dir,
+    relative: &Path,
+    root_display: &Path,
+) -> Result<Dir> {
+    let mut directory = root
+        .try_clone()
+        .map_err(|error| FolderbaseError::io(root_display, error))?;
+    let mut current_display = root_display.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
+        };
+        current_display.push(name);
+        directory = open_migration_directory_nofollow(&directory, name, &current_display)
+            .map_err(|error| FolderbaseError::io(&current_display, error))?;
+    }
+    Ok(directory)
+}
+
+#[cfg(not(windows))]
+fn open_migration_directory_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    _display: &Path,
+) -> io::Result<Dir> {
+    parent.open_dir_nofollow(name)
+}
+
+#[cfg(windows)]
+fn open_migration_directory_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> io::Result<Dir> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .access_mode(GENERIC_READ | GENERIC_WRITE)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let file = parent.open_with(name, &options)?.into_std();
+    let metadata = file.metadata()?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::other(format!(
+            "unsafe migration directory capability: {}",
+            display.display()
+        )));
+    }
+    Ok(Dir::from_std_file(file))
+}
+
+fn migration_directory_identity(directory: &Dir, display: &Path) -> Result<PhysicalIdentity> {
+    let file = directory
+        .try_clone()
+        .map_err(|error| FolderbaseError::io(display, error))?
+        .into_std_file();
+    PhysicalIdentity::from_file(&file).map_err(|error| FolderbaseError::io(display, error))
+}
+
+fn open_migration_regular_identity(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> Result<RetainedPhysicalIdentity> {
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+
+        options
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|error| FolderbaseError::io(display, error))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|error| FolderbaseError::io(display, error))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    RetainedPhysicalIdentity::from_file(file).map_err(|error| FolderbaseError::io(display, error))
+}
+
+impl MigrationLeafCapability {
+    fn reopen_parent(&self) -> Result<Dir> {
+        let parent = open_migration_directory_from_root(
+            &self.root,
+            &self.parent_relative,
+            &self.root_display,
+        )?;
+        if migration_directory_identity(
+            &parent,
+            self.display
+                .parent()
+                .ok_or_else(|| FolderbaseError::UnsafePath(self.display.clone()))?,
+        )? != self.parent_identity
+        {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                self.display.clone(),
+            ));
+        }
+        Ok(parent)
+    }
+}
+
+fn remove_matching_destination_with(
+    source: MigrationLeafCapability,
+    destination: MigrationLeafCapability,
+    before_final_destination_revalidation: &mut impl FnMut(&Path),
+) -> Result<()> {
+    if source.identity != destination.identity {
+        return Err(FolderbaseError::MigrationVerificationFailed(
+            destination.display.clone(),
+        ));
+    }
+    before_final_destination_revalidation(&destination.display);
+    let destination_parent = destination.reopen_parent()?;
+    let final_destination = open_migration_regular_identity(
+        &destination_parent,
+        &destination.name,
+        &destination.display,
+    )?;
+    if final_destination != destination.identity {
+        return Err(FolderbaseError::MigrationVerificationFailed(
+            destination.display.clone(),
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows child handles deny deletion. Relinquish them only after the
+        // final capability-relative identity proof; retain both the root and
+        // exact parent capabilities so ancestor substitution cannot redirect
+        // the removal. The remaining leaf-name transition uses the same
+        // cooperative namespace contract as ADR 0001.
+        drop(final_destination);
+        drop(destination.identity);
+        drop(source.identity);
+    }
+    #[cfg(not(windows))]
+    {
+        // POSIX permits unlink through the retained parent while every child
+        // authority remains live, eliminating identity-reuse authorization.
+        let _ = (&final_destination, &destination.identity, &source.identity);
+    }
+
+    destination_parent
+        .remove_file(&destination.name)
+        .map_err(|error| FolderbaseError::io(&destination.display, error))?;
+    sync_migration_directory(
+        &destination_parent,
+        destination
+            .display
+            .parent()
+            .ok_or_else(|| FolderbaseError::UnsafePath(destination.display.clone()))?,
+    )
+}
+
+#[cfg(unix)]
+fn sync_migration_directory(directory: &Dir, display: &Path) -> Result<()> {
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    directory
+        .open_with(Path::new("."), &options)
+        .and_then(|file| file.into_std().sync_all())
+        .map_err(|error| FolderbaseError::io(display, error))
+}
+
+#[cfg(windows)]
+fn sync_migration_directory(_directory: &Dir, _display: &Path) -> Result<()> {
+    // Windows exposes no documented POSIX directory-fsync equivalent. The
+    // retained directory capability still confines and revalidates removal.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_migration_directory(directory: &Dir, display: &Path) -> Result<()> {
+    directory
+        .try_clone()
+        .and_then(|directory| directory.into_std_file().sync_all())
+        .map_err(|error| FolderbaseError::io(display, error))
 }
 
 fn rollback_structural_journal(
@@ -4654,8 +4963,10 @@ fn load_plan(root: &Path, migration_id: &str) -> Result<MigrationPlan> {
     let mut plan: MigrationPlan = serde_json::from_slice(&bytes)
         .map_err(|source| FolderbaseError::json(&plan_path, source))?;
     validate_plan(root, migration_id, &plan_path, &plan)?;
-    plan.root_identity =
-        Some(Handle::from_path(root).map_err(|source| FolderbaseError::io(root, source))?);
+    plan.root_identity = Some(
+        RetainedPhysicalIdentity::from_path(root)
+            .map_err(|source| FolderbaseError::io(root, source))?,
+    );
     Ok(plan)
 }
 
@@ -6043,9 +6354,9 @@ fn verify_expanded_reconstructable_trees(plan: &MigrationPlan) -> Result<()> {
 }
 
 fn verify_root_identity(plan: &MigrationPlan) -> Result<()> {
-    let current =
-        Handle::from_path(&plan.root).map_err(|source| FolderbaseError::io(&plan.root, source))?;
-    if plan.root_identity.as_ref() != Some(&current) {
+    let current = PhysicalIdentity::from_path(&plan.root)
+        .map_err(|source| FolderbaseError::io(&plan.root, source))?;
+    if plan.root_identity.as_ref().map(|root| root.identity()) != Some(current) {
         return Err(FolderbaseError::MigrationSourceChanged(plan.root.clone()));
     }
     Ok(())
@@ -6386,6 +6697,105 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn in_flight_reconcile_preserves_a_same_byte_substitution_before_final_revalidation() {
+        let root = initialized_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let migration_id = plan.id.clone();
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            apply_migration_with_hook(approve_migration(plan).unwrap(), |checkpoint| {
+                if checkpoint == ApplyCheckpoint::OperationPlanned(0) {
+                    panic!("leave a durable in-flight move");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let source = root.path().join("notes.md");
+        let destination = root.path().join("Archive/notes.md");
+        fs::hard_link(&source, &destination).unwrap();
+        let original_destination = PhysicalIdentity::from_path(&destination).unwrap();
+        let canonical = canonical_root(root.path()).unwrap();
+        let (journal_path, mut journal) = load_journal(&canonical, &migration_id).unwrap();
+
+        let result = reconcile_structural_in_flight_with_hook(
+            &canonical,
+            &journal_path,
+            &mut journal,
+            |candidate| {
+                fs::remove_file(candidate).unwrap();
+                fs::write(candidate, b"source\n").unwrap();
+            },
+        );
+
+        assert!(
+            matches!(result, Err(FolderbaseError::MigrationVerificationFailed(ref path))
+                if path == &canonical.join("Archive/notes.md")),
+            "{result:?}"
+        );
+        assert!(source.exists());
+        assert!(destination.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"source\n");
+        assert_ne!(
+            PhysicalIdentity::from_path(&destination).unwrap(),
+            original_destination
+        );
+        assert_ne!(
+            PhysicalIdentity::from_path(&destination).unwrap(),
+            PhysicalIdentity::from_path(&source).unwrap()
+        );
+        assert_eq!(journal.in_flight_operation, Some(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn in_flight_reconcile_releases_child_handles_before_capability_relative_unlink() {
+        let root = initialized_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let migration_id = plan.id.clone();
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            apply_migration_with_hook(approve_migration(plan).unwrap(), |checkpoint| {
+                if checkpoint == ApplyCheckpoint::OperationPlanned(0) {
+                    panic!("leave a durable in-flight move");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let source = root.path().join("notes.md");
+        let destination = root.path().join("Archive/notes.md");
+        fs::hard_link(&source, &destination).unwrap();
+        let canonical = canonical_root(root.path()).unwrap();
+        let (journal_path, mut journal) = load_journal(&canonical, &migration_id).unwrap();
+
+        reconcile_structural_in_flight(&canonical, &journal_path, &mut journal)
+            .expect("Windows child handles must be released before exact-name unlink");
+
+        assert!(source.exists());
+        assert!(!destination.exists());
+        assert_eq!(journal.in_flight_operation, None);
+        assert_eq!(journal.completed_operations, 0);
+    }
 
     #[test]
     fn every_durable_apply_checkpoint_can_be_reopened_and_recovered() {

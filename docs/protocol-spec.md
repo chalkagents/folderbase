@@ -685,6 +685,41 @@ bounded transfer operations. Checkout hydration and historical recovery use
 separate authorization flows; a caller cannot turn an arbitrary historical
 version identifier into Live Folder materialization authority.
 
+## Device-local root identity
+
+`root_instance_sha256` is device-local integrity and recovery evidence, not a
+portable Folderbase identity or permission grant. Unix uses the released
+`folderbase-physical-root-instance-v1` domain over `unix`, big-endian `u64`
+device, and big-endian `u64` inode. Those bytes remain unchanged.
+
+Released Windows records used the same V1 domain over `windows`, big-endian
+`u32` volume serial, and big-endian `u64` file index. New Windows attestations
+use `folderbase-physical-root-instance-v2` over `windows`, the complete
+big-endian `u64` volume serial, and all 16 bytes of
+`FILE_ID_INFO.FileId.Identifier`. Both values are queried from one retained
+no-follow root handle. The digest domain selects the encoding; the public
+attestation receipt remains the same five-field record.
+
+On Windows, Core may admit an exact released V1 digest for a durable record
+when it matches the released digest computed from the retained root. Admission
+preserves the exact recorded value. Active capture and restore journals, their
+deterministic derivations, rollback, cleanup, completion, and authority receipts
+are never normalized or rewritten. Only mutable Local Head may move to the
+current V2 root under the transaction lock, after the named immutable Version
+and digest verify and no pending recovery remains, or as the normal next Head
+CAS. Capture-transaction authority keeps the SHA-256 of the exact journal
+bytes; version-derived authority is recomputed for the current root. Once a
+Head records V2, a different full identity is rejected even if the two roots
+would have collided under V1 truncation.
+
+First-upgrade admission of a released Windows V1 record is necessarily trust on
+first use within trusted local `.folderbase`. V1 cannot manufacture the upper
+identity bits it never recorded, so a copied, self-consistent legacy record on
+a rare root with the same truncated tuple is not distinguishable from same-root
+legacy state. That compatibility fact grants no portable, actor, sharing, or
+Cloud authority. Mutable Head moves to V2 at the safe boundary above; immutable
+legacy transaction evidence remains explicitly legacy through retirement.
+
 ## Canonical Folderbase Version 0.4
 
 `folderbase-version-v1` is the portable bounded full state of one Folderbase
@@ -754,11 +789,23 @@ bounded `CapturePlan` containing filesystem metadata only. The plan binds the
 physical root, effective ordered ignore policy, and optional device-local head.
 It is inert and is not a Folderbase Version.
 
+`.folderbase/` is trusted engine-owned local state, analogous to `.git/`.
+Local Core guarantees bounded and closed decoding, torn-state recovery,
+ordinary race and substitution refusal, and no-clobber workspace mutation. Its
+digests and stable filesystem identities are integrity and linearization
+evidence; they are not signatures. Deliberate coordinated forgery of every
+related `.folderbase/` record by a process running as the same user is outside
+the local Core threat model. Cloud grants and hosted Live Folder authority are
+separately authenticated and cannot be obtained from local metadata.
+
 Core reads protocol control bytes needed to interpret the root—the manifest,
-`.folderbaseignore`, and optional `.folderbase/local/head.json`—but does not open
-ordinary file contents while planning. PDFs, videos, CSV, SQLite, Git packs, and
-unknown files are all opaque regular files. Nested Folderbases, hard links, and
-special nodes are typed exclusions; symlinks are not followed.
+`.folderbaseignore`, optional `.folderbase/local/head.json`, and bounded retained
+restore-authority receipts—but does not request data access to ordinary files or
+their retained private links while planning. Unix planning compares no-follow
+directory metadata; Windows uses zero-data-access, no-follow metadata handles.
+PDFs, videos, CSV, SQLite, Git packs, and unknown files are all opaque regular
+files. Nested Folderbases, hard links, and special nodes are typed exclusions;
+symlinks are not followed.
 
 Core defaults exclude known generated trees before applying ordered user rules.
 Required `.folderbaseignore` and `FOLDERBASE.md` bindings cannot be ignored, and
@@ -809,10 +856,69 @@ stages, flushes, publishes, verifies, replaces, and removes capture state
 relative to retained no-follow directory handles. It rejects symlink/junction
 parent swaps; a detached write cannot advance visible Head. Local Head advances
 only after those checks, through a compare-and-replace under a cross-platform
-exclusive device-local file lock. The Local Head also binds the SHA-256 digest
-of the complete capture journal. Recovery after Head publication refuses any
-journal mutation and requires the committed version's exact parents and
-timestamp to match the anchored intent before projecting identity evidence.
+exclusive device-local file lock. New Local Heads use
+`folderbase-local-head-v2` with one closed authority discriminator:
+`capture_transaction_v1` binds the SHA-256 digest of the complete capture
+journal, while `version_derived_v1` binds a domain-separated digest of the
+Folderbase ID, physical-root instance, Version ID, and Version digest. Released
+`folderbase-local-head-v1.transaction_sha256` records are read only with their
+original capture-transaction meaning and are compare-and-swapped to v2 under
+the transaction lock after restore activity is ruled out. They are never
+silently reinterpreted as version-derived authority. Recovery after Head
+publication refuses any journal mutation and requires the committed version's
+exact parents and timestamp to match the anchored capture intent before
+projecting identity evidence.
+When a durable Head or active journal carries an admitted released Windows V1
+root, the journal's plan digest is reproduced with that exact recorded root.
+Recovery never hashes a current-root normalization in place of the recorded
+pre-Head or post-Head authority. A released-root Head is rebound only after its
+immutable Version verifies and pending capture work is retired, unless the
+normal next Head CAS already writes the current root.
+
+The closed v2 wire shape is:
+
+```json
+{
+  "format": "folderbase-local-head-v2",
+  "folderbase_id": "folderbase_...",
+  "root_instance_sha256": "<64 lowercase hex>",
+  "version_id": "fbversion_...",
+  "version_sha256": "<64 lowercase hex>",
+  "authority": {
+    "kind": "capture_transaction_v1",
+    "sha256": "<64 lowercase hex>"
+  }
+}
+```
+
+The `kind` value is exactly `capture_transaction_v1` or
+`version_derived_v1`. Unknown top-level fields, unknown authority fields,
+unknown authority kinds, malformed digests, and a `version_derived_v1` digest
+that does not equal the canonical domain-separated derivation are invalid.
+`capture_transaction_v1.sha256` is SHA-256 of the exact durable capture-journal
+bytes. `version_derived_v1.sha256` is SHA-256 of the compact UTF-8 JSON encoding
+of this object in the displayed field order:
+
+```json
+{
+  "format": "folderbase-local-head-authority-v1",
+  "folderbase_id": "folderbase_...",
+  "root_instance_sha256": "<64 lowercase hex>",
+  "version_id": "fbversion_...",
+  "version_sha256": "<64 lowercase hex>"
+}
+```
+
+Released v1 non-genesis capture journals stored the prior authority as
+`expected_head.transaction_sha256`. The bounded active-journal reader accepts
+that exact closed nested wire and its exact released assignment shape as capture
+authority, converts it to
+`capture_transaction_v1` only in memory, and separately retains SHA-256 of the
+exact journal bytes that were read. Pre-Head execution and committed-Head
+recovery both bind and compare that retained byte digest; normalized typed
+serialization is never substituted for a digest already named by a released
+Head. Current-only assignment fields cannot be smuggled through the released
+decoder under a flat released Head.
 
 Sealing opens the existing retained state capability and re-attests the inert
 plan before any lock, layout, recovery, or capture publication. Capture-specific
@@ -825,15 +931,164 @@ Assignment and Tombstone aggregate cardinality, every planned
 path/kind/observation, reused Object ID, prior Object Version, root-manifest
 lineage, expected Head, and the complete sorted target Tombstone set are matched
 to the approved plan and verified parent before object writes.
+For each regular source with retained restore links, metadata-only planning and
+the journal also commit the expected live link count and a canonical sorted set
+of exact authority receipt paths and byte digests, retained stage paths, and
+publication identities. Missing fields in released journals normalize only to
+one live link and an empty authority set and remain absent when serialized, so
+their original Head-anchored SHA-256 is preserved. The released decoder uses a
+closed historical assignment type; a current-only link commitment is an unknown
+field rather than a compatibility alias. Default-only plans retain the v1
+plan-digest domain when Head is absent or capture-transaction-derived. That v1
+encoder reproduces the released flat
+`current_head.transaction_sha256` representation byte-for-byte. A
+version-derived Head or any authority-bearing entry uses the typed v2
+plan-digest domain. Core re-enumerates and revalidates that exact set from the
+retained source handle immediately before and after its bounded byte read.
+Added links and same-count authority-set swaps are concurrent state changes.
+When a bounded active journal decodes through the released-v1 wire, recovery
+preserves that wire kind, exact raw byte length, and exact raw SHA-256.
+Preflight applies the byte bound to those raw bytes and validates the released
+closed schema plus normalized transaction semantics; it does not apply the same
+wire bound to a larger typed reserialization that is never persisted. Current
+and newly assigned journals remain bounded through the current encoder. JSON
+whitespace accepted by the released decoder remains part of its raw authority:
+the exact maximum is accepted, one byte over is refused, and truncated JSON is
+never normalized into a transaction.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 
+`FolderbaseVersionStore::restore_tombstone(path)` restores only a regular-file
+Tombstone selected from the current verified Local Head. It searches the
+bounded ancestor DAG for the nearest verified live binding with the exact
+path, Object ID, and Object Version. That binding supplies the authoritative
+opaque-byte digest, length, and executable fidelity. Missing, ambiguous,
+cyclic, corrupt, or over-limit ancestry is refused.
+
+Restore uses a separate bounded journal under the shared local transaction
+lock. Capture and restore refuse each other's active intent. The journal binds
+the expected Head, selected Tombstone, recovered live binding, target version,
+timestamp, and digest. Target and transaction IDs are deterministic
+domain-separated derivations of the verified parent authority; the timestamp
+is re-derived from that parent, so rewriting the mutable journal alone is
+refused under the trusted-local-state boundary. Deliberate coordinated forgery
+of every related trusted local record is not a cryptographic guarantee. A
+private copied stage retains transaction ownership
+while Core hard-links it into the absent same-path destination. Existing
+regular files, directories, symlinks, and dangling symlinks are never replaced;
+even identical foreign bytes are refused. Retry may accept the destination
+only when it has the exact retained-stage filesystem identity. Core validates
+the complete bounded reachable ancestry DAG before accepting the nearest
+candidate, so a binding cannot mask a deeper cycle and a legitimate
+convergent DAG remains accepted. Cycle validation runs over the complete
+bounded adjacency graph independently of global traversal deduplication.
+
+Workspace publication and every multi-step restore observation retain a
+no-follow parent-directory capability, its physical identity, the validated
+leaf, and the attested Folderbase Root. Core freshly reopens that parent from
+the root and compares its exact identity before mutation and after mutation,
+hooks, authority retention, and completion proof. Ancestor replacement
+therefore cannot redirect publication or produce a false success.
+
+On POSIX systems this guarantee is scoped to the retained capability and
+coordinated Folderbase namespace. An uncoordinated same-user rename may move the
+exact opened directory after an attachment proof; if it races after hard-link
+publication, the moved directory may contain that exact transaction-owned
+link. Core does not claim global pathname confinement and does not unlink
+through a replacement pathname. It retains journal, stage, and cleanup evidence
+and fails closed. Windows parent capabilities deny delete sharing while held,
+so the equivalent directory rename is blocked.
+
+Publication topology is exact. A missing destination is eligible only when the
+private stage has one link. An existing destination is resumable only when it
+is the same filesystem object as the stage and that object has exactly the two
+expected links. A missing destination with any extra link returns typed
+`RestoreNamespaceRepairRequired` before another hard link is created. Recovery
+continues after the user either returns the moved parent to the intended path or
+inspects and explicitly removes the operation-owned orphan. A future managed
+workspace may provide a stronger platform-specific namespace mutation
+invariant; v1 does not depend on it.
+
+The resulting full-state Folderbase Version preserves the root manifest,
+exclusions, every unrelated live binding, and every unrelated Tombstone,
+removes only the selected Tombstone, restores the original Object ID and Object
+Version, and names the deletion Head as its sole parent. The target file and
+every immutable reference verify before Local Head changes. Immediately before
+and after the Local Head CAS, Core re-attests the physical root, case-folded
+nested boundaries, retained-stage/destination identity, exact bytes, length,
+and executable fidelity. A post-Head failure durably restores the prior Head
+on the retained root capability before reporting conflict. Journal, stage,
+target, version, Head, projection, and cleanup boundaries are recoverable.
+Both prior-Head execution and committed-Head recovery re-derive the selected
+Tombstone, live binding, deterministic assignment, and exact child Version
+from the verified expected parent. After all read-only eligibility checks and
+before journal publication, Core atomically rebinds the verified parent Local
+Head to `folderbase-local-head-authority-v1`, a digest of the attested
+Folderbase ID, physical-root instance, parent Version ID, and parent Version
+digest. The rebound parent and restore-produced Heads are v2 records with
+`version_derived_v1` authority. Committed recovery rejects a journal-supplied
+prior Head digest that cannot be rederived after the prior Head is gone.
+For an admitted released-root restore, every transaction and target
+derivation uses `transaction.root_instance_sha256`, not the current
+attestation. Target and rollback Heads retain that recorded root until cleanup
+retires pending state; cleanup, completion, and authority records remain exact
+immutable compatibility evidence. Core then independently verifies the
+installed Version and atomically rebinds only Local Head to the current root.
+Post-Head projection remains confined to the retained state capability, and
+projection failure restores the exact prior Head. An in-place edit of the
+transaction-owned published target preserves the user's bytes. Cleanup
+publishes a durable closed v2 singleton receipt with `committed`, `modified`, or
+`committed_modified` disposition before retiring mutable intent. Every
+disposition rederives the exact deterministic transaction from the immutable
+parent, Tombstone, and ancestor binding, and the receipt binds the durable
+device-local identity of the published inode. Core retains the
+transaction-unique private stage as an authority link and never automatically
+renames or unlinks it. The private pathname, visible pathname, publication
+identity, and committed byte/mode fidelity are re-proved before and after both
+cleanup hook boundaries. A missing or replaced authority link leaves recovery
+pending and can never return restored success.
+
+A late same-inode edit after target Head publication transitions to
+`committed_modified`; cleanup preserves the edit and retains exact private
+authority without reporting restored success. Modified cleanup does not require
+owned user bytes to remain different from sealed bytes. The pending receipt
+survives active-journal retirement, blocks capture, and drives restartable
+convergence. Successful committed cleanup atomically replaces one bounded
+device-local completion v2 receipt before retiring the pending receipt.
+Completion evidence never blocks capture. It recovers an idempotent terminal
+result only while the exact target Head and installed Version remain current
+and the authority receipt, retained stage, and workspace path still prove the
+recorded published identity, sealed bytes, and executable fidelity. Capture
+accepts the resulting hard-linked workspace file only when its link count is
+one visible link plus the exact count of validated Folderbase authorities for
+that path and identity; any ordinary extra hard link remains excluded.
+Authorities are capped at 4096 and new restore fails with typed maintenance
+required at the cap. There is no automatic authority garbage collection in
+this version. Unix identity is device plus inode while the retained link keeps
+that inode live; Windows uses volume serial plus the complete 128-bit
+`FILE_ID_INFO` identifier. Missing, foreign, changed, or stale state produces
+no restored-success result. Unix staging explicitly applies its final `0700`
+or `0600` permissions after creation, independently of process umask.
+All cleanup hooks and mutable-state operations precede one final success
+linearization proof. A transaction-locked released-root Local Head rebind also
+precedes that proof. Final and terminal verification admit exactly one complete
+recorded-root target Head with independently derived recorded-root authority or
+one complete current-root rebound Head with independently derived current-root
+authority. They compare the full Folderbase ID, root digest, Version ID,
+Version digest, and authority rather than a root-free Head summary. The
+transaction, completion, and retained authority records keep their exact
+recorded-root bytes. Immediately before returning `Restored`, Core revalidates
+those bytes, the exact target Version and permitted Head, retained stage and
+visible destination identity, content digest and length, and executable mode.
+No hook or filesystem mutation follows that proof.
+Directory and symlink Tombstone reconstruction remain outside v1 restore.
+
 This remains Proposed. Productive captured-absence and supported-kind
-replacement Tombstones are implemented, including crash convergence. Durable
-App filesystem-event or explicit Core deletion evidence, cross-path moves, full
-no-clobber restore/crash recovery, database snapshot coordination, Remote Head
-publication, sync, sharing, authorization, and Cloud behavior remain out of
-scope.
+replacement Tombstones and exact ordinary-file no-clobber restore are
+implemented, including crash convergence. Durable App filesystem-event or
+explicit Core deletion evidence, cross-path moves, directory/symlink restore,
+database snapshot coordination, Remote Head publication, sync, sharing,
+authorization, and Cloud behavior remain out of scope.
 
 ## Checkout
 

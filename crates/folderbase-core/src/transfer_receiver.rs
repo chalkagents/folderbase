@@ -18,14 +18,17 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use same_file::Handle;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, Version};
 
-use crate::transfer_manifest::{
-    ChunkDescriptor, ChunkManifest, MAX_ENCODED_MANIFEST_BYTES, ManifestError, ManifestViolation,
-    ObjectVerificationError, TRANSFER_IO_BUFFER_BYTES, VerifiedObject, is_sha256,
+use crate::{
+    physical_identity::RetainedPhysicalIdentity,
+    transfer_manifest::{
+        ChunkDescriptor, ChunkManifest, MAX_ENCODED_MANIFEST_BYTES, ManifestError,
+        ManifestViolation, ObjectVerificationError, TRANSFER_IO_BUFFER_BYTES, VerifiedObject,
+        is_sha256,
+    },
 };
 
 const MANIFEST_FILE: &str = "manifest.json";
@@ -129,7 +132,7 @@ pub struct PersistentTransfer {
     _directory: Dir,
     chunks: Dir,
     receiver_lock: std::fs::File,
-    receiver_lock_identity: Handle,
+    receiver_lock_identity: RetainedPhysicalIdentity,
     checkpoint_lease_poisoned: AtomicBool,
     operation_mutex: Mutex<()>,
     manifest: ChunkManifest,
@@ -265,8 +268,8 @@ impl PersistentTransfer {
                 .map_err(TransferReceiverError::Io)?;
             let ingestion = copy_exact_chunk(descriptor, &mut reader, &mut staged)
                 .and_then(|()| staged.sync_all().map_err(TransferReceiverError::Io));
-            let staging_identity =
-                Handle::from_file(staged.into_std()).map_err(TransferReceiverError::Io)?;
+            let staging_identity = RetainedPhysicalIdentity::from_file(staged.into_std())
+                .map_err(TransferReceiverError::Io)?;
             let result = ingestion.and_then(|()| {
                 let current_staging = open_named_file_identity(&self.chunks, &staging)
                     .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
@@ -289,8 +292,9 @@ impl PersistentTransfer {
                         let mut existing = open_regular_file_nofollow(&self.chunks, &destination)
                             .map_err(TransferReceiverError::Io)?;
                         validate_chunk_reader(descriptor, &mut existing)?;
-                        let existing_identity = Handle::from_file(existing.into_std())
-                            .map_err(TransferReceiverError::Io)?;
+                        let existing_identity =
+                            RetainedPhysicalIdentity::from_file(existing.into_std())
+                                .map_err(TransferReceiverError::Io)?;
                         let current_destination =
                             open_named_file_identity(&self.chunks, &destination)
                                 .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;
@@ -428,7 +432,7 @@ impl PersistentTransfer {
             .open_dir_nofollow(CHUNKS_DIRECTORY)
             .map_err(TransferReceiverError::Io)?;
         let receiver_lock = open_lock_file_nofollow(&directory)?;
-        let receiver_lock_identity = Handle::from_file(
+        let receiver_lock_identity = RetainedPhysicalIdentity::from_file(
             receiver_lock
                 .try_clone()
                 .map_err(TransferReceiverError::Io)?,
@@ -567,8 +571,8 @@ struct MaterializationStaging<'a> {
     parent: &'a Dir,
     name: String,
     directory: Option<Dir>,
-    directory_identity: Option<Handle>,
-    object_identity: Option<Handle>,
+    directory_identity: Option<RetainedPhysicalIdentity>,
+    object_identity: Option<RetainedPhysicalIdentity>,
     object_removed: bool,
     finished: bool,
 }
@@ -597,7 +601,7 @@ impl<'a> MaterializationStaging<'a> {
         };
         validate_private_directory(staging.directory()?)?;
         staging.directory_identity = Some(
-            Handle::from_file(
+            RetainedPhysicalIdentity::from_file(
                 staging
                     .directory()?
                     .try_clone()
@@ -626,7 +630,10 @@ impl<'a> MaterializationStaging<'a> {
         let identity = object
             .try_clone()
             .map_err(TransferReceiverError::Io)
-            .and_then(|file| Handle::from_file(file.into_std()).map_err(TransferReceiverError::Io));
+            .and_then(|file| {
+                RetainedPhysicalIdentity::from_file(file.into_std())
+                    .map_err(TransferReceiverError::Io)
+            });
         match identity {
             Ok(identity) => {
                 self.object_identity = Some(identity);
@@ -720,9 +727,9 @@ impl<'a> MaterializationStaging<'a> {
                 return Err(TransferReceiverError::DestinationStateChanged);
             }
         }
-        // `same_file::Handle` owns an OS handle. Windows denies deletion while
-        // either comparison handle remains open, so relinquish only after the
-        // live name has matched the retained identity.
+        // The retained identity owns an OS handle. Windows denies deletion
+        // while either comparison handle remains open, so relinquish only
+        // after the live name has matched the retained identity.
         drop(
             self.object_identity
                 .take()
@@ -784,7 +791,7 @@ struct AcceptedChunkFile {
     remaining: u64,
     index: u32,
     name: String,
-    identity: Handle,
+    identity: RetainedPhysicalIdentity,
 }
 
 impl<'a> AcceptedChunkReader<'a> {
@@ -848,8 +855,8 @@ impl Read for AcceptedChunkReader<'_> {
             let file = open_regular_file_nofollow(self.chunks, &name)?;
             validate_private_regular_file(self.chunks, &name)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let identity =
-                Handle::from_file(file.try_clone()?.into_std()).map_err(std::io::Error::other)?;
+            let identity = RetainedPhysicalIdentity::from_file(file.try_clone()?.into_std())
+                .map_err(std::io::Error::other)?;
             self.current = Some(AcceptedChunkFile {
                 file,
                 remaining: descriptor.bytes,
@@ -946,19 +953,20 @@ fn open_lock_file_nofollow(directory: &Dir) -> Result<std::fs::File, TransferRec
 fn open_named_file_identity(
     directory: &Dir,
     name: impl AsRef<Path>,
-) -> Result<Handle, TransferReceiverError> {
+) -> Result<RetainedPhysicalIdentity, TransferReceiverError> {
     let file = open_regular_file_nofollow(directory, name).map_err(TransferReceiverError::Io)?;
-    Handle::from_file(file.into_std()).map_err(TransferReceiverError::Io)
+    RetainedPhysicalIdentity::from_file(file.into_std()).map_err(TransferReceiverError::Io)
 }
 
 fn open_named_directory_identity(
     parent: &Dir,
     name: impl AsRef<Path>,
-) -> Result<Handle, TransferReceiverError> {
+) -> Result<RetainedPhysicalIdentity, TransferReceiverError> {
     let directory = parent
         .open_dir_nofollow(name)
         .map_err(TransferReceiverError::Io)?;
-    Handle::from_file(directory.into_std_file()).map_err(TransferReceiverError::Io)
+    RetainedPhysicalIdentity::from_file(directory.into_std_file())
+        .map_err(TransferReceiverError::Io)
 }
 
 #[cfg(unix)]
@@ -1120,7 +1128,7 @@ fn reclaim_stale_staging(chunks: &Dir) -> Result<(), TransferReceiverError> {
 fn cleanup_owned_staging(
     chunks: &Dir,
     name: &str,
-    expected: &Handle,
+    expected: &RetainedPhysicalIdentity,
 ) -> Result<(), TransferReceiverError> {
     let current = open_named_file_identity(chunks, name)
         .map_err(|_| TransferReceiverError::CheckpointStateChanged)?;

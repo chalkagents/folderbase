@@ -2991,7 +2991,7 @@ fn journal_message(line: usize, message: &str) -> String {
     }
 }
 
-fn safe_content_path(path: &Path) -> Result<PathBuf> {
+pub(crate) fn safe_content_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() || path.is_absolute() || path.to_str().is_none() {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }

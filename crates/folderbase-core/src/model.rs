@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::physical_identity::RetainedPhysicalIdentity;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TemplateDescriptor {
@@ -209,7 +210,7 @@ pub struct TemplateExpansionPlan {
     pub(crate) history_sha256: String,
     pub(crate) preserved_preconditions: Vec<TemplateExpansionPrecondition>,
     #[serde(skip_serializing)]
-    pub(crate) root_handle: Handle,
+    pub(crate) root_identity: RetainedPhysicalIdentity,
 }
 
 impl TemplateExpansionPlan {
@@ -304,7 +305,7 @@ pub(crate) struct TemplateExpansionPrecondition {
     pub(crate) kind: TemplateArtifactKind,
     pub(crate) sha256: Option<String>,
     #[serde(skip_serializing)]
-    pub(crate) handle: Handle,
+    pub(crate) identity: RetainedPhysicalIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -693,7 +694,7 @@ pub struct InitializationPlan {
     pub(crate) warnings: Vec<String>,
     pub(crate) plan_digest: InitializationPlanDigest,
     #[serde(skip_serializing)]
-    pub(crate) root_handle: Handle,
+    pub(crate) root_identity: RetainedPhysicalIdentity,
     #[serde(skip_serializing)]
     pub(crate) destination_inventory: Vec<InitializationDestinationEntry>,
 }
@@ -745,7 +746,7 @@ pub struct TemplateArtifactPrecondition {
     pub(crate) path: PathBuf,
     pub(crate) kind: TemplateArtifactKind,
     #[serde(skip_serializing)]
-    pub(crate) handle: Handle,
+    pub(crate) identity: RetainedPhysicalIdentity,
 }
 
 impl TemplateArtifactPrecondition {

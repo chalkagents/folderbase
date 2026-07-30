@@ -5,17 +5,21 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(not(windows))]
+use folderbase_core::ROOT_INSTANCE_FORMAT_V1 as CURRENT_ROOT_INSTANCE_FORMAT;
+#[cfg(windows)]
+use folderbase_core::ROOT_INSTANCE_FORMAT_V2 as CURRENT_ROOT_INSTANCE_FORMAT;
 use folderbase_core::{
-    ApprovedMigration, FolderbaseError, FolderbaseKind, InitializationOptions, InitializationPlan,
-    InitializationPlanDigest, InitializationResult, InspectionReport, LocalVersionStore,
-    MAX_WORKSPACE_TEXT_BYTES, MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview,
-    MigrationResult, MigrationState, ROOT_INSTANCE_FORMAT_V1, RollbackResult, RootAttestationError,
-    TemplateAnswerType, TemplateAnswerValue, TemplatePackage, ValidationLevel, ValidationReport,
-    ValidationSeverity, VersionId, analyze_migration, apply_migration, approve_migration,
-    attest_folderbase_root, initialize, initialize_with_expected_plan_digest, inspect,
-    list_workspace, load_builtin_template, plan_initialization, plan_migration,
-    plan_template_initialization, preview_migration, read_workspace_text, save_workspace_text,
-    validate,
+    ApprovedMigration, FolderbaseCaptureError, FolderbaseError, FolderbaseKind,
+    FolderbaseVersionStore, InitializationOptions, InitializationPlan, InitializationPlanDigest,
+    InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
+    MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview, MigrationResult,
+    MigrationState, RollbackResult, RootAttestationError, TemplateAnswerType, TemplateAnswerValue,
+    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
+    analyze_migration, apply_migration, approve_migration, attest_folderbase_root, initialize,
+    initialize_with_expected_plan_digest, inspect, list_workspace, load_builtin_template,
+    plan_initialization, plan_migration, plan_template_initialization, preview_migration,
+    read_workspace_text, save_workspace_text, validate,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -165,6 +169,13 @@ enum VersionCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Restore the exact ordinary-file bytes named by the current Local Head Tombstone.
+    RestoreTombstone {
+        folderbase: PathBuf,
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the append-only local object journal.
     History {
         folderbase: PathBuf,
@@ -297,6 +308,7 @@ enum ValidationLevelArg {
 #[derive(Debug)]
 enum CliError {
     Folderbase(FolderbaseError),
+    Capture(FolderbaseCaptureError),
     RootAttestation(RootAttestationError),
     OutputSerialization(serde_json::Error),
 }
@@ -305,6 +317,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Folderbase(source) => source.fmt(formatter),
+            Self::Capture(source) => source.fmt(formatter),
             Self::RootAttestation(source) => source.fmt(formatter),
             Self::OutputSerialization(source) => {
                 write!(formatter, "failed to serialize command output: {source}")
@@ -317,6 +330,7 @@ impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Folderbase(source) => Some(source),
+            Self::Capture(source) => Some(source),
             Self::RootAttestation(source) => Some(source),
             Self::OutputSerialization(source) => Some(source),
         }
@@ -326,6 +340,12 @@ impl std::error::Error for CliError {
 impl From<FolderbaseError> for CliError {
     fn from(source: FolderbaseError) -> Self {
         Self::Folderbase(source)
+    }
+}
+
+impl From<FolderbaseCaptureError> for CliError {
+    fn from(source: FolderbaseCaptureError) -> Self {
+        Self::Capture(source)
     }
 }
 
@@ -393,7 +413,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 println!("Protocol version: {}", receipt.protocol_version);
                 println!("Manifest SHA-256: {}", receipt.manifest_sha256);
                 println!(
-                    "Physical root instance ({ROOT_INSTANCE_FORMAT_V1}): {}",
+                    "Physical root instance ({CURRENT_ROOT_INSTANCE_FORMAT}): {}",
                     receipt.root_instance_sha256
                 );
             }
@@ -675,6 +695,27 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         );
                     }
                 }
+                VersionCommand::RestoreTombstone {
+                    folderbase,
+                    path,
+                    json,
+                } => {
+                    let portable_path = path
+                        .to_str()
+                        .ok_or_else(|| FolderbaseError::UnsafePath(path.clone()))?;
+                    let result = FolderbaseVersionStore::open(folderbase)?
+                        .restore_tombstone(portable_path)?;
+                    if json {
+                        print_json(&result)?;
+                    } else {
+                        println!(
+                            "Restored Tombstone {} as {} in {}",
+                            result.path().display(),
+                            result.object_version_id(),
+                            result.version_id()
+                        );
+                    }
+                }
                 VersionCommand::History { folderbase, json } => {
                     let events = LocalVersionStore::open(folderbase)?.journal_events()?;
                     if json {
@@ -789,6 +830,14 @@ fn command_emits_json_errors(command: &Command) -> bool {
     if let Command::Init { json, .. } = command {
         return *json;
     }
+    if let Command::Version { command } = command {
+        return match command {
+            VersionCommand::Capture { json, .. }
+            | VersionCommand::Restore { json, .. }
+            | VersionCommand::RestoreTombstone { json, .. }
+            | VersionCommand::History { json, .. } => *json,
+        };
+    }
     let Command::Transform { command } = command else {
         return false;
     };
@@ -807,6 +856,26 @@ fn command_emits_json_errors(command: &Command) -> bool {
 fn error_code(error: &CliError) -> &'static str {
     let error = match error {
         CliError::Folderbase(error) => error,
+        CliError::Capture(error) => {
+            return match error {
+                FolderbaseCaptureError::MissingLocalHead => "missing_local_head",
+                FolderbaseCaptureError::TombstoneNotFound(_) => "tombstone_not_found",
+                FolderbaseCaptureError::UnsupportedTombstoneKind(_) => "unsupported_tombstone_kind",
+                FolderbaseCaptureError::RestoreTargetOccupied(_) => "restore_target_occupied",
+                FolderbaseCaptureError::InvalidRestoreAncestry(_) => "invalid_restore_ancestry",
+                FolderbaseCaptureError::InvalidRestoreTransaction(_) => {
+                    "invalid_restore_transaction"
+                }
+                FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { .. } => {
+                    "restore_authority_maintenance_required"
+                }
+                FolderbaseCaptureError::RestoreNamespaceRepairRequired(_) => {
+                    "restore_namespace_repair_required"
+                }
+                FolderbaseCaptureError::ConflictingTransaction(_) => "conflicting_transaction",
+                _ => "capture_error",
+            };
+        }
         CliError::RootAttestation(error) => return error.code(),
         CliError::OutputSerialization(_) => return "output_serialization",
     };
@@ -828,6 +897,7 @@ fn error_code(error: &CliError) -> &'static str {
         FolderbaseError::MigrationSourceChanged(_) => "migration_source_changed",
         FolderbaseError::MigrationVerificationFailed(_) => "migration_verification_failed",
         FolderbaseError::WouldOverwrite(_) => "would_overwrite",
+        FolderbaseError::RestoreNamespaceRepairRequired(_) => "restore_namespace_repair_required",
         FolderbaseError::StructuralTemplateChangeRequiresApproval => {
             "structural_template_change_requires_approval"
         }

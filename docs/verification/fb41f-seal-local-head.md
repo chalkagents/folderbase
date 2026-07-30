@@ -248,8 +248,17 @@ The implementation proves:
   inspection, stops after one byte beyond the referenced length;
 - exact mutable-state publication verification stops after one byte beyond the
   expected record length without allocating from a growing stream;
-- Local Head anchoring of the complete capture-journal digest, with
-  post-Head journal-observation tamper refusal;
+- v2 Local Head `capture_transaction_v1` anchoring of the complete
+  capture-journal digest, with post-Head journal-observation tamper refusal;
+- bounded read compatibility for released v1 Local Heads, preserving
+  `transaction_sha256` as capture authority and CAS-normalizing it under the
+  transaction lock without changing its digest;
+- bounded compatibility for released non-genesis active capture journals whose
+  nested expected Head used `transaction_sha256`, retaining the SHA-256 of the
+  exact durable bytes across both pre-Head and committed-Head recovery instead
+  of hashing the normalized in-memory wire;
+- closed, independently checked `version_derived_v1` authority for rebound and
+  restore-produced Heads, with unknown or mismatched discriminator refusal;
 - exact committed parent and timestamp validation before recovery may project
   identity evidence;
 - exact bytes for PDF, video, CSV, SQLite, Git packs, office-shaped, binary, and

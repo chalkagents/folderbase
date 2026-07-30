@@ -6,7 +6,6 @@ use std::{
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
-use same_file::Handle;
 use semver::Version;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
@@ -17,11 +16,15 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::physical_identity::PhysicalIdentity;
+
 /// Largest manifest accepted by the root-attestation seam.
 pub const MAX_FOLDERBASE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Domain separator for the current device-local root-instance digest.
 pub const ROOT_INSTANCE_FORMAT_V1: &str = "folderbase-physical-root-instance-v1";
+/// Domain separator for full Windows `FILE_ID_INFO` root identity.
+pub const ROOT_INSTANCE_FORMAT_V2: &str = "folderbase-physical-root-instance-v2";
 
 const STATE_DIRECTORY: &str = ".folderbase";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -162,9 +165,61 @@ impl RootAttestationError {
 }
 
 struct OpenedMarker {
-    identity: Handle,
+    identity: PhysicalIdentity,
     snapshot: FileSnapshot,
     file: fs::File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RootInstanceAuthority {
+    current_sha256: String,
+    legacy_v1_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RootInstanceAdmission<'a> {
+    recorded_sha256: &'a str,
+    legacy_v1: bool,
+}
+
+impl RootInstanceAdmission<'_> {
+    pub(crate) fn recorded_sha256(&self) -> &str {
+        self.recorded_sha256
+    }
+
+    pub(crate) fn is_legacy_v1(&self) -> bool {
+        self.legacy_v1
+    }
+}
+
+impl RootInstanceAuthority {
+    pub(crate) fn current_sha256(&self) -> &str {
+        &self.current_sha256
+    }
+
+    pub(crate) fn admit<'a>(&self, candidate: &'a str) -> Option<RootInstanceAdmission<'a>> {
+        if candidate == self.current_sha256 {
+            return Some(RootInstanceAdmission {
+                recorded_sha256: candidate,
+                legacy_v1: false,
+            });
+        }
+        self.legacy_v1_sha256
+            .as_deref()
+            .filter(|legacy| candidate == *legacy)
+            .map(|_| RootInstanceAdmission {
+                recorded_sha256: candidate,
+                legacy_v1: true,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(current_sha256: String, legacy_v1_sha256: Option<String>) -> Self {
+        Self {
+            current_sha256,
+            legacy_v1_sha256,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,10 +243,24 @@ pub fn attest_folderbase_root(
     attest_folderbase_root_inner(root.as_ref(), || {})
 }
 
+pub(crate) fn attest_folderbase_root_with_authority(
+    root: &Path,
+) -> Result<(FolderbaseRootAttestation, RootInstanceAuthority), RootAttestationError> {
+    attest_folderbase_root_with_authority_inner(root, || {})
+}
+
 fn attest_folderbase_root_inner(
     root: &Path,
     before_final_validation: impl FnOnce(),
 ) -> Result<FolderbaseRootAttestation, RootAttestationError> {
+    attest_folderbase_root_with_authority_inner(root, before_final_validation)
+        .map(|(attestation, _)| attestation)
+}
+
+fn attest_folderbase_root_with_authority_inner(
+    root: &Path,
+    before_final_validation: impl FnOnce(),
+) -> Result<(FolderbaseRootAttestation, RootInstanceAuthority), RootAttestationError> {
     classify_root(root)?;
     let root_file = open_root_nofollow(root).map_err(|source| RootAttestationError::Io {
         path: root.to_path_buf(),
@@ -214,19 +283,12 @@ fn attest_folderbase_root_inner(
         });
     }
     let root_identity =
-        Handle::from_file(
-            root_file
-                .try_clone()
-                .map_err(|source| RootAttestationError::Io {
-                    path: root.to_path_buf(),
-                    source,
-                })?,
-        )
-        .map_err(|source| RootAttestationError::Io {
+        PhysicalIdentity::from_file(&root_file).map_err(|source| RootAttestationError::Io {
             path: root.to_path_buf(),
             source,
         })?;
-    let root_instance_sha256 = root_instance_sha256(&root_file, root)?;
+    let root_instance_authority = root_instance_authority(&root_file, root)?;
+    let root_instance_sha256 = root_instance_authority.current_sha256().to_owned();
     let root_dir = Dir::from_std_file(root_file);
 
     let state_metadata = marker_metadata(
@@ -273,7 +335,7 @@ fn attest_folderbase_root_inner(
         });
     }
     let state_identity =
-        Handle::from_file(state_file).map_err(|source| RootAttestationError::Io {
+        PhysicalIdentity::from_file(&state_file).map_err(|source| RootAttestationError::Io {
             path: root.join(STATE_DIRECTORY),
             source,
         })?;
@@ -332,13 +394,16 @@ fn attest_folderbase_root_inner(
         root,
     )?;
 
-    Ok(FolderbaseRootAttestation {
-        root: root.to_path_buf(),
-        folderbase_id,
-        protocol_version,
-        manifest_sha256,
-        root_instance_sha256,
-    })
+    Ok((
+        FolderbaseRootAttestation {
+            root: root.to_path_buf(),
+            folderbase_id,
+            protocol_version,
+            manifest_sha256,
+            root_instance_sha256,
+        },
+        root_instance_authority,
+    ))
 }
 
 fn classify_root(root: &Path) -> Result<(), RootAttestationError> {
@@ -496,14 +561,7 @@ fn open_regular_marker(
         return Err(RootAttestationError::MarkerWrongType { marker });
     }
     let identity =
-        Handle::from_file(
-            file.try_clone()
-                .map_err(|source| RootAttestationError::Io {
-                    path: root.join(marker.relative_path()),
-                    source,
-                })?,
-        )
-        .map_err(|source| RootAttestationError::Io {
+        PhysicalIdentity::from_file(&file).map_err(|source| RootAttestationError::Io {
             path: root.join(marker.relative_path()),
             source,
         })?;
@@ -535,7 +593,7 @@ fn read_manifest_bounded(
     Ok(bytes)
 }
 
-fn revalidate_root(root: &Path, expected: &Handle) -> Result<Dir, RootAttestationError> {
+fn revalidate_root(root: &Path, expected: &PhysicalIdentity) -> Result<Dir, RootAttestationError> {
     let reopened =
         open_root_nofollow(root).map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     let metadata = reopened
@@ -544,12 +602,8 @@ fn revalidate_root(root: &Path, expected: &Handle) -> Result<Dir, RootAttestatio
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
-    let actual = Handle::from_file(
-        reopened
-            .try_clone()
-            .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?,
-    )
-    .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let actual = PhysicalIdentity::from_file(&reopened)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &actual != expected {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
@@ -560,7 +614,7 @@ fn revalidate_directory(
     parent: &Dir,
     name: &str,
     _marker: FolderbaseRootMarker,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
 ) -> Result<Dir, RootAttestationError> {
     let directory = parent
         .open_dir_nofollow(name)
@@ -575,7 +629,7 @@ fn revalidate_directory(
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
-    let actual = Handle::from_file(reopened)
+    let actual = PhysicalIdentity::from_file(&reopened)
         .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
     if &actual != expected {
         return Err(RootAttestationError::RootChangedDuringAttestation);
@@ -587,7 +641,7 @@ fn revalidate_file(
     parent: &Dir,
     name: &str,
     marker: FolderbaseRootMarker,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
     expected_snapshot: Option<&FileSnapshot>,
     root: &Path,
 ) -> Result<(), RootAttestationError> {
@@ -605,7 +659,7 @@ fn revalidate_manifest(
     parent: &Dir,
     name: &str,
     marker: FolderbaseRootMarker,
-    expected: &Handle,
+    expected: &PhysicalIdentity,
     expected_sha256: &str,
     root: &Path,
 ) -> Result<(), RootAttestationError> {
@@ -784,11 +838,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn root_instance_sha256(file: &fs::File, root: &Path) -> Result<String, RootAttestationError> {
-    let mut digest = Sha256::new();
-    digest.update(ROOT_INSTANCE_FORMAT_V1.as_bytes());
-    digest.update([0]);
-
+fn root_instance_authority(
+    file: &fs::File,
+    root: &Path,
+) -> Result<RootInstanceAuthority, RootAttestationError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -797,39 +850,158 @@ fn root_instance_sha256(file: &fs::File, root: &Path) -> Result<String, RootAtte
             path: root.to_path_buf(),
             source,
         })?;
-        digest.update(b"unix");
-        digest.update([0]);
-        digest.update(metadata.dev().to_be_bytes());
-        digest.update(metadata.ino().to_be_bytes());
+        Ok(RootInstanceAuthority {
+            current_sha256: root_instance_digest(
+                ROOT_INSTANCE_FORMAT_V1,
+                b"unix",
+                &[&metadata.dev().to_be_bytes(), &metadata.ino().to_be_bytes()],
+            ),
+            legacy_v1_sha256: None,
+        })
     }
 
     #[cfg(windows)]
     {
-        let information =
+        let full_identity =
+            PhysicalIdentity::from_file(file).map_err(|source| RootAttestationError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?;
+        let PhysicalIdentity::Windows {
+            volume_serial,
+            file_id,
+        } = full_identity
+        else {
+            return Err(RootAttestationError::PhysicalIdentityUnavailable);
+        };
+        let legacy =
             winapi_util::file::information(file).map_err(|source| RootAttestationError::Io {
                 path: root.to_path_buf(),
                 source,
             })?;
-        digest.update(b"windows");
-        digest.update([0]);
-        digest.update((information.volume_serial_number() as u32).to_be_bytes());
-        digest.update(information.file_index().to_be_bytes());
+        Ok(windows_root_instance_authority(
+            volume_serial,
+            file_id,
+            legacy.volume_serial_number() as u32,
+            legacy.file_index(),
+        ))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = file;
         let _ = root;
-        return Err(RootAttestationError::PhysicalIdentityUnavailable);
+        Err(RootAttestationError::PhysicalIdentityUnavailable)
     }
+}
 
-    Ok(format!("{:x}", digest.finalize()))
+fn root_instance_digest(format: &str, platform: &[u8], fields: &[&[u8]]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(format.as_bytes());
+    digest.update([0]);
+    digest.update(platform);
+    digest.update([0]);
+    for field in fields {
+        digest.update(field);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(any(windows, test))]
+fn windows_root_instance_authority(
+    volume_serial: u64,
+    file_id: [u8; 16],
+    legacy_volume_serial: u32,
+    legacy_file_index: u64,
+) -> RootInstanceAuthority {
+    RootInstanceAuthority {
+        current_sha256: root_instance_digest(
+            ROOT_INSTANCE_FORMAT_V2,
+            b"windows",
+            &[&volume_serial.to_be_bytes(), &file_id],
+        ),
+        legacy_v1_sha256: Some(root_instance_digest(
+            ROOT_INSTANCE_FORMAT_V1,
+            b"windows",
+            &[
+                &legacy_volume_serial.to_be_bytes(),
+                &legacy_file_index.to_be_bytes(),
+            ],
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn released_windows_v1_root_identity_remains_compatible_without_weakening_v2() {
+        let first = windows_root_instance_authority(
+            0x1020_3040_5060_7080,
+            [
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0,
+                0xf0, 0x01,
+            ],
+            0x1020_3040,
+            0x1122_3344_5566_7788,
+        );
+        let legacy_collision = windows_root_instance_authority(
+            0x1020_3040_5060_7080,
+            [
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+                0x0f, 0x10,
+            ],
+            0x1020_3040,
+            0x1122_3344_5566_7788,
+        );
+
+        assert_eq!(
+            first.current_sha256(),
+            "8ff64630529b2fbda0062c3c15b8109e050e99f905cf497ad3a864cc19db6b2c"
+        );
+        assert_eq!(
+            first.legacy_v1_sha256.as_deref(),
+            Some("b3bd16243ce08bcb477e45af8682519dbbbeb3d33bd50d4a1660fe04a073bc03")
+        );
+        let current = first.admit(first.current_sha256()).unwrap();
+        assert_eq!(current.recorded_sha256(), first.current_sha256());
+        assert!(!current.is_legacy_v1());
+        let legacy = first
+            .admit(first.legacy_v1_sha256.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(
+            legacy.recorded_sha256(),
+            first.legacy_v1_sha256.as_deref().unwrap()
+        );
+        assert!(legacy.is_legacy_v1());
+        assert_ne!(
+            first.current_sha256(),
+            legacy_collision.current_sha256(),
+            "new Windows authority must reject a ReFS upper-bit collision"
+        );
+        assert!(first.admit(legacy_collision.current_sha256()).is_none());
+        assert_eq!(
+            legacy_collision.current_sha256(),
+            "2afb8ccf76a5f517a400d52b539060d66a99ee816b9f2c94f63a7c3e2a32b6dc"
+        );
+    }
+
+    #[test]
+    fn released_unix_v1_root_identity_vector_is_unchanged() {
+        assert_eq!(
+            root_instance_digest(
+                ROOT_INSTANCE_FORMAT_V1,
+                b"unix",
+                &[
+                    &0x0102_0304_0506_0708_u64.to_be_bytes(),
+                    &0x1122_3344_5566_7788_u64.to_be_bytes(),
+                ],
+            ),
+            "f3684cd589445d66add75c1151f5df853fa89d37beae54a51e324606ba43736a"
+        );
+    }
 
     #[test]
     fn closed_marker_paths_are_stable() {

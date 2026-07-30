@@ -44,6 +44,22 @@ not require a Folderbase account.
 The commercial desktop app, managed sync service, web workspace, and cloud
 agent runtime live in the separate Folderbase Platform repository.
 
+## Trust boundary
+
+`.folderbase/` is engine-owned local database state, analogous to `.git/`.
+Local Core treats internally consistent records there as trusted state. It
+still fails closed on malformed or partial records, interrupted writes,
+ordinary concurrent races, path or inode substitution, unexpected hard links,
+and any operation that would overwrite existing workspace content.
+
+Local Core does not claim cryptographic authenticity against a local process
+running as the same user that deliberately rewrites every related
+`.folderbase/` record into one internally consistent forgery. Protecting local
+state from that actor would require an OS-protected device key and a larger key
+recovery UX, which is intentionally outside the KISS local protocol. Folderbase
+Cloud and server-side sharing authority are separate authenticated trust
+domains; local metadata possession alone never grants Cloud access.
+
 ## Install
 
 Folderbase currently requires Rust 1.96 or newer.
@@ -84,6 +100,17 @@ folderbase init /path/to/project \
   --json
 folderbase validate /path/to/project --json
 ```
+
+After a captured deletion, restore the current Local Head's exact ordinary-file
+Tombstone without overwriting anything already at that path:
+
+```sh
+folderbase version restore-tombstone /path/to/project path/to/file --json
+```
+
+This restores the sealed opaque bytes and executable fidelity under the
+original Object ID and Object Version, then creates one new full-state
+Folderbase Version. Directory and symlink Tombstones are not restored by v1.
 
 The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
 Core compares it and performs a bounded, metadata-only preflight immediately

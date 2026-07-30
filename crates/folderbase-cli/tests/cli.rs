@@ -518,6 +518,62 @@ fn version_capture_history_and_restore_round_trip() {
 }
 
 #[test]
+fn version_restore_tombstone_round_trips_exact_head_bytes_in_a_fresh_process() {
+    use folderbase_core::FolderbaseVersionStore;
+
+    let root = tempfile::tempdir().expect("temporary folderbase");
+    std::fs::write(root.path().join("proposal.docx"), [0_u8, 255, 7, 0]).unwrap();
+    folderbase()
+        .args([
+            "init",
+            root.path().to_str().unwrap(),
+            "--name",
+            "Restore CLI",
+        ])
+        .assert()
+        .success();
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    std::fs::remove_file(root.path().join("proposal.docx")).unwrap();
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    drop(store);
+
+    let output = folderbase()
+        .args([
+            "version",
+            "restore-tombstone",
+            root.path().to_str().unwrap(),
+            "proposal.docx",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let restored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(restored["path"], "proposal.docx");
+    assert_eq!(restored["created"], true);
+    assert!(
+        restored["version_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("fbversion_")
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("proposal.docx")).unwrap(),
+        [0_u8, 255, 7, 0]
+    );
+    let current = FolderbaseVersionStore::open(root.path())
+        .unwrap()
+        .read_version(restored["version_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(current.parents(), &[deletion.version_id().to_owned()]);
+}
+
+#[test]
 fn workspace_list_json_returns_the_sorted_flat_file_navigation_shape() {
     let root = tempfile::tempdir().expect("temporary folderbase");
     std::fs::create_dir(root.path().join("docs")).unwrap();

@@ -9,7 +9,6 @@ use std::{
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use chrono::Utc;
-use same_file::Handle;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -18,6 +17,7 @@ use uuid::Uuid;
 use crate::model::{
     InitializationDestinationEntry, InitializationDestinationKind, InitializationRequest,
 };
+use crate::physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity};
 use crate::template::template_package_sha256;
 use crate::traversal_policy::{is_git_metadata_component, is_reconstructable_directory};
 use crate::{
@@ -125,7 +125,7 @@ fn plan_initialization_with_template(
     }
     let OpenedRootCapability {
         directory: root_dir,
-        handle: root_handle,
+        identity: root_identity_guard,
         digest_identity: root_identity,
     } = open_root_capability(&root)?;
 
@@ -367,7 +367,7 @@ fn plan_initialization_with_template(
         preserved_paths,
         warnings,
         plan_digest,
-        root_handle,
+        root_identity: root_identity_guard,
         destination_inventory,
     })
 }
@@ -688,13 +688,9 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
     }
 
     let root_file = fs::File::open(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    let current_handle = Handle::from_file(
-        root_file
-            .try_clone()
-            .map_err(|source| FolderbaseError::io(&root, source))?,
-    )
-    .map_err(|source| FolderbaseError::io(&root, source))?;
-    if current_handle != plan.root_handle {
+    let current_identity = PhysicalIdentity::from_file(&root_file)
+        .map_err(|source| FolderbaseError::io(&root, source))?;
+    if current_identity != plan.root_identity.identity() {
         return Err(FolderbaseError::PlanRootIdentityChanged(root));
     }
     let mut preflight_budget = InitializationInventoryBudget::default();
@@ -901,7 +897,7 @@ fn template_preconditions(
                 ),
             });
         }
-        let handle = match artifact.kind {
+        let identity = match artifact.kind {
             TemplateArtifactKind::Directory => {
                 let directory = root_dir
                     .open_dir_nofollow(path)
@@ -917,7 +913,7 @@ fn template_preconditions(
                             .to_owned(),
                     });
                 }
-                Handle::from_file(
+                RetainedPhysicalIdentity::from_file(
                     directory
                         .try_clone()
                         .map_err(|source| FolderbaseError::io(&destination, source))?
@@ -931,14 +927,14 @@ fn template_preconditions(
                 let file = root_dir
                     .open_with(path, &options)
                     .map_err(|source| FolderbaseError::io(&destination, source))?;
-                Handle::from_file(file.into_std())
+                RetainedPhysicalIdentity::from_file(file.into_std())
                     .map_err(|source| FolderbaseError::io(&destination, source))?
             }
         };
         preconditions.push(TemplateArtifactPrecondition {
             path: path.clone(),
             kind: artifact.kind,
-            handle,
+            identity,
         });
     }
     preconditions.sort_by(|left, right| left.path.cmp(&right.path));
@@ -965,7 +961,7 @@ fn verify_template_preconditions(
         if metadata.file_type().is_symlink() || !expected_type {
             return Err(changed());
         }
-        let current_handle = match precondition.kind {
+        let current_identity = match precondition.kind {
             TemplateArtifactKind::Directory => {
                 let directory = root_dir
                     .open_dir_nofollow(&precondition.path)
@@ -984,13 +980,11 @@ fn verify_template_preconditions(
                 if is_nested {
                     return Err(changed());
                 }
-                Handle::from_file(
-                    directory
-                        .try_clone()
-                        .map_err(|_| changed())?
-                        .into_std_file(),
-                )
-                .map_err(|_| changed())?
+                let file = directory
+                    .try_clone()
+                    .map_err(|_| changed())?
+                    .into_std_file();
+                PhysicalIdentity::from_file(&file).map_err(|_| changed())?
             }
             TemplateArtifactKind::Text => {
                 let mut options = OpenOptions::new();
@@ -998,10 +992,10 @@ fn verify_template_preconditions(
                 let file = root_dir
                     .open_with(&precondition.path, &options)
                     .map_err(|_| changed())?;
-                Handle::from_file(file.into_std()).map_err(|_| changed())?
+                PhysicalIdentity::from_file(&file.into_std()).map_err(|_| changed())?
             }
         };
-        if current_handle != precondition.handle {
+        if current_identity != precondition.identity.identity() {
             return Err(changed());
         }
     }
@@ -1083,7 +1077,7 @@ fn refuse_template_target_inside_nested_folderbase_capability(
 
 struct OpenedRootCapability {
     directory: Dir,
-    handle: Handle,
+    identity: RetainedPhysicalIdentity,
     digest_identity: Vec<u8>,
 }
 
@@ -1096,14 +1090,14 @@ fn open_root_capability(root: &Path) -> Result<OpenedRootCapability> {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
     let digest_identity = root_digest_identity(&file, &metadata, root)?;
-    let handle = Handle::from_file(
+    let identity = RetainedPhysicalIdentity::from_file(
         file.try_clone()
             .map_err(|source| FolderbaseError::io(root, source))?,
     )
     .map_err(|source| FolderbaseError::io(root, source))?;
     Ok(OpenedRootCapability {
         directory: Dir::from_std_file(file),
-        handle,
+        identity,
         digest_identity,
     })
 }
