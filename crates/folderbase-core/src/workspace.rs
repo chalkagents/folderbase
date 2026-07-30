@@ -153,7 +153,7 @@ pub fn list_workspace(root: impl AsRef<Path>) -> Result<WorkspaceListing> {
             (
                 WorkspaceEntryKind::File,
                 bytes,
-                relative != Path::new(ROOT_IGNORE_POLICY_PATH)
+                refuse_generic_workspace_mutation_path(relative).is_ok()
                     && file_is_editable(entry.path(), bytes)?,
             )
         } else {
@@ -341,7 +341,15 @@ pub(crate) fn is_reserved_workspace_component(name: &OsStr) -> bool {
 }
 
 pub(crate) fn refuse_generic_workspace_mutation_path(path: &Path) -> Result<()> {
-    if path == Path::new(ROOT_IGNORE_POLICY_PATH) {
+    let mut components = path.components();
+    let is_root_ignore_policy = matches!(
+        components.next(),
+        Some(Component::Normal(name))
+            if name
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(ROOT_IGNORE_POLICY_PATH))
+    ) && components.next().is_none();
+    if is_root_ignore_policy {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }
     Ok(())
