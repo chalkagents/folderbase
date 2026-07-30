@@ -250,7 +250,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-614 passed; 3 ignored
+620 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
