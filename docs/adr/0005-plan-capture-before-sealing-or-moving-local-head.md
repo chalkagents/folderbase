@@ -219,23 +219,31 @@ overwriting foreign content. Post-Head projection stays relative to the retained
 state capability; a projection failure restores the exact prior Head. If a user
 or agent edits the transaction-owned published file in place before cleanup,
 Core preserves those workspace bytes. Cleanup first publishes one durable,
-closed singleton receipt with a `committed` or `modified` disposition. Committed
-and modified cleanup both rederive the exact deterministic restore transaction
-from the immutable parent, Tombstone, and ancestor binding. A durable
-transaction-owned rescue hard link protects the staged inode before its normal
-private name is removed. Core re-proves stage, rescue, and visible-destination
-identity at the removal boundary and again proves rescue and destination after
-stage removal; any replacement retains the rescue and pending cleanup instead
-of deleting uncertain bytes. Once a modified receipt is durable, later cleanup
-depends on same-inode ownership rather than the file remaining modified, so a
-same-inode revert cannot wedge recovery. Both dispositions remove only proven
-private links and the empty transaction directory, never the visible path, then
-retire the active journal. Successful committed cleanup atomically replaces one
-bounded device-local completion receipt before retiring pending cleanup. That
-receipt does not block capture and permits an exact retry result only while the
-immutable target Head, installed Version, and current workspace bytes and
-fidelity still match. A crash or cleanup error at any boundary therefore
-converges without unbounded receipts or a terminal lost acknowledgement.
+closed singleton receipt with a `committed`, `modified`, or
+`committed_modified` disposition. Every disposition rederives the exact
+deterministic restore transaction from the immutable parent, Tombstone, and
+ancestor binding. Cleanup v2 also records the durable device-local identity of
+the published inode. A transaction-owned rescue hard link protects that inode,
+while each ordinary private name is moved into a transaction-unique quarantine
+before deletion. Core verifies the object actually moved into quarantine,
+preserves a moved replacement, and re-proves the rescue and visible destination
+after every mutation. If every private name is already absent after a crash,
+committed recovery may finish only when the visible file still has the recorded
+identity, sealed bytes, and executable fidelity.
+
+A late same-inode edit after target Head publication transitions to
+`committed_modified`: the edit survives, private ownership is relinquished,
+capture becomes eligible, and the restore call does not report success. Once
+either modified disposition is durable, later cleanup depends on exact
+same-inode ownership rather than the file remaining modified, so a same-inode
+revert cannot wedge recovery. Successful committed cleanup atomically replaces
+one bounded device-local completion v2 receipt before retiring pending cleanup.
+The receipt never blocks capture. It recovers a terminal lost acknowledgement
+only while the exact target Head and installed Version remain current and the
+workspace path still names the recorded published inode with the sealed bytes
+and executable fidelity. A missing path, foreign inode (including identical
+bytes), changed bytes, changed fidelity, Head change, or Version change makes
+that evidence stale and can never produce a restored-success result.
 
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records

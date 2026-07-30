@@ -923,25 +923,34 @@ digest. The rebound parent and restore-produced Heads are v2 records with
 prior Head digest that cannot be rederived after the prior Head is gone.
 Post-Head projection remains confined to the retained state capability, and
 projection failure restores the exact prior Head. An in-place edit of the
-transaction-owned published target preserves the user's bytes. Cleanup publishes
-a durable closed singleton receipt with `committed` or `modified` disposition
-before removing private state. Both cleanup dispositions rederive the exact
-deterministic transaction from the immutable parent, Tombstone, and ancestor
-binding. Before removing the ordinary private stage name, Core durably creates
-a transaction-owned rescue hard link. It re-proves the stage, rescue, and
-visible destination at the removal boundary, then re-proves rescue and
-destination after stage removal before the rescue may be removed. A replacement
-or uncertain identity retains the rescue and pending receipt. Modified cleanup
-uses the receipt's already-established same-inode ownership and does not require
-the user bytes to remain different from the sealed bytes. Cleanup never unlinks
-the visible path. The pending receipt survives active-journal retirement,
-blocks capture, and drives restartable convergence. Committed cleanup then
-atomically replaces one bounded device-local completion receipt before retiring
-the pending receipt. Completion evidence never blocks capture and returns an
-idempotent result only after exact immutable Head, installed Version, current
-bytes, and fidelity verification. Unix staging explicitly applies its final
-`0700` or `0600` permissions after creation, independently of process umask.
-Directory and symlink Tombstone reconstruction remain outside v1 restore.
+transaction-owned published target preserves the user's bytes. Cleanup
+publishes a durable closed v2 singleton receipt with `committed`, `modified`, or
+`committed_modified` disposition before removing private state. Every
+disposition rederives the exact deterministic transaction from the immutable
+parent, Tombstone, and ancestor binding, and the receipt binds the durable
+device-local identity of the published inode. Core protects that inode with a
+rescue hard link, moves each ordinary private name into a
+transaction-unique capability-relative quarantine, verifies the object moved,
+and deletes only an exact match. A moved replacement remains quarantined and
+pending; visible workspace paths are never unlinked. If all private names are
+already absent after a crash, committed recovery additionally requires the
+visible path to retain the recorded identity, sealed bytes, and executable
+fidelity.
+
+A late same-inode edit after target Head publication transitions to
+`committed_modified`; cleanup preserves the edit and releases exact private
+ownership without reporting restored success. Modified cleanup does not require
+owned user bytes to remain different from sealed bytes. The pending receipt
+survives active-journal retirement, blocks capture, and drives restartable
+convergence. Successful committed cleanup atomically replaces one bounded
+device-local completion v2 receipt before retiring the pending receipt.
+Completion evidence never blocks capture. It recovers an idempotent terminal
+result only while the exact target Head and installed Version remain current
+and the workspace path retains the recorded published identity, sealed bytes,
+and executable fidelity. Missing, foreign, changed, or stale state produces no
+restored-success result. Unix staging explicitly applies its final `0700` or
+`0600` permissions after creation, independently of process umask. Directory
+and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind
 replacement Tombstones and exact ordinary-file no-clobber restore are

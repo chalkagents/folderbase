@@ -95,6 +95,19 @@ blob named by the current Head Tombstone.
   restore call to return its exact durable result after fresh-process reopen.
   The old terminal retry returned target-occupied because every result record
   had already been removed.
+- `d8d71f6` edited the published same inode immediately after
+  `ProjectionDurable`. The committed cleanup receipt then wedged because sealed
+  fidelity no longer matched while modified cleanup still required the prior
+  Head.
+- `8de8573` removed both private links at the cleanup boundary, then made the
+  visible publication missing or foreign. The old committed retry reported a
+  restored result without proving any workspace publication.
+- `8fcb862` moved the deterministic mutation hook after the final stage or
+  rescue pathname check. The old pathname unlink deleted a replacement created
+  in that exact check-to-mutation window.
+- `7c24cda` replaced a completed restore with a distinct inode containing the
+  same bytes and executable fidelity. The old completion singleton treated
+  content equality as terminal-result authority.
 
 ## GREEN behavior
 
@@ -167,9 +180,27 @@ blob named by the current Head Tombstone.
   re-proves rescue/destination afterward. Pre- or post-unlink replacement keeps
   the exact owned bytes and pending cleanup instead of deleting uncertain state.
 - `be02fbe` durably replaces one bounded device-local completion receipt before
-  retiring pending cleanup. It never blocks capture, survives terminal lost
-  acknowledgement, and yields a retry result only after immutable transaction,
-  target Head, installed Version, workspace bytes, and fidelity verification.
+  retiring pending cleanup. It never blocks capture and introduced bounded
+  terminal completion evidence.
+- `bc74848` adds a closed `committed_modified` cleanup disposition for a late
+  same-inode edit after target Head publication. It preserves the edit, removes
+  only proven private ownership, returns no restored success, and unblocks the
+  next capture.
+- `c2ec39a` binds cleanup v2 to a cross-platform durable device-local inode
+  identity. Recovery with no surviving private link succeeds only for the
+  recorded visible identity with sealed bytes and executable fidelity; missing
+  or foreign state remains pending.
+- `cce0b4e` replaces stage and rescue pathname unlink with
+  transaction-unique capability-relative quarantine moves. Each moved object is
+  identity-verified; replacements remain quarantined, exact restore bytes retain
+  a rescue name, and uncertain state is never deleted.
+- `32a5212` binds completion v2 to the published inode identity. A terminal
+  retry returns its idempotent result only while the exact target Head,
+  installed Version, published inode, sealed bytes, and executable fidelity all
+  remain current. Identical bytes on a foreign inode are stale evidence.
+- `d2aaf52` proves the positive crash case: once both private names are absent,
+  exact recorded publication identity and fidelity still converge and retire
+  pending cleanup.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -198,14 +229,17 @@ re-derived from the verified parent. Final target identity, content, fidelity,
 root attachment, and nested-boundary proofs run immediately before and after
 Head CAS. Post-Head failure rolls the retained root back to its prior Head and
 never reports restore success. Projection uses the already-retained state
-capability. Cleanup records its obligation durably before removing the retained
-stage and per-transaction directory, rederives immutable cleanup authority, and
-places a durable rescue name around the unlink boundary. The pending receipt
-survives active-journal retirement and resumes exact cleanup after restart. A
-separate bounded singleton completion receipt survives the terminal return
-boundary without blocking capture. If the published transaction-owned file is
-edited in place, Core preserves the edit, relinquishes only proven private
-ownership, and permits the ordinary next capture.
+capability. Cleanup records its obligation and published inode identity durably
+before removing the retained stage and per-transaction directory, rederives
+immutable cleanup authority, and uses quarantine-before-delete for every
+private name. The pending receipt survives active-journal retirement and
+resumes exact cleanup after restart. A separate bounded singleton completion
+receipt never blocks capture and survives the terminal return boundary only as
+conditional evidence: the exact target Head, installed Version, recorded inode,
+sealed bytes, and executable fidelity must all still match. If the published
+transaction-owned file is edited in place, Core preserves the edit, relinquishes
+only proven private ownership, reports no false restore success, and permits the
+ordinary next capture.
 
 ## Gates
 
@@ -216,7 +250,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-608 passed; 3 ignored
+614 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
