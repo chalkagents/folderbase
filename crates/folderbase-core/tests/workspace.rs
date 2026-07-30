@@ -404,6 +404,64 @@ fn workspace_read_returns_utf8_content_with_a_known_digest() {
 }
 
 #[test]
+fn exact_root_ignore_policy_is_readable_but_only_typed_flows_may_edit_it() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("docs")).unwrap();
+    fs::write(fixture.path().join(".folderbaseignore"), "node_modules/\n").unwrap();
+    fs::write(
+        fixture.path().join("docs/.folderbaseignore"),
+        "nested policy\n",
+    )
+    .unwrap();
+    fs::write(fixture.path().join("note.md"), "first\n").unwrap();
+
+    let policy = read_workspace_text(fixture.path(), ".folderbaseignore").unwrap();
+    assert_eq!(policy.content, "node_modules/\n");
+    let policy_entry = list_workspace(fixture.path())
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == ".folderbaseignore")
+        .expect("root ignore policy remains visible");
+    assert!(!policy_entry.editable);
+
+    let error = save_workspace_text(
+        fixture.path(),
+        ".folderbaseignore",
+        "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97",
+        "target/\n",
+    )
+    .expect_err("generic workspace save cannot change capture policy");
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::UnsafePath(path)
+            if path == PathBuf::from(".folderbaseignore")
+    ));
+    assert_eq!(
+        fs::read(fixture.path().join(".folderbaseignore")).unwrap(),
+        b"node_modules/\n"
+    );
+
+    let nested = save_workspace_text(
+        fixture.path(),
+        "docs/.folderbaseignore",
+        "cdf013df0dddf8a58713d56628c6d51e60088b1fbd1472de9a1c4bb1b89571d7",
+        "nested replacement\n",
+    )
+    .expect("the reserved policy name applies only at the root");
+    assert_eq!(nested.path, "docs/.folderbaseignore");
+
+    let ordinary = save_workspace_text(
+        fixture.path(),
+        "note.md",
+        "b640e840b19d378660b32fb51ae18d67dccb4a8596a29e7bd72c1b2ae5928f41",
+        "second\n",
+    )
+    .expect("ordinary files remain editable");
+    assert_eq!(ordinary.path, "note.md");
+}
+
+#[test]
 fn workspace_save_atomically_versions_the_previous_and_new_text_under_one_identity() {
     let fixture = tempdir().unwrap();
     fs::write(fixture.path().join("note.md"), "first\n").unwrap();

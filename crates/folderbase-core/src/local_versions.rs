@@ -3729,6 +3729,36 @@ mod tests {
     };
 
     #[test]
+    fn generic_versioned_replace_refuses_the_exact_root_ignore_policy_before_writes() {
+        let fixture = tempfile::tempdir().expect("temporary version store");
+        fs::write(fixture.path().join(".folderbaseignore"), b"node_modules/\n")
+            .expect("ignore policy");
+        let store = LocalVersionStore::open(fixture.path()).expect("version store");
+        let expected = ContentDigest {
+            algorithm: "sha256".to_owned(),
+            digest: "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97".to_owned(),
+            bytes: 14,
+        };
+
+        let error = store
+            .replace_file_versioned(".folderbaseignore", &expected, b"target/\n")
+            .expect_err("generic local-version replacement cannot change capture policy");
+
+        assert!(matches!(
+            error,
+            FolderbaseError::UnsafePath(path) if path == PathBuf::from(".folderbaseignore")
+        ));
+        assert_eq!(
+            fs::read(fixture.path().join(".folderbaseignore")).unwrap(),
+            b"node_modules/\n"
+        );
+        assert!(
+            !fixture.path().join(".folderbase").exists(),
+            "policy refusal must precede lazy version-state creation"
+        );
+    }
+
+    #[test]
     fn transaction_lock_is_exclusive_across_independent_handles() {
         let fixture = tempfile::tempdir().expect("temporary lock store");
         fs::create_dir_all(fixture.path().join(LOCKS_DIRECTORY)).expect("lock directory");
