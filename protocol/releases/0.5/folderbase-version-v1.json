@@ -136,7 +136,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folderbase_state.rs",
-      "sha256": "1d5f439ec93a7862fc820992fb167bde75769eaadaf17273af09097ef712ac97"
+      "sha256": "04277e54ce6747181c36a925e3c528d5cc62137851a612e8b9b3f6661425dde8"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_version.rs",
@@ -168,7 +168,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration.rs",
-      "sha256": "31af3498994e2a380127054321c8315dd741935761d5187e64ebee641626dbc0"
+      "sha256": "a72f3c259594d69187dcbe5727470c8e552f00840f2943814e3263a688a958db"
     },
     {
       "path": "crates/folderbase-core/src/model.rs",
@@ -180,7 +180,7 @@
     },
     {
       "path": "crates/folderbase-core/src/protocol_upgrade.rs",
-      "sha256": "98403c19d080ac581d39a239e639dcde826c45e4b1895544f7c8bf5f74acbf07"
+      "sha256": "d724a9b90ec84df8712d64967dec6a193d9b0cce8b21c9dad8da15a3f60420ea"
     },
     {
       "path": "crates/folderbase-core/src/reorganization.rs",
