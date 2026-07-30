@@ -52,7 +52,7 @@ const RESTORE_CLEANUP_RECOVERY_PATH: &str =
     ".folderbase/transactions/folderbase-version-restores/cleanup.json";
 const RESTORE_CLEANUP_RECOVERY_FORMAT_V2: &str = "folderbase-restore-cleanup-v2";
 const RESTORE_COMPLETION_PATH: &str = ".folderbase/local/completed-restore.json";
-const RESTORE_COMPLETION_FORMAT_V1: &str = "folderbase-restore-completion-v1";
+const RESTORE_COMPLETION_FORMAT_V2: &str = "folderbase-restore-completion-v2";
 const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
 const CAPTURE_IDENTITIES_DIRECTORY: &str = ".folderbase/local/capture-identities";
 const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
@@ -307,6 +307,7 @@ struct RestoreCleanupRecovery {
 struct RestoreCompletionReceipt {
     format: String,
     transaction: RestoreTransaction,
+    published_identity_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -466,8 +467,13 @@ impl FolderbaseVersionStore {
         if active.is_none()
             && let Some(completion) = read_restore_completion_receipt(&state)?
             && completion.transaction.path == path_string
-            && let Some(restored) =
-                completed_restore_result(self, &local, &state, &completion.transaction)?
+            && let Some(restored) = completed_restore_result(
+                self,
+                &local,
+                &state,
+                &completion.transaction,
+                &completion.published_identity_sha256,
+            )?
         {
             return Ok(restored);
         }
@@ -1304,7 +1310,7 @@ fn finish_restore_cleanup_with_identity(
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
-    write_restore_completion_receipt(state, transaction)?;
+    write_restore_completion_receipt(state, transaction, published_identity_sha256)?;
     checkpoint(&RestoreCheckpoint::CompletionDurable);
     remove_restore_cleanup_recovery(state)?;
     Ok(RestoreCleanupOutcome::Restored)
@@ -1693,6 +1699,7 @@ fn completed_restore_result(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
 ) -> Result<Option<RestoredTombstone>, FolderbaseCaptureError> {
     validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
@@ -1720,15 +1727,10 @@ fn completed_restore_result(
     }
 
     let path = Path::new(&transaction.path);
-    let display = store.root_attestation.root.join(path);
-    let mut file = match state.open_workspace_regular_file(path) {
-        Ok(file) => file,
-        Err(_) => return Ok(None),
-    };
-    let before = match fingerprint_std_file(&file, &display) {
-        Ok(fingerprint) => fingerprint,
-        Err(_) => return Ok(None),
-    };
+    let digest = transaction
+        .binding
+        .content_sha256()
+        .expect("validated regular binding");
     let bytes = transaction
         .binding
         .bytes()
@@ -1737,24 +1739,15 @@ fn completed_restore_result(
         .binding
         .executable()
         .expect("validated regular binding");
-    if before.bytes != bytes || before.executable != executable {
-        return Ok(None);
-    }
-    let observed = match hash_reader(&mut file, &display, bytes) {
-        Ok(digest) => digest,
-        Err(_) => return Ok(None),
-    };
-    let after = match fingerprint_std_file(&file, &display) {
-        Ok(fingerprint) => fingerprint,
-        Err(_) => return Ok(None),
-    };
-    if before != after
-        || observed.bytes != bytes
-        || observed.digest
-            != transaction
-                .binding
-                .content_sha256()
-                .expect("validated regular binding")
+    if state
+        .verify_workspace_regular_file_identity_and_fidelity(
+            path,
+            published_identity_sha256,
+            digest,
+            bytes,
+            executable,
+        )
+        .is_err()
     {
         return Ok(None);
     }
@@ -3702,9 +3695,11 @@ fn read_restore_completion_receipt(
                 "restore completion receipt is invalid JSON: {source}"
             ))
         })?;
-    if completion.format != RESTORE_COMPLETION_FORMAT_V1 {
+    if completion.format != RESTORE_COMPLETION_FORMAT_V2
+        || !is_lowercase_sha256(&completion.published_identity_sha256)
+    {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-            "restore completion receipt format is unsupported".to_owned(),
+            "restore completion receipt format or publication identity is invalid".to_owned(),
         ));
     }
     Ok(Some(completion))
@@ -3713,10 +3708,12 @@ fn read_restore_completion_receipt(
 fn write_restore_completion_receipt(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
 ) -> Result<(), FolderbaseCaptureError> {
     let completion = RestoreCompletionReceipt {
-        format: RESTORE_COMPLETION_FORMAT_V1.to_owned(),
+        format: RESTORE_COMPLETION_FORMAT_V2.to_owned(),
         transaction: transaction.clone(),
+        published_identity_sha256: published_identity_sha256.to_owned(),
     };
     let mut encoded = serde_json::to_vec_pretty(&completion).map_err(|source| {
         FolderbaseCaptureError::InvalidRestoreTransaction(format!(
