@@ -684,28 +684,65 @@ fn safe_workspace_relative(path: &Path) -> Result<PathBuf> {
 }
 
 fn contains_folderbase_marker(directory: &Dir, display: &Path) -> Result<bool> {
-    let state_display = display.join(STATE_COMPONENT);
+    let Some(state_name) = unique_matching_child(directory, display, is_folderbase_state_name)?
+    else {
+        return Ok(false);
+    };
+    let state_display = display.join(&state_name);
     let state = match open_directory_nofollow(
         directory,
-        OsStr::new(STATE_COMPONENT),
+        &state_name,
         &state_display,
         StateAccess::ReadOnly,
     ) {
         Ok(state) => state,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(source) => return Err(FolderbaseError::io(state_display, source)),
     };
-    let marker = OsStr::new("manifest.json");
-    let marker_display = state_display.join(marker);
+    let Some(marker) = unique_matching_child(&state, &state_display, is_folderbase_manifest_name)?
+    else {
+        return Ok(false);
+    };
+    let marker_display = state_display.join(&marker);
     let metadata = match state.symlink_metadata(marker) {
         Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(source) => return Err(FolderbaseError::io(marker_display, source)),
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(FolderbaseError::UnsafePath(marker_display));
     }
     Ok(true)
+}
+
+fn unique_matching_child(
+    directory: &Dir,
+    display: &Path,
+    matches: impl Fn(&OsStr) -> bool,
+) -> Result<Option<OsString>> {
+    let mut found = None;
+    for entry in directory
+        .entries()
+        .map_err(|source| FolderbaseError::io(display, source))?
+    {
+        let entry = entry.map_err(|source| FolderbaseError::io(display, source))?;
+        let name = entry.file_name();
+        if matches(&name) {
+            if found.is_some() {
+                return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+            }
+            found = Some(name);
+        }
+    }
+    Ok(found)
+}
+
+fn is_folderbase_state_name(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(STATE_COMPONENT))
+}
+
+fn is_folderbase_manifest_name(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
 }
 
 fn verify_open_regular_metadata(
