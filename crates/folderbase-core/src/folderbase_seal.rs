@@ -5158,6 +5158,39 @@ mod tests {
     }
 
     #[test]
+    fn local_head_wire_distinguishes_capture_and_version_derived_authority() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let captured: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("captured Head"),
+        )
+        .expect("captured Head JSON");
+        assert_eq!(captured["format"], "folderbase-local-head-v2");
+        assert_eq!(captured["authority"]["kind"], "capture_transaction_v1");
+        assert!(captured["authority"]["sha256"].as_str().is_some());
+        assert!(captured.get("transaction_sha256").is_none());
+
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("restore Tombstone");
+        let restored: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("restored Head"),
+        )
+        .expect("restored Head JSON");
+        assert_eq!(restored["format"], "folderbase-local-head-v2");
+        assert_eq!(restored["authority"]["kind"], "version_derived_v1");
+        assert!(restored["authority"]["sha256"].as_str().is_some());
+        assert!(restored.get("transaction_sha256").is_none());
+    }
+
+    #[test]
     fn post_head_legacy_journal_without_tombstone_field_still_recovers() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
