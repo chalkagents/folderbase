@@ -39,19 +39,15 @@ pub(crate) fn restore_authority_record_path(transaction_id: &str) -> PathBuf {
 }
 
 pub(crate) fn stable_file_identity_sha256(file: &File) -> io::Result<String> {
-    let mut digest = Sha256::new();
-    digest.update(b"folderbase-workspace-file-identity-v1");
-    digest.update([0]);
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
         let metadata = file.metadata()?;
-        digest.update(b"unix");
-        digest.update([0]);
-        digest.update(metadata.dev().to_be_bytes());
-        digest.update(metadata.ino().to_be_bytes());
+        return Ok(stable_unix_file_identity_sha256(
+            metadata.dev(),
+            metadata.ino(),
+        ));
     }
 
     #[cfg(windows)]
@@ -74,22 +70,36 @@ pub(crate) fn stable_file_identity_sha256(file: &File) -> io::Result<String> {
         {
             return Err(io::Error::last_os_error());
         }
+        let mut digest = Sha256::new();
+        digest.update(b"folderbase-workspace-file-identity-v1");
+        digest.update([0]);
         digest.update(b"windows");
         digest.update([0]);
         digest.update(information.VolumeSerialNumber.to_be_bytes());
         digest.update(information.FileId.Identifier);
+        return Ok(format!("{:x}", digest.finalize()));
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = file;
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "stable file identity is unavailable on this platform",
-        ));
+        ))
     }
+}
 
-    Ok(format!("{:x}", digest.finalize()))
+#[cfg(unix)]
+pub(crate) fn stable_unix_file_identity_sha256(device: u64, inode: u64) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-workspace-file-identity-v1");
+    digest.update([0]);
+    digest.update(b"unix");
+    digest.update([0]);
+    digest.update(device.to_be_bytes());
+    digest.update(inode.to_be_bytes());
+    format!("{:x}", digest.finalize())
 }
 
 pub(crate) fn stable_file_link_count(file: &File) -> io::Result<u64> {

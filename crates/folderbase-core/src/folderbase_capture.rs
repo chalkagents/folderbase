@@ -36,6 +36,9 @@ use crate::{
     traversal_policy::{RECONSTRUCTABLE_DIRECTORIES, is_folderbase_state_component},
 };
 
+#[cfg(unix)]
+use crate::folderbase_restore_authority::stable_unix_file_identity_sha256;
+
 pub const MAX_FOLDERBASEIGNORE_BYTES: u64 = 1024 * 1024;
 pub const MAX_LOCAL_HEAD_BYTES: u64 = 4096;
 pub const MAX_CAPTURE_PLAN_RECORDS: usize = MAX_VERSION_ENTRIES;
@@ -745,7 +748,7 @@ struct RestoreAuthorityRegistry {
 impl RestoreAuthorityRegistry {
     fn validated_link_commitment(
         &self,
-        workspace_file: &fs::File,
+        workspace_identity: &str,
         link_count: usize,
         workspace_path: &str,
         display_path: &Path,
@@ -753,7 +756,7 @@ impl RestoreAuthorityRegistry {
         validated_link_commitment(
             &self.state,
             &self.records,
-            workspace_file,
+            workspace_identity,
             link_count,
             workspace_path,
             display_path,
@@ -764,17 +767,11 @@ impl RestoreAuthorityRegistry {
 fn validated_link_commitment(
     state: &FolderbaseState,
     records: &[ObservedRestoreAuthority],
-    workspace_file: &fs::File,
+    workspace_identity: &str,
     link_count: usize,
     workspace_path: &str,
     display_path: &Path,
 ) -> Result<CaptureLinkCommitment, FolderbaseCaptureError> {
-    let workspace_identity = stable_file_identity_sha256(workspace_file).map_err(|source| {
-        FolderbaseCaptureError::Io {
-            path: display_path.to_path_buf(),
-            source,
-        }
-    })?;
     let mut validated_paths = BTreeSet::new();
     for observed in records.iter().filter(|observed| {
         observed.record.workspace_path == workspace_path
@@ -933,10 +930,17 @@ pub(crate) fn verify_capture_link_commitment(
     })?)
     .map_err(|_| FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(entry.path())))?;
     let records = read_restore_authority_records(root_attestation, state, MAX_RESTORE_AUTHORITIES)?;
+    let workspace_identity =
+        stable_file_identity_sha256(workspace_file).map_err(|source| {
+            FolderbaseCaptureError::Io {
+                path: display_path.clone(),
+                source,
+            }
+        })?;
     let actual = validated_link_commitment(
         state,
         &records,
-        workspace_file,
+        &workspace_identity,
         link_count,
         entry.path(),
         &display_path,
@@ -1180,49 +1184,17 @@ impl<'a> CapturePlanner<'a> {
         let mut regular_bytes = None;
         let mut regular_executable = None;
         if metadata.is_file() && !metadata.file_type().is_symlink() {
-            let workspace_file =
-                open_regular_nofollow(directory, Path::new(&name)).map_err(|source| {
-                    FolderbaseCaptureError::Io {
-                        path: display_path.clone(),
-                        source,
-                    }
-                })?;
-            let workspace_metadata =
-                workspace_file
-                    .metadata()
-                    .map_err(|source| FolderbaseCaptureError::Io {
-                        path: display_path.clone(),
-                        source,
-                    })?;
-            let handle_observed = CaptureMetadataFingerprint::from_std_file(&workspace_file)
-                .map_err(|source| FolderbaseCaptureError::Io {
-                    path: display_path.clone(),
-                    source,
-                })?;
-            if handle_observed
-                != capture_entry_fingerprint(
-                    directory,
-                    &name,
-                    CaptureEntryKind::RegularFile,
-                    &metadata,
-                    &display_path,
-                )?
-            {
-                return Err(FolderbaseCaptureError::PlanningStateChanged);
-            }
-            regular_bytes = Some(workspace_metadata.len());
-            regular_executable = Some(handle_observed.executable);
-            regular_observed = Some(handle_observed);
-            let link_count =
-                usize::try_from(stable_file_link_count(&workspace_file).map_err(|source| {
-                    FolderbaseCaptureError::Io {
-                        path: display_path.clone(),
-                        source,
-                    }
-                })?)
-                .map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
+            let (observed, workspace_identity, link_count) = planned_regular_link_observation(
+                directory,
+                &name,
+                &metadata,
+                &display_path,
+            )?;
+            regular_bytes = Some(observed.bytes);
+            regular_executable = Some(observed.executable);
+            regular_observed = Some(observed);
             link_commitment = self.restore_authorities.validated_link_commitment(
-                &workspace_file,
+                &workspace_identity,
                 link_count,
                 &path,
                 &display_path,
@@ -1451,6 +1423,76 @@ pub(crate) fn capture_entry_fingerprint(
     })?;
     Ok(CaptureMetadataFingerprint::from_cap_metadata(metadata)
         .with_physical_identity(Some(identity)))
+}
+
+#[cfg(unix)]
+fn planned_regular_link_observation(
+    _directory: &Dir,
+    _name: &OsStr,
+    metadata: &Metadata,
+    _display_path: &Path,
+) -> Result<(CaptureMetadataFingerprint, String, usize), FolderbaseCaptureError> {
+    use cap_std::fs::MetadataExt;
+
+    let link_count =
+        usize::try_from(metadata.nlink()).map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
+    Ok((
+        CaptureMetadataFingerprint::from_cap_metadata(metadata),
+        stable_unix_file_identity_sha256(metadata.dev(), metadata.ino()),
+        link_count,
+    ))
+}
+
+#[cfg(windows)]
+fn planned_regular_link_observation(
+    directory: &Dir,
+    name: &OsStr,
+    metadata: &Metadata,
+    display_path: &Path,
+) -> Result<(CaptureMetadataFingerprint, String, usize), FolderbaseCaptureError> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = directory
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseCaptureError::Io {
+            path: display_path.to_path_buf(),
+            source,
+        })?
+        .into_std();
+    let identity = stable_file_identity_sha256(&file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: display_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let link_count = usize::try_from(stable_file_link_count(&file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: display_path.to_path_buf(),
+            source,
+        }
+    })?)
+    .map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
+    Ok((
+        CaptureMetadataFingerprint::from_cap_metadata(metadata)
+            .with_physical_identity(Some(windows_file_identity(&file).map_err(|source| {
+                FolderbaseCaptureError::Io {
+                    path: display_path.to_path_buf(),
+                    source,
+                }
+            })?)),
+        identity,
+        link_count,
+    ))
 }
 
 #[cfg(windows)]
