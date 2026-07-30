@@ -20,6 +20,8 @@ mod initialization;
 mod inspection;
 mod local_versions;
 mod migration;
+#[cfg(test)]
+mod migration_execution_contract_red_tests;
 mod migration_filesystem;
 mod model;
 mod physical_identity;
