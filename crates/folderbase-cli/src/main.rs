@@ -959,6 +959,9 @@ fn error_code(error: &CliError) -> &'static str {
         FolderbaseError::InitializationInventoryLimitExceeded { .. } => {
             "initialization_inventory_limit_exceeded"
         }
+        FolderbaseError::NestedBoundaryWorkLimitExceeded { .. } => {
+            "nested_boundary_work_limit_exceeded"
+        }
         FolderbaseError::InvalidMigrationState { .. } => "invalid_migration_state",
         FolderbaseError::MigrationApprovalMismatch => "migration_approval_mismatch",
         FolderbaseError::MigrationSourceChanged(_) => "migration_source_changed",
@@ -1325,6 +1328,16 @@ fn validation_severity_label(severity: ValidationSeverity) -> &'static str {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn reports_the_shared_nested_boundary_work_limit() {
+        let error = CliError::Folderbase(FolderbaseError::NestedBoundaryWorkLimitExceeded {
+            path: PathBuf::from("nested"),
+            maximum: 16_384,
+        });
+
+        assert_eq!(error_code(&error), "nested_boundary_work_limit_exceeded");
+    }
 
     #[test]
     fn parses_supported_init_options() {
