@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{File, OpenOptions},
     io::{Read, Write},
+    ops::Deref,
     path::{Component, Path, PathBuf},
 };
 
@@ -188,6 +189,73 @@ struct CaptureTransaction {
     assignments: Vec<CaptureAssignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     target_tombstones: Vec<Tombstone>,
+}
+
+#[derive(Debug)]
+struct ActiveCaptureTransaction {
+    transaction: CaptureTransaction,
+    authority_sha256: String,
+}
+
+impl Deref for ActiveCaptureTransaction {
+    type Target = CaptureTransaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleasedV1JournalHead {
+    version_id: String,
+    version_sha256: String,
+    transaction_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleasedV1CaptureTransaction {
+    format: String,
+    transaction_id: String,
+    folderbase_id: String,
+    root_instance_sha256: String,
+    plan_sha256: String,
+    expected_head: Option<ReleasedV1JournalHead>,
+    target_version_id: String,
+    created_at: String,
+    root_manifest_object_id: String,
+    root_manifest_candidate_version_id: String,
+    prior_root_manifest_version_id: Option<String>,
+    assignments: Vec<CaptureAssignment>,
+    #[serde(default)]
+    target_tombstones: Vec<Tombstone>,
+}
+
+impl From<ReleasedV1CaptureTransaction> for CaptureTransaction {
+    fn from(value: ReleasedV1CaptureTransaction) -> Self {
+        Self {
+            format: value.format,
+            transaction_id: value.transaction_id,
+            folderbase_id: value.folderbase_id,
+            root_instance_sha256: value.root_instance_sha256,
+            plan_sha256: value.plan_sha256,
+            expected_head: value.expected_head.map(|head| JournalHead {
+                version_id: head.version_id,
+                version_sha256: head.version_sha256,
+                authority: LocalHeadAuthority::CaptureTransactionV1 {
+                    sha256: head.transaction_sha256,
+                },
+            }),
+            target_version_id: value.target_version_id,
+            created_at: value.created_at,
+            root_manifest_object_id: value.root_manifest_object_id,
+            root_manifest_candidate_version_id: value.root_manifest_candidate_version_id,
+            prior_root_manifest_version_id: value.prior_root_manifest_version_id,
+            assignments: value.assignments,
+            target_tombstones: value.target_tombstones,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,7 +560,7 @@ impl FolderbaseVersionStore {
             if let Some(head) = target_head {
                 if head.authority
                     != (LocalHeadAuthority::CaptureTransactionV1 {
-                        sha256: capture_transaction_sha256(transaction)?,
+                        sha256: transaction.authority_sha256.clone(),
                     })
                 {
                     return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
@@ -567,13 +635,16 @@ impl FolderbaseVersionStore {
                     maximum_transaction_bytes,
                     maximum_version_bytes,
                 )?;
-                write_active_transaction_with_limit(
+                let authority_sha256 = write_active_transaction_with_limit(
                     &state,
                     &transaction,
                     maximum_transaction_bytes,
                 )?;
                 checkpoint(&CaptureCheckpoint::JournalDurable);
-                transaction
+                ActiveCaptureTransaction {
+                    transaction,
+                    authority_sha256,
+                }
             }
         };
 
@@ -624,7 +695,7 @@ impl FolderbaseVersionStore {
                 version_id: built.version.version_id().to_owned(),
                 version_sha256: built.version_sha256.clone(),
                 authority: LocalHeadAuthority::CaptureTransactionV1 {
-                    sha256: capture_transaction_sha256(&transaction)?,
+                    sha256: transaction.authority_sha256.clone(),
                 },
             },
         )?;
@@ -1582,6 +1653,7 @@ fn local_head_authority_sha256(
     )
 }
 
+#[cfg(test)]
 fn capture_transaction_sha256(
     transaction: &CaptureTransaction,
 ) -> Result<String, FolderbaseCaptureError> {
@@ -3024,7 +3096,7 @@ fn validate_committed_transaction(
 
 fn read_active_transaction(
     state: &FolderbaseState,
-) -> Result<Option<CaptureTransaction>, FolderbaseCaptureError> {
+) -> Result<Option<ActiveCaptureTransaction>, FolderbaseCaptureError> {
     let Some(encoded) = state.read_bounded(
         Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
         MAX_CAPTURE_TRANSACTION_BYTES,
@@ -3032,13 +3104,24 @@ fn read_active_transaction(
     else {
         return Ok(None);
     };
-    serde_json::from_slice(&encoded)
-        .map(Some)
-        .map_err(|source| {
-            FolderbaseCaptureError::InvalidCaptureTransaction(format!(
-                "active journal is invalid JSON: {source}"
-            ))
-        })
+    let authority_sha256 = format!("{:x}", Sha256::digest(&encoded));
+    let transaction = match serde_json::from_slice::<CaptureTransaction>(&encoded) {
+        Ok(transaction) => transaction,
+        Err(current_error) => {
+            match serde_json::from_slice::<ReleasedV1CaptureTransaction>(&encoded) {
+                Ok(transaction) => transaction.into(),
+                Err(released_error) => {
+                    return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                        "active journal is invalid JSON for current ({current_error}) and released v1 ({released_error}) wire formats"
+                    )));
+                }
+            }
+        }
+    };
+    Ok(Some(ActiveCaptureTransaction {
+        transaction,
+        authority_sha256,
+    }))
 }
 
 fn ensure_no_active_capture(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
@@ -3328,11 +3411,12 @@ fn write_active_transaction_with_limit(
     state: &FolderbaseState,
     transaction: &CaptureTransaction,
     maximum_bytes: u64,
-) -> Result<(), FolderbaseCaptureError> {
+) -> Result<String, FolderbaseCaptureError> {
     let encoded = encode_active_transaction(transaction, maximum_bytes)?;
     state
         .publish_new(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &encoded)
-        .map_err(Into::into)
+        .map_err(FolderbaseCaptureError::from)?;
+    Ok(format!("{:x}", Sha256::digest(&encoded)))
 }
 
 fn encode_active_transaction(
@@ -3754,6 +3838,7 @@ mod tests {
     fn active_transaction(root: &Path) -> Option<CaptureTransaction> {
         read_active_transaction(&FolderbaseState::open(root).expect("state"))
             .expect("active intent")
+            .map(|active| active.transaction)
     }
 
     fn local_head(root: &Path) -> Option<LocalHeadRecord> {
