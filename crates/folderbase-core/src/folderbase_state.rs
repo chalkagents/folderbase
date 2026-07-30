@@ -1170,9 +1170,173 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
 mod tests {
     use std::{fs, io};
 
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
+
+    const RESTORE_SOURCE: &str = ".folderbase/source";
+    const RESTORE_STAGE: &str = ".folderbase/transactions/restore-stage";
+    const RESTORE_DESTINATION: &str = "project/restored.bin";
+
+    fn prepared_workspace_restore(
+        expected: &[u8],
+        executable: bool,
+    ) -> (TempDir, FolderbaseState, String) {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/transactions")).expect("transactions");
+        fs::create_dir(fixture.path().join("project")).expect("workspace parent");
+        fs::write(fixture.path().join(RESTORE_SOURCE), expected).expect("restore source");
+        let digest = format!("{:x}", Sha256::digest(expected));
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        state
+            .stage_restore_blob(
+                Path::new(RESTORE_SOURCE),
+                Path::new(RESTORE_STAGE),
+                &digest,
+                expected.len() as u64,
+                executable,
+            )
+            .expect("private restore stage");
+        state
+            .publish_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                executable,
+            )
+            .expect("workspace restore");
+        (fixture, state, digest)
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_accepts_the_exact_retained_stage() {
+        let expected = b"sealed opaque bytes\0\xff";
+        let (_fixture, state, digest) = prepared_workspace_restore(expected, false);
+
+        state
+            .verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            )
+            .expect("exact retained restore");
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_rejects_a_same_byte_replacement() {
+        let expected = b"sealed opaque bytes";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, false);
+        let destination = fixture.path().join(RESTORE_DESTINATION);
+        fs::remove_file(&destination).expect("remove transaction-owned link");
+        fs::write(&destination, expected).expect("foreign same-byte replacement");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            ),
+            Err(FolderbaseError::WouldOverwrite(path)) if path == destination
+        ));
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_rejects_in_place_byte_mutation() {
+        let expected = b"sealed opaque bytes";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, false);
+        fs::write(
+            fixture.path().join(RESTORE_DESTINATION),
+            b"mutated opaque byte",
+        )
+        .expect("mutate retained inode in place");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            ),
+            Err(FolderbaseError::InvalidRecord { message, .. })
+                if message.contains("restore file")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_restore_revalidation_rejects_executable_fidelity_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let expected = b"#!/bin/sh\nexit 0\n";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, true);
+        let destination = fixture.path().join(RESTORE_DESTINATION);
+        let mut permissions = fs::metadata(&destination).expect("metadata").permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&destination, permissions).expect("remove executable fidelity");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                true,
+            ),
+            Err(FolderbaseError::InvalidRecord { message, .. })
+                if message.contains("executable fidelity")
+        ));
+    }
+
+    #[test]
+    fn workspace_restore_revalidation_rejects_a_new_case_folded_nested_boundary() {
+        let expected = b"sealed opaque bytes";
+        let (fixture, state, digest) = prepared_workspace_restore(expected, false);
+        fs::create_dir(fixture.path().join("project/.FOLDERBASE")).expect("nested state");
+        fs::write(
+            fixture.path().join("project/.FOLDERBASE/MANIFEST.JSON"),
+            b"{}",
+        )
+        .expect("nested manifest");
+
+        assert!(matches!(
+            state.verify_workspace_restore(
+                Path::new(RESTORE_STAGE),
+                Path::new(RESTORE_DESTINATION),
+                &digest,
+                expected.len() as u64,
+                false,
+            ),
+            Err(FolderbaseError::UnsafePath(path))
+                if path == fixture.path().join("project")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachment_revalidation_rejects_an_ambient_replacement_root() {
+        let fixture = tempdir().expect("fixture");
+        let root = fixture.path().join("live");
+        let detached = fixture.path().join("detached");
+        fs::create_dir(&root).expect("root");
+        fs::create_dir(root.join(".folderbase")).expect("state");
+        let state = FolderbaseState::open_existing(&root).expect("state capability");
+
+        fs::rename(&root, &detached).expect("detach retained physical root");
+        fs::create_dir(&root).expect("replacement root");
+        fs::create_dir(root.join(".folderbase")).expect("replacement state");
+
+        assert!(matches!(
+            state.verify_still_attached(),
+            Err(FolderbaseError::UnsafePath(path)) if path == root
+        ));
+    }
 
     #[test]
     fn nested_folderbase_marker_names_are_ascii_case_folded() {
