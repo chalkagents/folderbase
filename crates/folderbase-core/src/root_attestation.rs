@@ -187,6 +187,12 @@ pub enum RootAttestationError {
     #[error("Folderbase manifest does not match the required live 0.5 shape")]
     InvalidManifestShape,
 
+    #[error("Folderbase manifest protocol-upgrade receipt is invalid or stale")]
+    InvalidProtocolUpgradeReceipt,
+
+    #[error("Folderbase protocol-upgrade recovery must complete before this operation")]
+    ProtocolUpgradeRecoveryRequired,
+
     #[error("Folderbase root identity changed during attestation")]
     RootChangedDuringAttestation,
 
@@ -221,6 +227,8 @@ impl RootAttestationError {
             Self::UnsupportedProtocolVersion => "unsupported_protocol_version",
             Self::InvalidCaptureIgnorePolicy => "invalid_capture_ignore_policy",
             Self::InvalidManifestShape => "invalid_manifest_shape",
+            Self::InvalidProtocolUpgradeReceipt => "invalid_protocol_upgrade_receipt",
+            Self::ProtocolUpgradeRecoveryRequired => "protocol_upgrade_recovery_required",
             Self::RootChangedDuringAttestation => "root_changed_during_attestation",
             Self::PhysicalIdentityUnavailable => "physical_identity_unavailable",
             Self::Io { .. } => "attestation_io",
@@ -317,20 +325,34 @@ pub(crate) fn attest_folderbase_root_with_profile(
     ),
     RootAttestationError,
 > {
-    attest_folderbase_root_with_authority_inner(root, || {})
+    attest_folderbase_root_with_authority_inner(root, || {}, false)
+}
+
+pub(crate) fn attest_folderbase_root_with_profile_allowing_upgrade_recovery(
+    root: &Path,
+) -> Result<
+    (
+        FolderbaseRootAttestation,
+        RootInstanceAuthority,
+        ManifestProtocolProfile,
+    ),
+    RootAttestationError,
+> {
+    attest_folderbase_root_with_authority_inner(root, || {}, true)
 }
 
 fn attest_folderbase_root_inner(
     root: &Path,
     before_final_validation: impl FnOnce(),
 ) -> Result<FolderbaseRootAttestation, RootAttestationError> {
-    attest_folderbase_root_with_authority_inner(root, before_final_validation)
+    attest_folderbase_root_with_authority_inner(root, before_final_validation, false)
         .map(|(attestation, _, _)| attestation)
 }
 
 fn attest_folderbase_root_with_authority_inner(
     root: &Path,
     before_final_validation: impl FnOnce(),
+    allow_upgrade_recovery: bool,
 ) -> Result<
     (
         FolderbaseRootAttestation,
@@ -478,6 +500,9 @@ fn attest_folderbase_root_with_authority_inner(
             Some(&entry.snapshot),
             root,
         )?;
+    }
+    if !allow_upgrade_recovery && has_pending_protocol_upgrade(&reopened_state) {
+        return Err(RootAttestationError::ProtocolUpgradeRecoveryRequired);
     }
 
     Ok((
@@ -661,13 +686,50 @@ fn validate_ordinary_manifest_shape(manifest: &Value) -> Result<(), RootAttestat
             }
         }
     }
-    if record
-        .get(PROTOCOL_UPGRADE_RECEIPT_FIELD)
-        .is_some_and(|receipt| !valid_protocol_upgrade_receipt(receipt))
+    if let Some(receipt) = record.get(PROTOCOL_UPGRADE_RECEIPT_FIELD)
+        && (!valid_protocol_upgrade_receipt(receipt)
+            || !protocol_upgrade_receipt_binds_target(manifest, receipt))
     {
-        return Err(RootAttestationError::InvalidManifestShape);
+        return Err(RootAttestationError::InvalidProtocolUpgradeReceipt);
     }
     Ok(())
+}
+
+fn protocol_upgrade_receipt_binds_target(manifest: &Value, receipt: &Value) -> bool {
+    let Some(expected) = receipt
+        .get("target_manifest_without_receipt_sha256")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let mut target = manifest.clone();
+    let Some(record) = target.as_object_mut() else {
+        return false;
+    };
+    record.remove(PROTOCOL_UPGRADE_RECEIPT_FIELD);
+    let Ok(encoded) = serde_json::to_string_pretty(&target) else {
+        return false;
+    };
+    let encoded = format!("{encoded}\n");
+    hex_sha256(encoded.as_bytes()) == expected
+}
+
+fn has_pending_protocol_upgrade(state: &Dir) -> bool {
+    let transactions = match state.open_dir_nofollow("transactions") {
+        Ok(directory) => directory,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let upgrades = match transactions.open_dir_nofollow("protocol-upgrades") {
+        Ok(directory) => directory,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    match upgrades.symlink_metadata("active.json") {
+        Ok(_) => true,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 fn valid_protocol_upgrade_receipt(receipt: &Value) -> bool {

@@ -1176,6 +1176,25 @@ impl LocalVersionStore {
         &self,
         state: &FolderbaseState,
     ) -> Result<StoreTransactionLock> {
+        let lock = self.acquire_transaction_lock_in_allowing_protocol_upgrade(state)?;
+        if state
+            .read_bounded_if_present(
+                Path::new(".folderbase/transactions/protocol-upgrades/active.json"),
+                16 * 1024 * 1024,
+            )?
+            .is_some()
+        {
+            return Err(FolderbaseError::ProtocolUpgradeBlocked(
+                "Folderbase protocol upgrade recovery",
+            ));
+        }
+        Ok(lock)
+    }
+
+    pub(crate) fn acquire_transaction_lock_in_allowing_protocol_upgrade(
+        &self,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
         state.ensure_private_dir(Path::new(LOCKS_DIRECTORY))?;
         let lock_path = self.root.join(TRANSACTION_LOCK_PATH);
         match state.publish_new(Path::new(TRANSACTION_LOCK_PATH), b"") {
