@@ -696,6 +696,18 @@ impl FolderbaseState {
         }
     }
 
+    pub(crate) fn remove_empty_dir_durable(&self, relative: &Path) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let (parent, name) = self.open_parent(&relative)?;
+        let display = self.display_path(&relative);
+        match parent.remove_dir(&name) {
+            Ok(()) => sync_directory(&parent, &display),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(FolderbaseError::io(display, source)),
+        }
+    }
+
     pub(crate) fn verify_still_attached(&self) -> Result<()> {
         let visible_root = open_root_nofollow(&self.display_root, self.access)?;
         let visible_root_identity = directory_identity(&visible_root, &self.display_root)?;

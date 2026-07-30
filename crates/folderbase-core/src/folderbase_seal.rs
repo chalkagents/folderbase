@@ -921,6 +921,7 @@ fn execute_restore_transaction(
 
     remove_active_restore_transaction(state)?;
     state.remove_durable(&restore_stage_path(transaction))?;
+    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     checkpoint(&RestoreCheckpoint::CleanupComplete);
     Ok(RestoredTombstone {
         path: PathBuf::from(&transaction.path),
@@ -1276,9 +1277,11 @@ fn finish_restore_projection(
 }
 
 fn restore_stage_path(transaction: &RestoreTransaction) -> PathBuf {
-    Path::new(RESTORE_TRANSACTIONS_DIRECTORY)
-        .join(&transaction.transaction_id)
-        .join("content")
+    restore_transaction_directory(transaction).join("content")
+}
+
+fn restore_transaction_directory(transaction: &RestoreTransaction) -> PathBuf {
+    Path::new(RESTORE_TRANSACTIONS_DIRECTORY).join(&transaction.transaction_id)
 }
 
 impl From<&LocalHeadRecord> for JournalHead {
