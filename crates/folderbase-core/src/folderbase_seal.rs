@@ -4406,6 +4406,59 @@ mod tests {
     }
 
     #[test]
+    fn in_place_edit_of_published_restore_is_preserved_and_capture_is_unblocked() {
+        for fault in [
+            RestoreCheckpoint::TargetPublished,
+            RestoreCheckpoint::HeadReplaced,
+        ] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            fs::remove_file(root.path().join("active.bin")).expect("delete");
+            let deletion = store
+                .seal_capture(store.plan_capture().expect("deletion"))
+                .expect("deletion");
+            let user_bytes = format!("user work after {fault:?}");
+
+            store
+                .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                    if checkpoint == &fault {
+                        fs::write(root.path().join("active.bin"), user_bytes.as_bytes())
+                            .expect("edit published file in place");
+                    }
+                })
+                .expect_err("an in-place edit must stop the restore");
+
+            assert_eq!(
+                fs::read(root.path().join("active.bin")).expect("preserved user work"),
+                user_bytes.as_bytes()
+            );
+            assert_eq!(
+                local_head(root.path()).expect("deletion Head").version_id,
+                deletion.version_id(),
+                "restore must roll back before relinquishing the edited file"
+            );
+
+            let captured = store
+                .seal_capture(store.plan_capture().expect("capture edited workspace"))
+                .expect("the abandoned restore must not block a normal capture");
+            let captured_version = store
+                .read_version(captured.version_id())
+                .expect("captured version");
+            assert_eq!(
+                captured_version.parents(),
+                &[deletion.version_id().to_owned()]
+            );
+            assert_eq!(
+                fs::read(root.path().join("active.bin")).expect("captured user work"),
+                user_bytes.as_bytes()
+            );
+        }
+    }
+
+    #[test]
     fn projection_failure_after_head_restores_the_prior_head() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
