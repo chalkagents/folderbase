@@ -8406,6 +8406,10 @@ fn cleanup_staging_in(filesystem: &MigrationFilesystem, migration_id: &str) {
 }
 
 #[cfg(test)]
+#[path = "migration_transaction_red_tests.rs"]
+mod migration_transaction_red_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
