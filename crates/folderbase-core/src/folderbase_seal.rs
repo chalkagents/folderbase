@@ -241,6 +241,33 @@ struct ReleasedV1JournalHead {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReleasedV1CaptureAssignment {
+    path: String,
+    kind: CaptureEntryKind,
+    object_id: String,
+    candidate_object_version_id: Option<String>,
+    prior_object_version_id: Option<String>,
+    reused_object: bool,
+    observed: CaptureMetadataFingerprint,
+}
+
+impl From<ReleasedV1CaptureAssignment> for CaptureAssignment {
+    fn from(value: ReleasedV1CaptureAssignment) -> Self {
+        Self {
+            path: value.path,
+            kind: value.kind,
+            object_id: value.object_id,
+            candidate_object_version_id: value.candidate_object_version_id,
+            prior_object_version_id: value.prior_object_version_id,
+            reused_object: value.reused_object,
+            observed: value.observed,
+            link_commitment: CaptureLinkCommitment::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReleasedV1CaptureTransaction {
     format: String,
     transaction_id: String,
@@ -253,7 +280,7 @@ struct ReleasedV1CaptureTransaction {
     root_manifest_object_id: String,
     root_manifest_candidate_version_id: String,
     prior_root_manifest_version_id: Option<String>,
-    assignments: Vec<CaptureAssignment>,
+    assignments: Vec<ReleasedV1CaptureAssignment>,
     #[serde(default)]
     target_tombstones: Vec<Tombstone>,
 }
@@ -278,7 +305,7 @@ impl From<ReleasedV1CaptureTransaction> for CaptureTransaction {
             root_manifest_object_id: value.root_manifest_object_id,
             root_manifest_candidate_version_id: value.root_manifest_candidate_version_id,
             prior_root_manifest_version_id: value.prior_root_manifest_version_id,
-            assignments: value.assignments,
+            assignments: value.assignments.into_iter().map(Into::into).collect(),
             target_tombstones: value.target_tombstones,
         }
     }
@@ -7740,10 +7767,7 @@ mod tests {
                 let hybrid_bytes =
                     serde_json::to_vec_pretty(&hybrid).expect("hybrid active journal");
                 state
-                    .replace(
-                        Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
-                        &hybrid_bytes,
-                    )
+                    .replace(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &hybrid_bytes)
                     .expect("install hybrid active journal");
                 assert!(
                     read_active_transaction_with_limit(
@@ -7798,7 +7822,10 @@ mod tests {
                 );
 
                 let mut truncated_released = released_bytes.clone();
-                while truncated_released.last().is_some_and(u8::is_ascii_whitespace) {
+                while truncated_released
+                    .last()
+                    .is_some_and(u8::is_ascii_whitespace)
+                {
                     truncated_released.pop();
                 }
                 assert_eq!(truncated_released.pop(), Some(b'}'));
