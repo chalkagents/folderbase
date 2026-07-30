@@ -6490,6 +6490,46 @@ mod tests {
         assert!(captured.created());
     }
 
+    #[test]
+    fn partial_restore_authority_record_fails_closed_before_capture() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let restored = store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let completion = read_restore_completion_receipt(&state)
+            .expect("completion")
+            .expect("completed restore");
+        fs::write(
+            root.path().join(restore_authority_record_path(
+                &completion.transaction.transaction_id,
+            )),
+            b"{",
+        )
+        .expect("simulate a torn authority receipt");
+
+        let error = store
+            .plan_capture()
+            .expect_err("partial engine metadata must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidRestoreTransaction(message)
+                if message.contains("invalid JSON")
+        ));
+        assert_eq!(
+            local_head(root.path()).expect("unchanged Head").version_id,
+            restored.version_id()
+        );
+    }
+
     fn assert_cleanup_hook_edit_never_returns_restored(checkpoint_to_edit: RestoreCheckpoint) {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
