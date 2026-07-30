@@ -1,5 +1,7 @@
 #![cfg_attr(test, allow(dead_code))]
 
+mod transaction_v1;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
@@ -39,6 +41,10 @@ use crate::{
 use crate::{
     InitializationOptions,
     initialization::{initialize, plan_template_initialization},
+};
+use transaction_v1::{
+    MAX_JOURNAL_GENERATION_BYTES, MAX_PROGRAM_BYTES, MutationProgramV1, TRANSACTION_DIRECTORY,
+    TransactionJournalGenerationV1, validate_chain,
 };
 
 const STATE_DIR: &str = ".folderbase";
@@ -2606,6 +2612,12 @@ fn legacy_apply_migration_with_hook(
         validation?;
     }
     checkpoint(ApplyCheckpoint::MutationAuthorityBound);
+    let _transaction = prepare_transaction_v1(
+        &migration_filesystem,
+        &plan,
+        &approved.approval_digest,
+        approved_root_identity.stable_sha256(),
+    )?;
     if is_structural_plan(&plan) {
         return apply_structural_migration(
             &migration_filesystem,
@@ -2713,6 +2725,138 @@ fn legacy_apply_migration_with_hook(
         created_paths: journal.created_paths,
         journal_path,
     })
+}
+
+struct PreparedTransactionV1 {
+    program: MutationProgramV1,
+    program_digest: String,
+    generations: Vec<TransactionJournalGenerationV1>,
+}
+
+fn prepare_transaction_v1(
+    filesystem: &MigrationFilesystem,
+    plan: &MigrationPlan,
+    approval_digest: &str,
+    root_identity_sha256: String,
+) -> Result<PreparedTransactionV1> {
+    let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&plan.id);
+    let snapshots = migration_root.join("snapshots");
+    filesystem.ensure_private_directory(Path::new(STATE_DIR))?;
+    filesystem.ensure_private_directory(Path::new(MIGRATIONS_DIR))?;
+    filesystem.ensure_private_directory(&migration_root)?;
+    if filesystem.metadata(&snapshots)?.is_some() {
+        filesystem.ensure_private_directory(&snapshots)?;
+        for name in filesystem.directory_file_names(&snapshots)? {
+            filesystem.set_private_regular_mode(&snapshots.join(name))?;
+        }
+    }
+    filesystem.set_private_regular_mode(&migration_root.join("plan.json"))?;
+    let manifest = Path::new(".folderbase/manifest.json");
+    let manifest_sha256 = filesystem
+        .sha256_regular_if_present(manifest)?
+        .unwrap_or_else(|| sha256_bytes(b"folderbase-manifest-absent"));
+    let program = MutationProgramV1::compile(
+        plan,
+        approval_digest,
+        root_identity_sha256,
+        manifest_sha256,
+        |path| filesystem.physical_identity_sha256(path).map(Some),
+    )?;
+    let transaction_root = migration_root.join(TRANSACTION_DIRECTORY);
+    let program_path = transaction_root.join("program.json");
+    let journal_root = transaction_root.join("journal");
+    let transaction_exists = filesystem.metadata(&transaction_root)?.is_some();
+    if transaction_exists {
+        return reopen_transaction_v1(filesystem, &migration_root, Some(&program));
+    }
+
+    for directory in [
+        transaction_root.clone(),
+        journal_root.clone(),
+        transaction_root.join("stages"),
+        transaction_root.join("claims"),
+        transaction_root.join("snapshots"),
+        transaction_root.join("receipts"),
+    ] {
+        filesystem.ensure_private_directory(&directory)?;
+    }
+    let program_bytes = program.encode(&filesystem.display(&program_path))?;
+    filesystem.publish_private_new(&program_path, &program_bytes)?;
+    let reopened_bytes = filesystem.read_regular_bounded(&program_path, MAX_PROGRAM_BYTES)?;
+    let reopened = MutationProgramV1::decode(&filesystem.display(&program_path), &reopened_bytes)?;
+    if reopened != program {
+        return Err(FolderbaseError::MigrationVerificationFailed(
+            filesystem.display(&program_path),
+        ));
+    }
+    let program_digest = reopened.digest(&filesystem.display(&program_path))?;
+    let initial = TransactionJournalGenerationV1::prepared(&reopened, program_digest.clone())?;
+    let initial_path = journal_root.join(initial.file_name());
+    let initial_bytes = initial.encode(&filesystem.display(&initial_path))?;
+    filesystem.publish_private_new(&initial_path, &initial_bytes)?;
+    let prepared = PreparedTransactionV1 {
+        program: reopened,
+        program_digest,
+        generations: vec![initial],
+    };
+    validate_chain(
+        &prepared.program,
+        &prepared.program_digest,
+        &prepared.generations,
+    )?;
+    Ok(prepared)
+}
+
+fn reopen_transaction_v1(
+    filesystem: &MigrationFilesystem,
+    migration_root: &Path,
+    expected_program: Option<&MutationProgramV1>,
+) -> Result<PreparedTransactionV1> {
+    let transaction_root = migration_root.join(TRANSACTION_DIRECTORY);
+    let program_path = transaction_root.join("program.json");
+    let program_bytes = filesystem.read_regular_bounded(&program_path, MAX_PROGRAM_BYTES)?;
+    let program = MutationProgramV1::decode(&filesystem.display(&program_path), &program_bytes)?;
+    if expected_program.is_some_and(|expected| expected != &program) {
+        return Err(FolderbaseError::MigrationApprovalMismatch);
+    }
+    let program_digest = program.digest(&filesystem.display(&program_path))?;
+    let journal_root = transaction_root.join("journal");
+    let mut generation_names = filesystem.directory_file_names(&journal_root)?;
+    generation_names.sort();
+    let mut generations = Vec::with_capacity(generation_names.len());
+    for (index, name) in generation_names.into_iter().enumerate() {
+        let expected_name = format!("{index:020}.json");
+        if name != OsStr::new(&expected_name) {
+            return Err(FolderbaseError::InvalidRecord {
+                path: filesystem.display(&journal_root.join(name)),
+                message: "transaction journal contains an unknown or gapped generation".to_owned(),
+            });
+        }
+        let path = journal_root.join(&expected_name);
+        let bytes = filesystem.read_regular_bounded(&path, MAX_JOURNAL_GENERATION_BYTES)?;
+        generations.push(TransactionJournalGenerationV1::decode(
+            &filesystem.display(&path),
+            &bytes,
+        )?);
+    }
+    validate_chain(&program, &program_digest, &generations)?;
+    Ok(PreparedTransactionV1 {
+        program,
+        program_digest,
+        generations,
+    })
+}
+
+fn validate_transaction_v1_if_present(
+    filesystem: &MigrationFilesystem,
+    migration_id: &str,
+) -> Result<Option<PreparedTransactionV1>> {
+    let migration_root = PathBuf::from(MIGRATIONS_DIR).join(migration_id);
+    let transaction_root = migration_root.join(TRANSACTION_DIRECTORY);
+    if filesystem.metadata(&transaction_root)?.is_none() {
+        return Ok(None);
+    }
+    reopen_transaction_v1(filesystem, &migration_root, None).map(Some)
 }
 
 struct ExistingFolderbaseTransactionCoordinator {
@@ -4197,6 +4341,7 @@ fn legacy_recover_migration_with_hook(
     let transaction_coordinator =
         acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
     let migration_filesystem = transaction_coordinator.migration_filesystem(&root)?;
+    let _transaction = validate_transaction_v1_if_present(&migration_filesystem, migration_id)?;
     let (journal_path, mut journal) = load_journal_from(&migration_filesystem, migration_id)?;
     after_transaction_coordinator();
     if matches!(
@@ -4266,6 +4411,7 @@ fn legacy_rollback_migration_by_id_with_hook(
     let transaction_coordinator =
         acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
     let migration_filesystem = transaction_coordinator.migration_filesystem(&root)?;
+    let _transaction = validate_transaction_v1_if_present(&migration_filesystem, migration_id)?;
     let (journal_path, mut journal) = load_journal_from(&migration_filesystem, migration_id)?;
     after_transaction_coordinator();
     require_state(journal.state, MigrationState::Verified)?;

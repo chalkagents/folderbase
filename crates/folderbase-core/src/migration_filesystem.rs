@@ -136,6 +136,26 @@ impl MigrationFilesystem {
         }
     }
 
+    pub(crate) fn physical_identity_sha256(&self, relative: &Path) -> Result<String> {
+        let (parent, name) = self.open_parent(relative)?;
+        let display = self.display(relative);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = parent
+            .open_with(&name, &options)
+            .map_err(|source| FolderbaseError::io(&display, source))?
+            .into_std();
+        let metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
+        crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map(crate::physical_identity::PhysicalIdentity::stable_sha256)
+            .map_err(|source| FolderbaseError::io(self.display(relative), source))
+    }
+
     pub(crate) fn ensure_directory(&self, relative: &Path) -> Result<()> {
         validate_relative(relative, true)?;
         let mut directory = self
@@ -179,8 +199,76 @@ impl MigrationFilesystem {
         sync_directory(&parent, &display)
     }
 
+    pub(crate) fn ensure_private_directory(&self, relative: &Path) -> Result<()> {
+        self.ensure_directory(relative)?;
+        #[cfg(unix)]
+        {
+            use cap_std::fs::{Permissions, PermissionsExt};
+
+            let (parent, name) = self.open_parent(relative)?;
+            let display = self.display(relative);
+            parent
+                .set_permissions(&name, Permissions::from_mode(0o700))
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let mode = parent
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != 0o700 {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private migration directory is not owner-only".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_private_regular_mode(&self, relative: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use cap_std::fs::{Permissions, PermissionsExt};
+
+            let (parent, name) = self.open_parent(relative)?;
+            let display = self.display(relative);
+            let metadata = parent
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(FolderbaseError::UnsafePath(display));
+            }
+            parent
+                .set_permissions(&name, Permissions::from_mode(0o600))
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let mode = parent
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != 0o600 {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private migration file is not owner-only".to_owned(),
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = relative;
+        }
+        Ok(())
+    }
+
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
         self.publish_new_with_hook(relative, bytes, || {})
+    }
+
+    pub(crate) fn publish_private_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
+        self.publish_new(relative, bytes)?;
+        self.set_private_regular_mode(relative)
     }
 
     pub(crate) fn publish_new_with_hook(
