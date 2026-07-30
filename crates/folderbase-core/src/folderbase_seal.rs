@@ -291,7 +291,7 @@ impl FolderbaseVersionStore {
                 if !state.workspace_path_is_absent(&path)? {
                     return Err(FolderbaseCaptureError::RestoreTargetOccupied(path));
                 }
-                let head =
+                let mut head =
                     read_head_record(&state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
                 if head.folderbase_id != self.root_attestation.folderbase_id
                     || head.root_instance_sha256 != self.root_attestation.root_instance_sha256
@@ -319,6 +319,16 @@ impl FolderbaseVersionStore {
                     ));
                 }
                 let binding = find_restore_binding(self, &local, &state, &current, &tombstone)?;
+                let restore_authority_sha256 =
+                    local_head_authority_sha256(self, &head.version_id, &head.version_sha256)?;
+                if head.transaction_sha256 != restore_authority_sha256 {
+                    let rebound = LocalHeadRecord {
+                        transaction_sha256: restore_authority_sha256,
+                        ..head.clone()
+                    };
+                    compare_and_swap_exact_local_head(&state, &head, &rebound)?;
+                    head = rebound;
+                }
                 let transaction =
                     build_restore_transaction(self, &head, &current, tombstone, binding)?;
                 write_active_restore_transaction(&state, &transaction)?;
@@ -816,11 +826,22 @@ fn execute_restore_transaction(
     state.verify_still_attached()?;
     validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+    if current_head.folderbase_id != store.root_attestation.folderbase_id
+        || current_head.root_instance_sha256 != store.root_attestation.root_instance_sha256
+    {
+        return Err(FolderbaseCaptureError::InvalidLocalHead(
+            "Local Head belongs to a different Folderbase Root".to_owned(),
+        ));
+    }
     let current_summary = JournalHead::from(&current_head);
     let target_summary = JournalHead {
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
-        transaction_sha256: restore_transaction_sha256(transaction)?,
+        transaction_sha256: local_head_authority_sha256(
+            store,
+            &transaction.target_version_id,
+            &transaction.target_version_sha256,
+        )?,
     };
     let target = derive_authoritative_restore_target(store, local, state, transaction)?;
     let created = if current_summary == target_summary {
@@ -838,7 +859,7 @@ fn execute_restore_transaction(
         if let Err(error) =
             finish_restore_materialization(store, local, state, transaction, checkpoint)
         {
-            rollback_restore_head(state, transaction)?;
+            rollback_restore_head(store, state, transaction)?;
             return Err(error);
         }
         false
@@ -867,12 +888,16 @@ fn execute_restore_transaction(
                 root_instance_sha256: transaction.root_instance_sha256.clone(),
                 version_id: transaction.target_version_id.clone(),
                 version_sha256: transaction.target_version_sha256.clone(),
-                transaction_sha256: restore_transaction_sha256(transaction)?,
+                transaction_sha256: local_head_authority_sha256(
+                    store,
+                    &transaction.target_version_id,
+                    &transaction.target_version_sha256,
+                )?,
             },
         )?;
         checkpoint(&RestoreCheckpoint::HeadReplaced);
         if let Err(error) = verify_restore_publication(store, state, transaction) {
-            rollback_restore_head(state, transaction)?;
+            rollback_restore_head(store, state, transaction)?;
             return Err(error);
         }
         finish_restore_projection(store, local, state, transaction)?;
@@ -914,6 +939,17 @@ fn derive_authoritative_restore_target(
     if parent.canonical_digest()? != transaction.expected_head.version_sha256 {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
             "restore parent digest changed".to_owned(),
+        ));
+    }
+    if transaction.expected_head.transaction_sha256
+        != local_head_authority_sha256(
+            store,
+            &transaction.expected_head.version_id,
+            &transaction.expected_head.version_sha256,
+        )?
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore parent Head authority is not independently derivable".to_owned(),
         ));
     }
     let parent_tombstone = parent
@@ -1026,13 +1062,18 @@ fn verify_restore_publication(
 }
 
 fn rollback_restore_head(
+    store: &FolderbaseVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
     let target = JournalHead {
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
-        transaction_sha256: restore_transaction_sha256(transaction)?,
+        transaction_sha256: local_head_authority_sha256(
+            store,
+            &transaction.target_version_id,
+            &transaction.target_version_sha256,
+        )?,
     };
     let prior = LocalHeadRecord {
         format: "folderbase-local-head-v1".to_owned(),
@@ -1265,6 +1306,35 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
         ))
     })?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn local_head_authority_sha256(
+    store: &FolderbaseVersionStore,
+    version_id: &str,
+    version_sha256: &str,
+) -> Result<String, FolderbaseCaptureError> {
+    #[derive(Serialize)]
+    struct LocalHeadAuthority<'a> {
+        format: &'static str,
+        folderbase_id: &'a str,
+        root_instance_sha256: &'a str,
+        version_id: &'a str,
+        version_sha256: &'a str,
+    }
+
+    let authority = serde_json::to_vec(&LocalHeadAuthority {
+        format: "folderbase-local-head-authority-v1",
+        folderbase_id: &store.root_attestation.folderbase_id,
+        root_instance_sha256: &store.root_attestation.root_instance_sha256,
+        version_id,
+        version_sha256,
+    })
+    .map_err(|source| {
+        FolderbaseCaptureError::InvalidLocalHead(format!(
+            "Local Head authority encoding failed: {source}"
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(authority)))
 }
 
 fn capture_transaction_sha256(
@@ -2802,15 +2872,6 @@ fn encode_restore_transaction(
     Ok(encoded)
 }
 
-fn restore_transaction_sha256(
-    transaction: &RestoreTransaction,
-) -> Result<String, FolderbaseCaptureError> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(encode_restore_transaction(transaction)?)
-    ))
-}
-
 fn remove_active_restore_transaction(
     state: &FolderbaseState,
 ) -> Result<(), FolderbaseCaptureError> {
@@ -2898,6 +2959,26 @@ fn compare_and_swap_restore_head(
     if read_head_record(state)?.as_ref() != Some(target) {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
             "Local Head replacement did not verify".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn compare_and_swap_exact_local_head(
+    state: &FolderbaseState,
+    expected: &LocalHeadRecord,
+    target: &LocalHeadRecord,
+) -> Result<(), FolderbaseCaptureError> {
+    let encoded = json_bytes(target)?;
+    state.verify_still_attached()?;
+    if read_head_record(state)?.as_ref() != Some(expected) {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    }
+    state.replace(Path::new(LOCAL_HEAD_PATH), &encoded)?;
+    state.verify_still_attached()?;
+    if read_head_record(state)?.as_ref() != Some(target) {
+        return Err(FolderbaseCaptureError::InvalidLocalHead(
+            "Local Head authority replacement did not verify".to_owned(),
         ));
     }
     Ok(())
@@ -3322,19 +3403,23 @@ mod tests {
 
     fn point_test_head(root: &Path, version: &FolderbaseVersion) {
         let state = FolderbaseState::open(root).expect("state");
+        let store = FolderbaseVersionStore::open(root).expect("store");
+        let version_sha256 = version.canonical_digest().expect("version digest");
         state
             .replace(
                 Path::new(LOCAL_HEAD_PATH),
                 &json_bytes(&LocalHeadRecord {
                     format: "folderbase-local-head-v1".to_owned(),
                     folderbase_id: version.folderbase_id().to_owned(),
-                    root_instance_sha256: FolderbaseVersionStore::open(root)
-                        .expect("store")
-                        .root_attestation
-                        .root_instance_sha256,
+                    root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
                     version_id: version.version_id().to_owned(),
-                    version_sha256: version.canonical_digest().expect("version digest"),
-                    transaction_sha256: "0".repeat(64),
+                    version_sha256: version_sha256.clone(),
+                    transaction_sha256: local_head_authority_sha256(
+                        &store,
+                        version.version_id(),
+                        &version_sha256,
+                    )
+                    .expect("Head authority"),
                 })
                 .expect("Head bytes"),
             )
@@ -3782,8 +3867,12 @@ mod tests {
                     root_instance_sha256: transaction.root_instance_sha256.clone(),
                     version_id: transaction.target_version_id.clone(),
                     version_sha256: transaction.target_version_sha256.clone(),
-                    transaction_sha256: restore_transaction_sha256(&transaction)
-                        .expect("forged journal digest"),
+                    transaction_sha256: local_head_authority_sha256(
+                        &store,
+                        &transaction.target_version_id,
+                        &transaction.target_version_sha256,
+                    )
+                    .expect("forged Head authority"),
                 })
                 .expect("forged Head"),
             )
