@@ -3246,21 +3246,7 @@ impl MigrationResult {
 
     /// Roll back a verified migration using only its durable ID.
     pub fn rollback_by_id(root: impl AsRef<Path>, migration_id: &str) -> Result<RollbackResult> {
-        let root = canonical_root(root.as_ref())?;
-        let (journal_path, mut journal) = load_journal(&root, migration_id)?;
-        require_state(journal.state, MigrationState::Verified)?;
-        let result = if is_structural_journal(&journal) {
-            rollback_structural_journal(&root, &journal_path, &mut journal)?
-        } else {
-            rollback_journal(&root, &journal_path, &mut journal)?
-        };
-        persist_plan_transition(
-            &root,
-            migration_id,
-            &[MigrationState::Verified],
-            MigrationState::RolledBack,
-        )?;
-        Ok(result)
+        rollback_migration_by_id_with_hook(root, migration_id, || {})
     }
 }
 
@@ -3318,6 +3304,29 @@ fn recover_migration_with_hook(
         cleanup_staging(&root, migration_id);
     }
     Ok(result_from_journal(root, journal_path, &journal))
+}
+
+fn rollback_migration_by_id_with_hook(
+    root: impl AsRef<Path>,
+    migration_id: &str,
+    after_transaction_coordinator: impl FnOnce(),
+) -> Result<RollbackResult> {
+    let root = canonical_root(root.as_ref())?;
+    after_transaction_coordinator();
+    let (journal_path, mut journal) = load_journal(&root, migration_id)?;
+    require_state(journal.state, MigrationState::Verified)?;
+    let result = if is_structural_journal(&journal) {
+        rollback_structural_journal(&root, &journal_path, &mut journal)?
+    } else {
+        rollback_journal(&root, &journal_path, &mut journal)?
+    };
+    persist_plan_transition(
+        &root,
+        migration_id,
+        &[MigrationState::Verified],
+        MigrationState::RolledBack,
+    )?;
+    Ok(result)
 }
 
 /// Roll back only additive, unchanged paths recorded by a verified migration.
@@ -6869,6 +6878,64 @@ mod tests {
             transaction_is_locked,
             "an existing-Folderbase migration recovery must exclude protocol activation"
         );
+    }
+
+    #[test]
+    fn protocol_upgrade_serializes_behind_existing_folderbase_migration_rollback() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let migration = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let migration_id = migration.id.clone();
+        apply_migration(approve_migration(migration).unwrap()).unwrap();
+
+        let rollback_root = root.path().to_path_buf();
+        let rollback_id = migration_id.clone();
+        let (paused_sender, paused_receiver) = mpsc::sync_channel(0);
+        let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
+        let rollback = thread::spawn(move || {
+            rollback_migration_by_id_with_hook(rollback_root, &rollback_id, || {
+                paused_sender.send(()).unwrap();
+                resume_receiver.recv().unwrap();
+            })
+        });
+        paused_receiver.recv().unwrap();
+
+        let lock_path = root.path().join(".folderbase/locks/transactions.lock");
+        let transaction_is_locked = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .and_then(|file| match file.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+                Err(std::fs::TryLockError::Error(source)) => Err(source),
+                Ok(()) => {
+                    let _ = file.unlock();
+                    Err(io::Error::other(
+                        "migration rollback did not hold the transaction lock",
+                    ))
+                }
+            })
+            .is_ok();
+
+        resume_sender.send(()).unwrap();
+        assert_eq!(
+            rollback.join().unwrap().unwrap().state,
+            MigrationState::RolledBack
+        );
+        assert!(
+            transaction_is_locked,
+            "an existing-Folderbase migration rollback must exclude protocol activation"
+        );
+        assert_eq!(fs::read(root.path().join("notes.md")).unwrap(), b"source\n");
+        assert!(!root.path().join("Archive/notes.md").exists());
     }
 
     #[cfg(unix)]
