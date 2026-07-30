@@ -543,7 +543,11 @@ impl FolderbaseVersionStore {
                 &completion.published_identity_sha256,
             )?
         {
+            rebind_legacy_root_local_head(self, &local, &state)?;
             return Ok(restored);
+        }
+        if active.is_none() {
+            rebind_legacy_root_local_head(self, &local, &state)?;
         }
         let transaction = match active {
             Some(transaction) => {
@@ -559,8 +563,11 @@ impl FolderbaseVersionStore {
                 if !state.workspace_path_is_absent(&path)? {
                     return Err(FolderbaseCaptureError::RestoreTargetOccupied(path));
                 }
-                if restore_authority_count(&self.root_attestation, maximum_restore_authorities)?
-                    >= maximum_restore_authorities
+                if restore_authority_count(
+                    &self.root_attestation,
+                    &self.root_instance_authority,
+                    maximum_restore_authorities,
+                )? >= maximum_restore_authorities
                 {
                     return Err(
                         FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired {
@@ -571,7 +578,10 @@ impl FolderbaseVersionStore {
                 let mut head =
                     read_head_record(&state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
                 if head.folderbase_id != self.root_attestation.folderbase_id
-                    || head.root_instance_sha256 != self.root_attestation.root_instance_sha256
+                    || self
+                        .root_instance_authority
+                        .admit(&head.root_instance_sha256)
+                        .is_none()
                 {
                     return Err(FolderbaseCaptureError::InvalidLocalHead(
                         "Local Head belongs to a different Folderbase Root".to_owned(),
@@ -675,15 +685,25 @@ impl FolderbaseVersionStore {
         state.ensure_private_dir(Path::new(FOLDERBASE_VERSIONS_DIRECTORY))?;
         state.ensure_private_dir(Path::new(CAPTURE_IDENTITIES_DIRECTORY))?;
         normalize_legacy_local_head(&state)?;
+        let mut active = read_active_transaction_with_limit(&state, maximum_transaction_bytes)?;
 
         let current_plan = self.plan_capture()?;
         ensure_same_plan(&plan, &current_plan)?;
-        let plan_sha256 = capture_plan_sha256(&plan)?;
+        let mut plan_sha256 = capture_plan_sha256(&plan)?;
         let current_head = current_plan.current_local_head().map(JournalHead::from);
-        let mut active = read_active_transaction_with_limit(&state, maximum_transaction_bytes)?;
 
         if let Some(transaction) = active.as_ref() {
             validate_transaction(self, transaction)?;
+            let admitted_root = self
+                .root_instance_authority
+                .admit(&transaction.root_instance_sha256)
+                .ok_or_else(|| {
+                    FolderbaseCaptureError::InvalidCaptureTransaction(
+                        "active journal is bound to another physical Folderbase Root".to_owned(),
+                    )
+                })?;
+            plan_sha256 =
+                capture_plan_sha256_with_root_instance(&plan, admitted_root.recorded_sha256())?;
             let target_head = current_head
                 .as_ref()
                 .filter(|head| head.version_id == transaction.target_version_id);
@@ -718,6 +738,7 @@ impl FolderbaseVersionStore {
                 validate_committed_transaction(transaction, &version, transaction_prior.as_ref())?;
                 finish_committed_transaction(self, &local, &state, transaction)?;
                 remove_active_transaction(&state)?;
+                rebind_legacy_root_local_head(self, &local, &state)?;
                 checkpoint(&CaptureCheckpoint::CleanupComplete);
                 active = None;
             } else if transaction.expected_head != current_head {
@@ -732,6 +753,9 @@ impl FolderbaseVersionStore {
                 active = None;
             }
         }
+        if active.is_none() {
+            plan_sha256 = capture_plan_sha256(&plan)?;
+        }
 
         let prior = load_prior_head(self, &local, &state, plan.current_local_head())?;
         ensure_prior_bindings_observable(&plan, prior.as_ref())?;
@@ -745,6 +769,7 @@ impl FolderbaseVersionStore {
                 &mut checkpoint,
             )?
         {
+            rebind_legacy_root_local_head(self, &local, &state)?;
             let head = plan
                 .current_local_head()
                 .expect("matched prior requires Head");
@@ -870,7 +895,7 @@ fn build_restore_transaction(
         format: RESTORE_TRANSACTION_FORMAT_V1.to_owned(),
         transaction_id,
         folderbase_id: store.root_attestation.folderbase_id.clone(),
-        root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
+        root_instance_sha256: head.root_instance_sha256.clone(),
         expected_head: JournalHead::from(head),
         target_version_id,
         target_version_sha256: target.canonical_digest()?,
@@ -905,7 +930,7 @@ fn assigned_restore_identity(
     let authority = serde_json::to_vec(&RestoreAuthority {
         format: "folderbase-tombstone-restore-authority-v1",
         folderbase_id: &store.root_attestation.folderbase_id,
-        root_instance_sha256: &store.root_attestation.root_instance_sha256,
+        root_instance_sha256: &head.root_instance_sha256,
         expected_head: JournalHead::from(head),
         tombstone,
         binding,
@@ -1126,7 +1151,10 @@ fn execute_restore_transaction(
     validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
     if current_head.folderbase_id != store.root_attestation.folderbase_id
-        || current_head.root_instance_sha256 != store.root_attestation.root_instance_sha256
+        || store
+            .root_instance_authority
+            .admit(&current_head.root_instance_sha256)
+            .is_none()
     {
         return Err(FolderbaseCaptureError::InvalidLocalHead(
             "Local Head belongs to a different Folderbase Root".to_owned(),
@@ -1137,8 +1165,8 @@ fn execute_restore_transaction(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.target_version_id,
                 &transaction.target_version_sha256,
             )?,
@@ -1190,8 +1218,8 @@ fn execute_restore_transaction(
                 version_id: transaction.target_version_id.clone(),
                 version_sha256: transaction.target_version_sha256.clone(),
                 authority: LocalHeadAuthority::VersionDerivedV1 {
-                    sha256: local_head_authority_sha256(
-                        store,
+                    sha256: restore_transaction_local_head_authority_sha256(
+                        transaction,
                         &transaction.target_version_id,
                         &transaction.target_version_sha256,
                     )?,
@@ -1239,6 +1267,7 @@ fn execute_restore_transaction(
         transaction,
         &published_identity_sha256,
     )?;
+    rebind_legacy_root_local_head(store, local, state)?;
     Ok(restored_tombstone(transaction, created))
 }
 
@@ -1276,8 +1305,8 @@ fn finish_restore_cleanup_recovery(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.target_version_id,
                 &transaction.target_version_sha256,
             )?,
@@ -1314,6 +1343,7 @@ fn finish_restore_cleanup_recovery(
         transaction,
         published_identity_sha256,
     )?;
+    rebind_legacy_root_local_head(store, local, state)?;
     Ok(restored_tombstone(transaction, false))
 }
 
@@ -1410,8 +1440,8 @@ fn derive_authoritative_restore_target(
     }
     if transaction.expected_head.authority
         != (LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.expected_head.version_id,
                 &transaction.expected_head.version_sha256,
             )?,
@@ -1617,7 +1647,8 @@ fn finish_modified_restore_cleanup_recovery(
     )?;
     write_restore_authority_record(state, transaction, published_identity_sha256)?;
     remove_active_restore_transaction(state)?;
-    remove_restore_cleanup_recovery(state)
+    remove_restore_cleanup_recovery(state)?;
+    rebind_legacy_root_local_head(store, local, state)
 }
 
 fn finish_committed_modified_restore_cleanup_recovery(
@@ -1639,8 +1670,8 @@ fn finish_committed_modified_restore_cleanup_recovery(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.target_version_id,
                 &transaction.target_version_sha256,
             )?,
@@ -1662,7 +1693,8 @@ fn finish_committed_modified_restore_cleanup_recovery(
         transaction,
         published_identity_sha256,
         checkpoint,
-    )
+    )?;
+    rebind_legacy_root_local_head(store, local, state)
 }
 
 fn finish_committed_modified_restore_cleanup_recovery_stage(
@@ -1782,8 +1814,8 @@ fn verify_restore_success_linearization(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.target_version_id,
                 &transaction.target_version_sha256,
             )?,
@@ -1883,8 +1915,8 @@ fn completed_restore_result(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.target_version_id,
                 &transaction.target_version_sha256,
             )?,
@@ -1953,7 +1985,7 @@ fn completed_restore_result(
 }
 
 fn rollback_restore_head(
-    store: &FolderbaseVersionStore,
+    _store: &FolderbaseVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
@@ -1961,8 +1993,8 @@ fn rollback_restore_head(
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
         authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: local_head_authority_sha256(
-                store,
+            sha256: restore_transaction_local_head_authority_sha256(
+                transaction,
                 &transaction.target_version_id,
                 &transaction.target_version_sha256,
             )?,
@@ -2208,6 +2240,13 @@ struct ReleasedV1PlanDigestExclusion<'a> {
 }
 
 fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureError> {
+    capture_plan_sha256_with_root_instance(plan, plan.root_instance_sha256())
+}
+
+fn capture_plan_sha256_with_root_instance(
+    plan: &CapturePlan,
+    root_instance_sha256: &str,
+) -> Result<String, FolderbaseCaptureError> {
     let has_restore_authority = plan
         .entries()
         .iter()
@@ -2219,12 +2258,12 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
         )
     });
     if !has_restore_authority && !has_version_derived_head {
-        return released_v1_capture_plan_sha256(plan);
+        return released_v1_capture_plan_sha256_with_root_instance(plan, root_instance_sha256);
     }
     let digest = PlanDigestV2 {
         format: "folderbase-capture-plan-digest-v2",
         folderbase_id: plan.folderbase_id(),
-        root_instance_sha256: plan.root_instance_sha256(),
+        root_instance_sha256,
         root_manifest_sha256: plan.root_manifest_sha256(),
         root_manifest_bytes: plan.root_manifest_bytes(),
         ignore_policy_sha256: plan.ignore_policy_sha256(),
@@ -2266,7 +2305,10 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
-fn released_v1_capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureError> {
+fn released_v1_capture_plan_sha256_with_root_instance(
+    plan: &CapturePlan,
+    root_instance_sha256: &str,
+) -> Result<String, FolderbaseCaptureError> {
     if plan
         .entries()
         .iter()
@@ -2295,7 +2337,7 @@ fn released_v1_capture_plan_sha256(plan: &CapturePlan) -> Result<String, Folderb
     let digest = ReleasedV1PlanDigest {
         format: "folderbase-capture-plan-digest-v1",
         folderbase_id: plan.folderbase_id(),
-        root_instance_sha256: plan.root_instance_sha256(),
+        root_instance_sha256,
         root_manifest_sha256: plan.root_manifest_sha256(),
         root_manifest_bytes: plan.root_manifest_bytes(),
         ignore_policy_sha256: plan.ignore_policy_sha256(),
@@ -2343,6 +2385,19 @@ fn local_head_authority_sha256(
     version_derived_local_head_sha256(
         &store.root_attestation.folderbase_id,
         &store.root_attestation.root_instance_sha256,
+        version_id,
+        version_sha256,
+    )
+}
+
+fn restore_transaction_local_head_authority_sha256(
+    transaction: &RestoreTransaction,
+    version_id: &str,
+    version_sha256: &str,
+) -> Result<String, FolderbaseCaptureError> {
+    version_derived_local_head_sha256(
+        &transaction.folderbase_id,
+        &transaction.root_instance_sha256,
         version_id,
         version_sha256,
     )
@@ -2726,8 +2781,14 @@ fn live_state_matches_prior(
         match entry.kind() {
             CaptureEntryKind::Directory => {}
             CaptureEntryKind::RegularFile => {
-                let content =
-                    hash_regular_entry(&store.root_attestation, state, entry, None, checkpoint)?;
+                let content = hash_regular_entry(
+                    &store.root_attestation,
+                    &store.root_instance_authority,
+                    state,
+                    entry,
+                    None,
+                    checkpoint,
+                )?;
                 if binding.content_sha256() != Some(content.digest.as_str())
                     || binding.bytes() != Some(content.bytes)
                     || binding.executable() != entry.executable()
@@ -2966,6 +3027,7 @@ fn build_and_install_capture(
             CaptureEntryKind::RegularFile => {
                 let content = hash_regular_entry(
                     &store.root_attestation,
+                    &store.root_instance_authority,
                     state,
                     entry,
                     Some(local),
@@ -3146,6 +3208,7 @@ fn capture_root_manifest(
 
 fn hash_regular_entry(
     root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &crate::root_attestation::RootInstanceAuthority,
     state: &FolderbaseState,
     entry: &CapturePlanEntry,
     installer: Option<&LocalVersionStore>,
@@ -3163,7 +3226,13 @@ fn hash_regular_entry(
     checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
         entry.path().to_owned(),
     ));
-    verify_capture_link_commitment(root_attestation, state, entry, &file)?;
+    verify_capture_link_commitment(
+        root_attestation,
+        root_instance_authority,
+        state,
+        entry,
+        &file,
+    )?;
     let content = match installer {
         Some(local) => local
             .install_content_reader_in(
@@ -3183,7 +3252,13 @@ fn hash_regular_entry(
     checkpoint(&CaptureCheckpoint::AfterObjectBytesRead(
         entry.path().to_owned(),
     ));
-    verify_capture_link_commitment(root_attestation, state, entry, &file)?;
+    verify_capture_link_commitment(
+        root_attestation,
+        root_instance_authority,
+        state,
+        entry,
+        &file,
+    )?;
     let after = fingerprint_std_file(&file, &display)?;
     let reopened = open_regular_beneath(&root_attestation.root, relative)?;
     let reopened_fingerprint = fingerprint_std_file(&reopened, &display)?;
@@ -3575,7 +3650,10 @@ fn validate_transaction(
         )
         .is_err()
         || transaction.folderbase_id != store.root_attestation.folderbase_id
-        || transaction.root_instance_sha256 != store.root_attestation.root_instance_sha256
+        || store
+            .root_instance_authority
+            .admit(&transaction.root_instance_sha256)
+            .is_none()
         || transaction.plan_sha256.len() != 64
         || aggregate_entries > crate::folderbase_version::MAX_VERSION_ENTRIES
     {
@@ -4182,7 +4260,10 @@ fn validate_restore_transaction(
     })?;
     if transaction.format != RESTORE_TRANSACTION_FORMAT_V1
         || transaction.folderbase_id != store.root_attestation.folderbase_id
-        || transaction.root_instance_sha256 != store.root_attestation.root_instance_sha256
+        || store
+            .root_instance_authority
+            .admit(&transaction.root_instance_sha256)
+            .is_none()
         || transaction.path != safe_path.to_string_lossy()
         || !transaction.transaction_id.starts_with("fbrestore_")
         || Uuid::parse_str(
@@ -4288,6 +4369,92 @@ fn normalize_legacy_local_head(state: &FolderbaseState) -> Result<(), Folderbase
         ..legacy.clone()
     };
     compare_and_swap_exact_local_head(state, &legacy, &normalized)
+}
+
+fn rebind_legacy_root_local_head(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+) -> Result<(), FolderbaseCaptureError> {
+    rebind_legacy_root_local_head_with_hook(store, local, state, |_| {})
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalHeadRebindCheckpoint {
+    BeforeCas,
+    AfterCas,
+}
+
+fn rebind_legacy_root_local_head_with_hook(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    mut checkpoint: impl FnMut(LocalHeadRebindCheckpoint),
+) -> Result<(), FolderbaseCaptureError> {
+    let Some(head) = read_head_record(state)? else {
+        return Ok(());
+    };
+    if head.folderbase_id != store.root_attestation.folderbase_id {
+        return Err(FolderbaseCaptureError::InvalidLocalHead(
+            "Local Head belongs to another Folderbase".to_owned(),
+        ));
+    }
+    let admission = store
+        .root_instance_authority
+        .admit(&head.root_instance_sha256)
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidLocalHead(
+                "Local Head belongs to another physical Folderbase Root".to_owned(),
+            )
+        })?;
+    if !admission.is_legacy_v1() {
+        return Ok(());
+    }
+    let version = read_and_verify_folderbase_version(store, local, state, &head.version_id)?;
+    if version.canonical_digest()? != head.version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidLocalHead(
+            "Local Head digest does not match its immutable Folderbase Version".to_owned(),
+        ));
+    }
+    let current_root = store.root_instance_authority.current_sha256();
+    let authority = match &head.authority {
+        LocalHeadAuthority::CaptureTransactionV1 { sha256 } => {
+            LocalHeadAuthority::CaptureTransactionV1 {
+                sha256: sha256.clone(),
+            }
+        }
+        LocalHeadAuthority::VersionDerivedV1 { sha256 } => {
+            let expected = version_derived_local_head_sha256(
+                &head.folderbase_id,
+                admission.recorded_sha256(),
+                &head.version_id,
+                &head.version_sha256,
+            )?;
+            if sha256 != &expected {
+                return Err(FolderbaseCaptureError::InvalidLocalHead(
+                    "legacy Local Head authority is not independently derivable".to_owned(),
+                ));
+            }
+            LocalHeadAuthority::VersionDerivedV1 {
+                sha256: version_derived_local_head_sha256(
+                    &head.folderbase_id,
+                    current_root,
+                    &head.version_id,
+                    &head.version_sha256,
+                )?,
+            }
+        }
+    };
+    let rebound = LocalHeadRecord {
+        format: "folderbase-local-head-v2".to_owned(),
+        root_instance_sha256: current_root.to_owned(),
+        authority,
+        ..head.clone()
+    };
+    checkpoint(LocalHeadRebindCheckpoint::BeforeCas);
+    compare_and_swap_exact_local_head(state, &head, &rebound)?;
+    checkpoint(LocalHeadRebindCheckpoint::AfterCas);
+    Ok(())
 }
 
 fn write_active_transaction_with_limit(
@@ -4694,6 +4861,8 @@ mod tests {
   }
 }
 "#;
+    const LEGACY_ROOT_INSTANCE_SHA256: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn folderbase() -> TempDir {
         let root = tempdir().expect("temporary Folderbase");
@@ -4765,6 +4934,23 @@ mod tests {
             .expect("point test Head");
     }
 
+    fn admit_test_legacy_root(store: &mut FolderbaseVersionStore) {
+        store.root_instance_authority = crate::root_attestation::RootInstanceAuthority::for_test(
+            store.root_attestation.root_instance_sha256.clone(),
+            Some(LEGACY_ROOT_INSTANCE_SHA256.to_owned()),
+        );
+    }
+
+    fn write_test_head(root: &Path, head: &LocalHeadRecord) {
+        FolderbaseState::open(root)
+            .expect("state")
+            .replace(
+                Path::new(LOCAL_HEAD_PATH),
+                &json_bytes(head).expect("Head bytes"),
+            )
+            .expect("replace Head");
+    }
+
     #[test]
     fn tombstone_restore_reopens_and_converges_at_every_persistence_checkpoint() {
         for fault in [
@@ -4828,6 +5014,157 @@ mod tests {
                 .expect("active restore")
                 .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn released_root_restore_converges_without_rewriting_durable_authority() {
+        for fault in [
+            RestoreCheckpoint::StageDurable,
+            RestoreCheckpoint::TargetPublished,
+            RestoreCheckpoint::VersionDurable,
+            RestoreCheckpoint::HeadReplaced,
+            RestoreCheckpoint::PublicationVerified,
+            RestoreCheckpoint::ProjectionDurable,
+            RestoreCheckpoint::CleanupRecoveryDurable,
+            RestoreCheckpoint::BeforeStageRetirement,
+            RestoreCheckpoint::AfterStageRetirement,
+            RestoreCheckpoint::CleanupIntentRetired,
+            RestoreCheckpoint::CompletionDurable,
+            RestoreCheckpoint::CleanupComplete,
+        ] {
+            let root = folderbase();
+            let mut store = FolderbaseVersionStore::open(root.path()).expect("open");
+            store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            fs::remove_file(root.path().join("active.bin")).expect("delete");
+            store
+                .seal_capture(store.plan_capture().expect("deletion"))
+                .expect("deletion");
+            admit_test_legacy_root(&mut store);
+
+            let mut legacy_head = local_head(root.path()).expect("deletion Head");
+            legacy_head.root_instance_sha256 = LEGACY_ROOT_INSTANCE_SHA256.to_owned();
+            legacy_head.authority = LocalHeadAuthority::VersionDerivedV1 {
+                sha256: version_derived_local_head_sha256(
+                    &legacy_head.folderbase_id,
+                    LEGACY_ROOT_INSTANCE_SHA256,
+                    &legacy_head.version_id,
+                    &legacy_head.version_sha256,
+                )
+                .expect("released parent authority"),
+            };
+            write_test_head(root.path(), &legacy_head);
+            let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+            let state = FolderbaseState::open_existing(root.path()).expect("state");
+            let current =
+                read_and_verify_folderbase_version(&store, &local, &state, &legacy_head.version_id)
+                    .expect("deletion Version");
+            let tombstone = current
+                .tombstones()
+                .iter()
+                .find(|candidate| candidate.path() == "active.bin")
+                .expect("Tombstone")
+                .clone();
+            let binding = find_restore_binding(&store, &local, &state, &current, &tombstone)
+                .expect("restore binding");
+            let transaction =
+                build_restore_transaction(&store, &legacy_head, &current, tombstone, binding)
+                    .expect("released-root restore transaction");
+            write_active_restore_transaction(&state, &transaction).expect("durable journal");
+            let transaction_bytes =
+                encode_restore_transaction(&transaction).expect("exact journal bytes");
+            assert_eq!(
+                fs::read(root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH))
+                    .expect("installed journal"),
+                transaction_bytes,
+                "the fixture starts at the released JournalDurable boundary"
+            );
+
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                    if checkpoint == &fault {
+                        panic!("terminate released-root restore at {fault:?}");
+                    }
+                })
+            }));
+            assert!(
+                interrupted.is_err(),
+                "fault {fault:?} returned before its checkpoint: {interrupted:?}"
+            );
+
+            if let Ok(encoded) = fs::read(root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH)) {
+                assert_eq!(
+                    encoded, transaction_bytes,
+                    "active restore bytes changed at {fault:?}"
+                );
+            }
+            if let Some(recovery) = read_restore_cleanup_recovery(&state).expect("cleanup recovery")
+            {
+                assert_eq!(recovery.transaction, transaction);
+                assert_eq!(
+                    recovery.transaction.root_instance_sha256,
+                    LEGACY_ROOT_INSTANCE_SHA256
+                );
+            }
+            if let Some(completion) = read_restore_completion_receipt(&state).expect("completion") {
+                assert_eq!(completion.transaction, transaction);
+                assert_eq!(
+                    completion.transaction.root_instance_sha256,
+                    LEGACY_ROOT_INSTANCE_SHA256
+                );
+            }
+            let authority_path = restore_authority_record_path(&transaction.transaction_id);
+            let authority_before = state
+                .read_bounded(&authority_path, MAX_RESTORE_AUTHORITY_BYTES)
+                .expect("authority before retry");
+            let authority_digest_before = authority_before
+                .as_ref()
+                .map(|encoded| format!("{:x}", Sha256::digest(encoded)));
+
+            let restored = store
+                .restore_tombstone("active.bin")
+                .expect("converge released-root restore");
+            assert_eq!(restored.version_id(), transaction.target_version_id);
+            let final_head = local_head(root.path()).expect("rebound final Head");
+            assert_eq!(
+                final_head.root_instance_sha256,
+                store.root_attestation.root_instance_sha256
+            );
+            assert_eq!(
+                final_head.authority,
+                LocalHeadAuthority::VersionDerivedV1 {
+                    sha256: local_head_authority_sha256(
+                        &store,
+                        &final_head.version_id,
+                        &final_head.version_sha256,
+                    )
+                    .expect("current final authority"),
+                }
+            );
+
+            let authority_after = state
+                .read_bounded(&authority_path, MAX_RESTORE_AUTHORITY_BYTES)
+                .expect("authority after retry")
+                .expect("durable authority");
+            let authority: RestoreAuthorityRecord =
+                serde_json::from_slice(&authority_after).expect("authority JSON");
+            assert_eq!(
+                authority.root_instance_sha256, LEGACY_ROOT_INSTANCE_SHA256,
+                "immutable authority retains the exact recorded root"
+            );
+            if let Some(before) = authority_before {
+                assert_eq!(
+                    authority_after, before,
+                    "authority bytes changed at {fault:?}"
+                );
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&authority_after)),
+                    authority_digest_before.expect("prior authority digest"),
+                    "authority digest changed at {fault:?}"
+                );
+            }
         }
     }
 
@@ -7679,6 +8016,77 @@ mod tests {
     }
 
     #[test]
+    fn released_root_capture_journal_survives_before_and_after_head_recovery_exactly() {
+        let root = folderbase();
+        let mut store = FolderbaseVersionStore::open(root.path()).expect("open");
+        admit_test_legacy_root(&mut store);
+        let plan = store.plan_capture().expect("plan");
+        let legacy_plan_sha256 =
+            capture_plan_sha256_with_root_instance(&plan, LEGACY_ROOT_INSTANCE_SHA256)
+                .expect("legacy-root plan digest");
+
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    let state = FolderbaseState::open(root.path()).expect("state");
+                    let mut transaction = active_transaction(root.path()).expect("active");
+                    transaction.root_instance_sha256 = LEGACY_ROOT_INSTANCE_SHA256.to_owned();
+                    transaction.plan_sha256 = legacy_plan_sha256.clone();
+                    state
+                        .replace(
+                            Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                            &json_bytes(&transaction).expect("released journal bytes"),
+                        )
+                        .expect("install released-root journal");
+                    panic!("terminate with released-root journal durable");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let journal_before =
+            fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH)).expect("journal");
+        let assigned = active_transaction(root.path())
+            .expect("released-root active journal")
+            .target_version_id;
+
+        let after_head = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(store.plan_capture().expect("retry plan"), |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::HeadReplaced {
+                    assert_eq!(
+                        fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH))
+                            .expect("journal through Head CAS"),
+                        journal_before,
+                        "recovery must never normalize the active journal"
+                    );
+                    let head = local_head(root.path()).expect("recovered Head");
+                    assert_eq!(
+                        head.root_instance_sha256, store.root_attestation.root_instance_sha256,
+                        "the normal next Head CAS may bind the current stronger root identity"
+                    );
+                    panic!("terminate after Head CAS");
+                }
+            })
+        }));
+        assert!(after_head.is_err());
+        assert_eq!(
+            fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH)).expect("post-Head journal"),
+            journal_before
+        );
+
+        let recovered = store
+            .seal_capture(store.plan_capture().expect("final retry"))
+            .expect("recover exact released-root journal");
+        assert_eq!(recovered.version_id(), assigned);
+        assert!(active_transaction(root.path()).is_none());
+        assert_eq!(
+            local_head(root.path())
+                .expect("final Head")
+                .root_instance_sha256,
+            store.root_attestation.root_instance_sha256
+        );
+    }
+
+    #[test]
     fn local_head_wire_distinguishes_capture_and_version_derived_authority() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
@@ -7709,6 +8117,161 @@ mod tests {
         assert_eq!(restored["authority"]["kind"], "version_derived_v1");
         assert!(restored["authority"]["sha256"].as_str().is_some());
         assert!(restored.get("transaction_sha256").is_none());
+    }
+
+    #[test]
+    fn legacy_root_head_rebind_is_atomic_and_verifies_its_immutable_version() {
+        let root = folderbase();
+        let mut store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        admit_test_legacy_root(&mut store);
+
+        let mut legacy = local_head(root.path()).expect("captured Head");
+        legacy.root_instance_sha256 = LEGACY_ROOT_INSTANCE_SHA256.to_owned();
+        let retained_authority = legacy.authority.clone();
+        write_test_head(root.path(), &legacy);
+        let legacy_bytes = fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("legacy Head bytes");
+        let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+
+        let before = catch_unwind(AssertUnwindSafe(|| {
+            rebind_legacy_root_local_head_with_hook(&store, &local, &state, |checkpoint| {
+                if checkpoint == LocalHeadRebindCheckpoint::BeforeCas {
+                    panic!("terminate before Head CAS");
+                }
+            })
+        }));
+        assert!(before.is_err());
+        assert_eq!(
+            fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("Head after pre-CAS fault"),
+            legacy_bytes,
+            "a pre-CAS fault must preserve the exact released Head bytes"
+        );
+
+        let after = catch_unwind(AssertUnwindSafe(|| {
+            rebind_legacy_root_local_head_with_hook(&store, &local, &state, |checkpoint| {
+                if checkpoint == LocalHeadRebindCheckpoint::AfterCas {
+                    panic!("terminate after Head CAS");
+                }
+            })
+        }));
+        assert!(after.is_err());
+        let rebound = local_head(root.path()).expect("rebound Head");
+        assert_eq!(
+            rebound.root_instance_sha256,
+            store.root_attestation.root_instance_sha256
+        );
+        assert_eq!(
+            rebound.authority, retained_authority,
+            "capture-transaction authority continues to hash the exact journal bytes"
+        );
+
+        let mut invalid = rebound;
+        invalid.root_instance_sha256 = LEGACY_ROOT_INSTANCE_SHA256.to_owned();
+        invalid.version_sha256 =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+        write_test_head(root.path(), &invalid);
+        let invalid_bytes = fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("invalid Head");
+        assert!(matches!(
+            rebind_legacy_root_local_head(&store, &local, &state),
+            Err(FolderbaseCaptureError::InvalidLocalHead(_))
+        ));
+        assert_eq!(
+            fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("rejected Head"),
+            invalid_bytes,
+            "rebind must not bless a Head whose immutable Version digest is invalid"
+        );
+    }
+
+    #[test]
+    fn legacy_version_derived_head_rebinds_only_its_root_derived_authority() {
+        let root = folderbase();
+        let mut store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("restore to version-derived Head");
+        admit_test_legacy_root(&mut store);
+
+        let mut legacy = local_head(root.path()).expect("version-derived Head");
+        legacy.root_instance_sha256 = LEGACY_ROOT_INSTANCE_SHA256.to_owned();
+        legacy.authority = LocalHeadAuthority::VersionDerivedV1 {
+            sha256: version_derived_local_head_sha256(
+                &legacy.folderbase_id,
+                LEGACY_ROOT_INSTANCE_SHA256,
+                &legacy.version_id,
+                &legacy.version_sha256,
+            )
+            .expect("released authority"),
+        };
+        let legacy_authority = legacy.authority.clone();
+        write_test_head(root.path(), &legacy);
+
+        let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        rebind_legacy_root_local_head(&store, &local, &state).expect("rebind");
+        let rebound = local_head(root.path()).expect("rebound Head");
+        assert_eq!(
+            rebound.root_instance_sha256,
+            store.root_attestation.root_instance_sha256
+        );
+        assert_ne!(rebound.authority, legacy_authority);
+        assert_eq!(
+            rebound.authority,
+            LocalHeadAuthority::VersionDerivedV1 {
+                sha256: local_head_authority_sha256(
+                    &store,
+                    &rebound.version_id,
+                    &rebound.version_sha256,
+                )
+                .expect("current authority"),
+            }
+        );
+    }
+
+    #[test]
+    fn full_windows_v2_collision_is_rejected_by_local_head_admission() {
+        const WINDOWS_V2_FIRST: &str =
+            "8ff64630529b2fbda0062c3c15b8109e050e99f905cf497ad3a864cc19db6b2c";
+        const RELEASED_WINDOWS_V1: &str =
+            "b3bd16243ce08bcb477e45af8682519dbbbeb3d33bd50d4a1660fe04a073bc03";
+        const WINDOWS_V2_LEGACY_COLLISION: &str =
+            "2afb8ccf76a5f517a400d52b539060d66a99ee816b9f2c94f63a7c3e2a32b6dc";
+
+        let root = folderbase();
+        let mut store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        store.root_attestation.root_instance_sha256 = WINDOWS_V2_FIRST.to_owned();
+        store.root_instance_authority = crate::root_attestation::RootInstanceAuthority::for_test(
+            WINDOWS_V2_FIRST.to_owned(),
+            Some(RELEASED_WINDOWS_V1.to_owned()),
+        );
+        let mut forged = local_head(root.path()).expect("Head");
+        forged.root_instance_sha256 = WINDOWS_V2_LEGACY_COLLISION.to_owned();
+        write_test_head(root.path(), &forged);
+        let exact_bytes = fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("forged Head");
+        let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+
+        assert!(matches!(
+            rebind_legacy_root_local_head(&store, &local, &state),
+            Err(FolderbaseCaptureError::InvalidLocalHead(_))
+        ));
+        assert_eq!(
+            fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("rejected Head"),
+            exact_bytes,
+            "a V2 identity that collided under released truncation must never be admitted"
+        );
     }
 
     #[test]

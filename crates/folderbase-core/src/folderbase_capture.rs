@@ -21,7 +21,7 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    FolderbaseError, FolderbaseRootAttestation, RootAttestationError, attest_folderbase_root,
+    FolderbaseError, FolderbaseRootAttestation, RootAttestationError,
     folderbase_restore_authority::{
         MAX_RESTORE_AUTHORITIES, MAX_RESTORE_AUTHORITY_BYTES, RESTORE_AUTHORITIES_DIRECTORY,
         RESTORE_AUTHORITY_FORMAT_V1, RestoreAuthorityRecord, restore_authority_record_path,
@@ -33,6 +33,9 @@ use crate::{
         validate_capture_sha256, validate_capture_symlink_targets, validate_capture_version_id,
     },
     physical_identity::PhysicalIdentity,
+    root_attestation::{
+        RootInstanceAuthority, attest_folderbase_root, attest_folderbase_root_with_authority,
+    },
     traversal_policy::{RECONSTRUCTABLE_DIRECTORIES, is_folderbase_state_component},
 };
 
@@ -618,13 +621,14 @@ pub enum FolderbaseCaptureError {
 #[derive(Debug)]
 pub struct FolderbaseVersionStore {
     pub(crate) root_attestation: FolderbaseRootAttestation,
+    pub(crate) root_instance_authority: RootInstanceAuthority,
 }
 
 impl FolderbaseVersionStore {
     /// Open one exact, existing Folderbase Root without writing any state.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, FolderbaseCaptureError> {
         let requested_root = root.as_ref();
-        let requested_attestation = attest_folderbase_root(requested_root)?;
+        let (requested_attestation, _) = attest_folderbase_root_with_authority(requested_root)?;
         let canonical_root =
             requested_root
                 .canonicalize()
@@ -632,7 +636,8 @@ impl FolderbaseVersionStore {
                     path: requested_root.to_path_buf(),
                     source,
                 })?;
-        let root_attestation = attest_folderbase_root(&canonical_root)?;
+        let (root_attestation, root_instance_authority) =
+            attest_folderbase_root_with_authority(&canonical_root)?;
         if requested_attestation.folderbase_id != root_attestation.folderbase_id
             || requested_attestation.protocol_version != root_attestation.protocol_version
             || requested_attestation.manifest_sha256 != root_attestation.manifest_sha256
@@ -647,14 +652,21 @@ impl FolderbaseVersionStore {
             &canonical_root,
             Path::new(".folderbaseignore"),
         )?;
-        read_local_head(&root_attestation, &root_capability)?;
+        read_local_head(
+            &root_attestation,
+            &root_instance_authority,
+            &root_capability,
+        )?;
         verify_root_capability(&root_capability, &canonical_root)?;
-        Ok(Self { root_attestation })
+        Ok(Self {
+            root_attestation,
+            root_instance_authority,
+        })
     }
 
     /// Plan a bounded metadata inventory without reading ordinary file bytes.
     pub fn plan_capture(&self) -> Result<CapturePlan, FolderbaseCaptureError> {
-        let current = attest_folderbase_root(&self.root_attestation.root)?;
+        let (current, _) = attest_folderbase_root_with_authority(&self.root_attestation.root)?;
         if current.root_instance_sha256 != self.root_attestation.root_instance_sha256 {
             return Err(RootAttestationError::RootChangedDuringAttestation.into());
         }
@@ -671,8 +683,13 @@ impl FolderbaseVersionStore {
             Path::new(".folderbase/manifest.json"),
         )?;
         let ignore = read_ignore_policy(&root_capability, &current.root)?;
-        let current_local_head = read_local_head(&current, &root_capability)?;
-        let restore_authorities = read_restore_authorities(&current, MAX_RESTORE_AUTHORITIES)?;
+        let current_local_head =
+            read_local_head(&current, &self.root_instance_authority, &root_capability)?;
+        let restore_authorities = read_restore_authorities(
+            &current,
+            &self.root_instance_authority,
+            MAX_RESTORE_AUTHORITIES,
+        )?;
 
         let mut planner = CapturePlanner::new(&current.root, &ignore, restore_authorities);
         planner.visit_directory(&root_capability, Path::new(""))?;
@@ -700,7 +717,8 @@ impl FolderbaseVersionStore {
         )
         .map_err(|path| FolderbaseCaptureError::UnsafeSymlinkTarget(PathBuf::from(path)))?;
         let final_ignore = read_ignore_policy(&root_capability, &current.root)?;
-        let final_local_head = read_local_head(&current, &root_capability)?;
+        let final_local_head =
+            read_local_head(&current, &self.root_instance_authority, &root_capability)?;
         let final_manifest_bytes = protocol_file_length(
             &root_capability,
             &current.root,
@@ -853,24 +871,30 @@ fn capture_authority_set_sha256(authorities: &[CaptureAuthorityLink]) -> String 
 
 pub(crate) fn restore_authority_count(
     root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
     maximum: usize,
 ) -> Result<usize, FolderbaseCaptureError> {
-    Ok(read_restore_authorities(root_attestation, maximum)?
-        .records
-        .len())
+    Ok(
+        read_restore_authorities(root_attestation, root_instance_authority, maximum)?
+            .records
+            .len(),
+    )
 }
 
 fn read_restore_authorities(
     root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
     maximum: usize,
 ) -> Result<RestoreAuthorityRegistry, FolderbaseCaptureError> {
     let state = FolderbaseState::open_existing_read_only(&root_attestation.root)?;
-    let records = read_restore_authority_records(root_attestation, &state, maximum)?;
+    let records =
+        read_restore_authority_records(root_attestation, root_instance_authority, &state, maximum)?;
     Ok(RestoreAuthorityRegistry { state, records })
 }
 
 fn read_restore_authority_records(
     root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
     state: &FolderbaseState,
     maximum: usize,
 ) -> Result<Vec<ObservedRestoreAuthority>, FolderbaseCaptureError> {
@@ -905,7 +929,12 @@ fn read_restore_authority_records(
                     "restore authority is invalid JSON: {source}"
                 ))
             })?;
-        validate_restore_authority(root_attestation, transaction_id, &record)?;
+        validate_restore_authority(
+            root_attestation,
+            root_instance_authority,
+            transaction_id,
+            &record,
+        )?;
         records.push(ObservedRestoreAuthority { record, encoded });
         if records.len() > maximum {
             return Err(FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { maximum });
@@ -917,6 +946,7 @@ fn read_restore_authority_records(
 
 pub(crate) fn verify_capture_link_commitment(
     root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
     state: &FolderbaseState,
     entry: &CapturePlanEntry,
     workspace_file: &fs::File,
@@ -932,7 +962,12 @@ pub(crate) fn verify_capture_link_commitment(
         }
     })?)
     .map_err(|_| FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(entry.path())))?;
-    let records = read_restore_authority_records(root_attestation, state, MAX_RESTORE_AUTHORITIES)?;
+    let records = read_restore_authority_records(
+        root_attestation,
+        root_instance_authority,
+        state,
+        MAX_RESTORE_AUTHORITIES,
+    )?;
     let workspace_identity = stable_file_identity_sha256(workspace_file).map_err(|source| {
         FolderbaseCaptureError::Io {
             path: display_path.clone(),
@@ -974,12 +1009,15 @@ pub(crate) fn verify_capture_link_commitment(
 
 fn validate_restore_authority(
     root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
     transaction_id: &str,
     record: &RestoreAuthorityRecord,
 ) -> Result<(), FolderbaseCaptureError> {
     if record.format != RESTORE_AUTHORITY_FORMAT_V1
         || record.folderbase_id != root_attestation.folderbase_id
-        || record.root_instance_sha256 != root_attestation.root_instance_sha256
+        || root_instance_authority
+            .admit(&record.root_instance_sha256)
+            .is_none()
         || record.transaction_id != transaction_id
         || record.private_stage_path
             != restore_stage_path(transaction_id)
@@ -1711,6 +1749,7 @@ fn ensure_record_capacity(current: usize, path: &Path) -> Result<(), FolderbaseC
 
 fn read_local_head(
     attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
     root: &Dir,
 ) -> Result<Option<CaptureLocalHead>, FolderbaseCaptureError> {
     let path = attestation.root.join(LOCAL_HEAD_PATH);
@@ -1782,7 +1821,9 @@ fn read_local_head(
         }
     };
     if folderbase_id != attestation.folderbase_id
-        || root_instance_sha256 != attestation.root_instance_sha256
+        || root_instance_authority
+            .admit(&root_instance_sha256)
+            .is_none()
     {
         return Err(FolderbaseCaptureError::InvalidLocalHead(
             "record does not bind the attested physical Folderbase Root".to_owned(),

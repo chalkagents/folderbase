@@ -6,7 +6,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(unix)]
+use cap_fs_ext::DirExt;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -4204,7 +4206,7 @@ fn open_migration_leaf_from_root(
         .ok_or_else(|| FolderbaseError::UnsafePath(relative.to_path_buf()))?
         .to_os_string();
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
-    let parent = open_migration_directory_from_root(&root_capability, parent_relative, root)?;
+    let parent = open_migration_directory_from_root(root_capability, parent_relative, root)?;
     let parent_identity = migration_directory_identity(&parent, &root.join(parent_relative))?;
     let display = root.join(relative);
     let identity = open_migration_regular_identity(&parent, &name, &display)?;

@@ -86,7 +86,7 @@ pub use reorganization::{
 };
 pub use root_attestation::{
     FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES,
-    ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
+    ROOT_INSTANCE_FORMAT_V1, ROOT_INSTANCE_FORMAT_V2, RootAttestationError, attest_folderbase_root,
 };
 pub use sharing::{
     AccessDecision, AccessReason, AccessRequest, FolderbaseRegistration, ShareGrant,

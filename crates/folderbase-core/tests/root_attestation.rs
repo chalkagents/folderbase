@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use folderbase_core::{
     FolderbaseRootAttestation, FolderbaseRootMarker, MAX_FOLDERBASE_MANIFEST_BYTES,
-    ROOT_INSTANCE_FORMAT_V1, RootAttestationError, attest_folderbase_root,
+    ROOT_INSTANCE_FORMAT_V1, ROOT_INSTANCE_FORMAT_V2, RootAttestationError, attest_folderbase_root,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
@@ -28,14 +28,14 @@ fn write_root(root: &Path, manifest: &[u8]) {
     fs::write(root.join("FOLDERBASE.md"), "# Folderbase\n").expect("entry");
 }
 
-fn expected_physical_v1_digest(root: &Path) -> String {
+fn expected_current_physical_digest(root: &Path) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"folderbase-physical-root-instance-v1\0");
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
+        digest.update(b"folderbase-physical-root-instance-v1\0");
         let metadata = fs::metadata(root).expect("root metadata");
         digest.update(b"unix\0");
         digest.update(metadata.dev().to_be_bytes());
@@ -44,10 +44,16 @@ fn expected_physical_v1_digest(root: &Path) -> String {
 
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
+        use std::{
+            mem::size_of,
+            os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+                FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx,
+            },
         };
 
         let root_file = fs::OpenOptions::new()
@@ -56,10 +62,24 @@ fn expected_physical_v1_digest(root: &Path) -> String {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .open(root)
             .expect("open physical root");
-        let information = winapi_util::file::information(&root_file).expect("root information");
+        let mut information = FILE_ID_INFO::default();
+        assert_ne!(
+            unsafe {
+                GetFileInformationByHandleEx(
+                    root_file.as_raw_handle() as HANDLE,
+                    FileIdInfo,
+                    (&raw mut information).cast(),
+                    size_of::<FILE_ID_INFO>() as u32,
+                )
+            },
+            0,
+            "query full FILE_ID_INFO: {}",
+            std::io::Error::last_os_error()
+        );
+        digest.update(b"folderbase-physical-root-instance-v2\0");
         digest.update(b"windows\0");
-        digest.update((information.volume_serial_number() as u32).to_be_bytes());
-        digest.update(information.file_index().to_be_bytes());
+        digest.update(information.VolumeSerialNumber.to_be_bytes());
+        digest.update(information.FileId.Identifier);
     }
 
     format!("{:x}", digest.finalize())
@@ -91,6 +111,10 @@ fn attests_exact_manifest_bytes_and_one_physical_root_instance() {
         ROOT_INSTANCE_FORMAT_V1,
         "folderbase-physical-root-instance-v1"
     );
+    assert_eq!(
+        ROOT_INSTANCE_FORMAT_V2,
+        "folderbase-physical-root-instance-v2"
+    );
 
     let physical_copy = root_with_manifest(MANIFEST);
     let copied = attest_folderbase_root(physical_copy.path()).expect("valid copied root");
@@ -109,18 +133,18 @@ fn attests_exact_manifest_bytes_and_one_physical_root_instance() {
 }
 
 #[test]
-fn physical_v1_matches_the_independent_platform_encoding() {
+fn physical_root_instance_matches_the_independent_platform_encoding() {
     let root = root_with_manifest(MANIFEST);
     let receipt = attest_folderbase_root(root.path()).expect("attested root");
 
     assert_eq!(
         receipt.root_instance_sha256,
-        expected_physical_v1_digest(root.path())
+        expected_current_physical_digest(root.path())
     );
 }
 
 #[test]
-fn physical_v1_survives_rename_but_changes_for_same_path_replacement() {
+fn physical_root_instance_survives_rename_but_changes_for_same_path_replacement() {
     let parent = tempdir().expect("parent");
     let original = parent.path().join("workspace");
     write_root(&original, MANIFEST);
