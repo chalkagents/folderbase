@@ -174,6 +174,15 @@ re-enumerates that exact set and reads link count from the retained source
 handle immediately before and after content streaming. An added user link,
 missing receipt or stage, or same-count authority-set swap fails closed before
 capture can advance Head.
+
+Recovery retains whether a bounded active journal decoded as released v1 or
+current wire. A released-v1 journal is preflighted against the exact raw byte
+length already admitted by the bounded reader plus the closed released schema
+and normalized semantic invariants; it is not rejected merely because its
+larger typed in-memory representation would exceed the same wire bound.
+Newly assigned and current journals remain preflighted through the current
+encoder. The exact raw journal bytes continue to define capture-transaction
+Head authority.
 Included content streams are capped at the exact approved length plus one byte:
 a growing source is refused as a concurrent state change and staging is
 removed, instead of reading an attacker-controlled stream to EOF. The active

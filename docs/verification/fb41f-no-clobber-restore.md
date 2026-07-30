@@ -128,6 +128,11 @@ blob named by the current Head Tombstone.
   with an independently encoded released-v1 non-genesis digest whose Head has
   the original flat `transaction_sha256` field. Pre-Head retry abandoned the
   released assignment and created a different target Version.
+- `0ab155a` lowers the journal limit to the exact compact released-v1 raw byte
+  length and proves that its normalized typed representation is larger. The
+  old preflight rejected the valid pre-Head journal even though the bounded
+  reader had admitted its exact old wire; one byte below the raw length still
+  fails.
 
 ## GREEN behavior
 
@@ -257,6 +262,11 @@ blob named by the current Head Tombstone.
   digest byte-for-byte. A version-derived Head or authority-bearing plan uses
   typed v2. Genuine old pre-Head and post-Head journals converge on their
   original assigned Version and exact raw journal SHA.
+- `375a3ea` preserves the bounded active journal's parsed wire kind and raw
+  length. Released-v1 recovery preflights the exact already-bounded raw wire,
+  its closed released schema, and all normalized semantic invariants instead
+  of rejecting a larger typed reserialization that is never written. Current
+  and newly assigned journals still pass the current bounded encoder.
 
 The local threat boundary is intentionally KISS: `.folderbase/` is trusted
 engine-owned state analogous to `.git/`. The regressions prove malformed or

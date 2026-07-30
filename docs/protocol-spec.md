@@ -898,6 +898,12 @@ version-derived Head or any authority-bearing entry uses the typed v2
 plan-digest domain. Core re-enumerates and revalidates that exact set from the
 retained source handle immediately before and after its bounded byte read.
 Added links and same-count authority-set swaps are concurrent state changes.
+When a bounded active journal decodes through the released-v1 wire, recovery
+preserves that wire kind, exact raw byte length, and exact raw SHA-256.
+Preflight applies the byte bound to those raw bytes and validates the released
+closed schema plus normalized transaction semantics; it does not apply the same
+wire bound to a larger typed reserialization that is never persisted. Current
+and newly assigned journals remain bounded through the current encoder.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 
