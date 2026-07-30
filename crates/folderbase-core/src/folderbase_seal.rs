@@ -5628,6 +5628,45 @@ mod tests {
             .expect("advisory completion evidence must not block later work");
     }
 
+    #[test]
+    fn late_same_inode_edit_after_projection_retires_without_false_restore_success() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let edited = b"user edit after projection became durable";
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::ProjectionDurable {
+                    fs::write(root.path().join("active.bin"), edited)
+                        .expect("late same-inode edit");
+                }
+            })
+            .expect_err("late edit must prevent restored-success acknowledgement");
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh-process reopen");
+        assert!(matches!(
+            reopened.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("preserved edit"),
+            edited
+        );
+        let captured = reopened
+            .seal_capture(reopened.plan_capture().expect("edited capture"))
+            .expect("late edit cleanup must not wedge capture");
+        assert!(captured.created());
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_failure_reopens_from_durable_recovery_and_converges() {
