@@ -271,7 +271,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-620 passed; 3 ignored
+628 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
@@ -291,7 +291,7 @@ RUSTFLAGS="-D warnings" \
 passed
 
 bash scripts/test-package-install.sh
-passed; Core packaged 55 files, CLI packaged 10 files, extracted package
+passed; Core packaged 56 files, CLI packaged 10 files, extracted package
 tests passed, and the fresh release install reported folderbase 0.4.0
 
 bash scripts/check-ci-policy.sh
