@@ -17,6 +17,7 @@ use crate::{
     root_attestation::{
         DEFAULT_V05_CAPTURE_IGNORE_RULES, MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile,
         PROTOCOL_UPGRADE_RECEIPT_FIELD, PROTOCOL_UPGRADE_RECEIPT_FORMAT,
+        attest_folderbase_root_with_profile,
         attest_folderbase_root_with_profile_allowing_upgrade_recovery,
         decode_manifest_protocol_profile,
     },
@@ -495,6 +496,7 @@ fn apply_protocol_upgrade_with_ack_hooks(
     state.verify_still_attached()?;
     state.remove_durable(Path::new(UPGRADE_INTENT_PATH))?;
     after_intent_retirement();
+    attest_retired_protocol_upgrade_target(&plan.root, &intent)?;
     Ok(upgrade_result(plan))
 }
 
@@ -990,6 +992,34 @@ fn attest_exact_protocol_upgrade_target(
     Ok(())
 }
 
+fn attest_retired_protocol_upgrade_target(
+    root: &Path,
+    intent: &ProtocolUpgradeIntent,
+) -> Result<()> {
+    let visible_state = FolderbaseState::open_existing_read_only(root)?;
+    visible_state.verify_still_attached()?;
+    let manifest = visible_state
+        .read_bounded(Path::new("manifest.json"), MAX_FOLDERBASE_MANIFEST_BYTES)?
+        .ok_or_else(|| invalid_upgrade(root, "manifest disappeared after intent retirement"))?;
+    let (attestation, _, profile) = attest_folderbase_root_with_profile(root)
+        .map_err(|source| invalid_upgrade(root, source.to_string()))?;
+    visible_state.verify_still_attached()?;
+    let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest));
+    if attestation.folderbase_id != intent.folderbase_id
+        || attestation.root_instance_sha256 != intent.root_instance_sha256
+        || attestation.protocol_version != "0.5.0"
+        || attestation.manifest_sha256 != manifest_sha256
+        || !matches!(profile, ManifestProtocolProfile::OrdinaryV05 { .. })
+        || manifest != intent.target_bytes()
+    {
+        return Err(invalid_upgrade(
+            root,
+            "retired protocol upgrade does not bind the visible physical root and exact target",
+        ));
+    }
+    Ok(())
+}
+
 fn read_ignore_snapshot(state: &FolderbaseState, root: &Path) -> Result<IgnorePolicySnapshot> {
     read_ignore_snapshot_with_hook(state, root, || {})
 }
@@ -1101,8 +1131,6 @@ mod tests {
     use std::fs;
 
     use tempfile::tempdir;
-
-    use crate::root_attestation::attest_folderbase_root_with_profile;
 
     use super::*;
 
