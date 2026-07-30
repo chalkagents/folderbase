@@ -930,13 +930,12 @@ pub(crate) fn verify_capture_link_commitment(
     })?)
     .map_err(|_| FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(entry.path())))?;
     let records = read_restore_authority_records(root_attestation, state, MAX_RESTORE_AUTHORITIES)?;
-    let workspace_identity =
-        stable_file_identity_sha256(workspace_file).map_err(|source| {
-            FolderbaseCaptureError::Io {
-                path: display_path.clone(),
-                source,
-            }
-        })?;
+    let workspace_identity = stable_file_identity_sha256(workspace_file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: display_path.clone(),
+            source,
+        }
+    })?;
     let actual = validated_link_commitment(
         state,
         &records,
@@ -1184,12 +1183,8 @@ impl<'a> CapturePlanner<'a> {
         let mut regular_bytes = None;
         let mut regular_executable = None;
         if metadata.is_file() && !metadata.file_type().is_symlink() {
-            let (observed, workspace_identity, link_count) = planned_regular_link_observation(
-                directory,
-                &name,
-                &metadata,
-                &display_path,
-            )?;
+            let (observed, workspace_identity, link_count) =
+                planned_regular_link_observation(directory, &name, &metadata, &display_path)?;
             regular_bytes = Some(observed.bytes);
             regular_executable = Some(observed.executable);
             regular_observed = Some(observed);
@@ -1434,8 +1429,8 @@ fn planned_regular_link_observation(
 ) -> Result<(CaptureMetadataFingerprint, String, usize), FolderbaseCaptureError> {
     use cap_std::fs::MetadataExt;
 
-    let link_count =
-        usize::try_from(metadata.nlink()).map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
+    let link_count = usize::try_from(metadata.nlink())
+        .map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
     Ok((
         CaptureMetadataFingerprint::from_cap_metadata(metadata),
         stable_unix_file_identity_sha256(metadata.dev(), metadata.ino()),
@@ -1469,12 +1464,11 @@ fn planned_regular_link_observation(
             source,
         })?
         .into_std();
-    let identity = stable_file_identity_sha256(&file).map_err(|source| {
-        FolderbaseCaptureError::Io {
+    let identity =
+        stable_file_identity_sha256(&file).map_err(|source| FolderbaseCaptureError::Io {
             path: display_path.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     let link_count = usize::try_from(stable_file_link_count(&file).map_err(|source| {
         FolderbaseCaptureError::Io {
             path: display_path.to_path_buf(),
@@ -1483,13 +1477,12 @@ fn planned_regular_link_observation(
     })?)
     .map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
     Ok((
-        CaptureMetadataFingerprint::from_cap_metadata(metadata)
-            .with_physical_identity(Some(windows_file_identity(&file).map_err(|source| {
-                FolderbaseCaptureError::Io {
-                    path: display_path.to_path_buf(),
-                    source,
-                }
-            })?)),
+        CaptureMetadataFingerprint::from_cap_metadata(metadata).with_physical_identity(Some(
+            windows_file_identity(&file).map_err(|source| FolderbaseCaptureError::Io {
+                path: display_path.to_path_buf(),
+                source,
+            })?,
+        )),
         identity,
         link_count,
     ))
