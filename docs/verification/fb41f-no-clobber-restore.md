@@ -124,6 +124,10 @@ blob named by the current Head Tombstone.
   `BeforeObjectBytesRead`. Planning had validated the retained restore link,
   but sealing had discarded that topology and returned the unchanged prior
   capture.
+- `3d40940` replaced the compatibility fixture's reused current plan digest
+  with an independently encoded released-v1 non-genesis digest whose Head has
+  the original flat `transaction_sha256` field. Pre-Head retry abandoned the
+  released assignment and created a different target Version.
 
 ## GREEN behavior
 
@@ -247,6 +251,12 @@ blob named by the current Head Tombstone.
   files: Unix derives identity and link count from no-follow directory
   metadata, Windows uses a zero-data-access metadata handle, and seal-time
   topology checks remain bound to the actual opened content handle.
+- `5a7f4ac` gives released-v1 compatibility one exact encoder rather than
+  accepting two digests. A plan with no retained authority links and an absent
+  or capture-transaction-derived Head reproduces the released flat-Head v1
+  digest byte-for-byte. A version-derived Head or authority-bearing plan uses
+  typed v2. Genuine old pre-Head and post-Head journals converge on their
+  original assigned Version and exact raw journal SHA.
 
 The local threat boundary is intentionally KISS: `.folderbase/` is trusted
 engine-owned state analogous to `.git/`. The regressions prove malformed or

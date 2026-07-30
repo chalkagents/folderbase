@@ -891,10 +891,13 @@ of exact authority receipt paths and byte digests, retained stage paths, and
 publication identities. Missing fields in released journals normalize only to
 one live link and an empty authority set and remain absent when serialized, so
 their original Head-anchored SHA-256 is preserved. Default-only plans retain the
-v1 plan-digest domain; authority-bearing plans use v2. Core re-enumerates and
-revalidates that exact set from the retained source handle immediately before
-and after its bounded byte read. Added links and same-count authority-set swaps
-are concurrent state changes.
+v1 plan-digest domain when Head is absent or capture-transaction-derived. That
+v1 encoder reproduces the released flat
+`current_head.transaction_sha256` representation byte-for-byte. A
+version-derived Head or any authority-bearing entry uses the typed v2
+plan-digest domain. Core re-enumerates and revalidates that exact set from the
+retained source handle immediately before and after its bounded byte read.
+Added links and same-count authority-set swaps are concurrent state changes.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 

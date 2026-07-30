@@ -166,11 +166,14 @@ ASCII-sorted set of authority receipt paths, SHA-256 digests of the exact
 receipt bytes, retained stage paths, and publication identities. Default or
 released records with no such field normalize only to one visible link and no
 authorities, and preserve their original serialized bytes and Head-anchored
-SHA-256. Authority-bearing plans use the v2 plan-digest domain; default-only
-plans retain the released v1 digest domain. Core re-enumerates that exact set
-and reads link count from the retained source handle immediately before and
-after content streaming. An added user link, missing receipt or stage, or
-same-count authority-set swap fails closed before capture can advance Head.
+SHA-256. Default-only plans whose Head is absent or capture-transaction-derived
+retain the released v1 digest domain and its exact flat
+`current_head.transaction_sha256` encoding. Authority-bearing plans and plans
+whose Head is version-derived use the typed-authority v2 domain. Core
+re-enumerates that exact set and reads link count from the retained source
+handle immediately before and after content streaming. An added user link,
+missing receipt or stage, or same-count authority-set swap fails closed before
+capture can advance Head.
 Included content streams are capped at the exact approved length plus one byte:
 a growing source is refused as a concurrent state change and staging is
 removed, instead of reading an attacker-controlled stream to EOF. The active
