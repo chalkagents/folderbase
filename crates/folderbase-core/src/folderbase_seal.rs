@@ -548,6 +548,13 @@ impl FolderbaseVersionStore {
             checkpoint(&RestoreCheckpoint::BeforeLegacyRootHeadRebind);
             rebind_legacy_root_local_head(self, &local, &state)?;
             checkpoint(&RestoreCheckpoint::AfterLegacyRootHeadRebind);
+            verify_restore_success_linearization(
+                self,
+                &local,
+                &state,
+                &completion.transaction,
+                &completion.published_identity_sha256,
+            )?;
             return Ok(restored);
         }
         if active.is_none() {
@@ -1274,6 +1281,13 @@ fn execute_restore_transaction(
     checkpoint(&RestoreCheckpoint::BeforeLegacyRootHeadRebind);
     rebind_legacy_root_local_head(store, local, state)?;
     checkpoint(&RestoreCheckpoint::AfterLegacyRootHeadRebind);
+    verify_restore_success_linearization(
+        store,
+        local,
+        state,
+        transaction,
+        &published_identity_sha256,
+    )?;
     Ok(restored_tombstone(transaction, created))
 }
 
@@ -1352,6 +1366,13 @@ fn finish_restore_cleanup_recovery(
     checkpoint(&RestoreCheckpoint::BeforeLegacyRootHeadRebind);
     rebind_legacy_root_local_head(store, local, state)?;
     checkpoint(&RestoreCheckpoint::AfterLegacyRootHeadRebind);
+    verify_restore_success_linearization(
+        store,
+        local,
+        state,
+        transaction,
+        published_identity_sha256,
+    )?;
     Ok(restored_tombstone(transaction, false))
 }
 
@@ -1793,6 +1814,52 @@ fn rederive_authoritative_restore_transaction(
     Ok(())
 }
 
+fn restore_target_head_for_root(
+    transaction: &RestoreTransaction,
+    root_instance_sha256: &str,
+) -> Result<LocalHeadRecord, FolderbaseCaptureError> {
+    Ok(LocalHeadRecord {
+        format: "folderbase-local-head-v2".to_owned(),
+        folderbase_id: transaction.folderbase_id.clone(),
+        root_instance_sha256: root_instance_sha256.to_owned(),
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: version_derived_local_head_sha256(
+                &transaction.folderbase_id,
+                root_instance_sha256,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
+    })
+}
+
+fn is_exact_restore_target_head(
+    store: &FolderbaseVersionStore,
+    transaction: &RestoreTransaction,
+    current_head: &LocalHeadRecord,
+) -> Result<bool, FolderbaseCaptureError> {
+    let admission = store
+        .root_instance_authority
+        .admit(&transaction.root_instance_sha256)
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore transaction is bound to another physical Folderbase Root".to_owned(),
+            )
+        })?;
+    let recorded = restore_target_head_for_root(transaction, admission.recorded_sha256())?;
+    if current_head == &recorded {
+        return Ok(true);
+    }
+    if !admission.is_legacy_v1() {
+        return Ok(false);
+    }
+    let rebound =
+        restore_target_head_for_root(transaction, store.root_instance_authority.current_sha256())?;
+    Ok(current_head == &rebound)
+}
+
 fn verify_restore_success_linearization(
     store: &FolderbaseVersionStore,
     local: &LocalVersionStore,
@@ -1818,18 +1885,7 @@ fn verify_restore_success_linearization(
         ));
     }
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
-    let expected_head = JournalHead {
-        version_id: transaction.target_version_id.clone(),
-        version_sha256: transaction.target_version_sha256.clone(),
-        authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: restore_transaction_local_head_authority_sha256(
-                transaction,
-                &transaction.target_version_id,
-                &transaction.target_version_sha256,
-            )?,
-        },
-    };
-    if JournalHead::from(&current_head) != expected_head {
+    if !is_exact_restore_target_head(store, transaction, &current_head)? {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     }
 
@@ -1919,18 +1975,7 @@ fn completed_restore_result(
 ) -> Result<Option<RestoredTombstone>, FolderbaseCaptureError> {
     validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
-    let target_head = JournalHead {
-        version_id: transaction.target_version_id.clone(),
-        version_sha256: transaction.target_version_sha256.clone(),
-        authority: LocalHeadAuthority::VersionDerivedV1 {
-            sha256: restore_transaction_local_head_authority_sha256(
-                transaction,
-                &transaction.target_version_id,
-                &transaction.target_version_sha256,
-            )?,
-        },
-    };
-    if JournalHead::from(&current_head) != target_head {
+    if !is_exact_restore_target_head(store, transaction, &current_head)? {
         return Ok(None);
     }
     rederive_authoritative_restore_transaction(store, local, state, transaction)?;
