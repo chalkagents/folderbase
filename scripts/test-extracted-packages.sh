@@ -79,7 +79,7 @@ cd "$extraction_root/outside-checkout"
   --json > initialization.json
 
 test -f unmanaged/.folderbase/manifest.json
-test -f unmanaged/.folderbaseignore
+test ! -e unmanaged/.folderbaseignore
 test -f unmanaged/FOLDERBASE.md
 
 printf '%s\n' 'Extracted Cargo packages are self-contained and testable.'

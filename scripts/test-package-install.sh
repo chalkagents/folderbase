@@ -17,7 +17,10 @@ export CARGO_TARGET_DIR="$temporary_root/target"
 
 cd "$repository_root"
 
+node scripts/verify-folderbase-version-digest-vectors.mjs
 node scripts/verify-folderbase-version-distribution.mjs
+node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
+node scripts/verify-folderbase-version-0.5-distribution.mjs
 
 for template in \
   person \

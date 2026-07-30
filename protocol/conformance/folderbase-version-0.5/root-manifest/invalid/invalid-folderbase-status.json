@@ -1,0 +1,22 @@
+{
+  "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+  "protocol_version": "0.5.0",
+  "folderbase": {
+    "id": "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+    "name": "Strict ordinary root",
+    "kind": "project",
+    "status": "deleted",
+    "created_at": "2026-07-30T00:00:00Z"
+  },
+  "adapters": [],
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "manual",
+    "cloud_sync": "disabled",
+    "capture_ignore": {
+      "format": "folderbase-capture-ignore-v1",
+      "rules": []
+    }
+  }
+}

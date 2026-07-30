@@ -1,6 +1,6 @@
 # Folderbase protocol specification
 
-Status: Draft 0.1
+Status: Draft through protocol 0.5
 
 Audience: Client implementers, agent-harness authors, and protocol reviewers
 
@@ -74,24 +74,51 @@ Canonical definitions live in [`../CONTEXT.md`](../CONTEXT.md).
 
 ## Folderbase discovery
 
-A directory is a folderbase root when it contains both:
+Discovery is profile-specific. A protocol 0.1 or 0.2 directory is a Folderbase
+root when it contains both:
 
 ```text
 FOLDERBASE.md
 .folderbase/manifest.json
 ```
 
-Clients must not infer folderbase status from `AGENTS.md`, `CLAUDE.md`, a folder
-name, or cloud registration alone.
+For a native protocol 0.5 directory, an exact regular
+`.folderbase/manifest.json` with the supported `protocol_version: "0.5.0"`
+establishes the root when that directory is opened and attested.
+`FOLDERBASE.md`, `.folderbase/summary.md`,
+`.folderbase/questions.jsonl`, adapter files, a folder name, and cloud
+registration do not establish a root. Clients must not infer Folderbase status
+from any of those hints.
 
-When traversing a filesystem, a client stops applying a parent folderbase's policy
-when it discovers another valid folderbase root. A nested folderbase is an independent
-boundary, not an inherited subfolder.
+When traversing a filesystem, a client stops applying a parent Folderbase's
+policy when it observes another exact nested manifest marker. The nested tree
+is an independent opaque boundary, not an inherited subfolder.
 
-A traversal that sees both marker paths must fail closed at that directory
-even when the nested manifest is malformed or cannot yet be validated. The
-client may report the nested folderbase as invalid, but it must not expose its
-descendants through the parent folderbase while deciding that.
+A parent traversal that observes any exact regular, no-follow
+`.folderbase/manifest.json` stops at that directory and records one opaque
+nested boundary. It does not read or decode the nested manifest through the
+parent, even when the bytes are malformed or unsupported. Only an operation
+that explicitly opens that nested root decodes and attests its manifest; that
+operation fails closed if the root is invalid. This prevents malformed private
+state from being exposed through the parent without making the parent an
+authority over nested profile validity.
+
+The shared classifier has three outcomes:
+
+- an exact `.folderbase` directory containing an exact regular, no-follow
+  `manifest.json` is the opaque boundary above, regardless of its bytes;
+- an ASCII-case alias of either marker, a symlink or non-directory
+  `.folderbase`, or a symlink or non-regular `manifest.json` is an unsafe
+  filesystem shape, not Folderbase authority; and
+- markerless `.folderbase` state, summary, question context, adapters, and
+  other context are inert and establish no boundary.
+
+Read-only analysis may report an unsafe shape as an `Unchecked` quarantine
+(`unchecked` on the wire) and omit its descendants. That conservative omission
+grants no authority.
+
+Materialization, mutation, transfer, and restore seams reject unsafe shapes
+instead of treating them as either ordinary content or a valid nested root.
 
 Creating a nested folderbase also closes the parent boundary retroactively for
 tracked paths beneath it. Parent history may retain immutable bytes for
@@ -101,6 +128,8 @@ new folderbase requires an explicit, reviewed transfer rather than implicit
 inheritance.
 
 ## Required layout
+
+The legacy 0.1/0.2 profile requires:
 
 ```text
 Folderbase Root/
@@ -126,6 +155,23 @@ CLAUDE.md
 Empty protocol directories may be omitted from a portable export. Their
 absence does not invalidate the folderbase.
 
+A native 0.5 root requires only:
+
+```text
+Folderbase Root/
+└── .folderbase/
+    └── manifest.json
+```
+
+Root `FOLDERBASE.md` is fully ordinary optional user content in 0.5. Root
+`.folderbaseignore` is optional and user-owned, but it controls capture policy:
+clients bound its input, force-capture it when present, and change it only
+through typed policy-aware flows. Optional `.folderbase/summary.md` and
+`.folderbase/questions.jsonl` files are the named engine-owned hint formats.
+Their absence is normal, and their presence does not expand authority or the
+portable Version surface. Any other `.folderbase/**` content remains private
+and inert but is not assigned one of those named hint formats.
+
 `.folderbase/local/` is reserved for device-local runtime state such as
 filesystem path-identity bindings. Clients must exclude that directory from
 cloud synchronization and portable exports regardless of `.folderbaseignore`.
@@ -134,9 +180,9 @@ verified local observations on each device.
 
 ## Folderbase entry
 
-`FOLDERBASE.md` is the canonical human- and agent-readable entry point. It must be
-valid Markdown and should remain concise enough to enter an agent context
-without summarization.
+For protocol 0.1 and 0.2, `FOLDERBASE.md` is the canonical human- and
+agent-readable entry point. It must be valid Markdown and should remain concise
+enough to enter an agent context without summarization.
 
 It must contain:
 
@@ -180,6 +226,16 @@ The 0.1 reference implementation is running locally and remains pre-release.
 
 `FOLDERBASE.md` is not a transcript, generated dump, or complete index. It points to
 deeper knowledge.
+
+Protocol 0.5 has no mandatory narrative entry and no `folderbase.entry`
+authority field. If a root `FOLDERBASE.md` exists, it is ordinary user content:
+it may be text or opaque bytes, may be ignored from capture, and grants no
+special permission. Optional `.folderbase/summary.md` and
+`.folderbase/questions.jsonl` files may summarize or ask about the ordinary tree,
+but they are non-authoritative hints. They never establish discovery, approve a
+mutation, authorize sharing, or enter ordinary Folderbase Version bindings.
+Other `.folderbase/**` content remains private and inert without becoming a
+named narrative or question format.
 
 Stored object paths must be matched using the canonical filesystem spelling.
 On a case-insensitive filesystem, a legacy record such as `notes.md` and the
@@ -240,6 +296,42 @@ Example:
 | `policies.cloud_sync` | `disabled` or `enabled` |
 
 Unknown fields must be preserved by clients that rewrite the manifest.
+
+Protocol 0.5 uses the separate
+`protocol/schemas/0.5/folderbase.schema.json` profile. It removes
+`folderbase.entry` from the required shape and requires the embedded
+`policies.capture_ignore` record:
+
+```json
+{
+  "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+  "protocol_version": "0.5.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-0b22-7a18-8f40-3f29f1438b62",
+    "name": "Folderbase",
+    "kind": "project",
+    "status": "active",
+    "created_at": "2026-07-30T00:00:00Z"
+  },
+  "adapters": [],
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "manual",
+    "cloud_sync": "disabled",
+    "capture_ignore": {
+      "format": "folderbase-capture-ignore-v1",
+      "rules": []
+    }
+  }
+}
+```
+
+The capture record is closed: it contains exactly `format` and `rules`.
+`format` is `folderbase-capture-ignore-v1`; `rules` contains at most 1,024
+ordered nonempty strings, each at most 4,096 UTF-8 bytes and containing no NUL.
+JSON Schema expresses the corresponding 4,096-character ceiling; runtimes must
+also enforce the UTF-8 byte ceiling.
 
 ### Folderbase kinds
 
@@ -364,8 +456,11 @@ weaken migration approval rules.
 
 ## Agent adapters
 
-Agent adapters direct a tool to the canonical folderbase entry. They must not become
-independent sources of project truth.
+Agent adapters direct a tool to the canonical root authority. They must not
+become independent sources of project truth. Adapter installation is opt-in in
+protocol 0.5; initialization does not create or rewrite one unless requested.
+Managed 0.5 adapter targets must be safe ordinary visible relative paths;
+`.folderbase` and `.git` components and their ASCII-case aliases are forbidden.
 
 Recommended Codex adapter:
 
@@ -373,9 +468,10 @@ Recommended Codex adapter:
 <!-- folderbase:begin -->
 # Folderbase
 
-Read `FOLDERBASE.md` before working in this directory. Follow its navigation and
-operating rules. Record durable project context in the folderbase rather than only
-in the current conversation.
+Confirm this root through `.folderbase/manifest.json` before working in this
+directory. Treat optional summaries, questions, and narratives as context, not
+mutation or sharing authority. Record durable project context in ordinary
+folderbase content rather than only in the current conversation.
 <!-- folderbase:end -->
 ```
 
@@ -389,9 +485,18 @@ If an adapter file already exists:
 
 ## Ignore rules
 
-`.folderbaseignore` uses Git-style ordered path patterns relative to the folderbase
-root. It governs cloud synchronization and protocol inventory, not local
-filesystem visibility.
+The legacy 0.1/0.2 profile requires a root `.folderbaseignore`. It uses
+Git-style ordered path patterns relative to the Folderbase root and governs
+protocol capture, not local filesystem visibility. Protocol 0.5 instead applies
+the manifest's `policies.capture_ignore.rules` first, followed by the root
+`.folderbaseignore` rules only when that optional regular file exists. Later
+matches win. Presence and absence of the optional root file are distinct
+effective policies and therefore produce distinct policy digests.
+
+The optional 0.5 root file is user-owned but policy-controlling, not fully
+ordinary content. Reads are bounded, a present file is force-captured, and
+changes use typed policy-aware flows so preview and approval bind the effective
+policy transition.
 
 Recommended defaults:
 
@@ -412,6 +517,13 @@ Pods/
 
 Clients may suggest additional generated paths after deterministic inspection.
 They must not assume every `.gitignore` entry is safe to exclude from storage.
+
+In protocol 0.5, a present `.folderbaseignore` is force-included as an ordinary
+binding even if a rule matches it. `FOLDERBASE.md` has no marker override and
+may be ignored. `.folderbase/**` remains outside ordinary bindings regardless
+of rules, except that the exact root manifest is represented through the
+reserved `root_manifest` reference. Optional summary and question hints are
+therefore never silently promoted into portable history.
 
 An ignored file remains a normal local file. The client should distinguish:
 
@@ -734,10 +846,11 @@ sorted Tombstones, and sorted typed exclusions. The containing Folderbase Versio
 itself establishes the deletion generation for every Tombstone, so Tombstones do
 not repeat the containing ID or digest.
 
-Every restorable full state contains `.folderbaseignore` and `FOLDERBASE.md` as
-live regular-file Path Bindings. Both are required protocol files, not optional
-template output. The schema rejects fewer than two bindings; Core semantic
-validation proves the exact required paths and kinds.
+Every protocol 0.4 restorable full state contains `.folderbaseignore` and
+`FOLDERBASE.md` as live regular-file Path Bindings. Both are required 0.4
+protocol files, not optional template output. The 0.4 schema rejects fewer than
+two bindings; 0.4 semantic validation proves the exact required paths and
+kinds.
 
 Regular files are opaque exact bytes plus executable fidelity. Symlinks retain an
 exact UTF-8 target and are never followed; only lexically contained targets that
@@ -781,6 +894,31 @@ reference encoder. The released manifest at
 source-release surface. ADR-0004 is Accepted, and CI rejects either a non-released
 status or a remaining candidate manifest.
 
+## Folderbase Version protocol 0.5 delta
+
+Protocol 0.5 retains the closed `folderbase-version-v1` envelope, portable-path
+policy, bounds, semantic validation, and canonical digest encoding from 0.4.
+The `protocol_version` literal changes from `0.4` to `0.5`; because that string
+is the first encoded field after the v1 digest domain, otherwise identical 0.4
+and 0.5 records have distinct digests.
+
+The only root-file binding delta is deliberate. A 0.5 Version may have zero
+bindings. Root `FOLDERBASE.md` and `.folderbaseignore` are optional bindings
+when present; neither is required to restore the exact 0.5 authority because
+`root_manifest` represents `.folderbase/manifest.json`. `FOLDERBASE.md` is
+fully ordinary. `.folderbaseignore` is user-owned but policy-controlling,
+bounded, force-captured, and changed only through typed policy-aware flows.
+Ordinary `.folderbase/**` bindings remain forbidden, including the named
+optional `.folderbase/summary.md` and `.folderbase/questions.jsonl` hints.
+
+The immutable 0.4 release inventory, conformance bytes, reference encoder, and
+verifier semantics do not change. Protocol 0.5 has a separate candidate schema,
+conformance tree, reference encoder, member-hashed inventory, release-manifest
+sidecar, and verifier under `protocol/releases/0.5/`. ADR-0006 records the
+accepted ordinary-folder and optional-narrative transition. Repository CI and
+package-install validation run both 0.5 verifiers while retaining the frozen
+0.4 digest and distribution gates.
+
 ### Proposed local capture, sealing, and Local Head
 
 The first producer-side FB-41F slice remains Proposed in ADR-0005. A
@@ -798,21 +936,23 @@ related `.folderbase/` record by a process running as the same user is outside
 the local Core threat model. Cloud grants and hosted Live Folder authority are
 separately authenticated and cannot be obtained from local metadata.
 
-Core reads protocol control bytes needed to interpret the root—the manifest,
-`.folderbaseignore`, optional `.folderbase/local/head.json`, and bounded retained
-restore-authority receipts—but does not request data access to ordinary files or
-their retained private links while planning. Unix planning compares no-follow
-directory metadata; Windows uses zero-data-access, no-follow metadata handles.
-PDFs, videos, CSV, SQLite, Git packs, and unknown files are all opaque regular
-files. Nested Folderbases, hard links, and special nodes are typed exclusions;
-symlinks are not followed.
+Core reads the manifest, optional `.folderbaseignore`, optional
+`.folderbase/local/head.json`, and bounded retained restore-authority receipts
+needed to interpret a 0.5 root, but does not request data access to ordinary
+files or their retained private links while planning. Unix planning compares
+no-follow directory metadata; Windows uses zero-data-access, no-follow metadata
+handles. PDFs, videos, CSV, SQLite, Git packs, and unknown files are all opaque
+regular files. Nested Folderbases, hard links, and special nodes are typed
+exclusions; symlinks are not followed.
 
-Core defaults exclude known generated trees before applying ordered user rules.
-Required `.folderbaseignore` and `FOLDERBASE.md` bindings cannot be ignored, and
-`.folderbase/**` cannot enter the ordinary inventory. Definitively excluded
-directories are classified before they are opened. Root-relative no-follow
-directory capabilities prevent ambient-path escape, opened directory identities
-are rechecked, and streamed traversal enforces the aggregate bound without
+For protocol 0.5, Core applies manifest engine rules first, then the optional
+root `.folderbaseignore` rules. A present `.folderbaseignore` is captured;
+`FOLDERBASE.md` may be ignored. For 0.4 compatibility capture, both required
+root files retain their marker override. `.folderbase/**` cannot enter the
+ordinary inventory under either profile. Definitively excluded directories are
+classified before they are opened. Root-relative no-follow directory
+capabilities prevent ambient-path escape, opened directory identities are
+rechecked, and streamed traversal enforces the aggregate bound without
 retaining an unbounded directory listing. The capture inventory uses the v1
 portable-path, Unicode collision, depth, entry-count, and object-size limits.
 
@@ -1193,6 +1333,15 @@ A version 0.1 validator checks:
 - migrations and change sets have valid state transitions
 
 Validation must not modify a folderbase. Repair is a separate explicit operation.
+
+A native 0.5 validator instead requires the exact root manifest, rejects
+unsupported live protocol versions, validates the closed embedded
+`capture_ignore` record and its runtime UTF-8 byte bounds, and does not require
+`FOLDERBASE.md` or `.folderbaseignore`. A present `FOLDERBASE.md` is ordinary
+content. A present `.folderbaseignore` is bounded policy input and a
+force-captured binding under the 0.5 capture semantics.
+Optional summary and question hints never satisfy a missing manifest or grant
+authority.
 
 ## Protocol compatibility
 

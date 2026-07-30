@@ -1,0 +1,278 @@
+{
+  "format": "folderbase-protocol-source-release-v2",
+  "status": "candidate",
+  "protocol_version": "0.5",
+  "contract": "folderbase-version-v1",
+  "distribution": "repository-candidate-source-tree",
+  "repository": "https://github.com/chalkagents/folderbase",
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "550c7012675b088aea8cf4f66840e6c93df71ae745d7459d21fe3c37222026c7"
+    },
+    {
+      "path": "README.md",
+      "sha256": "0250ec97ce07073d4385b374cc79eca344903986ba507406a5abe776ce2a188d"
+    },
+    {
+      "path": "docs/adr/0003-attest-exact-folderbase-roots.md",
+      "sha256": "e07c5e5f55f7058bfcc67212c2f3098b71e4d278b0b70428211b583029a43939"
+    },
+    {
+      "path": "docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md",
+      "sha256": "ed251317a2e9ca6d834cfe1f9db2731cce182f41c9938e94662f2e7af3d5a2ed"
+    },
+    {
+      "path": "docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md",
+      "sha256": "e2a8dadde4e37dd174163f144060b9581f67c8b7d8a03bfb7de4e210c9de5a93"
+    },
+    {
+      "path": "docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md",
+      "sha256": "0513f778997e9c6a4cd01ba68a4a4f3eb11c9b76cbeea751cb6b9653f447e72e"
+    },
+    {
+      "path": "docs/protocol-spec.md",
+      "sha256": "89e8bc6983f0821bc588e28e3e9f10e7bc1a5bcc25de6a95fdc5c90bb6b3fb3e"
+    },
+    {
+      "path": "docs/reorganization-protocol.md",
+      "sha256": "2b34f28f3ca6ac63431f0f27c07848f854c55353cfd66e7e71a3f2236ec34be5"
+    },
+    {
+      "path": "docs/template-protocol.md",
+      "sha256": "9de706b5208d1bec5563fe34eac17b218a9617e61098121995aa8d612dfb82b8"
+    },
+    {
+      "path": "protocol/README.md",
+      "sha256": "01c7ddb3dc7e9364d76a2263d8f6c54ae79161053e94f8f8f525a1741a0126ea"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/README.md",
+      "sha256": "bd8680ad378941e31404797694b8ee363f770403eee575f3d258cf130ab5e7d7"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/invalid/private-summary-binding.json",
+      "sha256": "9b12a37f0d8c14aee93094933004d235a8dea34cb7c448764050925e895f21c5"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/invalid/protocol-version-0.4.json",
+      "sha256": "5566afdc1c5b39818a998798aa3cf091c4520c7aac9f1d3244a65c34a26302f2"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/invalid/unknown-top-level-field.json",
+      "sha256": "6e141aace63781eb0746af4d4c1ecd80c085036fe11a475005b18d91186f5166"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/reference-digest.mjs",
+      "sha256": "1d1a103a03e90110de241e25bbe2c1b5132232d5e6fca8e1bb5121501f46dc98"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/empty-rule.json",
+      "sha256": "539756d643b51b7d1220fc5bbd947c425193f78021de8d7ec67cfa59597d9dfb"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-folderbase-created-at.json",
+      "sha256": "72ab41a6dbc50c3ce17daf5a5fcbffed5ee57716e3e4fb9bf80e6877607b3b99"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-folderbase-kind.json",
+      "sha256": "601aa61b1f8d3f6987d2180d0302cb7591aa8c5e851afc266a0650ab85320719"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-folderbase-name.json",
+      "sha256": "3a352d18650abb5e9e57660bbe8e2d5ed003a88a321ff8308945a11e812d4c61"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-folderbase-status.json",
+      "sha256": "de4dc03a53003e5c66af868d59bf5be2d6e4aa3d456c753b05b147d849363808"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-policy-archive.json",
+      "sha256": "fff9d5547ad01e5173a424267a71f689ac01dbbc3b5bd8e99cca3bcdf2b9377d"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-policy-availability.json",
+      "sha256": "981d5db671ece57a28b719fa8e173d71e6da5379c0c8985b83de6468c5a5d4b6"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-policy-cloud-sync.json",
+      "sha256": "b8d949d8feafe2a4032d680748b6f212afaaae560f394590d4c75f64fc202555"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/invalid-policy-structural-changes.json",
+      "sha256": "0baf14dd9a3ecc3b9915b45636cace75f9a2dd94b10122566ed1c5409f2af0c6"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/malformed-adapter-agent.json",
+      "sha256": "225c1111e7af4cc58aa628a987fb5a4cdd39aed79f1cdec6d8b3527d6405fc29"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/malformed-adapter-missing-agent.json",
+      "sha256": "93c6d3114dbdf13d20a87b86765432e9bb587489635b3329415800adad602ade"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/malformed-adapter-missing-path.json",
+      "sha256": "cee8bc6db0854c1cb6379ed7168d0281f159c4577400c606197a78ba22576e8f"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/malformed-adapters-not-array.json",
+      "sha256": "c2ad6ddcc6b3f003807c4988cbe6a57f59455ab0ea51f8eddaa5e45b6b72cb54"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-capture-ignore.json",
+      "sha256": "c1bf139b14df555cefb041c2ab474fcde393f87b59b63d5bfd378618cce5a0e0"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-folderbase-created-at.json",
+      "sha256": "3eb2da25fa679bbceb8c004efabffeb8b86c60077ac3b686966da5655d889f21"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-folderbase-kind.json",
+      "sha256": "781f9843475c1a909dbcfd1426ad901e6e461187c020e8e67dc2ade1ad23bdd2"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-folderbase-name.json",
+      "sha256": "502a614f609e382005c55f4f1f1af16621c8c50e38914f65b8074069d91c9a57"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-folderbase-status.json",
+      "sha256": "f2c0c409d18eec24860d64085a9babd824900d7ddbe8d5a50cc22e767b6412c3"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-policy-archive.json",
+      "sha256": "57e3133b78f7af64512bdca12ef9afefffd4fd485af21b49fac64560346c7cf9"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-policy-availability.json",
+      "sha256": "4476ecbc147bd123d6fdb71d783212c70131ccd1fa4b6b98455cbae35c759d95"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-policy-cloud-sync.json",
+      "sha256": "f0e6e48e95c0e47880cc655a5408f5ac4540f2bd3c6091282ce73ca4da61871a"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/missing-policy-structural-changes.json",
+      "sha256": "754016e955ff01629d5c8ba77c93a6d26dd1d64fa5293ec14a50fe82fda568ae"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/null-byte-rule.json",
+      "sha256": "8335b88088174ece3846c39401d6fa86024172c8eb4f8b42fc30e7bc11ef56eb"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unknown-capture-ignore-field.json",
+      "sha256": "ee64342b2b74654321f70aaf197ace715a369b4348b6b81a972988ca3fe48e5b"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-dot.json",
+      "sha256": "43ff87c102402b4bab2f7179214bc1fa616f857f35ad2c549692eac361b7749e"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-drive-prefix.json",
+      "sha256": "08bfd12d1c20969d344dfa4ac57bb819a8e6aaa73282f150a10def9c0fa19759"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-folderbase-case-alias.json",
+      "sha256": "d91158045e3608449d67166006f63d6ba6b13afa2c9441f5ec95cfc1716f77f5"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-folderbase.json",
+      "sha256": "e19950208acf52173908ecd38d85c33fd592a65fa37333997f3e418c1dfcca20"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-git-case-alias.json",
+      "sha256": "b96f41edc021b687d7355505d81745cdd19977e214a1147a58d32acd1ecb8382"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-git.json",
+      "sha256": "1e83aed82857149bd385ab21c2c2c95d16d7305b32bf798b4033d22f94b00ea2"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-nul.json",
+      "sha256": "438901d905606dbd89f40de40b21716cbc4a8a492bba927c44a90c086adf9674"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsafe-adapter-path-parent-traversal.json",
+      "sha256": "61ecd95ded3f93d25c1679f3ef8dfaa79540678ef55e454f801e1203d880d5ea"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/unsupported-protocol-version.json",
+      "sha256": "a456524769449b7d101fea52dcf82396d739c72bbd327cf0f45a482ab10bd02b"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/utf8-byte-length-overflow.json",
+      "sha256": "b144aec4775da297a195e7fcbaa5702de5465d5be47764ddc9216589802b3ec0"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/wrong-capture-ignore-format.json",
+      "sha256": "ea9985c983c89168ab79309587201246d1f032aca9a830bd19ee629b44572a8c"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/invalid/wrong-rule-type.json",
+      "sha256": "89f41dc5e1203a7d3027316d8a31352e005a2932d047109ddaa463461d08b212"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/valid/minimal-ordinary.json",
+      "sha256": "414a7cfe27231b0b25de7d85a539323fefad943a92795f15a5aab9d4a0197b70"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/valid/minimal-ordinary.sha256",
+      "sha256": "381429f6f398fba7350d2f3c2faa1391e486506523119440f5ff865020701ccd"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/valid/opt-in-adapter.json",
+      "sha256": "0752b9c9a652532a6bb5064fdf604f00746d6fd5b43c98e0e03c9a20212c8c47"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/root-manifest/valid/opt-in-adapter.sha256",
+      "sha256": "4179e5eaa2b7e4fcb02e9e183ae768607923447cd87cc92cc9e20d385f5e75d1"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/valid/minimal-ordinary-v1.json",
+      "sha256": "019d074fc22d31b028ceb7871ff615b53b7bca74e49de9f10004a94aafbf9c40"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/valid/minimal-ordinary-v1.sha256",
+      "sha256": "74b2874c7f5b00abf7b1579f585c846a17f2ddf88c96c1d4a20125d549b25935"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/valid/optional-root-files-v1.json",
+      "sha256": "c606366e55be8cfef8782ef6f63a69cc57d3615bdb21ba43ea3bc0f78461cf06"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version-0.5/valid/optional-root-files-v1.sha256",
+      "sha256": "2e3422fd94bba81c45787400817e562b0a48a541136f049986af3e81cfa29f4c"
+    },
+    {
+      "path": "protocol/schemas/0.2/template-application.schema.json",
+      "sha256": "e5df25cf1b435804fb91cbdb0a84f2bd937f1d0d204c45638a859eb5b20e6111"
+    },
+    {
+      "path": "protocol/schemas/0.3/reorganization-draft.schema.json",
+      "sha256": "cc1df781a335876580c3ae1ee66d2ffc7afd4811f10c4fd5a05da5d94effea04"
+    },
+    {
+      "path": "protocol/schemas/0.5/folderbase-version.schema.json",
+      "sha256": "c19cd50972e5ede3c4dc894b41cf5b3d0539317984e733c1613c0a39c4526eab"
+    },
+    {
+      "path": "protocol/schemas/0.5/folderbase.schema.json",
+      "sha256": "fa359c904dd0db0580ed5ea03c211095443430be0dc12c999ec70c818b71fada"
+    },
+    {
+      "path": "scripts/test-extracted-packages.sh",
+      "sha256": "1fba4d9a04b4059c4e2597584d808def63a5b1083bbbaa2f178e8dd00fe2ba1b"
+    },
+    {
+      "path": "scripts/test-package-install.sh",
+      "sha256": "2e09e6050c1b615057b4ed9316993647304dc71ddcef343acf1b79807080a6c3"
+    },
+    {
+      "path": "scripts/verify-folderbase-version-0.5-digest-vectors.mjs",
+      "sha256": "af28915c05a57c8abc5dbe6e984f7956c38a8af66a3cbb7e2b0d78aa483a2502"
+    },
+    {
+      "path": "scripts/verify-folderbase-version-0.5-distribution.mjs",
+      "sha256": "70ec356e49c83d82a5f414b78bee81bf4886c80897d68a9448556c24347e2198"
+    }
+  ]
+}

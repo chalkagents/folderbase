@@ -25,6 +25,10 @@ independent of the Folderbase application and hosted services.
   validator.
 - `schemas/0.4/folderbase-version.schema.json` validates the closed,
   provider-neutral `folderbase-version-v1` bounded full-state artifact.
+- `schemas/0.5/folderbase.schema.json` validates the native protocol 0.5 root
+  manifest, including the closed embedded capture-ignore policy.
+- `schemas/0.5/folderbase-version.schema.json` validates the protocol 0.5
+  profile of the same closed, provider-neutral Version v1 envelope.
 - `conformance/` contains valid and invalid compatibility fixtures.
 - `conformance/chunk-manifest/` fixes the valid and invalid manifest shapes;
   its independently generated `.sha256` sidecars fix cross-client canonical
@@ -36,7 +40,11 @@ independent of the Folderbase application and hosted services.
   calculated canonical Plan digest.
 - `conformance/folderbase-version/` fixes valid fidelity/lifecycle state,
   schema and semantic negatives, Unicode collision policy, and independently
-  generated canonical-digest sidecars.
+  generated canonical-digest sidecars for the immutable protocol 0.4 release.
+- `conformance/folderbase-version-0.5/` is the separate protocol 0.5 corpus. It
+  fixes markerless and optional-root-file Version states, strict root-manifest
+  capture policy, invalid delta cases, canonical Version digests, and exact
+  root-manifest byte digests.
 - `templates/0.2/project/template.json` is the built-in data-only
   Project package.
 - `templates/project/` is the additive starting point for a new Project
@@ -75,42 +83,69 @@ also validates ordered, contiguous descriptors, exact object length, profile
 bounds, the 1 TiB lossless JSON-integer ceiling, and empty-object identity
 because JSON Schema cannot compare all of those values across array entries.
 
-Folderbase Version v1 also rejects unknown fields. It preserves exact UTF-8 path
+Folderbase Version v1 rejects unknown fields. It preserves exact UTF-8 path
 spellings while rejecting exact, NFC, and full-default-case-fold collisions.
 Regular files are opaque bytes with executable fidelity, symlinks are recorded
 without being followed, empty directories are explicit, Tombstones retain
 deletions, and hard links or special nodes are typed exclusions rather than silent
 loss. `.folderbase/manifest.json` is represented only by the reserved
 `root_manifest` Object Version reference; every ordinary `.folderbase/**` binding
-is rejected. `FOLDERBASE.md` and root `.folderbaseignore` remain ordinary visible
-bindings.
+is rejected. Root `FOLDERBASE.md` is fully ordinary when present.
+`.folderbaseignore` is an optional user-owned policy input in 0.5 and is
+force-captured as a visible binding when present.
 
 The full-state artifact is an independent restore contract, not a scoped share
 projection, authorization record, hosted-presence receipt, or chunk transfer plan.
 A separate future projection artifact must contain only the paths authorized for
 one Folder Scope.
 
-`FOLDERBASE.md` and `.folderbaseignore` are both required live regular-file
-bindings in every restorable Folderbase Version. The source repository/tag is the
-normative cross-language protocol bundle. The `folderbase-core` crate is the Rust
-runtime implementation and intentionally does not duplicate workspace-level
-schemas, fixtures, or the independent reference encoder. The closed released
-manifest is `releases/0.4/folderbase-version-v1.json`; CI verifies its `released`
-status and exact declared surface before testing Cargo packages. The verifier also
-rejects a remaining candidate manifest, so a tag cannot publish an ambiguous
-protocol surface.
+The required root-file bindings are profile-specific. Protocol 0.4 requires
+`FOLDERBASE.md` and `.folderbaseignore` as live regular-file bindings. Protocol
+0.5 changes that requirement: either file may be absent. `FOLDERBASE.md` is
+fully ordinary. `.folderbaseignore` remains bounded, policy-controlling,
+force-captured, and changed only through typed policy-aware flows. A native 0.5
+Version may therefore have zero bindings. The Version format and canonical
+binary encoding remain v1; the literal `protocol_version` (`0.4` or `0.5`)
+enters that encoding and keeps the digest namespaces distinct.
+
+Optional `.folderbase/summary.md` and `.folderbase/questions.jsonl` are the
+named non-authoritative hint formats. They do not establish a boundary, grant
+mutation or sharing authority, or enter ordinary Version bindings under the
+`.folderbase/**` self-capture ban. Other `.folderbase/**` content remains
+private and inert without becoming a named hint format. Parent traversal treats
+any exact regular, no-follow nested manifest marker as an opaque boundary and
+does not decode it through the parent. Markerless state/context is inert.
+ASCII-case aliases and symlink or wrong-type state/manifest markers are unsafe
+shapes, not authority. Analysis may quarantine them as `Unchecked`
+(`unchecked` on the wire) and omit descendants; materializing, mutating,
+transfer, and restore seams reject them.
+
+The source repository/tag is the normative cross-language protocol bundle. The
+`folderbase-core` crate is the Rust runtime implementation and intentionally
+does not duplicate workspace-level schemas, fixtures, or independent reference
+encoders. The immutable released 0.4 manifest remains
+`releases/0.4/folderbase-version-v1.json`. The separately hashed 0.5 candidate
+inventory is `releases/0.5/folderbase-version-v1.json`; its independent verifier
+does not reinterpret or mutate any 0.4 release or conformance bytes. The
+accepted profile decision is
+`../docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md`.
 
 ## Using the Project template
 
-Copy the contents of `templates/project/` into a folder through an
-approved initialization plan. Before installing the manifest, replace every
-`${...}` token in `.folderbase/manifest.template.json`, then save the result as
+`templates/project/` is explicit additive template input, not the native 0.5
+default. Native 0.5 initialization creates only `.folderbase/manifest.json`
+unless the user selects additional template artifacts or adapters. A selected
+template is applied through an approved initialization plan. Before installing
+its manifest, replace every `${...}` token in
+`.folderbase/manifest.template.json`, then save the result as
 `.folderbase/manifest.json`. Generate a new Folderbase ID for every initialized
 folder; never ship the literal placeholder as an identity.
 
-`AGENTS.md` and `CLAUDE.md` contain only the managed bootstrap block described
-by the protocol. If either file already exists, initialization must preserve
-it and propose insertion of the block instead of overwriting the file.
+Root `FOLDERBASE.md` remains fully ordinary optional content, while an optional
+user-owned `.folderbaseignore` remains typed capture-policy input. `AGENTS.md`
+and `CLAUDE.md` adapters are opt-in. If an adapter is requested and its file
+already exists, initialization must preserve it and propose insertion of the
+managed block instead of overwriting the file.
 
 ## Fixture safety
 

@@ -67,6 +67,7 @@
       "properties": {
         "source": {
           "enum": [
+            "unmanaged",
             "origin",
             "application"
           ]
@@ -83,6 +84,28 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "const": "unmanaged"
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "version": {
+                "const": "0.0.0"
+              },
+              "application_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {

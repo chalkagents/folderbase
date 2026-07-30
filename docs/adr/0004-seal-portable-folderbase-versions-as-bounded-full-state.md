@@ -44,10 +44,11 @@ The artifact contains:
 - retained Tombstones sorted by exact UTF-8 path bytes; and
 - typed exclusions sorted by exact UTF-8 path bytes.
 
-The live binding set always contains `.folderbaseignore` and `FOLDERBASE.md` as
-regular files. Both are protocol-mandatory for a valid restored Folderbase. The
-schema therefore requires at least two bindings, while semantic validation proves
-their exact paths and kinds; array cardinality alone cannot express that condition.
+For `protocol_version: "0.4"`, the live binding set always contains
+`.folderbaseignore` and `FOLDERBASE.md` as regular files. Both are
+protocol-0.4-mandatory for a valid restored Folderbase. The 0.4 schema therefore
+requires at least two bindings, while 0.4 semantic validation proves their exact
+paths and kinds; array cardinality alone cannot express that condition.
 
 Every live binding has one stable Object ID and explicit `live` lifecycle.
 Regular opaque files bind the exact existing object-level `VersionId`, byte length,
@@ -63,8 +64,11 @@ what v1 claimed.
 `.folderbase/**` self-capture ban and appears only through `root_manifest`, never
 as an ordinary Path Binding. This makes the boundary independently reconstructable
 without recursively capturing the version records that describe it.
-`FOLDERBASE.md` and the root-level `.folderbaseignore` are ordinary visible files
-and may be represented by regular Path Bindings.
+`FOLDERBASE.md` and the root-level `.folderbaseignore` may be represented by
+regular Path Bindings. Their required-versus-optional status is selected by the
+Version's protocol profile, not by the v1 binding kind. Outside this Version
+representation, 0.5 `FOLDERBASE.md` is fully ordinary while
+`.folderbaseignore` remains bounded, policy-controlling, and force-captured.
 
 A Tombstone records the deleted path, stable Object ID, deleted kind, and optional
 last Object Version. Its containment in the sealed Folderbase Version establishes
@@ -127,6 +131,31 @@ Focused conformance and independent digest verification run on Ubuntu, macOS, an
 Windows CI. The protocol 0.4 release manifest has `released` status, and the
 verifier rejects both any other status and a remaining candidate manifest before
 tagging.
+
+## Protocol 0.5 profile
+
+Protocol 0.5 deliberately reuses the closed `folderbase-version-v1` envelope and
+the canonical digest v1 encoding below. It changes the encoded
+`protocol_version` literal to `0.5`, so the protocol profile is committed into
+the digest and cannot be confused with 0.4.
+
+The 0.5 binding delta is exact: root `FOLDERBASE.md` and `.folderbaseignore`
+files are optional bindings when present, and a Version with zero bindings is
+valid. `FOLDERBASE.md` is fully ordinary. `.folderbaseignore` is optional and
+user-owned but remains bounded policy input, is force-captured when present,
+and changes only through typed policy-aware flows. The reserved
+`root_manifest` remains required and continues to represent the exact
+`.folderbase/manifest.json` authority. The `.folderbase/**` ordinary-binding
+ban is unchanged; the named optional `.folderbase/summary.md` and
+`.folderbase/questions.jsonl` hints are non-authoritative and are not portable
+Version bindings. Other `.folderbase/**` content remains private and inert
+without becoming a named hint format.
+
+This extension does not amend the released 0.4 schema, corpus, reference
+encoder, release inventory, or verifier semantics. Protocol 0.5 has a separate
+candidate schema, conformance tree, reference encoder, member-hashed inventory,
+release-manifest SHA-256 sidecar, and verifier. Candidate status is not release
+status.
 
 ## Canonical digest v1
 
