@@ -1,7 +1,8 @@
 use std::fs;
 
 use folderbase_core::{
-    FolderbaseError, FolderbaseVersionStore, apply_protocol_upgrade, plan_protocol_upgrade,
+    FolderbaseError, FolderbaseVersionStore, InitializationOptions, apply_protocol_upgrade,
+    initialize, plan_initialization, plan_protocol_upgrade,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -51,6 +52,51 @@ fn upgrade_refuses_a_supplied_symlink_root_before_canonicalization() {
         fs::read(root.path().join(".folderbase/manifest.json")).unwrap(),
         LEGACY_MANIFEST
     );
+}
+
+#[test]
+fn native_v05_upgrade_is_an_explicit_idempotent_no_op() {
+    let root = tempdir().expect("ordinary root");
+    let initialization =
+        plan_initialization(root.path(), InitializationOptions::default()).expect("init plan");
+    initialize(&initialization).expect("initialize");
+    let before = fs::read(root.path().join(".folderbase/manifest.json")).expect("manifest");
+
+    let plan = plan_protocol_upgrade(root.path()).expect("already-current plan");
+    let result =
+        apply_protocol_upgrade(&plan, plan.plan_digest()).expect("already-current apply result");
+
+    assert_eq!(result.from_protocol_version, "0.5.0");
+    assert_eq!(result.to_protocol_version, "0.5.0");
+    assert!(result.changed_paths.is_empty());
+    assert_eq!(
+        fs::read(root.path().join(".folderbase/manifest.json")).expect("manifest"),
+        before
+    );
+}
+
+#[test]
+fn legacy_upgrade_refuses_reserved_extension_collisions() {
+    for collision in ["protocol_upgrade", "capture_ignore"] {
+        let root = legacy_root();
+        let path = root.path().join(".folderbase/manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest");
+        if collision == "protocol_upgrade" {
+            manifest["protocol_upgrade"] = serde_json::json!({"foreign": true});
+        } else {
+            manifest["policies"]["capture_ignore"] =
+                serde_json::json!({"format":"foreign","rules":[]});
+        }
+        let bytes = format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap());
+        fs::write(&path, &bytes).expect("colliding legacy extension");
+
+        assert!(plan_protocol_upgrade(root.path()).is_err());
+        assert_eq!(
+            fs::read(&path).expect("preserved collision"),
+            bytes.as_bytes()
+        );
+    }
 }
 
 #[test]
@@ -114,6 +160,62 @@ fn an_applied_receipt_cannot_make_a_mutated_target_match_the_reviewed_plan() {
 }
 
 #[test]
+fn restore_requires_a_live_profile_capture_after_legacy_upgrade() {
+    let root = legacy_root();
+    fs::write(root.path().join("proposal.docx"), b"approved bytes").expect("ordinary file");
+    let legacy = FolderbaseVersionStore::open(root.path()).expect("legacy store");
+    legacy
+        .seal_capture(legacy.plan_capture().expect("legacy genesis"))
+        .expect("legacy genesis");
+    fs::remove_file(root.path().join("proposal.docx")).expect("delete ordinary file");
+    legacy
+        .seal_capture(legacy.plan_capture().expect("legacy tombstone plan"))
+        .expect("legacy tombstone");
+
+    let upgrade = plan_protocol_upgrade(root.path()).expect("upgrade plan");
+    apply_protocol_upgrade(&upgrade, upgrade.plan_digest()).expect("activate 0.5");
+    let current = FolderbaseVersionStore::open(root.path()).expect("0.5 store");
+    assert!(
+        current.restore_tombstone("proposal.docx").is_err(),
+        "restore cannot create a legacy-protocol child under a live 0.5 root"
+    );
+    let transition = current
+        .seal_capture(current.plan_capture().expect("0.5 transition capture"))
+        .expect("0.5 transition version");
+    let restored = current
+        .restore_tombstone("proposal.docx")
+        .expect("restore after live-profile capture");
+    assert_eq!(
+        fs::read(root.path().join("proposal.docx")).expect("restored file"),
+        b"approved bytes"
+    );
+    let head = current
+        .plan_capture()
+        .expect("post-restore capture plan")
+        .current_local_head()
+        .expect("post-restore Head")
+        .version_id()
+        .to_owned();
+    assert_eq!(head, restored.version_id());
+    let restored_version = current
+        .read_version(restored.version_id())
+        .expect("restored Folderbase Version");
+    assert_eq!(restored_version.protocol_version(), "0.5");
+    assert_eq!(
+        restored_version.parents(),
+        &[transition.version_id().to_owned()],
+        "restore must form a 0.5 child of the exact reviewed transition capture"
+    );
+    assert_eq!(
+        current
+            .read_version(transition.version_id())
+            .expect("transition Folderbase Version")
+            .protocol_version(),
+        "0.5"
+    );
+}
+
+#[test]
 fn upgrade_refuses_active_capture_restore_migration_and_reorganization_work() {
     for (relative, label) in [
         (
@@ -123,6 +225,10 @@ fn upgrade_refuses_active_capture_restore_migration_and_reorganization_work() {
         (
             ".folderbase/transactions/folderbase-version-restores/active.json",
             "restore",
+        ),
+        (
+            ".folderbase/transactions/folderbase-version-restores/cleanup.json",
+            "restore cleanup",
         ),
         (
             ".folderbase/migrations/migration_pending/plan.json",

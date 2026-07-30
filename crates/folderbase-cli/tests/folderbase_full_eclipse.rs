@@ -144,8 +144,8 @@ fn init_materializes_only_the_folderbase_protocol_surface() {
         ".folderbase/manifest.json must be created"
     );
     assert!(
-        root.path().join(".folderbaseignore").is_file(),
-        ".folderbaseignore must be created"
+        !root.path().join(".folderbaseignore").exists(),
+        ".folderbaseignore remains optional unless the selected template explicitly adds it"
     );
     assert!(
         root.path().join("FOLDERBASE.md").is_file(),
@@ -157,26 +157,28 @@ fn init_materializes_only_the_folderbase_protocol_surface() {
             .expect("manifest JSON");
     assert_eq!(
         manifest["$schema"],
-        "https://folderbase.ai/protocol/0.2/folderbase.schema.json"
+        "https://folderbase.ai/protocol/0.5/folderbase.schema.json"
     );
     assert!(
         manifest["folderbase"]["id"]
             .as_str()
             .is_some_and(|id| id.starts_with("folderbase_"))
     );
-    assert_eq!(manifest["folderbase"]["entry"], "FOLDERBASE.md");
+    assert!(
+        manifest["folderbase"].get("entry").is_none(),
+        "template-created FOLDERBASE.md is ordinary guidance, not root authority"
+    );
     assert_eq!(
         manifest["folderbase"]["template_provenance"]["id"],
         "folderbase.project"
     );
 
+    assert_eq!(manifest["adapters"], serde_json::json!([]));
     for adapter_path in ["AGENTS.md", "CLAUDE.md"] {
-        let adapter =
-            fs::read_to_string(root.path().join(adapter_path)).expect("generated adapter");
-        assert!(adapter.contains("<!-- folderbase:begin -->"));
-        assert!(adapter.contains("# Folderbase"));
-        assert!(adapter.contains("Read `FOLDERBASE.md`"));
-        assert!(adapter.contains("<!-- folderbase:end -->"));
+        assert!(
+            !root.path().join(adapter_path).exists(),
+            "{adapter_path} remains opt-in"
+        );
     }
 
     let former_state = format!(".{}{}", "tenth", "brain");
@@ -189,7 +191,7 @@ fn init_materializes_only_the_folderbase_protocol_surface() {
 fn protocol_schemas_and_templates_are_folderbase_native() {
     let protocol = workspace_root().join("protocol");
 
-    for version in ["0.1", "0.2"] {
+    for version in ["0.1", "0.2", "0.5"] {
         let schema_path = protocol
             .join("schemas")
             .join(version)

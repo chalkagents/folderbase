@@ -273,14 +273,9 @@ fn nested_folderbase_boundary_overrides_a_reconstructable_directory_name() {
 }
 
 #[test]
-fn nested_folderbase_discovery_case_folds_markers_without_following_state_symlinks() {
+fn workspace_refuses_alias_shaped_markers_without_granting_them_boundary_authority() {
     let fixture = tempdir().unwrap();
     fs::create_dir_all(fixture.path().join("casefolded/.FOLDERBASE")).unwrap();
-    fs::write(
-        fixture.path().join("casefolded/FOLDERBASE.MD"),
-        "case-folded folderbase\n",
-    )
-    .unwrap();
     fs::write(
         fixture.path().join("casefolded/.FOLDERBASE/MANIFEST.JSON"),
         "malformed\n",
@@ -288,75 +283,65 @@ fn nested_folderbase_discovery_case_folds_markers_without_following_state_symlin
     .unwrap();
     fs::write(
         fixture.path().join("casefolded/private.md"),
-        "must stay behind the boundary\n",
+        "must fail closed\n",
     )
     .unwrap();
-
-    fs::create_dir(fixture.path().join("ordinary")).unwrap();
-    fs::write(
-        fixture.path().join("ordinary/FOLDERBASE.MD"),
-        "entry without manifest\n",
-    )
-    .unwrap();
-    fs::write(fixture.path().join("ordinary/private.md"), "ordinary\n").unwrap();
-
-    #[cfg(unix)]
-    {
-        fs::create_dir(fixture.path().join("symlink-marker")).unwrap();
-        fs::write(
-            fixture.path().join("symlink-marker/FOLDERBASE.md"),
-            "invalid nested folderbase\n",
-        )
-        .unwrap();
-        symlink(
-            fixture.path().join("missing-state-directory"),
-            fixture.path().join("symlink-marker/.FOLDERBASE"),
-        )
-        .unwrap();
-        fs::write(
-            fixture.path().join("symlink-marker/private.md"),
-            "must fail closed\n",
-        )
-        .unwrap();
-    }
-
-    let listing = list_workspace(fixture.path()).unwrap();
-    let observed = listing
-        .entries
-        .iter()
-        .map(|entry| (entry.path.as_str(), entry.kind))
-        .collect::<Vec<_>>();
-    #[cfg(unix)]
-    assert_eq!(
-        observed,
-        vec![
-            ("casefolded", WorkspaceEntryKind::Folderbase),
-            ("ordinary", WorkspaceEntryKind::Directory),
-            ("ordinary/FOLDERBASE.MD", WorkspaceEntryKind::File),
-            ("ordinary/private.md", WorkspaceEntryKind::File),
-            ("symlink-marker", WorkspaceEntryKind::Folderbase),
-        ]
-    );
-    #[cfg(not(unix))]
-    assert_eq!(
-        observed,
-        vec![
-            ("casefolded", WorkspaceEntryKind::Folderbase),
-            ("ordinary", WorkspaceEntryKind::Directory),
-            ("ordinary/FOLDERBASE.MD", WorkspaceEntryKind::File),
-            ("ordinary/private.md", WorkspaceEntryKind::File),
-        ]
-    );
-
+    assert!(matches!(
+        list_workspace(fixture.path()),
+        Err(folderbase_core::FolderbaseError::UnsafePath(_))
+    ));
     assert!(matches!(
         read_workspace_text(fixture.path(), "casefolded/private.md"),
         Err(folderbase_core::FolderbaseError::UnsafePath(_))
     ));
-    #[cfg(unix)]
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_refuses_a_symlink_shaped_marker_without_following_it() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("symlink-marker")).unwrap();
+    fs::write(
+        fixture.path().join("symlink-marker/private.md"),
+        "must fail closed\n",
+    )
+    .unwrap();
+    symlink(
+        fixture.path().join("missing-state-directory"),
+        fixture.path().join("symlink-marker/.folderbase"),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        list_workspace(fixture.path()),
+        Err(folderbase_core::FolderbaseError::UnsafePath(_))
+    ));
     assert!(matches!(
         read_workspace_text(fixture.path(), "symlink-marker/private.md"),
         Err(folderbase_core::FolderbaseError::UnsafePath(_))
     ));
+}
+
+#[test]
+fn workspace_treats_markerless_context_as_inert_ordinary_folder_content() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir_all(fixture.path().join("ordinary/.folderbase/questions")).unwrap();
+    fs::write(
+        fixture.path().join("ordinary/.folderbase/summary.md"),
+        "inert summary\n",
+    )
+    .unwrap();
+    fs::write(fixture.path().join("ordinary/private.md"), "ordinary\n").unwrap();
+
+    let listing = list_workspace(fixture.path()).expect("inert context is not a boundary");
+    assert!(
+        listing.entries.iter().any(|entry| {
+            entry.path == "ordinary" && entry.kind == WorkspaceEntryKind::Directory
+        })
+    );
+    assert!(listing.entries.iter().any(|entry| {
+        entry.path == "ordinary/private.md" && entry.kind == WorkspaceEntryKind::File
+    }));
 }
 
 #[test]

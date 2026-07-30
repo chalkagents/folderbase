@@ -9,7 +9,7 @@ use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
 const MANIFEST: &[u8] = br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
   }
@@ -182,7 +182,11 @@ fn nested_folderbases_are_typed_boundaries_and_all_regular_file_formats_remain_o
     }
     let child = root.path().join("Clients/Prosperna");
     fs::create_dir_all(child.join(".folderbase")).expect("nested state");
-    fs::write(child.join(".folderbase/manifest.json"), MANIFEST).expect("nested manifest");
+    fs::write(
+        child.join(".folderbase/manifest.json"),
+        b"{not-json and still opaque",
+    )
+    .expect("opaque nested manifest");
     fs::write(child.join("FOLDERBASE.md"), "# Child\n").expect("nested entry");
     #[cfg(unix)]
     fs::write(child.join("CON"), "must not be traversed").expect("unsafe nested descendant");
@@ -253,6 +257,41 @@ fn malformed_nested_entry_marker_still_closes_the_nested_boundary() {
     assert_eq!(
         boundary.reason(),
         CaptureExclusionReason::NestedFolderbaseBoundary
+    );
+}
+
+#[test]
+fn capture_refuses_case_folded_marker_aliases_without_granting_them_authority() {
+    let root = folderbase();
+    let child = root.path().join("Clients/Alias");
+    fs::create_dir_all(child.join(".FOLDERBASE")).expect("nested alias state");
+    fs::write(child.join(".FOLDERBASE/MANIFEST.JSON"), b"opaque").expect("nested alias manifest");
+    fs::write(child.join("private.bin"), b"must not be captured").expect("private descendant");
+
+    assert!(
+        FolderbaseVersionStore::open(root.path())
+            .expect("open")
+            .plan_capture()
+            .is_err(),
+        "an alias-shaped marker fails closed but never becomes protocol authority"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_refuses_a_symlink_shaped_marker_without_following_it() {
+    let root = folderbase();
+    let child = root.path().join("Clients/Symlink");
+    fs::create_dir_all(&child).expect("child");
+    std::os::unix::fs::symlink(root.path().join("missing-state"), child.join(".folderbase"))
+        .expect("state symlink");
+    fs::write(child.join("private.bin"), b"must not be captured").expect("private descendant");
+
+    assert!(
+        FolderbaseVersionStore::open(root.path())
+            .expect("open")
+            .plan_capture()
+            .is_err()
     );
 }
 

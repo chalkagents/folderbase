@@ -9,7 +9,7 @@ use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
 const MANIFEST: &[u8] = br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
   }
@@ -1064,7 +1064,7 @@ fn new_nested_folderbase_hiding_prior_content_is_refused_before_mutation() {
     fs::write(
         root.path().join("client/.folderbase/manifest.json"),
         br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }

@@ -758,7 +758,7 @@ fn project_adoption_records_kind_template_version_and_history() {
         &fs::read(root.path().join(".folderbase/manifest.json")).expect("manifest"),
     )
     .expect("valid manifest JSON");
-    assert_eq!(manifest["protocol_version"], "0.2.0");
+    assert_eq!(manifest["protocol_version"], "0.5.0");
     assert_eq!(manifest["folderbase"]["kind"], "project");
     assert_eq!(
         manifest["folderbase"]["template_provenance"]["id"],
@@ -815,38 +815,51 @@ fn custom_adoption_package(extra_target: &str, extra_kind: &str) -> TemplatePack
 }
 
 #[test]
-fn template_adoption_rejects_collisions_with_core_protocol_paths() {
-    for (target, kind) in [
-        (".folderbase/manifest.json", "text"),
-        (".folderbaseignore", "text"),
-        ("AGENTS.md", "text"),
-        ("agents.md", "text"),
-        ("AGENTS.md/notes.md", "text"),
-        (".folderbaseignore/notes.md", "text"),
-    ] {
-        let root = tempfile::tempdir().expect("ordinary project");
-        let package = custom_adoption_package(target, kind);
+fn template_adoption_rejects_a_collision_with_the_core_manifest_path() {
+    let root = tempfile::tempdir().expect("ordinary project");
+    let package = custom_adoption_package(".folderbase/manifest.json", "text");
 
-        let error = plan_template_initialization(
+    let error = plan_template_initialization(
+        root.path(),
+        InitializationOptions::default(),
+        &package,
+        &BTreeMap::new(),
+    )
+    .expect_err("template/core collision must be refused");
+
+    assert!(
+        error.to_string().contains("collision"),
+        "core manifest should report a collision: {error}"
+    );
+    assert!(
+        fs::read_dir(root.path())
+            .expect("unchanged project")
+            .next()
+            .is_none(),
+        "planning must remain read-only"
+    );
+    assert!(!root.path().join(".folderbase/manifest.json").exists());
+}
+
+#[test]
+fn template_adoption_can_explicitly_add_optional_root_guidance() {
+    for target in [".folderbaseignore", "AGENTS.md"] {
+        let root = tempfile::tempdir().expect("ordinary project");
+        let package = custom_adoption_package(target, "text");
+
+        let plan = plan_template_initialization(
             root.path(),
             InitializationOptions::default(),
             &package,
             &BTreeMap::new(),
         )
-        .expect_err("template/core collision must be refused");
+        .expect("optional root guidance is an explicit template artifact");
 
         assert!(
-            error.to_string().contains("collision"),
-            "{target} should report a collision: {error}"
+            plan.writes()
+                .iter()
+                .any(|write| write.path() == Path::new(target))
         );
-        assert!(
-            fs::read_dir(root.path())
-                .expect("unchanged project")
-                .next()
-                .is_none(),
-            "{target} planning must remain read-only"
-        );
-        assert!(!root.path().join(".folderbase/manifest.json").exists());
     }
 }
 

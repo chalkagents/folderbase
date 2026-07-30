@@ -896,12 +896,6 @@ fn generic_operations_cannot_mutate_reserved_protocol_git_or_root_adapter_paths(
             "content": "{}"
         }),
         serde_json::json!({
-            "kind": "replace_utf8_file",
-            "path": "FOLDERBASE.md",
-            "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "content": "# replaced\n"
-        }),
-        serde_json::json!({
             "kind": "move_file",
             "source_path": "AGENTS.md",
             "destination_path": "Archive/AGENTS.md",
@@ -924,6 +918,30 @@ fn generic_operations_cannot_mutate_reserved_protocol_git_or_root_adapter_paths(
             "unexpected error: {error}"
         );
     }
+}
+
+#[test]
+fn folderbase_md_is_an_ordinary_reorganizable_v05_path() {
+    let mut draft = protocol_json("conformance/reorganization/draft/valid/additive-folder-v1.json");
+    draft["analysis_scope"]["operation_closure"] = serde_json::json!([{
+        "expectation": "file",
+        "path": "FOLDERBASE.md",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "byte_count": 10
+    }]);
+    draft["operations"] = serde_json::json!([{
+        "kind": "replace_utf8_file",
+        "path": "FOLDERBASE.md",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "content": "# replaced\n"
+    }]);
+    let schema = protocol_json("schemas/0.3/reorganization-draft.schema.json");
+    let validator = jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile Draft schema");
+    assert!(validator.is_valid(&draft));
+    decode_reorganization_draft_slice(&serde_json::to_vec(&draft).expect("ordinary narrative"))
+        .expect("ordinary FOLDERBASE.md operation");
 }
 
 #[test]

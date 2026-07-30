@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use folderbase_core::{
     FolderbaseError, FolderbaseKind, InitializationOptions, TemplatePackage,
     TemplateStructuralChangeKind, apply_template_expansion, initialize, load_template,
-    plan_template_expansion, plan_template_initialization, template_application_history,
+    plan_initialization, plan_template_expansion, plan_template_initialization,
+    template_application_history,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -134,6 +135,54 @@ fn paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+#[test]
+fn default_v05_root_can_expand_a_template_without_a_root_narrative_prerequisite() {
+    let folderbase = tempfile::tempdir().expect("ordinary Folderbase");
+    let plan = plan_initialization(folderbase.path(), InitializationOptions::default())
+        .expect("default initialization");
+    initialize(&plan).expect("initialize ordinary root");
+    assert!(!folderbase.path().join("FOLDERBASE.md").exists());
+
+    let registry = tempfile::tempdir().expect("template registry");
+    let target = write_package(
+        registry.path(),
+        "example-1.0.0",
+        "1.0.0",
+        "project",
+        base_artifacts(),
+        None,
+    );
+    let expansion = plan_template_expansion(folderbase.path(), &target, &BTreeMap::new())
+        .expect("manifest-only 0.5 root can expand");
+    let result = apply_template_expansion(&expansion).expect("apply expansion");
+
+    assert_eq!(
+        fs::read(folderbase.path().join("FOLDERBASE.md")).expect("template narrative"),
+        b"# Example folderbase\n"
+    );
+    let record_path = folderbase
+        .path()
+        .join(result.application_record().expect("application record"));
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("record JSON");
+    assert_eq!(record["comparison"]["source"], "unmanaged");
+    assert_eq!(record["comparison"]["version"], "0.0.0");
+    assert!(record["comparison"]["application_id"].is_null());
+
+    record["comparison"]["source"] = json!("origin");
+    rewrite_record_digest(&mut record);
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&record).expect("forged origin"),
+    )
+    .expect("write forged record");
+    let error = template_application_history(folderbase.path()).expect_err("forged origin");
+    assert!(
+        error.to_string().contains("missing manifest origin"),
+        "only explicit unmanaged may root an untemplated lineage: {error}"
+    );
 }
 
 fn rewrite_record_digest(document: &mut Value) {
@@ -497,6 +546,11 @@ fn policy_ignore_adapter_and_canonical_changes_are_structural() {
         Some("1.0.0"),
     );
     initialize_from_template(folderbase.path(), &origin);
+    fs::write(
+        folderbase.path().join(".folderbaseignore"),
+        "node_modules/\n",
+    )
+    .expect("optional ignore policy");
     let folderbase_before =
         fs::read(folderbase.path().join("FOLDERBASE.md")).expect("folderbase entry");
     let adapter_before = fs::read(folderbase.path().join("AGENTS.md")).expect("adapter");

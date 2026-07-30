@@ -1022,7 +1022,7 @@ fn commercial_content_is_absent_from_client_shared_scope() {
 }
 
 #[test]
-fn each_codex_adapter_points_to_its_own_folderbase_entry() {
+fn generated_adapters_use_the_exact_manifest_and_existing_adapter_is_preserved() {
     let fixture = golden_fixture();
     let analysis = analyze(&fixture.root);
     golden_apply(&fixture.root, &analysis);
@@ -1030,8 +1030,15 @@ fn each_codex_adapter_points_to_its_own_folderbase_entry() {
     for folderbase in GOLDEN_FOLDERBASES {
         let folderbase = fixture.root.join("Organized").join(folderbase);
         let adapter = fs::read_to_string(folderbase.join("AGENTS.md")).unwrap();
-        assert!(adapter.contains("`FOLDERBASE.md`"));
+        if adapter.contains("<!-- folderbase:begin -->") {
+            assert!(adapter.contains("`.folderbase/manifest.json`"));
+            assert!(adapter.contains("ordinary files"));
+        } else {
+            assert!(adapter.contains("# Existing project instructions"));
+            assert!(adapter.contains("read `FOLDERBASE.md`"));
+        }
         assert!(!adapter.contains("../"));
+        // The selected migration template may still add this ordinary guide.
         assert!(folderbase.join("FOLDERBASE.md").exists());
     }
 }
@@ -1222,13 +1229,15 @@ fn okada_shaped_folder_to_folderbase_journey_preserves_restart_and_agent_entry_c
     let saved: serde_json::Value = serde_json::from_slice(&saved.stdout).unwrap();
     let version_id = saved["version_id"].as_str().unwrap();
 
-    // Prove the ordinary-file entry contract that a fresh Codex/Claude session
-    // can consume without an MCP or manual context export.
+    // Prove that a fresh Codex/Claude session gets the exact root boundary and
+    // ordinary-file contract without an MCP or manual context export.
     let adapter = fs::read_to_string(folderbase_path.join("AGENTS.md")).unwrap();
-    assert!(adapter.contains("`FOLDERBASE.md`"));
+    assert!(adapter.contains("`.folderbase/manifest.json`"));
+    assert!(adapter.contains("ordinary files"));
     assert!(!adapter.contains("../"));
     let claude_adapter = fs::read_to_string(folderbase_path.join("CLAUDE.md")).unwrap();
-    assert!(claude_adapter.contains("`FOLDERBASE.md`"));
+    assert!(claude_adapter.contains("`.folderbase/manifest.json`"));
+    assert!(claude_adapter.contains("ordinary files"));
     assert!(!claude_adapter.contains("../"));
     assert!(
         !fs::read_to_string(folderbase_path.join("FOLDERBASE.md"))

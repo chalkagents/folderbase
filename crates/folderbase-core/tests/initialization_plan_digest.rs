@@ -93,6 +93,48 @@ fn nested_folderbase_boundaries_change_the_plan_digest_without_hashing_their_con
 }
 
 #[test]
+fn initialization_distinguishes_inert_context_from_case_folded_marker_aliases() {
+    let inert = tempfile::tempdir().expect("inert folder");
+    fs::create_dir_all(inert.path().join("client/.folderbase/questions")).expect("inert context");
+    fs::write(
+        inert.path().join("client/.folderbase/summary.md"),
+        "ordinary context\n",
+    )
+    .expect("inert summary");
+    plan_initialization(inert.path(), InitializationOptions::default())
+        .expect("markerless context remains inert");
+
+    let alias = tempfile::tempdir().expect("alias folder");
+    fs::create_dir_all(alias.path().join("client/.FOLDERBASE")).expect("alias state");
+    fs::write(
+        alias.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
+        "opaque\n",
+    )
+    .expect("alias manifest");
+    assert!(matches!(
+        plan_initialization(alias.path(), InitializationOptions::default()),
+        Err(FolderbaseError::UnsafePath(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn initialization_refuses_a_symlink_shaped_nested_marker_without_following_it() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    fs::create_dir(root.path().join("client")).expect("client");
+    std::os::unix::fs::symlink(
+        root.path().join("missing-state"),
+        root.path().join("client/.folderbase"),
+    )
+    .expect("state symlink");
+
+    assert!(matches!(
+        plan_initialization(root.path(), InitializationOptions::default()),
+        Err(FolderbaseError::UnsafePath(_))
+    ));
+}
+
+#[test]
 fn every_canonical_reconstructable_tree_is_collapsed_for_initialization_approval() {
     for name in [
         "node_modules",

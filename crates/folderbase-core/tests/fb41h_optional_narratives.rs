@@ -546,3 +546,60 @@ fn v05_default_capture_exclusions_are_declared_engine_policy_not_a_hidden_root_f
     assert!(!paths.iter().any(|path| path.starts_with(".next/")));
     assert!(!paths.iter().any(|path| path.starts_with("dist/")));
 }
+
+#[test]
+fn live_v05_admission_matches_required_shape_and_safe_adapter_paths() {
+    for mutation in [
+        ("missing name", serde_json::json!(null)),
+        ("invalid availability", serde_json::json!("sometimes")),
+        ("capture policy extension", serde_json::json!(true)),
+        ("drive-relative adapter", serde_json::json!("C:AGENTS.md")),
+        (
+            "private-state adapter",
+            serde_json::json!(".folderbase/AGENTS.md"),
+        ),
+        ("Git-internal adapter", serde_json::json!(".git/AGENTS.md")),
+    ] {
+        let root = tempdir().expect("ordinary root");
+        initialize_ordinary(root.path());
+        let path = root.path().join(".folderbase/manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("manifest JSON");
+        match mutation.0 {
+            "missing name" => {
+                manifest["folderbase"]
+                    .as_object_mut()
+                    .expect("folderbase")
+                    .remove("name");
+            }
+            "invalid availability" => {
+                manifest["policies"]["availability"] = mutation.1;
+            }
+            "capture policy extension" => {
+                manifest["policies"]["capture_ignore"]["extension"] = mutation.1;
+            }
+            _ => {
+                manifest["adapters"] = serde_json::json!([{
+                    "agent": "codex",
+                    "path": mutation.1
+                }]);
+            }
+        }
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+        )
+        .expect("mutated manifest");
+
+        assert!(
+            attest_folderbase_root(root.path()).is_err(),
+            "{} is rejected by live admission",
+            mutation.0
+        );
+        assert!(
+            FolderbaseVersionStore::open(root.path()).is_err(),
+            "{} cannot capture a Folderbase Version",
+            mutation.0
+        );
+    }
+}
