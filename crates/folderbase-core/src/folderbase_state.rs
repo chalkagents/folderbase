@@ -689,17 +689,25 @@ impl FolderbaseState {
     pub(crate) fn retire_workspace_restore_stage_with_hook(
         &self,
         stage: &Path,
-        stage_quarantine: &Path,
         rescue: &Path,
-        rescue_quarantine: &Path,
         destination: &Path,
         expected_fidelity: Option<(&str, u64, bool)>,
         mut checkpoint: impl FnMut(bool),
     ) -> Result<bool> {
         let stage = state_relative(stage)?;
-        let stage_quarantine = state_relative(stage_quarantine)?;
         let rescue = state_relative(rescue)?;
-        let rescue_quarantine = state_relative(rescue_quarantine)?;
+        let mut stage_quarantine_name = stage
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(self.display_path(&stage)))?
+            .to_os_string();
+        stage_quarantine_name.push(".folderbase-quarantine");
+        let stage_quarantine = stage.with_file_name(stage_quarantine_name);
+        let mut rescue_quarantine_name = rescue
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(self.display_path(&rescue)))?
+            .to_os_string();
+        rescue_quarantine_name.push(".folderbase-quarantine");
+        let rescue_quarantine = rescue.with_file_name(rescue_quarantine_name);
         let destination = safe_workspace_relative(destination)?;
         for private in [&stage, &stage_quarantine, &rescue, &rescue_quarantine] {
             self.require_mutable(private)?;

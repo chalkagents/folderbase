@@ -1255,9 +1255,7 @@ fn finish_restore_cleanup_with_identity(
         .expect("validated regular binding");
     let retirement = match state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
-        &restore_stage_quarantine_path(transaction),
         &restore_rescue_path(transaction),
-        &restore_rescue_quarantine_path(transaction),
         Path::new(&transaction.path),
         Some((digest, bytes, executable)),
         |stage_removed| {
@@ -1529,9 +1527,7 @@ fn finish_modified_restore_cleanup_recovery(
     rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
     let retired = state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
-        &restore_stage_quarantine_path(transaction),
         &restore_rescue_path(transaction),
-        &restore_rescue_quarantine_path(transaction),
         Path::new(&transaction.path),
         None,
         |stage_removed| {
@@ -1606,9 +1602,7 @@ fn finish_committed_modified_restore_cleanup_recovery_stage(
 ) -> Result<(), FolderbaseCaptureError> {
     let retired = state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
-        &restore_stage_quarantine_path(transaction),
         &restore_rescue_path(transaction),
-        &restore_rescue_quarantine_path(transaction),
         Path::new(&transaction.path),
         None,
         |stage_removed| {
@@ -1920,18 +1914,6 @@ fn restore_stage_path(transaction: &RestoreTransaction) -> PathBuf {
 
 fn restore_rescue_path(transaction: &RestoreTransaction) -> PathBuf {
     restore_transaction_directory(transaction).join("content.rescue")
-}
-
-fn restore_stage_quarantine_path(transaction: &RestoreTransaction) -> PathBuf {
-    restore_transaction_directory(transaction)
-        .join(format!("content.quarantine-{}", transaction.transaction_id))
-}
-
-fn restore_rescue_quarantine_path(transaction: &RestoreTransaction) -> PathBuf {
-    restore_transaction_directory(transaction).join(format!(
-        "content.rescue.quarantine-{}",
-        transaction.transaction_id
-    ))
 }
 
 fn restore_transaction_directory(transaction: &RestoreTransaction) -> PathBuf {
