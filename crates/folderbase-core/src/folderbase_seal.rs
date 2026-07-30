@@ -156,6 +156,8 @@ enum RestoreCheckpoint {
     CleanupIntentRetired,
     CompletionDurable,
     CleanupComplete,
+    BeforeLegacyRootHeadRebind,
+    AfterLegacyRootHeadRebind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,7 +545,9 @@ impl FolderbaseVersionStore {
                 &completion.published_identity_sha256,
             )?
         {
+            checkpoint(&RestoreCheckpoint::BeforeLegacyRootHeadRebind);
             rebind_legacy_root_local_head(self, &local, &state)?;
+            checkpoint(&RestoreCheckpoint::AfterLegacyRootHeadRebind);
             return Ok(restored);
         }
         if active.is_none() {
@@ -1267,7 +1271,9 @@ fn execute_restore_transaction(
         transaction,
         &published_identity_sha256,
     )?;
+    checkpoint(&RestoreCheckpoint::BeforeLegacyRootHeadRebind);
     rebind_legacy_root_local_head(store, local, state)?;
+    checkpoint(&RestoreCheckpoint::AfterLegacyRootHeadRebind);
     Ok(restored_tombstone(transaction, created))
 }
 
@@ -1343,7 +1349,9 @@ fn finish_restore_cleanup_recovery(
         transaction,
         published_identity_sha256,
     )?;
+    checkpoint(&RestoreCheckpoint::BeforeLegacyRootHeadRebind);
     rebind_legacy_root_local_head(store, local, state)?;
+    checkpoint(&RestoreCheckpoint::AfterLegacyRootHeadRebind);
     Ok(restored_tombstone(transaction, false))
 }
 
@@ -4951,6 +4959,59 @@ mod tests {
             .expect("replace Head");
     }
 
+    fn released_root_restore_fixture()
+    -> (TempDir, FolderbaseVersionStore, RestoreTransaction, Vec<u8>) {
+        let root = folderbase();
+        let mut store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        admit_test_legacy_root(&mut store);
+
+        let mut legacy_head = local_head(root.path()).expect("deletion Head");
+        legacy_head.root_instance_sha256 = LEGACY_ROOT_INSTANCE_SHA256.to_owned();
+        legacy_head.authority = LocalHeadAuthority::VersionDerivedV1 {
+            sha256: version_derived_local_head_sha256(
+                &legacy_head.folderbase_id,
+                LEGACY_ROOT_INSTANCE_SHA256,
+                &legacy_head.version_id,
+                &legacy_head.version_sha256,
+            )
+            .expect("released parent authority"),
+        };
+        write_test_head(root.path(), &legacy_head);
+
+        let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        let current =
+            read_and_verify_folderbase_version(&store, &local, &state, &legacy_head.version_id)
+                .expect("deletion Version");
+        let tombstone = current
+            .tombstones()
+            .iter()
+            .find(|candidate| candidate.path() == "active.bin")
+            .expect("Tombstone")
+            .clone();
+        let binding = find_restore_binding(&store, &local, &state, &current, &tombstone)
+            .expect("restore binding");
+        let transaction =
+            build_restore_transaction(&store, &legacy_head, &current, tombstone, binding)
+                .expect("released-root restore transaction");
+        write_active_restore_transaction(&state, &transaction).expect("durable journal");
+        let transaction_bytes =
+            encode_restore_transaction(&transaction).expect("exact journal bytes");
+        assert_eq!(
+            fs::read(root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH)).expect("installed journal"),
+            transaction_bytes
+        );
+
+        (root, store, transaction, transaction_bytes)
+    }
+
     #[test]
     fn tombstone_restore_reopens_and_converges_at_every_persistence_checkpoint() {
         for fault in [
@@ -5166,6 +5227,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn released_root_restore_revalidates_an_ordinary_edit_after_head_rebind() {
+        let (root, store, _transaction, _transaction_bytes) = released_root_restore_fixture();
+
+        let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+            if checkpoint == &RestoreCheckpoint::BeforeLegacyRootHeadRebind {
+                fs::write(root.path().join("active.bin"), b"edited after final proof")
+                    .expect("ordinary edit");
+            }
+        });
+
+        assert!(
+            result.is_err(),
+            "restore must not return Restored when bytes change around root-Head rebind"
+        );
+    }
+
+    #[test]
+    fn released_root_restore_revalidates_inode_replacement_after_head_rebind() {
+        let (root, store, _transaction, _transaction_bytes) = released_root_restore_fixture();
+
+        let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+            if checkpoint == &RestoreCheckpoint::BeforeLegacyRootHeadRebind {
+                let replacement = root.path().join("same-bytes-replacement");
+                fs::write(&replacement, b"first opaque bytes").expect("replacement bytes");
+                fs::rename(replacement, root.path().join("active.bin"))
+                    .expect("replace restored inode");
+            }
+        });
+
+        assert!(
+            result.is_err(),
+            "restore must not return Restored when its inode is replaced around root-Head rebind"
+        );
+    }
+
+    #[test]
+    fn released_root_restore_rebind_crash_retries_exactly_without_rewriting_authority() {
+        let (root, store, transaction, transaction_bytes) = released_root_restore_fixture();
+
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::AfterLegacyRootHeadRebind {
+                    panic!("terminate immediately after root-Head rebind CAS");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        let completion_before = fs::read(root.path().join(RESTORE_COMPLETION_PATH))
+            .expect("completion receipt after rebind crash");
+        let decoded_completion: RestoreCompletionReceipt =
+            serde_json::from_slice(&completion_before).expect("completion JSON");
+        assert_eq!(decoded_completion.transaction, transaction);
+        assert_eq!(
+            encode_restore_transaction(&decoded_completion.transaction)
+                .expect("embedded transaction bytes"),
+            transaction_bytes,
+            "completion must retain the exact released-root transaction"
+        );
+        let authority_path = restore_authority_record_path(&transaction.transaction_id);
+        let authority_before = state
+            .read_bounded(&authority_path, MAX_RESTORE_AUTHORITY_BYTES)
+            .expect("authority read")
+            .expect("durable authority");
+        let decoded_authority: RestoreAuthorityRecord =
+            serde_json::from_slice(&authority_before).expect("authority JSON");
+        assert_eq!(
+            decoded_authority.root_instance_sha256,
+            LEGACY_ROOT_INSTANCE_SHA256
+        );
+
+        let first_retry = store
+            .restore_tombstone("active.bin")
+            .expect("post-rebind crash must retain exact committed result");
+        let second_retry = store
+            .restore_tombstone("active.bin")
+            .expect("second identical retry must retain exact committed result");
+        assert_eq!(first_retry, second_retry);
+        assert_eq!(first_retry.version_id(), transaction.target_version_id);
+        assert_eq!(
+            fs::read(root.path().join(RESTORE_COMPLETION_PATH)).expect("completion after retries"),
+            completion_before,
+            "completion receipt bytes must remain immutable"
+        );
+        assert_eq!(
+            state
+                .read_bounded(&authority_path, MAX_RESTORE_AUTHORITY_BYTES)
+                .expect("authority after retries")
+                .expect("durable authority after retries"),
+            authority_before,
+            "restore authority bytes must remain immutable"
+        );
     }
 
     #[test]
