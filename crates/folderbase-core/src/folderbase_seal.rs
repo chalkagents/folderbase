@@ -1012,6 +1012,7 @@ fn finish_restore_cleanup(
     state.remove_durable(&restore_stage_path(transaction))?;
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
+    checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
     remove_restore_cleanup_recovery(state)
 }
 
@@ -3635,6 +3636,7 @@ mod tests {
             RestoreCheckpoint::PublicationVerified,
             RestoreCheckpoint::ProjectionDurable,
             RestoreCheckpoint::CleanupRecoveryDurable,
+            RestoreCheckpoint::CleanupIntentRetired,
             RestoreCheckpoint::CleanupComplete,
         ] {
             let root = folderbase();

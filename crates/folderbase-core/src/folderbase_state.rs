@@ -687,7 +687,15 @@ impl FolderbaseState {
     pub(crate) fn remove_durable(&self, relative: &Path) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
-        let (parent, name) = self.open_parent(&relative)?;
+        let (parent, name) = match self.open_parent(&relative) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let display = self.display_path(&relative);
         match parent.remove_file(&name) {
             Ok(()) => sync_directory(&parent, &display),
