@@ -607,7 +607,7 @@ fn in_scope_paths_fail_closed_on_non_utf8_and_portable_case_collisions() {
 }
 
 #[test]
-fn required_ignore_marker_and_bounded_policy_fail_closed() {
+fn required_ignore_marker_and_capture_policy_validation_fail_closed() {
     let missing = folderbase();
     fs::remove_file(missing.path().join(".folderbaseignore")).expect("remove marker");
     assert!(matches!(
@@ -630,6 +630,15 @@ fn required_ignore_marker_and_bounded_policy_fail_closed() {
             .plan_capture(),
         Err(FolderbaseCaptureError::IgnorePolicyTooLarge { maximum_bytes })
             if maximum_bytes == folderbase_core::MAX_FOLDERBASEIGNORE_BYTES
+    ));
+
+    let invalid = folderbase();
+    fs::write(invalid.path().join(".folderbaseignore"), "{a,b\n").expect("invalid ignore policy");
+    assert!(matches!(
+        FolderbaseVersionStore::open(invalid.path())
+            .expect("marker is present")
+            .plan_capture(),
+        Err(FolderbaseCaptureError::InvalidIgnorePolicy(_))
     ));
 }
 

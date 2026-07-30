@@ -20,6 +20,7 @@ use crate::{
     FolderbaseError, FolderbaseKind, InitializationOptions, NestedFolderbaseBoundary,
     ReconstructableTree, Result, TemplateAnswerValue, TemplateArtifactKind, ValidationLevel,
     folder_analysis::{AnalyzedFile, analyze_folder, expand_reconstructable_tree},
+    folderbase_capture::validate_folderbaseignore_content,
     folderbase_state::FolderbaseState,
     initialization::{initialize, plan_template_initialization},
     local_versions::{LocalVersionStore, StoreTransactionLock},
@@ -932,15 +933,7 @@ fn enrich_structural_operation(root: &Path, operation: &mut MigrationOperation) 
             snapshot_path,
             snapshot_sha256,
         } => {
-            if path != Path::new(".folderbaseignore")
-                || content.len() as u64 > MAX_STRUCTURAL_TEXT_BYTES
-                || content.contains('\0')
-            {
-                return Err(FolderbaseError::InvalidRecord {
-                    path: source,
-                    message: "ignore policy must be bounded UTF-8 for .folderbaseignore".to_owned(),
-                });
-            }
+            validate_typed_ignore_policy_update(root, path, content, &source)?;
             *expected = expected_sha256;
             *expected_result_sha256 = sha256_bytes(content.as_bytes());
             *snapshot_path = None;
@@ -1324,6 +1317,37 @@ pub(crate) fn validate_managed_block_body_syntax(body: &str, path: &Path) -> Res
             path: path.to_path_buf(),
             message: "managed adapter body is invalid".to_owned(),
         });
+    }
+    Ok(())
+}
+
+fn validate_typed_ignore_policy_update(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    error_path: &Path,
+) -> Result<()> {
+    if path != Path::new(".folderbaseignore") || content.contains('\0') {
+        return Err(FolderbaseError::InvalidRecord {
+            path: error_path.to_path_buf(),
+            message: "ignore policy must be capture-compatible UTF-8 for .folderbaseignore"
+                .to_owned(),
+        });
+    }
+    validate_folderbaseignore_content(root, content).map_err(|error| {
+        FolderbaseError::InvalidRecord {
+            path: error_path.to_path_buf(),
+            message: format!("ignore policy is not capture-compatible: {error}"),
+        }
+    })
+}
+
+fn validate_typed_ignore_policy_updates(plan: &MigrationPlan) -> Result<()> {
+    for operation in &plan.operations {
+        if let MigrationOperation::UpdateIgnorePolicy { path, content, .. } = operation {
+            let source = safe_join(&plan.root, path)?;
+            validate_typed_ignore_policy_update(&plan.root, path, content, &source)?;
+        }
     }
     Ok(())
 }
@@ -2176,6 +2200,7 @@ pub fn approve_migration(mut plan: MigrationPlan) -> Result<ApprovedMigration> {
     }
     plan = stored;
     if is_structural_plan(&plan) {
+        validate_typed_ignore_policy_updates(&plan)?;
         prepare_structural_snapshots(&mut plan)?;
     }
     plan.state = MigrationState::Approved;
@@ -2647,6 +2672,10 @@ fn preflight_structural_operations(plan: &MigrationPlan) -> Result<()> {
     }
     for operation in &plan.operations {
         refuse_structural_operation_boundaries(&plan.root, operation)?;
+        if let MigrationOperation::UpdateIgnorePolicy { path, content, .. } = operation {
+            let source = safe_join(&plan.root, path)?;
+            validate_typed_ignore_policy_update(&plan.root, path, content, &source)?;
+        }
         let source_path = operation
             .structural_source_path()
             .expect("structural operation has a source");

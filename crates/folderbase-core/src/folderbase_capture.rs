@@ -14,7 +14,10 @@ use std::{
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirEntry, Metadata, OpenOptions, ReadDir};
-use ignore::{Match, gitignore::GitignoreBuilder};
+use ignore::{
+    Match,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -1942,7 +1945,6 @@ fn read_ignore_policy(
     }
     let policy =
         std::str::from_utf8(&encoded).map_err(|_| FolderbaseCaptureError::IgnorePolicyNotUtf8)?;
-    let mut builder = GitignoreBuilder::new(root);
     let mut digest = Sha256::new();
     let engine_rules = if required {
         digest.update(b"folderbase-ignore-policy-v1\0");
@@ -1964,26 +1966,50 @@ fn read_ignore_policy(
             .to_vec()
     };
     for pattern in &engine_rules {
-        builder
-            .add_line(None, pattern)
-            .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;
         digest.update(pattern.as_bytes());
         digest.update(b"\n");
     }
     digest.update(b"\0");
     digest.update(&encoded);
-    for line in policy.lines() {
-        builder
-            .add_line(Some(path.clone()), line)
-            .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;
-    }
-    let matcher = builder
-        .build()
-        .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;
+    let matcher = build_folderbaseignore_matcher(root, &path, &engine_rules, policy)?;
     Ok(IgnorePolicy {
         matcher,
         sha256: format!("{:x}", digest.finalize()),
     })
+}
+
+pub(crate) fn validate_folderbaseignore_content(
+    root: &Path,
+    content: &str,
+) -> Result<(), FolderbaseCaptureError> {
+    build_folderbaseignore_matcher(root, &root.join(".folderbaseignore"), &[], content).map(drop)
+}
+
+fn build_folderbaseignore_matcher(
+    root: &Path,
+    path: &Path,
+    engine_rules: &[String],
+    content: &str,
+) -> Result<Gitignore, FolderbaseCaptureError> {
+    if content.len() as u64 > MAX_FOLDERBASEIGNORE_BYTES {
+        return Err(FolderbaseCaptureError::IgnorePolicyTooLarge {
+            maximum_bytes: MAX_FOLDERBASEIGNORE_BYTES,
+        });
+    }
+    let mut builder = GitignoreBuilder::new(root);
+    for pattern in engine_rules {
+        builder
+            .add_line(None, pattern)
+            .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;
+    }
+    for line in content.lines() {
+        builder
+            .add_line(Some(path.to_path_buf()), line)
+            .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;
+    }
+    builder
+        .build()
+        .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))
 }
 
 fn require_regular_marker(
