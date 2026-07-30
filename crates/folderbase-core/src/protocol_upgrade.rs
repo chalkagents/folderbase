@@ -400,6 +400,24 @@ fn apply_protocol_upgrade_with_hooks(
     before_activation: impl FnOnce(),
     after_activation: impl FnOnce() -> Result<()>,
 ) -> Result<ProtocolUpgradeResult> {
+    apply_protocol_upgrade_with_ack_hooks(
+        plan,
+        expected,
+        before_activation,
+        after_activation,
+        || {},
+        || {},
+    )
+}
+
+fn apply_protocol_upgrade_with_ack_hooks(
+    plan: &ProtocolUpgradePlan,
+    expected: &ProtocolUpgradePlanDigest,
+    before_activation: impl FnOnce(),
+    after_activation: impl FnOnce() -> Result<()>,
+    after_revalidation: impl FnOnce(),
+    before_final_ack: impl FnOnce(),
+) -> Result<ProtocolUpgradeResult> {
     expected.validate()?;
     let local = LocalVersionStore::open_read_only(&plan.root)?;
     let state = FolderbaseState::open_existing(&plan.root)?;
@@ -408,6 +426,7 @@ fn apply_protocol_upgrade_with_hooks(
     recover_pending_protocol_upgrade(&state, &plan.root, expected)?;
     ensure_no_pending_transactions(&state)?;
     let current = plan_protocol_upgrade(&plan.root)?;
+    after_revalidation();
     if current.plan_digest != *expected || current.plan_digest != plan.plan_digest {
         return Err(FolderbaseError::ProtocolUpgradePlanChanged {
             expected: expected.digest.clone(),
@@ -475,6 +494,7 @@ fn apply_protocol_upgrade_with_hooks(
     }
     state.verify_still_attached()?;
     state.remove_durable(Path::new(UPGRADE_INTENT_PATH))?;
+    before_final_ack();
     attest_folderbase_root_with_profile(&plan.root)
         .map_err(|source| invalid_upgrade(&plan.root, source.to_string()))?;
     Ok(upgrade_result(plan))
@@ -1439,6 +1459,87 @@ mod tests {
                 .join(UPGRADE_INTENT_PATH)
                 .exists(),
             "detached recovery evidence must remain after root substitution"
+        );
+    }
+
+    #[test]
+    fn final_ack_never_accepts_a_root_substituted_after_intent_retirement() {
+        let parent = tempdir().expect("parent");
+        let root = parent.path().join("active");
+        let detached = parent.path().join("detached");
+        write_legacy_root(&root);
+        let plan = plan_protocol_upgrade(&root).expect("upgrade plan");
+        let expected = plan.plan_digest().clone();
+        let replacement_manifest = plan.upgraded_manifest.clone();
+        let visible_root = root.clone();
+        let detached_root = detached.clone();
+
+        let result = apply_protocol_upgrade_with_ack_hooks(
+            &plan,
+            &expected,
+            || {},
+            || Ok(()),
+            || {},
+            || {
+                fs::rename(&visible_root, &detached_root).expect("detach acknowledged root");
+                fs::create_dir_all(visible_root.join(".folderbase")).expect("replacement state");
+                fs::write(
+                    visible_root.join(".folderbase/manifest.json"),
+                    replacement_manifest,
+                )
+                .expect("replacement manifest");
+                fs::write(visible_root.join(".folderbaseignore"), b"node_modules/\n")
+                    .expect("replacement ignore");
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "final acknowledgement must remain bound to the upgraded physical root"
+        );
+        assert!(
+            detached
+                .join(".folderbase")
+                .join(UPGRADE_INTENT_PATH)
+                .exists(),
+            "recovery evidence must not retire before final acknowledgement"
+        );
+    }
+
+    #[test]
+    fn already_applied_ack_rechecks_the_retained_physical_root() {
+        let parent = tempdir().expect("parent");
+        let root = parent.path().join("active");
+        let detached = parent.path().join("detached");
+        write_legacy_root(&root);
+        let initial = plan_protocol_upgrade(&root).expect("upgrade plan");
+        apply_protocol_upgrade(&initial, initial.plan_digest()).expect("initial upgrade");
+        let retry = plan_protocol_upgrade(&root).expect("already-applied plan");
+        let expected = retry.plan_digest().clone();
+        let replacement_manifest = retry.upgraded_manifest.clone();
+        let visible_root = root.clone();
+        let detached_root = detached.clone();
+
+        let result = apply_protocol_upgrade_with_ack_hooks(
+            &retry,
+            &expected,
+            || {},
+            || Ok(()),
+            || {
+                fs::rename(&visible_root, &detached_root).expect("detach revalidated root");
+                fs::create_dir_all(visible_root.join(".folderbase")).expect("replacement state");
+                fs::write(
+                    visible_root.join(".folderbase/manifest.json"),
+                    replacement_manifest,
+                )
+                .expect("replacement manifest");
+            },
+            || {},
+        );
+
+        assert!(
+            result.is_err(),
+            "an already-applied acknowledgement must bind its retained root"
         );
     }
 
