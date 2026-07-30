@@ -2814,4 +2814,46 @@ mod tests {
             b"replaced"
         );
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn interrupted_windows_exchange_reclaims_only_its_owned_artifacts() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        let manifest = fixture.path().join(".folderbase/manifest.json");
+        let expected = b"legacy manifest\n";
+        let replacement = b"ordinary manifest\n";
+        fs::write(&manifest, expected).expect("manifest");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let owner = Uuid::now_v7().to_string();
+        let foreign = fixture.path().join(".folderbase/.exchange-backup-foreign.tmp");
+        fs::write(&foreign, expected).expect("foreign artifact");
+
+        state
+            .compare_exchange_exact_owned_with_hooks(
+                Path::new(".folderbase/manifest.json"),
+                expected,
+                replacement,
+                &owner,
+                || {},
+                || Err(io::Error::other("simulated crash after ReplaceFileW")),
+            )
+            .expect_err("interrupted exchange");
+        let owned = fixture
+            .path()
+            .join(format!(".folderbase/.exchange-backup-{owner}.tmp"));
+        assert!(owned.exists(), "fault leaves the exact owned backup");
+
+        state
+            .recover_owned_exchange_artifacts(
+                Path::new(".folderbase/manifest.json"),
+                &owner,
+                expected,
+                replacement,
+            )
+            .expect("owned cleanup");
+        assert!(!owned.exists());
+        assert!(foreign.exists(), "unowned artifacts are never reclaimed");
+        assert_eq!(fs::read(manifest).expect("target manifest"), replacement);
+    }
 }

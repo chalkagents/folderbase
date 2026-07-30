@@ -990,6 +990,31 @@ mod tests {
 }
 "#;
 
+    fn write_legacy_root(root: &Path) {
+        fs::create_dir_all(root.join(".folderbase")).expect("state");
+        fs::write(root.join(".folderbase/manifest.json"), LEGACY_MANIFEST).expect("manifest");
+        fs::write(root.join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+        fs::write(root.join(".folderbaseignore"), b"node_modules/\n").expect("ignore");
+    }
+
+    fn substitute_root_with_recovery_surface(root: &Path, ignore: &[u8]) {
+        let manifest = fs::read(root.join(".folderbase/manifest.json")).expect("live manifest");
+        let intent = fs::read(root.join(".folderbase").join(UPGRADE_INTENT_PATH))
+            .expect("durable intent");
+        let detached = root.with_extension("detached");
+        fs::rename(root, &detached).expect("detach original root");
+        fs::create_dir_all(root.join(".folderbase").join(UPGRADE_INTENT_DIRECTORY))
+            .expect("replacement state");
+        fs::write(root.join(".folderbase/manifest.json"), manifest).expect("replacement manifest");
+        fs::write(
+            root.join(".folderbase").join(UPGRADE_INTENT_PATH),
+            intent,
+        )
+        .expect("replacement intent");
+        fs::write(root.join("FOLDERBASE.md"), b"# User narrative\n").expect("replacement entry");
+        fs::write(root.join(".folderbaseignore"), ignore).expect("replacement ignore");
+    }
+
     #[test]
     fn manifest_replacement_is_a_durable_lost_ack_recovery_point() {
         let root = tempdir().expect("legacy root");
@@ -1193,6 +1218,57 @@ mod tests {
         let retry = plan_protocol_upgrade(root.path()).expect("restart plan");
         apply_protocol_upgrade(&retry, retry.plan_digest()).expect("resume prepared activation");
         attest_folderbase_root_with_profile(root.path()).expect("intent retired after activation");
+    }
+
+    #[test]
+    fn target_recovery_never_acknowledges_a_copied_replacement_root() {
+        let parent = tempdir().expect("parent");
+        let root = parent.path().join("active");
+        write_legacy_root(&root);
+        let plan = plan_protocol_upgrade(&root).expect("upgrade plan");
+        let expected = plan.plan_digest().clone();
+        apply_protocol_upgrade_with_hooks(
+            &plan,
+            &expected,
+            || {},
+            || {
+                Err(FolderbaseError::ProtocolUpgradeBlocked(
+                    "simulated process interruption",
+                ))
+            },
+        )
+        .expect_err("simulated interruption");
+        substitute_root_with_recovery_surface(&root, b"node_modules/\n");
+
+        let retry = plan_protocol_upgrade(&root).expect("replacement restart plan");
+        assert!(
+            apply_protocol_upgrade(&retry, retry.plan_digest()).is_err(),
+            "target recovery must bind the intent to the current physical root"
+        );
+        assert!(
+            root.join(".folderbase").join(UPGRADE_INTENT_PATH).exists(),
+            "foreign-root recovery evidence must remain for explicit repair"
+        );
+    }
+
+    #[test]
+    fn source_recovery_never_retires_an_intent_copied_to_a_replacement_root() {
+        let parent = tempdir().expect("parent");
+        let root = parent.path().join("active");
+        write_legacy_root(&root);
+        let plan = plan_protocol_upgrade(&root).expect("upgrade plan");
+        let expected = plan.plan_digest().clone();
+        let intent = ProtocolUpgradeIntent::from_plan(&plan).expect("intent");
+        let state = FolderbaseState::open_existing(&root).expect("state");
+        prepare_protocol_upgrade_intent(&state, &root, &intent).expect("prepared intent");
+        drop(state);
+        substitute_root_with_recovery_surface(&root, b"dist/\n");
+
+        assert!(apply_protocol_upgrade(&plan, &expected).is_err());
+        assert!(
+            root.join(".folderbase").join(UPGRADE_INTENT_PATH).exists(),
+            "source recovery must attest the root before retiring stale intent state"
+        );
     }
 
     #[test]
