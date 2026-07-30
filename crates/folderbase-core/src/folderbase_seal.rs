@@ -1257,6 +1257,7 @@ fn finish_restore_cleanup_with_identity(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
+        published_identity_sha256,
         Some((digest, bytes, executable)),
         |stage_removed| {
             checkpoint(if stage_removed {
@@ -1529,6 +1530,7 @@ fn finish_modified_restore_cleanup_recovery(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
+        published_identity_sha256,
         None,
         |stage_removed| {
             checkpoint(if stage_removed {
@@ -1604,6 +1606,7 @@ fn finish_committed_modified_restore_cleanup_recovery_stage(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
+        published_identity_sha256,
         None,
         |stage_removed| {
             checkpoint(if stage_removed {

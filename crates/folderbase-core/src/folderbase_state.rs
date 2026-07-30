@@ -691,6 +691,7 @@ impl FolderbaseState {
         stage: &Path,
         rescue: &Path,
         destination: &Path,
+        expected_identity_sha256: &str,
         expected_fidelity: Option<(&str, u64, bool)>,
         mut checkpoint: impl FnMut(bool),
     ) -> Result<bool> {
@@ -795,13 +796,20 @@ impl FolderbaseState {
             (rescue_file.as_ref(), &rescue_display),
             (rescue_quarantine_file.as_ref(), &rescue_quarantine_display),
         ] {
-            if let Some(file) = file
-                && open_regular_file_identity(file, display)? != retained_identity
-            {
-                return Err(FolderbaseError::InvalidRecord {
-                    path: display.to_path_buf(),
-                    message: "restore private names do not share one retained inode".to_owned(),
-                });
+            if let Some(file) = file {
+                if open_regular_file_identity(file, display)? != retained_identity {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: display.to_path_buf(),
+                        message: "restore private names do not share one retained inode".to_owned(),
+                    });
+                }
+                if stable_regular_file_identity_sha256(file, display)? != expected_identity_sha256 {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: display.to_path_buf(),
+                        message: "restore private name no longer has the published identity"
+                            .to_owned(),
+                    });
+                }
             }
         }
 
@@ -815,6 +823,14 @@ impl FolderbaseState {
             return Err(FolderbaseError::InvalidRecord {
                 path: retained_display.to_path_buf(),
                 message: "restore private state no longer owns the workspace file".to_owned(),
+            });
+        }
+        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "workspace file no longer has the restore publication identity".to_owned(),
             });
         }
         if let Some((digest, bytes, executable)) = expected_fidelity {
@@ -987,6 +1003,19 @@ impl FolderbaseState {
             .remove_file(&rescue_quarantine_name)
             .map_err(|source| FolderbaseError::io(&rescue_quarantine_display, source))?;
         sync_directory(&rescue_quarantine_parent, &rescue_quarantine_display)?;
+        let destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+            != expected_identity_sha256
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "workspace file identity changed during restore retirement".to_owned(),
+            });
+        }
         self.verify_still_attached()?;
         Ok(true)
     }
