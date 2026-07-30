@@ -62,6 +62,19 @@ blob named by the current Head Tombstone.
   Head transaction digest, every dependent deterministic assignment, the valid
   target Version, retained stage, and current Head. The prior implementation
   accepted that coordinated rewrite.
+- `e7bf984` required post-Head projection to keep using retained capabilities
+  and to roll Head back if projection failed. The prior implementation could
+  leave the new Head visible after projection failure.
+- `b24614c` required an in-place edit of the transaction-owned published target
+  to preserve the new workspace bytes while relinquishing restore ownership.
+  The prior implementation left durable restore intent blocking capture.
+- `62df4cb`, `b497099`, and `af4b4b6` required successful transaction-directory
+  retirement and restartable cleanup whose durable receipt survives active
+  journal retirement. The prior implementation leaked transaction directories
+  or could lose the final cleanup obligation.
+- `773955f` required captured and restore-derived Heads to carry different,
+  closed authority meanings while released v1 capture Heads still recover. The
+  old wire used one ambiguous `transaction_sha256` field for both meanings.
 
 ## GREEN behavior
 
@@ -99,6 +112,20 @@ blob named by the current Head Tombstone.
   restore journal exists. Both restore execution branches and rollback require
   the rederived parent/target Head authorities; capture journal binding remains
   unchanged.
+- `1755a57` confines projection to the retained state capability and restores
+  the prior Head when post-Head projection cannot be proven.
+- `2805ce7` distinguishes a transaction-owned unchanged target from an in-place
+  user or agent edit, preserves edited workspace bytes, and retires only the
+  transaction's ownership and private stage.
+- `329e8d7`, `d47e0c0`, and `e28108f` durably retire successful private
+  transaction directories through a singleton cleanup receipt. Receipt-only
+  recovery re-derives the exact target and converges, and capture remains
+  excluded until final receipt retirement.
+- `4b620b5` writes `folderbase-local-head-v2` with the closed
+  `capture_transaction_v1` or `version_derived_v1` authority. It independently
+  verifies version-derived authority, rejects unknown or mismatched
+  discriminators, and reads released v1 `transaction_sha256` only as capture
+  authority before CAS normalization under the transaction lock.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -126,7 +153,13 @@ Head, Tombstone, binding, Folderbase, and physical root, while the timestamp is
 re-derived from the verified parent. Final target identity, content, fidelity,
 root attachment, and nested-boundary proofs run immediately before and after
 Head CAS. Post-Head failure rolls the retained root back to its prior Head and
-never reports restore success.
+never reports restore success. Projection uses the already-retained state
+capability. Cleanup records its obligation durably before removing the retained
+stage and per-transaction directory, retains that receipt through active-journal
+retirement, and resumes from either active intent or the singleton receipt after
+restart. If the published transaction-owned file is edited in place, Core
+preserves the edit, relinquishes its restore ownership, and permits the ordinary
+next capture.
 
 ## Gates
 
@@ -137,7 +170,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-593 passed; 3 ignored
+596 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed

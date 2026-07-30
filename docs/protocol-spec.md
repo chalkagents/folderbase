@@ -809,10 +809,52 @@ stages, flushes, publishes, verifies, replaces, and removes capture state
 relative to retained no-follow directory handles. It rejects symlink/junction
 parent swaps; a detached write cannot advance visible Head. Local Head advances
 only after those checks, through a compare-and-replace under a cross-platform
-exclusive device-local file lock. The Local Head also binds the SHA-256 digest
-of the complete capture journal. Recovery after Head publication refuses any
-journal mutation and requires the committed version's exact parents and
-timestamp to match the anchored intent before projecting identity evidence.
+exclusive device-local file lock. New Local Heads use
+`folderbase-local-head-v2` with one closed authority discriminator:
+`capture_transaction_v1` binds the SHA-256 digest of the complete capture
+journal, while `version_derived_v1` binds a domain-separated digest of the
+Folderbase ID, physical-root instance, Version ID, and Version digest. Released
+`folderbase-local-head-v1.transaction_sha256` records are read only with their
+original capture-transaction meaning and are compare-and-swapped to v2 under
+the transaction lock after restore activity is ruled out. They are never
+silently reinterpreted as version-derived authority. Recovery after Head
+publication refuses any journal mutation and requires the committed version's
+exact parents and timestamp to match the anchored capture intent before
+projecting identity evidence.
+
+The closed v2 wire shape is:
+
+```json
+{
+  "format": "folderbase-local-head-v2",
+  "folderbase_id": "folderbase_...",
+  "root_instance_sha256": "<64 lowercase hex>",
+  "version_id": "fbversion_...",
+  "version_sha256": "<64 lowercase hex>",
+  "authority": {
+    "kind": "capture_transaction_v1",
+    "sha256": "<64 lowercase hex>"
+  }
+}
+```
+
+The `kind` value is exactly `capture_transaction_v1` or
+`version_derived_v1`. Unknown top-level fields, unknown authority fields,
+unknown authority kinds, malformed digests, and a `version_derived_v1` digest
+that does not equal the canonical domain-separated derivation are invalid.
+`capture_transaction_v1.sha256` is SHA-256 of the exact durable capture-journal
+bytes. `version_derived_v1.sha256` is SHA-256 of the compact UTF-8 JSON encoding
+of this object in the displayed field order:
+
+```json
+{
+  "format": "folderbase-local-head-authority-v1",
+  "folderbase_id": "folderbase_...",
+  "root_instance_sha256": "<64 lowercase hex>",
+  "version_id": "fbversion_...",
+  "version_sha256": "<64 lowercase hex>"
+}
+```
 
 Sealing opens the existing retained state capability and re-attests the inert
 plan before any lock, layout, recovery, or capture publication. Capture-specific
@@ -867,11 +909,19 @@ from the verified expected parent. After all read-only eligibility checks and
 before journal publication, Core atomically rebinds the verified parent Local
 Head to `folderbase-local-head-authority-v1`, a digest of the attested
 Folderbase ID, physical-root instance, parent Version ID, and parent Version
-digest. Restore-produced Heads use the same derivable authority. Committed
-recovery rejects a journal-supplied prior Head digest that cannot be rederived
-after the prior Head is gone. Unix staging explicitly applies its final `0700`
-or `0600` permissions after creation, independently of process umask.
-Directory and symlink Tombstone reconstruction remain outside v1 restore.
+digest. The rebound parent and restore-produced Heads are v2 records with
+`version_derived_v1` authority. Committed recovery rejects a journal-supplied
+prior Head digest that cannot be rederived after the prior Head is gone.
+Post-Head projection remains confined to the retained state capability, and
+projection failure restores the exact prior Head. An in-place edit of the
+transaction-owned published target preserves the user's bytes, retires restore
+ownership, and leaves capture unblocked. Cleanup publishes a durable singleton
+receipt before removing the private stage and transaction directory; that
+receipt survives active-journal retirement, blocks capture, and drives
+restartable cleanup convergence before it is itself removed. Unix staging
+explicitly applies its final `0700` or `0600` permissions after creation,
+independently of process umask. Directory and symlink Tombstone reconstruction
+remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind
 replacement Tombstones and exact ordinary-file no-clobber restore are

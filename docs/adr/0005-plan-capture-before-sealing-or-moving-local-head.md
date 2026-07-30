@@ -16,9 +16,17 @@ The planning seam is `FolderbaseVersionStore::open(root)` followed by
 Folderbase identity, effective ordered ignore-policy digest, and optional
 device-local head observed at `.folderbase/local/head.json`. A Local Head record
 is accepted only when it is closed, bounded, and names the exact Folderbase and
-physical root. It also anchors the SHA-256 digest of the exact capture
-transaction whose complete Folderbase Version it names. It is device-local
-state, not shared or Cloud authority.
+physical root. New records use `folderbase-local-head-v2` and a closed authority
+discriminator. `capture_transaction_v1` binds the SHA-256 digest of the exact
+capture transaction whose complete Folderbase Version it names;
+`version_derived_v1` binds a domain-separated digest independently derived from
+the Folderbase ID, physical-root instance, Version ID, and Version digest.
+Released `folderbase-local-head-v1.transaction_sha256` records retain exactly
+their capture-transaction meaning: Core reads them only as
+`capture_transaction_v1` and compare-and-swaps them to v2 under the shared
+transaction lock after ruling out restore activity. It never reinterprets a v1
+field as version-derived authority. Local Head is device-local state, not shared
+or Cloud authority.
 
 Metadata planning treats every regular file identically, including PDFs, videos,
 CSV, SQLite, unknown formats, and Git pack files. It records length and executable
@@ -201,7 +209,15 @@ executable-fidelity decision.
 The capture and restore journals mutually exclude each other under the shared
 transaction lock. Interruption at journal, stage, target publication, version,
 Head, projection, or cleanup converges on the one assigned version without
-overwriting foreign content.
+overwriting foreign content. Post-Head projection stays relative to the retained
+state capability; a projection failure restores the exact prior Head. If a user
+or agent edits the transaction-owned published file in place before cleanup,
+Core preserves those workspace bytes, retires restore ownership, and leaves the
+next capture unblocked. Successful cleanup first publishes one durable singleton
+receipt, then durably removes the private stage and per-transaction directory,
+then retires the active journal, and finally retires the receipt. A crash or
+cleanup error at any boundary reopens from the receipt and converges; capture is
+blocked while either active restore intent or cleanup receipt remains.
 
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records
