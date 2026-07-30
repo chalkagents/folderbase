@@ -1363,24 +1363,9 @@ fn finish_modified_restore_cleanup_recovery(
     if JournalHead::from(&current_head) != transaction.expected_head {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     }
-    let digest = transaction
-        .binding
-        .content_sha256()
-        .expect("validated regular binding");
-    let bytes = transaction
-        .binding
-        .bytes()
-        .expect("validated regular binding");
-    let executable = transaction
-        .binding
-        .executable()
-        .expect("validated regular binding");
     state.retire_modified_workspace_restore_stage(
         &restore_stage_path(transaction),
         Path::new(&transaction.path),
-        digest,
-        bytes,
-        executable,
     )?;
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;

@@ -555,9 +555,6 @@ impl FolderbaseState {
         &self,
         stage: &Path,
         destination: &Path,
-        digest: &str,
-        bytes: u64,
-        executable: bool,
     ) -> Result<bool> {
         let stage = state_relative(stage)?;
         let destination = safe_workspace_relative(destination)?;
@@ -572,7 +569,7 @@ impl FolderbaseState {
             Err(error) => return Err(error),
         };
         let stage_display = self.display_path(&stage);
-        let mut stage_file =
+        let stage_file =
             match open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display) {
                 Ok(file) => file,
                 Err(FolderbaseError::Io { source, .. })
@@ -596,16 +593,6 @@ impl FolderbaseState {
                 path: stage_display,
                 message: "modified restore stage no longer owns the workspace file".to_owned(),
             });
-        }
-        match verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display) {
-            Err(FolderbaseError::InvalidRecord { .. }) => {}
-            Ok(()) => {
-                return Err(FolderbaseError::InvalidRecord {
-                    path: stage_display,
-                    message: "restore stage is no longer modified".to_owned(),
-                });
-            }
-            Err(error) => return Err(error),
         }
 
         if regular_file_identity(&stage_parent, &stage_name, &stage_display)? != stage_identity {
