@@ -462,6 +462,91 @@ fn exact_root_ignore_policy_is_readable_but_only_typed_flows_may_edit_it() {
 }
 
 #[test]
+fn root_ignore_policy_case_variant_is_visible_read_only_and_not_generically_mutable() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("docs")).unwrap();
+    fs::write(fixture.path().join(".FOLDERBASEIGNORE"), "node_modules/\n").unwrap();
+    fs::write(
+        fixture.path().join("docs/.folderbaseignore"),
+        "nested policy\n",
+    )
+    .unwrap();
+
+    let root_policy = read_workspace_text(fixture.path(), ".FOLDERBASEIGNORE").unwrap();
+    assert_eq!(root_policy.content, "node_modules/\n");
+    let listing = list_workspace(fixture.path()).unwrap();
+    assert!(
+        !listing
+            .entries
+            .iter()
+            .find(|entry| entry.path == ".FOLDERBASEIGNORE")
+            .expect("case-variant root policy remains visible")
+            .editable
+    );
+    assert!(
+        listing
+            .entries
+            .iter()
+            .find(|entry| entry.path == "docs/.folderbaseignore")
+            .expect("nested same-name file remains visible")
+            .editable
+    );
+
+    let error = save_workspace_text(
+        fixture.path(),
+        ".FOLDERBASEIGNORE",
+        "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97",
+        "target/\n",
+    )
+    .expect_err("generic save cannot change a case-variant root capture policy");
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::UnsafePath(path)
+            if path == std::path::Path::new(".FOLDERBASEIGNORE")
+    ));
+    assert_eq!(
+        fs::read(fixture.path().join(".FOLDERBASEIGNORE")).unwrap(),
+        b"node_modules/\n"
+    );
+
+    save_workspace_text(
+        fixture.path(),
+        "docs/.folderbaseignore",
+        "cdf013df0dddf8a58713d56628c6d51e60088b1fbd1472de9a1c4bb1b89571d7",
+        "nested replacement\n",
+    )
+    .expect("nested same-name files remain ordinary and editable");
+}
+
+#[test]
+fn public_save_refuses_a_case_variant_alias_when_the_host_resolves_it() {
+    let fixture = tempdir().unwrap();
+    fs::write(fixture.path().join(".folderbaseignore"), "node_modules/\n").unwrap();
+    if !fixture.path().join(".FOLDERBASEIGNORE").exists() {
+        return;
+    }
+
+    let error = save_workspace_text(
+        fixture.path(),
+        ".FOLDERBASEIGNORE",
+        "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97",
+        "target/\n",
+    )
+    .expect_err("a filesystem alias cannot bypass the reviewed policy flow");
+
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::UnsafePath(path)
+            if path == std::path::Path::new(".FOLDERBASEIGNORE")
+                || path == std::path::Path::new(".folderbaseignore")
+    ));
+    assert_eq!(
+        fs::read(fixture.path().join(".folderbaseignore")).unwrap(),
+        b"node_modules/\n"
+    );
+}
+
+#[test]
 fn workspace_save_atomically_versions_the_previous_and_new_text_under_one_identity() {
     let fixture = tempdir().unwrap();
     fs::write(fixture.path().join("note.md"), "first\n").unwrap();

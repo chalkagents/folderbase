@@ -425,3 +425,33 @@ fn invalid_workspace_record(
         message: message.into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_mutation_classifier_reserves_ascii_case_variants_only_at_the_root() {
+        for root_policy in [
+            ".folderbaseignore",
+            ".FOLDERBASEIGNORE",
+            ".FolderBaseIgnore",
+        ] {
+            assert!(matches!(
+                refuse_generic_workspace_mutation_path(Path::new(root_policy)),
+                Err(FolderbaseError::UnsafePath(path)) if path == Path::new(root_policy)
+            ));
+        }
+
+        for ordinary_path in [
+            "docs/.folderbaseignore",
+            "docs/.FOLDERBASEIGNORE",
+            ".folderbaseignore.txt",
+        ] {
+            assert!(
+                refuse_generic_workspace_mutation_path(Path::new(ordinary_path)).is_ok(),
+                "{ordinary_path} is not the root capture policy"
+            );
+        }
+    }
+}
