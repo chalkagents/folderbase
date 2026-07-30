@@ -1167,9 +1167,31 @@ fn finish_restore_cleanup(
         },
     )?;
     checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
-    checkpoint(&RestoreCheckpoint::BeforeStageRetirement);
-    state.remove_durable(&restore_stage_path(transaction))?;
-    checkpoint(&RestoreCheckpoint::AfterStageRetirement);
+    let digest = transaction
+        .binding
+        .content_sha256()
+        .expect("validated regular binding");
+    let bytes = transaction
+        .binding
+        .bytes()
+        .expect("validated regular binding");
+    let executable = transaction
+        .binding
+        .executable()
+        .expect("validated regular binding");
+    state.retire_workspace_restore_stage_with_hook(
+        &restore_stage_path(transaction),
+        &restore_rescue_path(transaction),
+        Path::new(&transaction.path),
+        Some((digest, bytes, executable)),
+        |stage_removed| {
+            checkpoint(if stage_removed {
+                &RestoreCheckpoint::AfterStageRetirement
+            } else {
+                &RestoreCheckpoint::BeforeStageRetirement
+            });
+        },
+    )?;
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
@@ -1374,12 +1396,19 @@ fn finish_modified_restore_cleanup_recovery(
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
-    state.retire_modified_workspace_restore_stage_with_hook(
+    state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
+        &restore_rescue_path(transaction),
         Path::new(&transaction.path),
-        || checkpoint(&RestoreCheckpoint::BeforeStageRetirement),
+        None,
+        |stage_removed| {
+            checkpoint(if stage_removed {
+                &RestoreCheckpoint::AfterStageRetirement
+            } else {
+                &RestoreCheckpoint::BeforeStageRetirement
+            });
+        },
     )?;
-    checkpoint(&RestoreCheckpoint::AfterStageRetirement);
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     remove_restore_cleanup_recovery(state)
@@ -1590,6 +1619,10 @@ fn finish_restore_projection(
 
 fn restore_stage_path(transaction: &RestoreTransaction) -> PathBuf {
     restore_transaction_directory(transaction).join("content")
+}
+
+fn restore_rescue_path(transaction: &RestoreTransaction) -> PathBuf {
+    restore_transaction_directory(transaction).join("content.rescue")
 }
 
 fn restore_transaction_directory(transaction: &RestoreTransaction) -> PathBuf {
@@ -3934,6 +3967,8 @@ mod tests {
             RestoreCheckpoint::PublicationVerified,
             RestoreCheckpoint::ProjectionDurable,
             RestoreCheckpoint::CleanupRecoveryDurable,
+            RestoreCheckpoint::BeforeStageRetirement,
+            RestoreCheckpoint::AfterStageRetirement,
             RestoreCheckpoint::CleanupIntentRetired,
             RestoreCheckpoint::CleanupComplete,
         ] {
@@ -5158,9 +5193,7 @@ mod tests {
             .expect("active restore")
             .expect("durable active restore");
         forged.transaction_id = "fbrestore_00000000-0000-8000-8000-000000000001".to_owned();
-        let forged_directory = root
-            .path()
-            .join(restore_transaction_directory(&forged));
+        let forged_directory = root.path().join(restore_transaction_directory(&forged));
         fs::create_dir(&forged_directory).expect("forged transaction directory");
         fs::hard_link(
             root.path().join("active.bin"),
@@ -5217,7 +5250,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn assert_cleanup_boundary_swap_fails_closed(modified: bool, swap: CleanupBoundarySwap) {
+    fn assert_cleanup_boundary_swap_fails_closed(
+        modified: bool,
+        swap: CleanupBoundarySwap,
+        after_stage_retirement: bool,
+    ) {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         store
@@ -5240,7 +5277,12 @@ mod tests {
                 fs::write(root.path().join("active.bin"), owned_bytes)
                     .expect("edit restored target in place");
             }
-            if checkpoint == &RestoreCheckpoint::BeforeStageRetirement {
+            let mutation_checkpoint = if after_stage_retirement {
+                &RestoreCheckpoint::AfterStageRetirement
+            } else {
+                &RestoreCheckpoint::BeforeStageRetirement
+            };
+            if checkpoint == mutation_checkpoint {
                 let transaction = read_active_restore_transaction(
                     &FolderbaseState::open(root.path()).expect("state"),
                 )
@@ -5292,25 +5334,37 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn modified_cleanup_retains_owned_bytes_when_destination_swaps_at_unlink_boundary() {
-        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Destination);
+        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Destination, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn modified_cleanup_never_unlinks_a_stage_name_replacement() {
-        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Stage);
+        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Stage, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn committed_cleanup_retains_owned_bytes_when_destination_swaps_at_unlink_boundary() {
-        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Destination);
+        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Destination, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn committed_cleanup_never_unlinks_a_stage_name_replacement() {
-        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Stage);
+        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Stage, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modified_cleanup_rescue_survives_destination_swap_after_stage_unlink() {
+        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Destination, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_cleanup_rescue_survives_destination_swap_after_stage_unlink() {
+        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Destination, true);
     }
 
     #[test]

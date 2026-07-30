@@ -548,26 +548,28 @@ impl FolderbaseState {
         Ok(modified)
     }
 
-    /// Retire only the private hard link for a restore-owned workspace file
-    /// whose bytes were modified in place. An absent stage is an idempotent
-    /// retry; a replaced stage or destination is never unlinked.
-    pub(crate) fn retire_modified_workspace_restore_stage(
+    /// Retire only the exact private stage for a restore-owned workspace file.
+    ///
+    /// A transaction-owned rescue hard link protects the staged inode across
+    /// the unlink boundary. Both private names and the visible destination are
+    /// revalidated through retained directory capabilities. Any replacement or
+    /// uncertainty fails closed while the rescue remains durable.
+    pub(crate) fn retire_workspace_restore_stage_with_hook(
         &self,
         stage: &Path,
+        rescue: &Path,
         destination: &Path,
-    ) -> Result<bool> {
-        self.retire_modified_workspace_restore_stage_with_hook(stage, destination, || {})
-    }
-
-    pub(crate) fn retire_modified_workspace_restore_stage_with_hook(
-        &self,
-        stage: &Path,
-        destination: &Path,
-        before_remove: impl FnOnce(),
+        expected_fidelity: Option<(&str, u64, bool)>,
+        mut checkpoint: impl FnMut(bool),
     ) -> Result<bool> {
         let stage = state_relative(stage)?;
+        let rescue = state_relative(rescue)?;
         let destination = safe_workspace_relative(destination)?;
         self.require_mutable(&stage)?;
+        self.require_mutable(&rescue)?;
+        if stage.parent() != rescue.parent() || stage == rescue {
+            return Err(FolderbaseError::UnsafePath(self.display_path(&rescue)));
+        }
         self.verify_still_attached()?;
 
         let (stage_parent, stage_name) = match self.open_parent(&stage) {
@@ -577,44 +579,139 @@ impl FolderbaseState {
             }
             Err(error) => return Err(error),
         };
+        let (rescue_parent, rescue_name) = self.open_parent(&rescue)?;
         let stage_display = self.display_path(&stage);
+        let rescue_display = self.display_path(&rescue);
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+
         let stage_file =
             match open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display) {
-                Ok(file) => file,
+                Ok(file) => Some(file),
                 Err(FolderbaseError::Io { source, .. })
                     if source.kind() == io::ErrorKind::NotFound =>
                 {
-                    return Ok(false);
+                    None
                 }
                 Err(error) => return Err(error),
             };
-        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+        let rescue_file =
+            match open_regular_file_nofollow(&rescue_parent, &rescue_name, &rescue_display) {
+                Ok(file) => Some(file),
+                Err(FolderbaseError::Io { source, .. })
+                    if source.kind() == io::ErrorKind::NotFound =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            };
 
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let retained_file = stage_file.as_ref().or(rescue_file.as_ref());
+        let Some(retained_file) = retained_file else {
+            return Ok(false);
+        };
+        let retained_display = if stage_file.is_some() {
+            &stage_display
+        } else {
+            &rescue_display
+        };
+        let retained_identity = open_regular_file_identity(retained_file, retained_display)?;
+        if let Some(file) = stage_file.as_ref()
+            && open_regular_file_identity(file, &stage_display)? != retained_identity
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: stage_display,
+                message: "restore stage identity is inconsistent".to_owned(),
+            });
+        }
+        if let Some(file) = rescue_file.as_ref()
+            && open_regular_file_identity(file, &rescue_display)? != retained_identity
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_display,
+                message: "restore rescue does not name the retained stage".to_owned(),
+            });
+        }
+
         let destination_file = open_regular_file_nofollow(
             &destination_parent,
             &destination_name,
             &destination_display,
         )?;
-        if open_regular_file_identity(&destination_file, &destination_display)? != stage_identity {
+        if open_regular_file_identity(&destination_file, &destination_display)? != retained_identity
+        {
             return Err(FolderbaseError::InvalidRecord {
                 path: stage_display,
-                message: "modified restore stage no longer owns the workspace file".to_owned(),
+                message: "restore stage no longer owns the workspace file".to_owned(),
             });
+        }
+        if let Some((digest, bytes, executable)) = expected_fidelity {
+            let mut fidelity_file = retained_file
+                .try_clone()
+                .map_err(|source| FolderbaseError::io(retained_display.to_path_buf(), source))?;
+            verify_open_regular_file(
+                &mut fidelity_file,
+                digest,
+                bytes,
+                executable,
+                retained_display,
+            )?;
         }
 
-        if regular_file_identity(&stage_parent, &stage_name, &stage_display)? != stage_identity {
+        if rescue_file.is_none() {
+            match stage_parent.hard_link(&stage_name, &rescue_parent, &rescue_name) {
+                Ok(()) => sync_directory(&rescue_parent, &rescue_display)?,
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => return Err(FolderbaseError::io(&rescue_display, source)),
+            }
+            if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: rescue_display,
+                    message: "restore rescue captured a different filesystem object".to_owned(),
+                });
+            }
+        }
+
+        if stage_file.is_some() {
+            checkpoint(false);
+            if regular_file_identity(&stage_parent, &stage_name, &stage_display)?
+                != retained_identity
+                || regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                    != retained_identity
+                || regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: stage_display,
+                    message: "restore ownership changed at the retirement boundary".to_owned(),
+                });
+            }
+            stage_parent
+                .remove_file(&stage_name)
+                .map_err(|source| FolderbaseError::io(&stage_display, source))?;
+            sync_directory(&stage_parent, &stage_display)?;
+        }
+
+        checkpoint(true);
+        if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+            != retained_identity
+            || regular_file_identity(&destination_parent, &destination_name, &destination_display)?
+                != retained_identity
+        {
             return Err(FolderbaseError::InvalidRecord {
-                path: stage_display,
-                message: "modified restore stage changed before retirement".to_owned(),
+                path: rescue_display,
+                message: "restore destination changed after private stage retirement".to_owned(),
             });
         }
-        before_remove();
-        stage_parent
-            .remove_file(&stage_name)
-            .map_err(|source| FolderbaseError::io(&stage_display, source))?;
-        sync_directory(&stage_parent, &stage_display)?;
+        rescue_parent
+            .remove_file(&rescue_name)
+            .map_err(|source| FolderbaseError::io(&rescue_display, source))?;
+        sync_directory(&rescue_parent, &rescue_display)?;
         self.verify_still_attached()?;
         Ok(true)
     }
