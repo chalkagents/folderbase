@@ -90,6 +90,30 @@ fn manifest_activation_is_an_idempotent_applied_upgrade_receipt() {
 }
 
 #[test]
+fn an_applied_receipt_cannot_make_a_mutated_target_match_the_reviewed_plan() {
+    let root = legacy_root();
+    let plan = plan_protocol_upgrade(root.path()).expect("upgrade plan");
+    let expected = plan.plan_digest().clone();
+    apply_protocol_upgrade(&plan, &expected).expect("manifest activation");
+
+    let manifest_path = root.path().join(".folderbase/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("activated manifest"))
+            .expect("manifest JSON");
+    manifest["policies"]["availability"] = serde_json::json!("cloud_only");
+    fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("foreign target mutation");
+
+    assert!(
+        apply_protocol_upgrade(&plan, &expected).is_err(),
+        "the durable receipt cannot authorize a different target manifest"
+    );
+}
+
+#[test]
 fn upgrade_refuses_active_capture_restore_migration_and_reorganization_work() {
     for (relative, label) in [
         (
