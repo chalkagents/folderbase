@@ -23,7 +23,8 @@ use crate::{
     folderbase_capture::{
         CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureLocalHead,
         CaptureMetadataFingerprint, CapturePlan, CapturePlanEntry, FolderbaseCaptureError,
-        FolderbaseVersionStore, capture_entry_fingerprint,
+        FolderbaseVersionStore, LocalHeadAuthority, capture_entry_fingerprint,
+        version_derived_local_head_sha256,
     },
     folderbase_state::FolderbaseState,
     folderbase_version::{
@@ -144,7 +145,7 @@ enum RestoreCheckpoint {
 struct JournalHead {
     version_id: String,
     version_sha256: String,
-    transaction_sha256: String,
+    authority: LocalHeadAuthority,
 }
 
 impl From<&CaptureLocalHead> for JournalHead {
@@ -152,7 +153,7 @@ impl From<&CaptureLocalHead> for JournalHead {
         Self {
             version_id: value.version_id().to_owned(),
             version_sha256: value.version_sha256().to_owned(),
-            transaction_sha256: value.transaction_sha256().to_owned(),
+            authority: value.authority().clone(),
         }
     }
 }
@@ -204,9 +205,38 @@ struct RestoreTransaction {
     binding: PathBinding,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LocalHeadRecord {
+    format: String,
+    folderbase_id: String,
+    root_instance_sha256: String,
+    version_id: String,
+    version_sha256: String,
+    authority: LocalHeadAuthority,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LocalHeadRecordWire {
+    V2(LocalHeadRecordV2Wire),
+    V1(LocalHeadRecordV1Wire),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalHeadRecordV2Wire {
+    format: String,
+    folderbase_id: String,
+    root_instance_sha256: String,
+    version_id: String,
+    version_sha256: String,
+    authority: LocalHeadAuthority,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalHeadRecordV1Wire {
     format: String,
     folderbase_id: String,
     root_instance_sha256: String,
@@ -345,9 +375,13 @@ impl FolderbaseVersionStore {
                 let binding = find_restore_binding(self, &local, &state, &current, &tombstone)?;
                 let restore_authority_sha256 =
                     local_head_authority_sha256(self, &head.version_id, &head.version_sha256)?;
-                if head.transaction_sha256 != restore_authority_sha256 {
+                let restore_authority = LocalHeadAuthority::VersionDerivedV1 {
+                    sha256: restore_authority_sha256,
+                };
+                if head.authority != restore_authority {
                     let rebound = LocalHeadRecord {
-                        transaction_sha256: restore_authority_sha256,
+                        format: "folderbase-local-head-v2".to_owned(),
+                        authority: restore_authority,
                         ..head.clone()
                     };
                     compare_and_swap_exact_local_head(&state, &head, &rebound)?;
@@ -417,6 +451,7 @@ impl FolderbaseVersionStore {
         ensure_no_active_restore(&state)?;
         state.ensure_private_dir(Path::new(FOLDERBASE_VERSIONS_DIRECTORY))?;
         state.ensure_private_dir(Path::new(CAPTURE_IDENTITIES_DIRECTORY))?;
+        normalize_legacy_local_head(&state)?;
 
         let current_plan = self.plan_capture()?;
         ensure_same_plan(&plan, &current_plan)?;
@@ -430,7 +465,11 @@ impl FolderbaseVersionStore {
                 .as_ref()
                 .filter(|head| head.version_id == transaction.target_version_id);
             if let Some(head) = target_head {
-                if capture_transaction_sha256(transaction)? != head.transaction_sha256 {
+                if head.authority
+                    != (LocalHeadAuthority::CaptureTransactionV1 {
+                        sha256: capture_transaction_sha256(transaction)?,
+                    })
+                {
                     return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
                         "active journal digest does not match Local Head".to_owned(),
                     ));
@@ -554,12 +593,14 @@ impl FolderbaseVersionStore {
             &state,
             plan.current_local_head(),
             &LocalHeadRecord {
-                format: "folderbase-local-head-v1".to_owned(),
+                format: "folderbase-local-head-v2".to_owned(),
                 folderbase_id: self.root_attestation.folderbase_id.clone(),
                 root_instance_sha256: self.root_attestation.root_instance_sha256.clone(),
                 version_id: built.version.version_id().to_owned(),
                 version_sha256: built.version_sha256.clone(),
-                transaction_sha256: capture_transaction_sha256(&transaction)?,
+                authority: LocalHeadAuthority::CaptureTransactionV1 {
+                    sha256: capture_transaction_sha256(&transaction)?,
+                },
             },
         )?;
         checkpoint(&CaptureCheckpoint::HeadReplaced);
@@ -866,11 +907,13 @@ fn execute_restore_transaction(
     let target_summary = JournalHead {
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
-        transaction_sha256: local_head_authority_sha256(
-            store,
-            &transaction.target_version_id,
-            &transaction.target_version_sha256,
-        )?,
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
     };
     let target = derive_authoritative_restore_target(store, local, state, transaction)?;
     let created = if current_summary == target_summary {
@@ -912,16 +955,18 @@ fn execute_restore_transaction(
             state,
             &transaction.expected_head,
             &LocalHeadRecord {
-                format: "folderbase-local-head-v1".to_owned(),
+                format: "folderbase-local-head-v2".to_owned(),
                 folderbase_id: transaction.folderbase_id.clone(),
                 root_instance_sha256: transaction.root_instance_sha256.clone(),
                 version_id: transaction.target_version_id.clone(),
                 version_sha256: transaction.target_version_sha256.clone(),
-                transaction_sha256: local_head_authority_sha256(
-                    store,
-                    &transaction.target_version_id,
-                    &transaction.target_version_sha256,
-                )?,
+                authority: LocalHeadAuthority::VersionDerivedV1 {
+                    sha256: local_head_authority_sha256(
+                        store,
+                        &transaction.target_version_id,
+                        &transaction.target_version_sha256,
+                    )?,
+                },
             },
         )?;
         checkpoint(&RestoreCheckpoint::HeadReplaced);
@@ -979,11 +1024,13 @@ fn finish_restore_cleanup_recovery(
     let target_head = JournalHead {
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
-        transaction_sha256: local_head_authority_sha256(
-            store,
-            &transaction.target_version_id,
-            &transaction.target_version_sha256,
-        )?,
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
     };
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
     if JournalHead::from(&current_head) != target_head {
@@ -1033,12 +1080,14 @@ fn derive_authoritative_restore_target(
             "restore parent digest changed".to_owned(),
         ));
     }
-    if transaction.expected_head.transaction_sha256
-        != local_head_authority_sha256(
-            store,
-            &transaction.expected_head.version_id,
-            &transaction.expected_head.version_sha256,
-        )?
+    if transaction.expected_head.authority
+        != (LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.expected_head.version_id,
+                &transaction.expected_head.version_sha256,
+            )?,
+        })
     {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
             "restore parent Head authority is not independently derivable".to_owned(),
@@ -1065,12 +1114,12 @@ fn derive_authoritative_restore_target(
         ));
     }
     let parent_head = LocalHeadRecord {
-        format: "folderbase-local-head-v1".to_owned(),
+        format: "folderbase-local-head-v2".to_owned(),
         folderbase_id: transaction.folderbase_id.clone(),
         root_instance_sha256: transaction.root_instance_sha256.clone(),
         version_id: transaction.expected_head.version_id.clone(),
         version_sha256: transaction.expected_head.version_sha256.clone(),
-        transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+        authority: transaction.expected_head.authority.clone(),
     };
     let (transaction_id, target_version_id, created_at) = assigned_restore_identity(
         store,
@@ -1205,19 +1254,21 @@ fn rollback_restore_head(
     let target = JournalHead {
         version_id: transaction.target_version_id.clone(),
         version_sha256: transaction.target_version_sha256.clone(),
-        transaction_sha256: local_head_authority_sha256(
-            store,
-            &transaction.target_version_id,
-            &transaction.target_version_sha256,
-        )?,
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
     };
     let prior = LocalHeadRecord {
-        format: "folderbase-local-head-v1".to_owned(),
+        format: "folderbase-local-head-v2".to_owned(),
         folderbase_id: transaction.folderbase_id.clone(),
         root_instance_sha256: transaction.root_instance_sha256.clone(),
         version_id: transaction.expected_head.version_id.clone(),
         version_sha256: transaction.expected_head.version_sha256.clone(),
-        transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+        authority: transaction.expected_head.authority.clone(),
     };
     // Rollback deliberately uses the already-retained state capability rather
     // than the ambient root path. If that path was swapped after the forward
@@ -1368,7 +1419,7 @@ impl From<&LocalHeadRecord> for JournalHead {
         Self {
             version_id: value.version_id.clone(),
             version_sha256: value.version_sha256.clone(),
-            transaction_sha256: value.transaction_sha256.clone(),
+            authority: value.authority.clone(),
         }
     }
 }
@@ -1453,28 +1504,12 @@ fn local_head_authority_sha256(
     version_id: &str,
     version_sha256: &str,
 ) -> Result<String, FolderbaseCaptureError> {
-    #[derive(Serialize)]
-    struct LocalHeadAuthority<'a> {
-        format: &'static str,
-        folderbase_id: &'a str,
-        root_instance_sha256: &'a str,
-        version_id: &'a str,
-        version_sha256: &'a str,
-    }
-
-    let authority = serde_json::to_vec(&LocalHeadAuthority {
-        format: "folderbase-local-head-authority-v1",
-        folderbase_id: &store.root_attestation.folderbase_id,
-        root_instance_sha256: &store.root_attestation.root_instance_sha256,
+    version_derived_local_head_sha256(
+        &store.root_attestation.folderbase_id,
+        &store.root_attestation.root_instance_sha256,
         version_id,
         version_sha256,
-    })
-    .map_err(|source| {
-        FolderbaseCaptureError::InvalidLocalHead(format!(
-            "Local Head authority encoding failed: {source}"
-        ))
-    })?;
-    Ok(format!("{:x}", Sha256::digest(authority)))
+    )
 }
 
 fn capture_transaction_sha256(
@@ -3107,7 +3142,7 @@ fn validate_restore_transaction(
         )
         .is_err()
         || !valid_hex(&transaction.expected_head.version_sha256)
-        || !valid_hex(&transaction.expected_head.transaction_sha256)
+        || !valid_hex(transaction.expected_head.authority.sha256())
         || !valid_hex(&transaction.target_version_sha256)
     {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
@@ -3181,6 +3216,20 @@ fn compare_and_swap_exact_local_head(
         ));
     }
     Ok(())
+}
+
+fn normalize_legacy_local_head(state: &FolderbaseState) -> Result<(), FolderbaseCaptureError> {
+    let Some(legacy) = read_head_record(state)? else {
+        return Ok(());
+    };
+    if legacy.format != "folderbase-local-head-v1" {
+        return Ok(());
+    }
+    let normalized = LocalHeadRecord {
+        format: "folderbase-local-head-v2".to_owned(),
+        ..legacy.clone()
+    };
+    compare_and_swap_exact_local_head(state, &legacy, &normalized)
 }
 
 fn write_active_transaction_with_limit(
@@ -3271,7 +3320,7 @@ fn compare_and_swap_local_head(
     let current_summary = current.as_ref().map(|head| JournalHead {
         version_id: head.version_id.clone(),
         version_sha256: head.version_sha256.clone(),
-        transaction_sha256: head.transaction_sha256.clone(),
+        authority: head.authority.clone(),
     });
     if current_summary != expected {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
@@ -3294,18 +3343,47 @@ fn read_head_record(
     else {
         return Ok(None);
     };
-    let head: LocalHeadRecord = serde_json::from_slice(&encoded).map_err(|source| {
+    let wire: LocalHeadRecordWire = serde_json::from_slice(&encoded).map_err(|source| {
         FolderbaseCaptureError::InvalidLocalHead(format!("Local Head JSON is invalid: {source}"))
     })?;
-    if head.format != "folderbase-local-head-v1"
-        || head.version_sha256.len() != 64
-        || head.transaction_sha256.len() != 64
+    let head = match wire {
+        LocalHeadRecordWire::V2(head) if head.format == "folderbase-local-head-v2" => {
+            LocalHeadRecord {
+                format: head.format,
+                folderbase_id: head.folderbase_id,
+                root_instance_sha256: head.root_instance_sha256,
+                version_id: head.version_id,
+                version_sha256: head.version_sha256,
+                authority: head.authority,
+            }
+        }
+        LocalHeadRecordWire::V1(head) if head.format == "folderbase-local-head-v1" => {
+            LocalHeadRecord {
+                format: head.format,
+                folderbase_id: head.folderbase_id,
+                root_instance_sha256: head.root_instance_sha256,
+                version_id: head.version_id,
+                version_sha256: head.version_sha256,
+                authority: LocalHeadAuthority::CaptureTransactionV1 {
+                    sha256: head.transaction_sha256,
+                },
+            }
+        }
+        _ => {
+            return Err(FolderbaseCaptureError::InvalidLocalHead(
+                "Local Head format is unsupported".to_owned(),
+            ));
+        }
+    };
+    if head.version_sha256.len() != 64
+        || head.authority.sha256().len() != 64
         || !head
             .version_sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || !head
-            .transaction_sha256
+            .authority
+            .sha256()
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
@@ -3608,17 +3686,19 @@ mod tests {
             .replace(
                 Path::new(LOCAL_HEAD_PATH),
                 &json_bytes(&LocalHeadRecord {
-                    format: "folderbase-local-head-v1".to_owned(),
+                    format: "folderbase-local-head-v2".to_owned(),
                     folderbase_id: version.folderbase_id().to_owned(),
                     root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
                     version_id: version.version_id().to_owned(),
                     version_sha256: version_sha256.clone(),
-                    transaction_sha256: local_head_authority_sha256(
-                        &store,
-                        version.version_id(),
-                        &version_sha256,
-                    )
-                    .expect("Head authority"),
+                    authority: LocalHeadAuthority::VersionDerivedV1 {
+                        sha256: local_head_authority_sha256(
+                            &store,
+                            version.version_id(),
+                            &version_sha256,
+                        )
+                        .expect("Head authority"),
+                    },
                 })
                 .expect("Head bytes"),
             )
@@ -3861,7 +3941,9 @@ mod tests {
         assert!(interrupted.is_err());
         let state = FolderbaseState::open(root.path()).expect("state");
         let mut head = read_head_record(&state).expect("Head").expect("Head");
-        head.transaction_sha256 = "0".repeat(64);
+        head.authority = LocalHeadAuthority::CaptureTransactionV1 {
+            sha256: "0".repeat(64),
+        };
         state
             .replace(
                 Path::new(LOCAL_HEAD_PATH),
@@ -4012,14 +4094,16 @@ mod tests {
             .expect("journal")
             .expect("active");
         let parent = store.read_version(deletion.version_id()).expect("parent");
-        transaction.expected_head.transaction_sha256 = "a".repeat(64);
+        transaction.expected_head.authority = LocalHeadAuthority::VersionDerivedV1 {
+            sha256: "a".repeat(64),
+        };
         let forged_parent_head = LocalHeadRecord {
-            format: "folderbase-local-head-v1".to_owned(),
+            format: "folderbase-local-head-v2".to_owned(),
             folderbase_id: transaction.folderbase_id.clone(),
             root_instance_sha256: transaction.root_instance_sha256.clone(),
             version_id: transaction.expected_head.version_id.clone(),
             version_sha256: transaction.expected_head.version_sha256.clone(),
-            transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+            authority: transaction.expected_head.authority.clone(),
         };
         let (transaction_id, target_version_id, created_at) = assigned_restore_identity(
             &store,
@@ -4064,17 +4148,19 @@ mod tests {
             .replace(
                 Path::new(LOCAL_HEAD_PATH),
                 &json_bytes(&LocalHeadRecord {
-                    format: "folderbase-local-head-v1".to_owned(),
+                    format: "folderbase-local-head-v2".to_owned(),
                     folderbase_id: transaction.folderbase_id.clone(),
                     root_instance_sha256: transaction.root_instance_sha256.clone(),
                     version_id: transaction.target_version_id.clone(),
                     version_sha256: transaction.target_version_sha256.clone(),
-                    transaction_sha256: local_head_authority_sha256(
-                        &store,
-                        &transaction.target_version_id,
-                        &transaction.target_version_sha256,
-                    )
-                    .expect("forged Head authority"),
+                    authority: LocalHeadAuthority::VersionDerivedV1 {
+                        sha256: local_head_authority_sha256(
+                            &store,
+                            &transaction.target_version_id,
+                            &transaction.target_version_sha256,
+                        )
+                        .expect("forged Head authority"),
+                    },
                 })
                 .expect("forged Head"),
             )
@@ -5191,6 +5277,128 @@ mod tests {
     }
 
     #[test]
+    fn released_v1_capture_heads_recover_and_normalize_without_losing_authority() {
+        fn write_v1_head(root: &Path, transaction_sha256: &str) {
+            let head = local_head(root).expect("current Head");
+            FolderbaseState::open(root)
+                .expect("state")
+                .replace(
+                    Path::new(LOCAL_HEAD_PATH),
+                    &json_bytes(&serde_json::json!({
+                        "format": "folderbase-local-head-v1",
+                        "folderbase_id": head.folderbase_id,
+                        "root_instance_sha256": head.root_instance_sha256,
+                        "version_id": head.version_id,
+                        "version_sha256": head.version_sha256,
+                        "transaction_sha256": transaction_sha256
+                    }))
+                    .expect("v1 Head bytes"),
+                )
+                .expect("install v1 Head");
+        }
+
+        let recovering = folderbase();
+        let store = FolderbaseVersionStore::open(recovering.path()).expect("open");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(store.plan_capture().expect("plan"), |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::HeadReplaced {
+                    let transaction =
+                        active_transaction(recovering.path()).expect("active capture transaction");
+                    write_v1_head(
+                        recovering.path(),
+                        &capture_transaction_sha256(&transaction).expect("transaction authority"),
+                    );
+                    panic!("simulate released v1 process termination");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(recovering.path()).expect("reopen");
+        let recovered = reopened
+            .seal_capture(reopened.plan_capture().expect("v1 recovery plan"))
+            .expect("recover v1 Head and active capture");
+        let recovered_head: serde_json::Value = serde_json::from_slice(
+            &fs::read(recovering.path().join(LOCAL_HEAD_PATH)).expect("recovered Head"),
+        )
+        .expect("recovered Head JSON");
+        assert_eq!(recovered_head["format"], "folderbase-local-head-v2");
+        assert_eq!(
+            recovered_head["authority"]["kind"],
+            "capture_transaction_v1"
+        );
+        assert_eq!(recovered_head["version_id"], recovered.version_id());
+
+        let steady = folderbase();
+        let steady_store = FolderbaseVersionStore::open(steady.path()).expect("open steady");
+        steady_store
+            .seal_capture(steady_store.plan_capture().expect("steady plan"))
+            .expect("steady capture");
+        let authority = local_head(steady.path())
+            .expect("steady Head")
+            .authority
+            .sha256()
+            .to_owned();
+        write_v1_head(steady.path(), &authority);
+        drop(steady_store);
+
+        let reopened = FolderbaseVersionStore::open(steady.path()).expect("reopen steady");
+        let unchanged = reopened
+            .seal_capture(reopened.plan_capture().expect("steady v1 plan"))
+            .expect("normalize steady v1 Head");
+        assert!(!unchanged.created());
+        let normalized: serde_json::Value = serde_json::from_slice(
+            &fs::read(steady.path().join(LOCAL_HEAD_PATH)).expect("normalized Head"),
+        )
+        .expect("normalized Head JSON");
+        assert_eq!(normalized["format"], "folderbase-local-head-v2");
+        assert_eq!(normalized["authority"]["sha256"], authority);
+    }
+
+    #[test]
+    fn local_head_rejects_unknown_or_mismatched_authority_discriminators() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let head = local_head(root.path()).expect("captured Head");
+        let version_authority =
+            local_head_authority_sha256(&store, &head.version_id, &head.version_sha256)
+                .expect("version authority");
+        assert_ne!(head.authority.sha256(), version_authority);
+        let head_path = Path::new(LOCAL_HEAD_PATH);
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut wire: serde_json::Value = serde_json::from_slice(
+            &state
+                .read_bounded(head_path, crate::MAX_LOCAL_HEAD_BYTES)
+                .expect("read Head")
+                .expect("Head"),
+        )
+        .expect("Head JSON");
+
+        wire["authority"]["kind"] = serde_json::Value::String("version_derived_v1".to_owned());
+        state
+            .replace(head_path, &json_bytes(&wire).expect("mismatched Head"))
+            .expect("install mismatched Head");
+        assert!(matches!(
+            FolderbaseVersionStore::open(root.path()),
+            Err(FolderbaseCaptureError::InvalidLocalHead(message))
+                if message.contains("version-derived")
+        ));
+
+        wire["authority"]["kind"] = serde_json::Value::String("future_authority_v9".to_owned());
+        state
+            .replace(head_path, &json_bytes(&wire).expect("unknown Head"))
+            .expect("install unknown Head");
+        assert!(matches!(
+            FolderbaseVersionStore::open(root.path()),
+            Err(FolderbaseCaptureError::InvalidLocalHead(_))
+        ));
+    }
+
+    #[test]
     fn post_head_legacy_journal_without_tombstone_field_still_recovers() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
@@ -5216,7 +5424,9 @@ mod tests {
                         .expect("install legacy journal");
 
                     let mut head = local_head(root.path()).expect("Local Head");
-                    head.transaction_sha256 = format!("{:x}", Sha256::digest(&legacy_encoded));
+                    head.authority = LocalHeadAuthority::CaptureTransactionV1 {
+                        sha256: format!("{:x}", Sha256::digest(&legacy_encoded)),
+                    };
                     state
                         .replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&head).unwrap())
                         .expect("bind Head to legacy journal");

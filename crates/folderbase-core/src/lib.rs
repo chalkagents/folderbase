@@ -37,7 +37,7 @@ pub use error::{FolderbaseError, InitializationInventoryLimitKind, Result};
 pub use folderbase_capture::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureIgnoredPath,
     CaptureLocalHead, CapturePlan, CapturePlanEntry, CapturePlanExclusion, CapturePlanLimitKind,
-    FolderbaseCaptureError, FolderbaseVersionStore, MAX_CAPTURE_PLAN_RECORDS,
+    FolderbaseCaptureError, FolderbaseVersionStore, LocalHeadAuthority, MAX_CAPTURE_PLAN_RECORDS,
     MAX_FOLDERBASEIGNORE_BYTES, MAX_LOCAL_HEAD_BYTES,
 };
 pub use folderbase_seal::{RestoredTombstone, SealedCapture};

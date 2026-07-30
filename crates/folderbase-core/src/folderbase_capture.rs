@@ -271,12 +271,78 @@ impl CaptureIgnoredPath {
 pub struct CaptureLocalHead {
     version_id: String,
     version_sha256: String,
-    transaction_sha256: String,
+    authority: LocalHeadAuthority,
+}
+
+/// The closed meaning of one Local Head authority digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum LocalHeadAuthority {
+    #[serde(rename = "capture_transaction_v1")]
+    CaptureTransactionV1 { sha256: String },
+    #[serde(rename = "version_derived_v1")]
+    VersionDerivedV1 { sha256: String },
+}
+
+impl LocalHeadAuthority {
+    pub fn sha256(&self) -> &str {
+        match self {
+            Self::CaptureTransactionV1 { sha256 } | Self::VersionDerivedV1 { sha256 } => sha256,
+        }
+    }
+}
+
+pub(crate) fn version_derived_local_head_sha256(
+    folderbase_id: &str,
+    root_instance_sha256: &str,
+    version_id: &str,
+    version_sha256: &str,
+) -> Result<String, FolderbaseCaptureError> {
+    #[derive(Serialize)]
+    struct VersionDerivedLocalHeadAuthority<'a> {
+        format: &'static str,
+        folderbase_id: &'a str,
+        root_instance_sha256: &'a str,
+        version_id: &'a str,
+        version_sha256: &'a str,
+    }
+
+    let authority = serde_json::to_vec(&VersionDerivedLocalHeadAuthority {
+        format: "folderbase-local-head-authority-v1",
+        folderbase_id,
+        root_instance_sha256,
+        version_id,
+        version_sha256,
+    })
+    .map_err(|source| {
+        FolderbaseCaptureError::InvalidLocalHead(format!(
+            "Local Head authority encoding failed: {source}"
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(authority)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LocalHeadWire {
+    V2(LocalHeadWireV2),
+    V1(LocalHeadWireV1),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LocalHeadWire {
+struct LocalHeadWireV2 {
+    format: String,
+    folderbase_id: String,
+    root_instance_sha256: String,
+    version_id: String,
+    version_sha256: String,
+    authority: LocalHeadAuthority,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalHeadWireV1 {
     format: String,
     folderbase_id: String,
     root_instance_sha256: String,
@@ -294,8 +360,8 @@ impl CaptureLocalHead {
         &self.version_sha256
     }
 
-    pub(crate) fn transaction_sha256(&self) -> &str {
-        &self.transaction_sha256
+    pub fn authority(&self) -> &LocalHeadAuthority {
+        &self.authority
     }
 }
 
@@ -1254,26 +1320,62 @@ fn read_local_head(
     }
     let head: LocalHeadWire = serde_json::from_slice(&encoded)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
-    if head.format != "folderbase-local-head-v1"
-        || head.folderbase_id != attestation.folderbase_id
-        || head.root_instance_sha256 != attestation.root_instance_sha256
+    let (folderbase_id, root_instance_sha256, version_id, version_sha256, authority) = match head {
+        LocalHeadWire::V2(head) if head.format == "folderbase-local-head-v2" => (
+            head.folderbase_id,
+            head.root_instance_sha256,
+            head.version_id,
+            head.version_sha256,
+            head.authority,
+        ),
+        LocalHeadWire::V1(head) if head.format == "folderbase-local-head-v1" => (
+            head.folderbase_id,
+            head.root_instance_sha256,
+            head.version_id,
+            head.version_sha256,
+            LocalHeadAuthority::CaptureTransactionV1 {
+                sha256: head.transaction_sha256,
+            },
+        ),
+        _ => {
+            return Err(FolderbaseCaptureError::InvalidLocalHead(
+                "record has an unsupported Local Head format".to_owned(),
+            ));
+        }
+    };
+    if folderbase_id != attestation.folderbase_id
+        || root_instance_sha256 != attestation.root_instance_sha256
     {
         return Err(FolderbaseCaptureError::InvalidLocalHead(
             "record does not bind the attested physical Folderbase Root".to_owned(),
         ));
     }
-    validate_capture_sha256(&head.root_instance_sha256)
+    validate_capture_sha256(&root_instance_sha256)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
-    validate_capture_version_id(&head.version_id)
+    validate_capture_version_id(&version_id)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
-    validate_capture_sha256(&head.version_sha256)
+    validate_capture_sha256(&version_sha256)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
-    validate_capture_sha256(&head.transaction_sha256)
+    validate_capture_sha256(authority.sha256())
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
+    if let LocalHeadAuthority::VersionDerivedV1 { sha256 } = &authority {
+        let expected = version_derived_local_head_sha256(
+            &folderbase_id,
+            &root_instance_sha256,
+            &version_id,
+            &version_sha256,
+        )?;
+        if sha256 != &expected {
+            return Err(FolderbaseCaptureError::InvalidLocalHead(
+                "version-derived Local Head authority does not match its bound Folderbase Version"
+                    .to_owned(),
+            ));
+        }
+    }
     Ok(Some(CaptureLocalHead {
-        version_id: head.version_id,
-        version_sha256: head.version_sha256,
-        transaction_sha256: head.transaction_sha256,
+        version_id,
+        version_sha256,
+        authority,
     }))
 }
 
