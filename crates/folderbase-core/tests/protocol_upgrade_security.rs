@@ -76,27 +76,69 @@ fn native_v05_upgrade_is_an_explicit_idempotent_no_op() {
 }
 
 #[test]
-fn legacy_upgrade_refuses_reserved_extension_collisions() {
-    for collision in ["protocol_upgrade", "capture_ignore"] {
-        let root = legacy_root();
-        let path = root.path().join(".folderbase/manifest.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest");
-        if collision == "protocol_upgrade" {
-            manifest["protocol_upgrade"] = serde_json::json!({"foreign": true});
-        } else {
-            manifest["policies"]["capture_ignore"] =
-                serde_json::json!({"format":"foreign","rules":[]});
-        }
-        let bytes = format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap());
-        fs::write(&path, &bytes).expect("colliding legacy extension");
+fn native_v05_upgrade_preserves_an_unknown_vendor_extension() {
+    let root = tempdir().expect("ordinary root");
+    let initialization =
+        plan_initialization(root.path(), InitializationOptions::default()).expect("init plan");
+    initialize(&initialization).expect("initialize");
+    let path = root.path().join(".folderbase/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("manifest JSON");
+    manifest["protocol_upgrade"] = serde_json::json!({"vendor": "future-client"});
+    let before = format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap());
+    fs::write(&path, &before).expect("schema-valid vendor extension");
 
-        assert!(plan_protocol_upgrade(root.path()).is_err());
-        assert_eq!(
-            fs::read(&path).expect("preserved collision"),
-            bytes.as_bytes()
-        );
-    }
+    let plan = plan_protocol_upgrade(root.path()).expect("already-current plan");
+    let result =
+        apply_protocol_upgrade(&plan, plan.plan_digest()).expect("already-current apply result");
+
+    assert!(result.changed_paths.is_empty());
+    assert_eq!(
+        fs::read(&path).expect("preserved extension"),
+        before.as_bytes()
+    );
+}
+
+#[test]
+fn legacy_upgrade_preserves_an_unknown_vendor_extension() {
+    let root = legacy_root();
+    let path = root.path().join(".folderbase/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest");
+    manifest["protocol_upgrade"] = serde_json::json!({"vendor": "future-client"});
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("vendor extension");
+
+    let plan = plan_protocol_upgrade(root.path()).expect("upgrade plan");
+    apply_protocol_upgrade(&plan, plan.plan_digest()).expect("upgrade apply");
+    let upgraded: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("upgraded manifest"))
+            .expect("upgraded JSON");
+    assert_eq!(
+        upgraded["protocol_upgrade"],
+        serde_json::json!({"vendor": "future-client"})
+    );
+}
+
+#[test]
+fn legacy_upgrade_refuses_a_reserved_capture_ignore_collision() {
+    let root = legacy_root();
+    let path = root.path().join(".folderbase/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest");
+    manifest["policies"]["capture_ignore"] =
+        serde_json::json!({"format":"foreign","rules":[]});
+    let bytes = format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap());
+    fs::write(&path, &bytes).expect("colliding legacy extension");
+
+    assert!(plan_protocol_upgrade(root.path()).is_err());
+    assert_eq!(
+        fs::read(&path).expect("preserved collision"),
+        bytes.as_bytes()
+    );
 }
 
 #[test]
