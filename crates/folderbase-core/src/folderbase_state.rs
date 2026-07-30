@@ -548,6 +548,80 @@ impl FolderbaseState {
         Ok(modified)
     }
 
+    /// Retire only the private hard link for a restore-owned workspace file
+    /// whose bytes were modified in place. An absent stage is an idempotent
+    /// retry; a replaced stage or destination is never unlinked.
+    pub(crate) fn retire_modified_workspace_restore_stage(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<bool> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = match self.open_parent(&stage) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let stage_display = self.display_path(&stage);
+        let mut stage_file =
+            match open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display) {
+                Ok(file) => file,
+                Err(FolderbaseError::Io { source, .. })
+                    if source.kind() == io::ErrorKind::NotFound =>
+                {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if open_regular_file_identity(&destination_file, &destination_display)? != stage_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: stage_display,
+                message: "modified restore stage no longer owns the workspace file".to_owned(),
+            });
+        }
+        match verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display) {
+            Err(FolderbaseError::InvalidRecord { .. }) => {}
+            Ok(()) => {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: stage_display,
+                    message: "restore stage is no longer modified".to_owned(),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+
+        if regular_file_identity(&stage_parent, &stage_name, &stage_display)? != stage_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: stage_display,
+                message: "modified restore stage changed before retirement".to_owned(),
+            });
+        }
+        stage_parent
+            .remove_file(&stage_name)
+            .map_err(|source| FolderbaseError::io(&stage_display, source))?;
+        sync_directory(&stage_parent, &stage_display)?;
+        self.verify_still_attached()?;
+        Ok(true)
+    }
+
     /// Revalidate one published restore against its retained private stage.
     ///
     /// Success proves that the ambient Folderbase root is still the retained
