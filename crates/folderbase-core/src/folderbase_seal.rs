@@ -214,6 +214,7 @@ struct CaptureTransaction {
 struct ActiveCaptureTransaction {
     transaction: CaptureTransaction,
     authority_sha256: String,
+    wire: CaptureTransactionWire,
 }
 
 impl Deref for ActiveCaptureTransaction {
@@ -222,6 +223,12 @@ impl Deref for ActiveCaptureTransaction {
     fn deref(&self) -> &Self::Target {
         &self.transaction
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureTransactionWire {
+    Current,
+    ReleasedV1 { encoded_bytes: u64 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -644,7 +651,7 @@ impl FolderbaseVersionStore {
         ensure_same_plan(&plan, &current_plan)?;
         let plan_sha256 = capture_plan_sha256(&plan)?;
         let current_head = current_plan.current_local_head().map(JournalHead::from);
-        let mut active = read_active_transaction(&state)?;
+        let mut active = read_active_transaction_with_limit(&state, maximum_transaction_bytes)?;
 
         if let Some(transaction) = active.as_ref() {
             validate_transaction(self, transaction)?;
@@ -726,6 +733,7 @@ impl FolderbaseVersionStore {
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
+                    CaptureTransactionWire::Current,
                     maximum_transaction_bytes,
                     maximum_version_bytes,
                 )?;
@@ -738,6 +746,7 @@ impl FolderbaseVersionStore {
                 ActiveCaptureTransaction {
                     transaction,
                     authority_sha256,
+                    wire: CaptureTransactionWire::Current,
                 }
             }
         };
@@ -753,6 +762,7 @@ impl FolderbaseVersionStore {
         preflight_capture_envelopes(
             &plan,
             &transaction,
+            transaction.wire,
             maximum_transaction_bytes,
             maximum_version_bytes,
         )?;
@@ -2714,10 +2724,23 @@ fn live_state_matches_prior(
 fn preflight_capture_envelopes(
     plan: &CapturePlan,
     transaction: &CaptureTransaction,
+    wire: CaptureTransactionWire,
     maximum_transaction_bytes: u64,
     maximum_version_bytes: u64,
 ) -> Result<(), FolderbaseCaptureError> {
-    encode_active_transaction(transaction, maximum_transaction_bytes)?;
+    match wire {
+        CaptureTransactionWire::Current => {
+            encode_active_transaction(transaction, maximum_transaction_bytes)?;
+        }
+        CaptureTransactionWire::ReleasedV1 { encoded_bytes }
+            if encoded_bytes > maximum_transaction_bytes =>
+        {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "released v1 active journal exceeds its bounded record limit".to_owned(),
+            ));
+        }
+        CaptureTransactionWire::ReleasedV1 { .. } => {}
+    }
 
     if transaction.assignments.len() != plan.entries().len() {
         return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
@@ -3750,19 +3773,29 @@ fn validate_committed_transaction(
 fn read_active_transaction(
     state: &FolderbaseState,
 ) -> Result<Option<ActiveCaptureTransaction>, FolderbaseCaptureError> {
-    let Some(encoded) = state.read_bounded(
-        Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
-        MAX_CAPTURE_TRANSACTION_BYTES,
-    )?
+    read_active_transaction_with_limit(state, MAX_CAPTURE_TRANSACTION_BYTES)
+}
+
+fn read_active_transaction_with_limit(
+    state: &FolderbaseState,
+    maximum_bytes: u64,
+) -> Result<Option<ActiveCaptureTransaction>, FolderbaseCaptureError> {
+    let Some(encoded) =
+        state.read_bounded(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), maximum_bytes)?
     else {
         return Ok(None);
     };
     let authority_sha256 = format!("{:x}", Sha256::digest(&encoded));
-    let transaction = match serde_json::from_slice::<CaptureTransaction>(&encoded) {
-        Ok(transaction) => transaction,
+    let (transaction, wire) = match serde_json::from_slice::<CaptureTransaction>(&encoded) {
+        Ok(transaction) => (transaction, CaptureTransactionWire::Current),
         Err(current_error) => {
             match serde_json::from_slice::<ReleasedV1CaptureTransaction>(&encoded) {
-                Ok(transaction) => transaction.into(),
+                Ok(transaction) => (
+                    transaction.into(),
+                    CaptureTransactionWire::ReleasedV1 {
+                        encoded_bytes: encoded.len() as u64,
+                    },
+                ),
                 Err(released_error) => {
                     return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
                         "active journal is invalid JSON for current ({current_error}) and released v1 ({released_error}) wire formats"
@@ -3774,6 +3807,7 @@ fn read_active_transaction(
     Ok(Some(ActiveCaptureTransaction {
         transaction,
         authority_sha256,
+        wire,
     }))
 }
 
