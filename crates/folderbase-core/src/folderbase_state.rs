@@ -689,17 +689,32 @@ impl FolderbaseState {
     pub(crate) fn retire_workspace_restore_stage_with_hook(
         &self,
         stage: &Path,
+        stage_quarantine: &Path,
         rescue: &Path,
+        rescue_quarantine: &Path,
         destination: &Path,
         expected_fidelity: Option<(&str, u64, bool)>,
         mut checkpoint: impl FnMut(bool),
     ) -> Result<bool> {
         let stage = state_relative(stage)?;
+        let stage_quarantine = state_relative(stage_quarantine)?;
         let rescue = state_relative(rescue)?;
+        let rescue_quarantine = state_relative(rescue_quarantine)?;
         let destination = safe_workspace_relative(destination)?;
-        self.require_mutable(&stage)?;
-        self.require_mutable(&rescue)?;
-        if stage.parent() != rescue.parent() || stage == rescue {
+        for private in [&stage, &stage_quarantine, &rescue, &rescue_quarantine] {
+            self.require_mutable(private)?;
+        }
+        let private_parent = stage.parent();
+        if private_parent != stage_quarantine.parent()
+            || private_parent != rescue.parent()
+            || private_parent != rescue_quarantine.parent()
+            || stage == stage_quarantine
+            || stage == rescue
+            || stage == rescue_quarantine
+            || stage_quarantine == rescue
+            || stage_quarantine == rescue_quarantine
+            || rescue == rescue_quarantine
+        {
             return Err(FolderbaseError::UnsafePath(self.display_path(&rescue)));
         }
         self.verify_still_attached()?;
@@ -711,58 +726,75 @@ impl FolderbaseState {
             }
             Err(error) => return Err(error),
         };
+        let (stage_quarantine_parent, stage_quarantine_name) =
+            self.open_parent(&stage_quarantine)?;
         let (rescue_parent, rescue_name) = self.open_parent(&rescue)?;
+        let (rescue_quarantine_parent, rescue_quarantine_name) =
+            self.open_parent(&rescue_quarantine)?;
         let stage_display = self.display_path(&stage);
+        let stage_quarantine_display = self.display_path(&stage_quarantine);
         let rescue_display = self.display_path(&rescue);
+        let rescue_quarantine_display = self.display_path(&rescue_quarantine);
         let destination_display = self.display_root.join(&destination);
         let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
 
-        let stage_file =
-            match open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display) {
-                Ok(file) => Some(file),
+        let open_optional =
+            |parent: &Dir, name: &OsStr, display: &Path| match open_regular_file_nofollow(
+                parent, name, display,
+            ) {
+                Ok(file) => Ok(Some(file)),
                 Err(FolderbaseError::Io { source, .. })
                     if source.kind() == io::ErrorKind::NotFound =>
                 {
-                    None
+                    Ok(None)
                 }
-                Err(error) => return Err(error),
+                Err(error) => Err(error),
             };
-        let rescue_file =
-            match open_regular_file_nofollow(&rescue_parent, &rescue_name, &rescue_display) {
-                Ok(file) => Some(file),
-                Err(FolderbaseError::Io { source, .. })
-                    if source.kind() == io::ErrorKind::NotFound =>
-                {
-                    None
-                }
-                Err(error) => return Err(error),
-            };
+        let stage_file = open_optional(&stage_parent, &stage_name, &stage_display)?;
+        let stage_quarantine_file = open_optional(
+            &stage_quarantine_parent,
+            &stage_quarantine_name,
+            &stage_quarantine_display,
+        )?;
+        let rescue_file = open_optional(&rescue_parent, &rescue_name, &rescue_display)?;
+        let rescue_quarantine_file = open_optional(
+            &rescue_quarantine_parent,
+            &rescue_quarantine_name,
+            &rescue_quarantine_display,
+        )?;
 
-        let retained_file = stage_file.as_ref().or(rescue_file.as_ref());
+        let retained_file = stage_file
+            .as_ref()
+            .or(stage_quarantine_file.as_ref())
+            .or(rescue_file.as_ref())
+            .or(rescue_quarantine_file.as_ref());
         let Some(retained_file) = retained_file else {
             return Ok(false);
         };
         let retained_display = if stage_file.is_some() {
             &stage_display
-        } else {
+        } else if stage_quarantine_file.is_some() {
+            &stage_quarantine_display
+        } else if rescue_file.is_some() {
             &rescue_display
+        } else {
+            &rescue_quarantine_display
         };
         let retained_identity = open_regular_file_identity(retained_file, retained_display)?;
-        if let Some(file) = stage_file.as_ref()
-            && open_regular_file_identity(file, &stage_display)? != retained_identity
-        {
-            return Err(FolderbaseError::InvalidRecord {
-                path: stage_display,
-                message: "restore stage identity is inconsistent".to_owned(),
-            });
-        }
-        if let Some(file) = rescue_file.as_ref()
-            && open_regular_file_identity(file, &rescue_display)? != retained_identity
-        {
-            return Err(FolderbaseError::InvalidRecord {
-                path: rescue_display,
-                message: "restore rescue does not name the retained stage".to_owned(),
-            });
+        for (file, display) in [
+            (stage_file.as_ref(), &stage_display),
+            (stage_quarantine_file.as_ref(), &stage_quarantine_display),
+            (rescue_file.as_ref(), &rescue_display),
+            (rescue_quarantine_file.as_ref(), &rescue_quarantine_display),
+        ] {
+            if let Some(file) = file
+                && open_regular_file_identity(file, display)? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display.to_path_buf(),
+                    message: "restore private names do not share one retained inode".to_owned(),
+                });
+            }
         }
 
         let destination_file = open_regular_file_nofollow(
@@ -773,8 +805,8 @@ impl FolderbaseState {
         if open_regular_file_identity(&destination_file, &destination_display)? != retained_identity
         {
             return Err(FolderbaseError::InvalidRecord {
-                path: stage_display,
-                message: "restore stage no longer owns the workspace file".to_owned(),
+                path: retained_display.to_path_buf(),
+                message: "restore private state no longer owns the workspace file".to_owned(),
             });
         }
         if let Some((digest, bytes, executable)) = expected_fidelity {
@@ -790,8 +822,13 @@ impl FolderbaseState {
             )?;
         }
 
-        if rescue_file.is_none() {
-            match stage_parent.hard_link(&stage_name, &rescue_parent, &rescue_name) {
+        if rescue_file.is_none() && rescue_quarantine_file.is_none() {
+            let (source_parent, source_name) = if stage_file.is_some() {
+                (&stage_parent, &stage_name)
+            } else {
+                (&stage_quarantine_parent, &stage_quarantine_name)
+            };
+            match source_parent.hard_link(source_name, &rescue_parent, &rescue_name) {
                 Ok(()) => sync_directory(&rescue_parent, &rescue_display)?,
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(source) => return Err(FolderbaseError::io(&rescue_display, source)),
@@ -806,6 +843,12 @@ impl FolderbaseState {
             }
         }
 
+        if stage_file.is_some() && stage_quarantine_file.is_some() {
+            return Err(FolderbaseError::InvalidRecord {
+                path: stage_quarantine_display,
+                message: "restore stage and quarantine both exist".to_owned(),
+            });
+        }
         if stage_file.is_some() {
             if regular_file_identity(&stage_parent, &stage_name, &stage_display)?
                 != retained_identity
@@ -819,31 +862,123 @@ impl FolderbaseState {
             {
                 return Err(FolderbaseError::InvalidRecord {
                     path: stage_display,
-                    message: "restore ownership changed at the retirement boundary".to_owned(),
+                    message: "restore ownership changed before stage quarantine".to_owned(),
                 });
             }
             checkpoint(false);
             stage_parent
-                .remove_file(&stage_name)
-                .map_err(|source| FolderbaseError::io(&stage_display, source))?;
+                .rename(
+                    &stage_name,
+                    &stage_quarantine_parent,
+                    &stage_quarantine_name,
+                )
+                .map_err(|source| FolderbaseError::io(&stage_quarantine_display, source))?;
             sync_directory(&stage_parent, &stage_display)?;
+            if regular_file_identity(
+                &stage_quarantine_parent,
+                &stage_quarantine_name,
+                &stage_quarantine_display,
+            )? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: stage_quarantine_display,
+                    message: "restore stage quarantine preserved a replacement".to_owned(),
+                });
+            }
         }
 
-        if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
-            != retained_identity
-            || regular_file_identity(&destination_parent, &destination_name, &destination_display)?
-                != retained_identity
+        let stage_is_quarantined = stage_file.is_some() || stage_quarantine_file.is_some();
+        if stage_is_quarantined
+            && (regular_file_identity(
+                &stage_quarantine_parent,
+                &stage_quarantine_name,
+                &stage_quarantine_display,
+            )? != retained_identity
+                || regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                    != retained_identity
+                || regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )? != retained_identity)
         {
             return Err(FolderbaseError::InvalidRecord {
-                path: rescue_display,
-                message: "restore destination changed after private stage retirement".to_owned(),
+                path: stage_quarantine_display,
+                message: "restore ownership changed after stage quarantine".to_owned(),
             });
         }
-        checkpoint(true);
-        rescue_parent
-            .remove_file(&rescue_name)
-            .map_err(|source| FolderbaseError::io(&rescue_display, source))?;
-        sync_directory(&rescue_parent, &rescue_display)?;
+        if stage_is_quarantined {
+            stage_quarantine_parent
+                .remove_file(&stage_quarantine_name)
+                .map_err(|source| FolderbaseError::io(&stage_quarantine_display, source))?;
+            sync_directory(&stage_quarantine_parent, &stage_quarantine_display)?;
+        }
+
+        if rescue_file.is_some() && rescue_quarantine_file.is_some() {
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_quarantine_display,
+                message: "restore rescue and quarantine both exist".to_owned(),
+            });
+        }
+        let rescue_is_normal = rescue_file.is_some() || rescue_quarantine_file.is_none();
+        if rescue_is_normal {
+            if regular_file_identity(&rescue_parent, &rescue_name, &rescue_display)?
+                != retained_identity
+                || regular_file_identity(
+                    &destination_parent,
+                    &destination_name,
+                    &destination_display,
+                )? != retained_identity
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: rescue_display,
+                    message: "restore ownership changed before rescue quarantine".to_owned(),
+                });
+            }
+            checkpoint(true);
+            rescue_parent
+                .rename(
+                    &rescue_name,
+                    &rescue_quarantine_parent,
+                    &rescue_quarantine_name,
+                )
+                .map_err(|source| FolderbaseError::io(&rescue_quarantine_display, source))?;
+            sync_directory(&rescue_parent, &rescue_display)?;
+        }
+
+        let moved_rescue_identity = regular_file_identity(
+            &rescue_quarantine_parent,
+            &rescue_quarantine_name,
+            &rescue_quarantine_display,
+        )?;
+        if moved_rescue_identity != retained_identity {
+            if regular_file_identity(&destination_parent, &destination_name, &destination_display)?
+                == retained_identity
+            {
+                match destination_parent.hard_link(&destination_name, &rescue_parent, &rescue_name)
+                {
+                    Ok(()) => sync_directory(&rescue_parent, &rescue_display)?,
+                    Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(source) => return Err(FolderbaseError::io(&rescue_display, source)),
+                }
+            }
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_quarantine_display,
+                message: "restore rescue quarantine preserved a replacement".to_owned(),
+            });
+        }
+        if regular_file_identity(&destination_parent, &destination_name, &destination_display)?
+            != retained_identity
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: rescue_quarantine_display,
+                message: "restore destination changed after rescue quarantine".to_owned(),
+            });
+        }
+        rescue_quarantine_parent
+            .remove_file(&rescue_quarantine_name)
+            .map_err(|source| FolderbaseError::io(&rescue_quarantine_display, source))?;
+        sync_directory(&rescue_quarantine_parent, &rescue_quarantine_display)?;
         self.verify_still_attached()?;
         Ok(true)
     }
