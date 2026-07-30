@@ -7670,6 +7670,47 @@ mod tests {
     }
 
     #[test]
+    fn extra_hard_link_before_restored_object_bytes_read_fails_without_head_movement() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let restored = store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+        let plan = store.plan_capture().expect("authority-aware plan");
+
+        let error = store
+            .seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::BeforeObjectBytesRead("active.bin".to_owned())
+                {
+                    fs::hard_link(
+                        root.path().join("active.bin"),
+                        root.path().join("unapproved-extra-link.bin"),
+                    )
+                    .expect("concurrent extra hard link");
+                }
+            })
+            .expect_err("an uncommitted hard link must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::CaptureStateChanged(path)
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            local_head(root.path())
+                .expect("restored Local Head remains")
+                .version_id,
+            restored.version_id()
+        );
+    }
+
+    #[test]
     fn abandoned_attempt_removes_only_intent_and_reuses_safe_content_addressed_orphans() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
