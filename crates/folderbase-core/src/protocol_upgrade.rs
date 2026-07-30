@@ -316,13 +316,22 @@ pub fn apply_protocol_upgrade(
     plan: &ProtocolUpgradePlan,
     expected: &ProtocolUpgradePlanDigest,
 ) -> Result<ProtocolUpgradeResult> {
-    apply_protocol_upgrade_with_hook(plan, expected, || {})
+    apply_protocol_upgrade_with_hooks(plan, expected, || {}, || Ok(()))
 }
 
 fn apply_protocol_upgrade_with_hook(
     plan: &ProtocolUpgradePlan,
     expected: &ProtocolUpgradePlanDigest,
     before_activation: impl FnOnce(),
+) -> Result<ProtocolUpgradeResult> {
+    apply_protocol_upgrade_with_hooks(plan, expected, before_activation, || Ok(()))
+}
+
+fn apply_protocol_upgrade_with_hooks(
+    plan: &ProtocolUpgradePlan,
+    expected: &ProtocolUpgradePlanDigest,
+    before_activation: impl FnOnce(),
+    after_activation: impl FnOnce() -> Result<()>,
 ) -> Result<ProtocolUpgradeResult> {
     expected.validate()?;
     let local = LocalVersionStore::open_read_only(&plan.root)?;
@@ -366,6 +375,7 @@ fn apply_protocol_upgrade_with_hook(
             },
             other => other,
         })?;
+    after_activation()?;
     if let Some(expected_ignore_snapshot) = &plan.attested_ignore_snapshot_sha256 {
         let current_ignore_snapshot = read_ignore_snapshot_sha256(&state, &plan.root);
         if !matches!(
@@ -535,6 +545,14 @@ fn update_bytes(digest: &mut Sha256, bytes: &[u8]) {
 }
 
 fn read_ignore_snapshot_sha256(state: &FolderbaseState, root: &Path) -> Result<String> {
+    read_ignore_snapshot_sha256_with_hook(state, root, || {})
+}
+
+fn read_ignore_snapshot_sha256_with_hook(
+    state: &FolderbaseState,
+    root: &Path,
+    after_read: impl FnOnce(),
+) -> Result<String> {
     state.verify_still_attached()?;
     let mut digest = Sha256::new();
     digest.update(b"folderbase-protocol-upgrade-ignore-snapshot-v1\0");
@@ -565,6 +583,7 @@ fn read_ignore_snapshot_sha256(state: &FolderbaseState, root: &Path) -> Result<S
         }
         update_bytes(&mut digest, &bytes);
     }
+    after_read();
     state.verify_still_attached()?;
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -696,5 +715,98 @@ mod tests {
             );
             assert_eq!(fs::read(&ignore_path).ok().as_deref(), replacement);
         }
+    }
+
+    #[test]
+    fn restart_never_acknowledges_an_unvalidated_policy_transition() {
+        let root = tempdir().expect("legacy root");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(
+            root.path().join(".folderbase/manifest.json"),
+            LEGACY_MANIFEST,
+        )
+        .expect("manifest");
+        fs::write(root.path().join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+        let ignore_path = root.path().join(".folderbaseignore");
+        fs::write(&ignore_path, b"node_modules/\n").expect("ignore");
+
+        let plan = plan_protocol_upgrade(root.path()).expect("upgrade plan");
+        let expected = plan.plan_digest().clone();
+        let interrupted = apply_protocol_upgrade_with_hooks(
+            &plan,
+            &expected,
+            || fs::write(&ignore_path, b"dist/\n").expect("concurrent policy transition"),
+            || {
+                Err(FolderbaseError::ProtocolUpgradeBlocked(
+                    "simulated process interruption",
+                ))
+            },
+        );
+        assert!(interrupted.is_err());
+        assert_ne!(
+            fs::read(root.path().join(MANIFEST_PATH)).expect("activated manifest"),
+            LEGACY_MANIFEST
+        );
+
+        let retry = plan_protocol_upgrade(root.path()).expect("restart plan");
+        assert!(
+            apply_protocol_upgrade(&retry, retry.plan_digest()).is_err(),
+            "a receipt cannot acknowledge activation that crashed before policy validation"
+        );
+        assert_eq!(
+            fs::read(root.path().join(MANIFEST_PATH)).expect("safe rollback"),
+            LEGACY_MANIFEST
+        );
+    }
+
+    #[test]
+    fn ignore_snapshot_rejects_a_post_read_same_byte_path_replacement() {
+        let root = tempdir().expect("legacy root");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(
+            root.path().join(".folderbase/manifest.json"),
+            LEGACY_MANIFEST,
+        )
+        .expect("manifest");
+        fs::write(root.path().join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+        let ignore_path = root.path().join(".folderbaseignore");
+        fs::write(&ignore_path, b"node_modules/\n").expect("ignore");
+        let state = FolderbaseState::open_existing_read_only(root.path()).expect("state");
+
+        let result = read_ignore_snapshot_sha256_with_hook(&state, root.path(), || {
+            fs::remove_file(&ignore_path).expect("remove observed policy");
+            fs::write(&ignore_path, b"node_modules/\n").expect("same-byte replacement");
+        });
+
+        assert!(
+            result.is_err(),
+            "the retained file is not enough; the visible path must be reopened and rebound"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn ignore_snapshot_rejects_a_post_read_hard_link_topology_change() {
+        let root = tempdir().expect("legacy root");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(
+            root.path().join(".folderbase/manifest.json"),
+            LEGACY_MANIFEST,
+        )
+        .expect("manifest");
+        fs::write(root.path().join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+        let ignore_path = root.path().join(".folderbaseignore");
+        fs::write(&ignore_path, b"node_modules/\n").expect("ignore");
+        let state = FolderbaseState::open_existing_read_only(root.path()).expect("state");
+
+        let result = read_ignore_snapshot_sha256_with_hook(&state, root.path(), || {
+            fs::hard_link(&ignore_path, root.path().join("ignore.backup"))
+                .expect("new hard-link authority");
+        });
+
+        assert!(
+            result.is_err(),
+            "link topology is part of the approved policy identity"
+        );
     }
 }

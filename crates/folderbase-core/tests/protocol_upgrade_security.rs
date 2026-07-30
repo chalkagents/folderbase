@@ -1,8 +1,9 @@
 use std::fs;
 
 use folderbase_core::{
-    FolderbaseError, FolderbaseVersionStore, InitializationOptions, apply_protocol_upgrade,
-    initialize, plan_initialization, plan_protocol_upgrade,
+    FolderbaseError, FolderbaseVersionStore, InitializationOptions, ValidationLevel,
+    apply_protocol_upgrade, attest_folderbase_root, initialize, plan_initialization,
+    plan_protocol_upgrade, template_application_history, validate,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -223,6 +224,39 @@ fn an_applied_receipt_cannot_make_a_mutated_target_match_the_reviewed_plan() {
         apply_protocol_upgrade(&plan, &expected).is_err(),
         "the durable receipt cannot authorize a different target manifest"
     );
+}
+
+#[test]
+fn stale_receipt_target_is_rejected_across_core_admission_seams() {
+    let root = legacy_root();
+    let plan = plan_protocol_upgrade(root.path()).expect("upgrade plan");
+    apply_protocol_upgrade(&plan, plan.plan_digest()).expect("manifest activation");
+
+    let manifest_path = root.path().join(".folderbase/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("activated manifest"))
+            .expect("manifest JSON");
+    manifest["policies"]["availability"] = serde_json::json!("cloud_only");
+    fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("schema-valid target mutation");
+
+    assert!(
+        attest_folderbase_root(root.path()).is_err(),
+        "ordinary root admission must validate receipt semantics"
+    );
+    assert!(
+        FolderbaseVersionStore::open(root.path()).is_err(),
+        "capture admission must reject the stale receipt"
+    );
+    assert!(
+        template_application_history(root.path()).is_err(),
+        "template admission must reject the stale receipt"
+    );
+    let report = validate(root.path(), ValidationLevel::Shallow).expect("validation report");
+    assert!(!report.valid, "validation must surface the stale receipt");
 }
 
 #[test]
