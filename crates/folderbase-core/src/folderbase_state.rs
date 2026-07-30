@@ -362,19 +362,30 @@ impl FolderbaseState {
         }
         match stage_parent.open_with(&stage_name, &write_options) {
             Ok(mut staged) => {
-                let copy_result = copy_exact_sha256(
-                    &mut source_file,
-                    &mut staged,
-                    bytes,
-                    digest,
-                    &source_display,
-                    &stage_display,
-                )
-                .and_then(|()| {
-                    staged
-                        .sync_all()
-                        .map_err(|source| FolderbaseError::io(&stage_display, source))
-                });
+                let copy_result =
+                    copy_exact_sha256(
+                        &mut source_file,
+                        &mut staged,
+                        bytes,
+                        digest,
+                        &source_display,
+                        &stage_display,
+                    )
+                    .and_then(|()| {
+                        #[cfg(unix)]
+                        {
+                            use cap_std::fs::PermissionsExt;
+
+                            staged
+                                .set_permissions(cap_std::fs::Permissions::from_mode(
+                                    if executable { 0o700 } else { 0o600 },
+                                ))
+                                .map_err(|source| FolderbaseError::io(&stage_display, source))?;
+                        }
+                        staged
+                            .sync_all()
+                            .map_err(|source| FolderbaseError::io(&stage_display, source))
+                    });
                 drop(staged);
                 if let Err(error) = copy_result {
                     let _ = stage_parent.remove_file(&stage_name);
