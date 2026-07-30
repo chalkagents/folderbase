@@ -91,3 +91,27 @@ pub(crate) fn stable_file_identity_sha256(file: &File) -> io::Result<String> {
 
     Ok(format!("{:x}", digest.finalize()))
 }
+
+pub(crate) fn stable_file_link_count(file: &File) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        return Ok(file.metadata()?.nlink());
+    }
+
+    #[cfg(windows)]
+    {
+        let information = winapi_util::file::information(file.try_clone()?)?;
+        return Ok(u64::from(information.number_of_links()));
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stable file link count is unavailable on this platform",
+        ))
+    }
+}

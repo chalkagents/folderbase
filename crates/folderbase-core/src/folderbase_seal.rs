@@ -20,12 +20,13 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    FolderbaseError,
+    FolderbaseError, FolderbaseRootAttestation,
     folderbase_capture::{
-        CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureLocalHead,
-        CaptureMetadataFingerprint, CapturePlan, CapturePlanEntry, FolderbaseCaptureError,
-        FolderbaseVersionStore, LocalHeadAuthority, capture_entry_fingerprint,
-        restore_authority_count, version_derived_local_head_sha256,
+        CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureLinkCommitment,
+        CaptureLocalHead, CaptureMetadataFingerprint, CapturePlan, CapturePlanEntry,
+        FolderbaseCaptureError, FolderbaseVersionStore, LocalHeadAuthority,
+        capture_entry_fingerprint, restore_authority_count, verify_capture_link_commitment,
+        version_derived_local_head_sha256,
     },
     folderbase_restore_authority::{
         MAX_RESTORE_AUTHORITIES, MAX_RESTORE_AUTHORITY_BYTES, RESTORE_AUTHORITY_FORMAT_V1,
@@ -130,6 +131,7 @@ impl SealedCapture {
 enum CaptureCheckpoint {
     StateCapabilityOpen,
     BeforeObjectBytesRead(String),
+    AfterObjectBytesRead(String),
     JournalDurable,
     ObjectWritesDurable,
     VersionDurable,
@@ -182,6 +184,11 @@ struct CaptureAssignment {
     prior_object_version_id: Option<String>,
     reused_object: bool,
     observed: CaptureMetadataFingerprint,
+    #[serde(
+        default,
+        skip_serializing_if = "CaptureLinkCommitment::is_legacy_default"
+    )]
+    link_commitment: CaptureLinkCommitment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2034,6 +2041,7 @@ fn finish_restore_projection(
         prior_object_version_id: transaction.binding.object_version_id().map(str::to_owned),
         reused_object: true,
         observed,
+        link_commitment: CaptureLinkCommitment::default(),
     };
     let version_id = VersionId::parse(
         transaction
@@ -2106,6 +2114,8 @@ struct PlanDigestEntry<'a> {
     executable: Option<bool>,
     symlink_target: Option<&'a str>,
     observed: &'a CaptureMetadataFingerprint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_commitment: Option<&'a CaptureLinkCommitment>,
 }
 
 #[derive(Serialize)]
@@ -2116,8 +2126,16 @@ struct PlanDigestExclusion<'a> {
 }
 
 fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureError> {
+    let has_restore_authority = plan
+        .entries()
+        .iter()
+        .any(|entry| !entry.link_commitment().is_legacy_default());
     let digest = PlanDigest {
-        format: "folderbase-capture-plan-digest-v1",
+        format: if has_restore_authority {
+            "folderbase-capture-plan-digest-v2"
+        } else {
+            "folderbase-capture-plan-digest-v1"
+        },
         folderbase_id: plan.folderbase_id(),
         root_instance_sha256: plan.root_instance_sha256(),
         root_manifest_sha256: plan.root_manifest_sha256(),
@@ -2134,6 +2152,8 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
                 executable: entry.executable(),
                 symlink_target: entry.symlink_target(),
                 observed: entry.observed(),
+                link_commitment: (!entry.link_commitment().is_legacy_default())
+                    .then_some(entry.link_commitment()),
             })
             .collect(),
         exclusions: plan
@@ -2211,6 +2231,7 @@ fn ensure_same_plan(
             || left.executable() != right.executable()
             || left.symlink_target() != right.symlink_target()
             || left.observed() != right.observed()
+            || left.link_commitment() != right.link_commitment()
         {
             return Err(FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(
                 if left.path() <= right.path() {
@@ -2312,6 +2333,7 @@ fn assign_capture_transaction(
             prior_object_version_id,
             reused_object,
             observed: entry.observed().clone(),
+            link_commitment: entry.link_commitment().clone(),
         });
     }
 
@@ -2548,16 +2570,8 @@ fn live_state_matches_prior(
         match entry.kind() {
             CaptureEntryKind::Directory => {}
             CaptureEntryKind::RegularFile => {
-                let content = hash_regular_entry(
-                    &store.root_attestation.root,
-                    entry,
-                    None::<(&LocalVersionStore, &FolderbaseState)>,
-                    || {
-                        checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
-                            entry.path().to_owned(),
-                        ));
-                    },
-                )?;
+                let content =
+                    hash_regular_entry(&store.root_attestation, state, entry, None, checkpoint)?;
                 if binding.content_sha256() != Some(content.digest.as_str())
                     || binding.bytes() != Some(content.bytes)
                     || binding.executable() != entry.executable()
@@ -2767,6 +2781,7 @@ fn build_and_install_capture(
         if assignment.path != entry.path()
             || assignment.kind != entry.kind()
             || assignment.observed != *entry.observed()
+            || assignment.link_commitment != *entry.link_commitment()
         {
             return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
                 "journal assignment does not match CapturePlan metadata".to_owned(),
@@ -2781,14 +2796,11 @@ fn build_and_install_capture(
             }
             CaptureEntryKind::RegularFile => {
                 let content = hash_regular_entry(
-                    &store.root_attestation.root,
+                    &store.root_attestation,
+                    state,
                     entry,
-                    Some((local, state)),
-                    || {
-                        checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
-                            entry.path().to_owned(),
-                        ));
-                    },
+                    Some(local),
+                    checkpoint,
                 )?;
                 let prior_binding = prior_bindings.get(entry.path()).copied();
                 let object_version_id = if prior_binding.is_some_and(|binding| {
@@ -2964,23 +2976,27 @@ fn capture_root_manifest(
 }
 
 fn hash_regular_entry(
-    root: &Path,
+    root_attestation: &FolderbaseRootAttestation,
+    state: &FolderbaseState,
     entry: &CapturePlanEntry,
-    installer: Option<(&LocalVersionStore, &FolderbaseState)>,
-    before_read: impl FnOnce(),
+    installer: Option<&LocalVersionStore>,
+    checkpoint: &mut impl FnMut(&CaptureCheckpoint),
 ) -> Result<ContentDigest, FolderbaseCaptureError> {
     let relative = Path::new(entry.path());
-    let display = root.join(relative);
-    let mut file = open_regular_beneath(root, relative)?;
+    let display = root_attestation.root.join(relative);
+    let mut file = open_regular_beneath(&root_attestation.root, relative)?;
     let before = fingerprint_std_file(&file, &display)?;
     if before != *entry.observed() {
         return Err(FolderbaseCaptureError::CaptureStateChanged(
             relative.to_path_buf(),
         ));
     }
-    before_read();
+    checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
+        entry.path().to_owned(),
+    ));
+    verify_capture_link_commitment(root_attestation, state, entry, &file)?;
     let content = match installer {
-        Some((local, state)) => local
+        Some(local) => local
             .install_content_reader_in(
                 state,
                 &mut file,
@@ -2995,8 +3011,12 @@ fn hash_regular_entry(
         )
         .map_err(|source| bounded_source_error(source, relative))?,
     };
+    checkpoint(&CaptureCheckpoint::AfterObjectBytesRead(
+        entry.path().to_owned(),
+    ));
+    verify_capture_link_commitment(root_attestation, state, entry, &file)?;
     let after = fingerprint_std_file(&file, &display)?;
-    let reopened = open_regular_beneath(root, relative)?;
+    let reopened = open_regular_beneath(&root_attestation.root, relative)?;
     let reopened_fingerprint = fingerprint_std_file(&reopened, &display)?;
     if after != *entry.observed()
         || reopened_fingerprint != *entry.observed()
@@ -3422,6 +3442,14 @@ fn validate_transaction(
         if let Some(version_id) = &assignment.prior_object_version_id {
             VersionId::parse(version_id.clone())?;
         }
+        if !assignment.link_commitment.is_well_formed()
+            || (assignment.kind != CaptureEntryKind::RegularFile
+                && !assignment.link_commitment.is_legacy_default())
+        {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "journal link commitment is malformed or belongs to a non-regular entry".to_owned(),
+            ));
+        }
         previous = Some(assignment.path.as_str());
     }
     let mut previous = None;
@@ -3471,6 +3499,7 @@ fn validate_transaction_against_plan(
         if assignment.path != entry.path()
             || assignment.kind != entry.kind()
             || assignment.observed != *entry.observed()
+            || assignment.link_commitment != *entry.link_commitment()
         {
             return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
                 "journal assignment does not exactly match the approved CapturePlan".to_owned(),
@@ -7275,6 +7304,17 @@ mod tests {
         }
 
         #[derive(Serialize)]
+        struct ReleasedCaptureAssignment {
+            path: String,
+            kind: CaptureEntryKind,
+            object_id: String,
+            candidate_object_version_id: Option<String>,
+            prior_object_version_id: Option<String>,
+            reused_object: bool,
+            observed: CaptureMetadataFingerprint,
+        }
+
+        #[derive(Serialize)]
         struct ReleasedCaptureTransaction {
             format: String,
             transaction_id: String,
@@ -7287,7 +7327,7 @@ mod tests {
             root_manifest_object_id: String,
             root_manifest_candidate_version_id: String,
             prior_root_manifest_version_id: Option<String>,
-            assignments: Vec<CaptureAssignment>,
+            assignments: Vec<ReleasedCaptureAssignment>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             target_tombstones: Vec<Tombstone>,
         }
@@ -7317,7 +7357,19 @@ mod tests {
                     .root_manifest_candidate_version_id
                     .clone(),
                 prior_root_manifest_version_id: transaction.prior_root_manifest_version_id.clone(),
-                assignments: transaction.assignments.clone(),
+                assignments: transaction
+                    .assignments
+                    .iter()
+                    .map(|assignment| ReleasedCaptureAssignment {
+                        path: assignment.path.clone(),
+                        kind: assignment.kind,
+                        object_id: assignment.object_id.clone(),
+                        candidate_object_version_id: assignment.candidate_object_version_id.clone(),
+                        prior_object_version_id: assignment.prior_object_version_id.clone(),
+                        reused_object: assignment.reused_object,
+                        observed: assignment.observed.clone(),
+                    })
+                    .collect(),
                 target_tombstones: transaction.target_tombstones.clone(),
             };
             let mut encoded =
@@ -7462,6 +7514,15 @@ mod tests {
                     wire.as_object_mut()
                         .expect("journal object")
                         .remove("target_tombstones");
+                    for assignment in wire["assignments"]
+                        .as_array_mut()
+                        .expect("legacy assignments")
+                    {
+                        assignment
+                            .as_object_mut()
+                            .expect("legacy assignment")
+                            .remove("link_commitment");
+                    }
                     assert!(wire.get("target_tombstones").is_none());
                     let legacy_encoded = json_bytes(&wire).expect("legacy journal bytes");
                     state
@@ -7481,7 +7542,9 @@ mod tests {
         }));
         assert!(interrupted.is_err());
 
-        let assigned = local_head(root.path()).expect("legacy Head").version_id;
+        let legacy_head = local_head(root.path()).expect("legacy Head");
+        let legacy_sha256 = legacy_head.authority.sha256().to_owned();
+        let assigned = legacy_head.version_id;
         let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
         let retry = reopened
             .seal_capture(reopened.plan_capture().expect("same live plan"))
@@ -7489,6 +7552,14 @@ mod tests {
         assert_eq!(retry.version_id(), assigned);
         assert!(reopened.read_version(retry.version_id()).is_ok());
         assert!(active_transaction(root.path()).is_none());
+        assert_eq!(
+            local_head(root.path())
+                .expect("recovered legacy Head")
+                .authority
+                .sha256(),
+            legacy_sha256,
+            "recovery must retain the SHA-256 of the exact installed legacy journal bytes"
+        );
     }
 
     fn interrupt_update_after_journal(
@@ -7905,6 +7976,165 @@ mod tests {
                 .version_id,
             restored.version_id()
         );
+    }
+
+    #[test]
+    fn extra_hard_link_after_restored_object_bytes_read_fails_without_head_movement() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let restored = store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+        let plan = store.plan_capture().expect("authority-aware plan");
+
+        let error = store
+            .seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::AfterObjectBytesRead("active.bin".to_owned()) {
+                    fs::hard_link(
+                        root.path().join("active.bin"),
+                        root.path().join("unapproved-after-read-link.bin"),
+                    )
+                    .expect("concurrent extra hard link after read");
+                }
+            })
+            .expect_err("an uncommitted hard link after read must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::CaptureStateChanged(path)
+                if path == Path::new("active.bin")
+        ));
+        assert_eq!(
+            local_head(root.path())
+                .expect("restored Local Head remains")
+                .version_id,
+            restored.version_id()
+        );
+    }
+
+    #[test]
+    fn same_count_authority_set_swap_before_byte_read_fails_closed() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+        fs::write(
+            root.path().join("active.bin"),
+            b"authority-bearing workspace edit",
+        )
+        .expect("same-inode edit requiring a new capture");
+        let plan = store.plan_capture().expect("authority-aware plan");
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let completion = read_restore_completion_receipt(&state)
+            .expect("completion")
+            .expect("completed restore");
+        let original_stage = root
+            .path()
+            .join(restore_stage_path(&completion.transaction));
+        let original_receipt = root.path().join(restore_authority_record_path(
+            &completion.transaction.transaction_id,
+        ));
+
+        let error = store
+            .seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::BeforeObjectBytesRead("active.bin".to_owned())
+                {
+                    fs::remove_file(&original_stage).expect("retire original stage");
+                    fs::remove_file(&original_receipt).expect("retire original receipt");
+                    let mut replacement = completion.transaction.clone();
+                    replacement.transaction_id = format!("fbrestore_{}", Uuid::now_v7());
+                    fs::create_dir(
+                        root.path()
+                            .join(restore_transaction_directory(&replacement)),
+                    )
+                    .expect("replacement authority directory");
+                    fs::hard_link(
+                        root.path().join("active.bin"),
+                        root.path().join(restore_stage_path(&replacement)),
+                    )
+                    .expect("same-count replacement stage");
+                    write_restore_authority_record(
+                        &state,
+                        &replacement,
+                        &completion.published_identity_sha256,
+                    )
+                    .expect("replacement authority receipt");
+                }
+            })
+            .expect_err("an exact authority-set swap must fail closed");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::CaptureStateChanged(path)
+                if path == Path::new("active.bin")
+        ));
+    }
+
+    #[test]
+    fn authority_bearing_capture_journal_recovers_with_exact_link_commitment() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+        fs::write(
+            root.path().join("active.bin"),
+            b"authority-bearing journal recovery edit",
+        )
+        .expect("same-inode edit requiring a new capture");
+        let plan = store.plan_capture().expect("authority-aware plan");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(plan, |checkpoint| {
+                if checkpoint == &CaptureCheckpoint::JournalDurable {
+                    panic!("simulated crash after authority-bearing journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let raw = fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH))
+            .expect("durable active journal");
+        let wire: serde_json::Value = serde_json::from_slice(&raw).expect("journal JSON");
+        let assignment = wire["assignments"]
+            .as_array()
+            .expect("assignments")
+            .iter()
+            .find(|assignment| assignment["path"] == "active.bin")
+            .expect("restored assignment");
+        assert_eq!(assignment["link_commitment"]["expected_live_link_count"], 2);
+        assert_eq!(
+            assignment["link_commitment"]["authorities"]
+                .as_array()
+                .expect("authority set")
+                .len(),
+            1
+        );
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh-process reopen");
+        reopened
+            .seal_capture(reopened.plan_capture().expect("retry plan"))
+            .expect("recover authority-bearing journal");
+        assert!(active_transaction(root.path()).is_none());
     }
 
     #[test]

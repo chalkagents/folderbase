@@ -26,7 +26,7 @@ use crate::{
     folderbase_restore_authority::{
         MAX_RESTORE_AUTHORITIES, MAX_RESTORE_AUTHORITY_BYTES, RESTORE_AUTHORITIES_DIRECTORY,
         RESTORE_AUTHORITY_FORMAT_V1, RestoreAuthorityRecord, restore_authority_record_path,
-        restore_stage_path, stable_file_identity_sha256,
+        restore_stage_path, stable_file_identity_sha256, stable_file_link_count,
     },
     folderbase_state::FolderbaseState,
     folderbase_version::{
@@ -74,6 +74,7 @@ pub struct CapturePlanEntry {
     executable: Option<bool>,
     symlink_target: Option<String>,
     observed: CaptureMetadataFingerprint,
+    link_commitment: CaptureLinkCommitment,
 }
 
 impl CapturePlanEntry {
@@ -99,6 +100,83 @@ impl CapturePlanEntry {
 
     pub(crate) fn observed(&self) -> &CaptureMetadataFingerprint {
         &self.observed
+    }
+
+    pub(crate) fn link_commitment(&self) -> &CaptureLinkCommitment {
+        &self.link_commitment
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CaptureAuthorityLink {
+    receipt_path: String,
+    receipt_sha256: String,
+    private_stage_path: String,
+    published_identity_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CaptureLinkCommitment {
+    expected_live_link_count: u64,
+    authority_set_sha256: Option<String>,
+    authorities: Vec<CaptureAuthorityLink>,
+}
+
+impl Default for CaptureLinkCommitment {
+    fn default() -> Self {
+        Self {
+            expected_live_link_count: 1,
+            authority_set_sha256: None,
+            authorities: Vec::new(),
+        }
+    }
+}
+
+impl CaptureLinkCommitment {
+    pub(crate) fn is_legacy_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub(crate) fn is_well_formed(&self) -> bool {
+        let exact_link_count = self
+            .authorities
+            .len()
+            .checked_add(1)
+            .and_then(|count| u64::try_from(count).ok());
+        let expected_digest =
+            (!self.authorities.is_empty()).then(|| capture_authority_set_sha256(&self.authorities));
+        if exact_link_count != Some(self.expected_live_link_count)
+            || self.authority_set_sha256 != expected_digest
+        {
+            return false;
+        }
+        let mut previous = None;
+        for authority in &self.authorities {
+            if previous
+                .is_some_and(|path: &str| path.as_bytes() >= authority.receipt_path.as_bytes())
+                || validate_capture_sha256(&authority.receipt_sha256).is_err()
+                || validate_capture_sha256(&authority.published_identity_sha256).is_err()
+            {
+                return false;
+            }
+            let receipt_path = Path::new(&authority.receipt_path);
+            let Some(transaction_id) = receipt_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(OsStr::to_str)
+            else {
+                return false;
+            };
+            if restore_authority_record_path(transaction_id) != receipt_path
+                || restore_stage_path(transaction_id) != Path::new(&authority.private_stage_path)
+            {
+                return false;
+            }
+            previous = Some(authority.receipt_path.as_str());
+        }
+        true
     }
 }
 
@@ -665,61 +743,112 @@ struct RestoreAuthorityRegistry {
 }
 
 impl RestoreAuthorityRegistry {
-    fn validated_link_count(
+    fn validated_link_commitment(
         &self,
-        directory: &Dir,
-        name: &OsStr,
+        workspace_file: &fs::File,
+        link_count: usize,
         workspace_path: &str,
         display_path: &Path,
-    ) -> Result<usize, FolderbaseCaptureError> {
-        let workspace_file =
-            open_regular_nofollow(directory, Path::new(name)).map_err(|source| {
-                FolderbaseCaptureError::Io {
-                    path: display_path.to_path_buf(),
-                    source,
-                }
-            })?;
-        let workspace_identity =
-            stable_file_identity_sha256(&workspace_file).map_err(|source| {
-                FolderbaseCaptureError::Io {
-                    path: display_path.to_path_buf(),
-                    source,
-                }
-            })?;
-        let mut validated_paths = BTreeSet::new();
-        for observed in self.records.iter().filter(|observed| {
+    ) -> Result<CaptureLinkCommitment, FolderbaseCaptureError> {
+        validated_link_commitment(
+            &self.state,
+            &self.records,
+            workspace_file,
+            link_count,
+            workspace_path,
+            display_path,
+        )
+    }
+}
+
+fn validated_link_commitment(
+    state: &FolderbaseState,
+    records: &[ObservedRestoreAuthority],
+    workspace_file: &fs::File,
+    link_count: usize,
+    workspace_path: &str,
+    display_path: &Path,
+) -> Result<CaptureLinkCommitment, FolderbaseCaptureError> {
+    let workspace_identity = stable_file_identity_sha256(workspace_file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: display_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let mut validated_paths = BTreeSet::new();
+    for observed in records.iter().filter(|observed| {
+        observed.record.workspace_path == workspace_path
+            && observed.record.published_identity_sha256 == workspace_identity
+    }) {
+        let record_path = restore_authority_record_path(&observed.record.transaction_id);
+        if state
+            .read_bounded(&record_path, MAX_RESTORE_AUTHORITY_BYTES)?
+            .as_deref()
+            != Some(observed.encoded.as_slice())
+        {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore authority changed during capture planning".to_owned(),
+            ));
+        }
+        let observed_identity = state.workspace_restore_identity_sha256(
+            Path::new(&observed.record.private_stage_path),
+            Path::new(workspace_path),
+        )?;
+        if observed_identity != workspace_identity {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore authority no longer names the current workspace file".to_owned(),
+            ));
+        }
+        if !validated_paths.insert(observed.record.private_stage_path.as_str()) {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore authorities name one private link more than once".to_owned(),
+            ));
+        }
+    }
+    state.verify_still_attached()?;
+    let mut authorities = records
+        .iter()
+        .filter(|observed| {
             observed.record.workspace_path == workspace_path
                 && observed.record.published_identity_sha256 == workspace_identity
-        }) {
-            let record_path = restore_authority_record_path(&observed.record.transaction_id);
-            if self
-                .state
-                .read_bounded(&record_path, MAX_RESTORE_AUTHORITY_BYTES)?
-                .as_deref()
-                != Some(observed.encoded.as_slice())
-            {
-                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                    "restore authority changed during capture planning".to_owned(),
-                ));
+        })
+        .map(|observed| {
+            let receipt_path = restore_authority_record_path(&observed.record.transaction_id);
+            CaptureAuthorityLink {
+                receipt_path: receipt_path
+                    .to_str()
+                    .expect("restore authority paths are UTF-8")
+                    .to_owned(),
+                receipt_sha256: format!("{:x}", Sha256::digest(&observed.encoded)),
+                private_stage_path: observed.record.private_stage_path.clone(),
+                published_identity_sha256: observed.record.published_identity_sha256.clone(),
             }
-            let observed_identity = self.state.workspace_restore_identity_sha256(
-                Path::new(&observed.record.private_stage_path),
-                Path::new(workspace_path),
-            )?;
-            if observed_identity != workspace_identity {
-                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                    "restore authority no longer names the current workspace file".to_owned(),
-                ));
-            }
-            if !validated_paths.insert(observed.record.private_stage_path.as_str()) {
-                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                    "restore authorities name one private link more than once".to_owned(),
-                ));
-            }
-        }
-        self.state.verify_still_attached()?;
-        Ok(validated_paths.len())
+        })
+        .collect::<Vec<_>>();
+    authorities.sort_by(|left, right| left.receipt_path.cmp(&right.receipt_path));
+    let authority_set_sha256 =
+        (!authorities.is_empty()).then(|| capture_authority_set_sha256(&authorities));
+    Ok(CaptureLinkCommitment {
+        expected_live_link_count: u64::try_from(link_count)
+            .map_err(|_| FolderbaseCaptureError::CaptureStateChanged(display_path.to_path_buf()))?,
+        authority_set_sha256,
+        authorities,
+    })
+}
+
+fn capture_authority_set_sha256(authorities: &[CaptureAuthorityLink]) -> String {
+    #[derive(Serialize)]
+    struct AuthoritySet<'a> {
+        format: &'static str,
+        authorities: &'a [CaptureAuthorityLink],
     }
+
+    let encoded = serde_json::to_vec(&AuthoritySet {
+        format: "folderbase-capture-authority-set-v1",
+        authorities,
+    })
+    .expect("capture authority commitments are serializable");
+    format!("{:x}", Sha256::digest(encoded))
 }
 
 pub(crate) fn restore_authority_count(
@@ -736,6 +865,15 @@ fn read_restore_authorities(
     maximum: usize,
 ) -> Result<RestoreAuthorityRegistry, FolderbaseCaptureError> {
     let state = FolderbaseState::open_existing_read_only(&root_attestation.root)?;
+    let records = read_restore_authority_records(root_attestation, &state, maximum)?;
+    Ok(RestoreAuthorityRegistry { state, records })
+}
+
+fn read_restore_authority_records(
+    root_attestation: &FolderbaseRootAttestation,
+    state: &FolderbaseState,
+    maximum: usize,
+) -> Result<Vec<ObservedRestoreAuthority>, FolderbaseCaptureError> {
     let names = match state.private_directory_names(
         Path::new(RESTORE_AUTHORITIES_DIRECTORY),
         MAX_RESTORE_AUTHORITIES.saturating_add(1024),
@@ -774,7 +912,58 @@ fn read_restore_authorities(
         }
     }
     state.verify_still_attached()?;
-    Ok(RestoreAuthorityRegistry { state, records })
+    Ok(records)
+}
+
+pub(crate) fn verify_capture_link_commitment(
+    root_attestation: &FolderbaseRootAttestation,
+    state: &FolderbaseState,
+    entry: &CapturePlanEntry,
+    workspace_file: &fs::File,
+) -> Result<(), FolderbaseCaptureError> {
+    if entry.kind() != CaptureEntryKind::RegularFile {
+        return Ok(());
+    }
+    let display_path = root_attestation.root.join(entry.path());
+    let link_count = usize::try_from(stable_file_link_count(workspace_file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: display_path.clone(),
+            source,
+        }
+    })?)
+    .map_err(|_| FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(entry.path())))?;
+    let records = read_restore_authority_records(root_attestation, state, MAX_RESTORE_AUTHORITIES)?;
+    let actual = validated_link_commitment(
+        state,
+        &records,
+        workspace_file,
+        link_count,
+        entry.path(),
+        &display_path,
+    )?;
+    let exact_expected_link_count = entry
+        .link_commitment()
+        .authorities
+        .len()
+        .checked_add(1)
+        .and_then(|count| u64::try_from(count).ok());
+    let exact_actual_link_count = actual
+        .authorities
+        .len()
+        .checked_add(1)
+        .and_then(|count| u64::try_from(count).ok());
+    let expected_digest = (!entry.link_commitment().authorities.is_empty())
+        .then(|| capture_authority_set_sha256(&entry.link_commitment().authorities));
+    if exact_expected_link_count != Some(entry.link_commitment().expected_live_link_count)
+        || entry.link_commitment().authority_set_sha256 != expected_digest
+        || exact_actual_link_count != Some(actual.expected_live_link_count)
+        || &actual != entry.link_commitment()
+    {
+        return Err(FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(
+            entry.path(),
+        )));
+    }
+    Ok(())
 }
 
 fn validate_restore_authority(
@@ -973,6 +1162,7 @@ impl<'a> CapturePlanner<'a> {
                     &metadata,
                     &display_path,
                 )?,
+                link_commitment: CaptureLinkCommitment::default(),
             });
             return Ok(Some(PendingCaptureDirectory {
                 directory: child,
@@ -985,26 +1175,68 @@ impl<'a> CapturePlanner<'a> {
             }));
         }
 
+        let mut link_commitment = CaptureLinkCommitment::default();
+        let mut regular_observed = None;
+        let mut regular_bytes = None;
+        let mut regular_executable = None;
         if metadata.is_file() && !metadata.file_type().is_symlink() {
-            let link_count = regular_file_link_count(directory, &name, &display_path, &metadata)?;
-            if link_count > 1 {
-                let authority_links = self.restore_authorities.validated_link_count(
+            let workspace_file =
+                open_regular_nofollow(directory, Path::new(&name)).map_err(|source| {
+                    FolderbaseCaptureError::Io {
+                        path: display_path.clone(),
+                        source,
+                    }
+                })?;
+            let workspace_metadata =
+                workspace_file
+                    .metadata()
+                    .map_err(|source| FolderbaseCaptureError::Io {
+                        path: display_path.clone(),
+                        source,
+                    })?;
+            let handle_observed = CaptureMetadataFingerprint::from_std_file(&workspace_file)
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: display_path.clone(),
+                    source,
+                })?;
+            if handle_observed
+                != capture_entry_fingerprint(
                     directory,
                     &name,
-                    &path,
+                    CaptureEntryKind::RegularFile,
+                    &metadata,
                     &display_path,
-                )?;
-                if link_count != authority_links.saturating_add(1) {
-                    if required_marker {
-                        return Err(FolderbaseCaptureError::RequiredMarker(display_path));
+                )?
+            {
+                return Err(FolderbaseCaptureError::PlanningStateChanged);
+            }
+            regular_bytes = Some(workspace_metadata.len());
+            regular_executable = Some(handle_observed.executable);
+            regular_observed = Some(handle_observed);
+            let link_count =
+                usize::try_from(stable_file_link_count(&workspace_file).map_err(|source| {
+                    FolderbaseCaptureError::Io {
+                        path: display_path.clone(),
+                        source,
                     }
-                    self.exclusions.push(CapturePlanExclusion {
-                        path,
-                        kind: CaptureExclusionKind::HardLink,
-                        reason: CaptureExclusionReason::UnsupportedV1,
-                    });
-                    return Ok(None);
+                })?)
+                .map_err(|_| FolderbaseCaptureError::PlanningStateChanged)?;
+            link_commitment = self.restore_authorities.validated_link_commitment(
+                &workspace_file,
+                link_count,
+                &path,
+                &display_path,
+            )?;
+            if link_count != link_commitment.authorities.len().saturating_add(1) {
+                if required_marker {
+                    return Err(FolderbaseCaptureError::RequiredMarker(display_path));
                 }
+                self.exclusions.push(CapturePlanExclusion {
+                    path,
+                    kind: CaptureExclusionKind::HardLink,
+                    reason: CaptureExclusionReason::UnsupportedV1,
+                });
+                return Ok(None);
             }
         }
 
@@ -1024,7 +1256,8 @@ impl<'a> CapturePlanner<'a> {
             let target = read_stable_symlink(directory, &name, &relative, &display_path)?;
             (CaptureEntryKind::Symlink, None, None, Some(target))
         } else if metadata.is_file() {
-            if metadata.len() > MAX_OBJECT_BYTES {
+            let bytes = regular_bytes.ok_or(FolderbaseCaptureError::PlanningStateChanged)?;
+            if bytes > MAX_OBJECT_BYTES {
                 return Err(FolderbaseCaptureError::InventoryLimitExceeded {
                     limit: CapturePlanLimitKind::ObjectBytes,
                     maximum: MAX_OBJECT_BYTES,
@@ -1033,12 +1266,20 @@ impl<'a> CapturePlanner<'a> {
             }
             (
                 CaptureEntryKind::RegularFile,
-                Some(metadata.len()),
-                Some(is_executable(&metadata)),
+                Some(bytes),
+                regular_executable,
                 None,
             )
         } else {
             return Err(FolderbaseCaptureError::PlanningStateChanged);
+        };
+        let observed = match kind {
+            CaptureEntryKind::RegularFile => {
+                regular_observed.ok_or(FolderbaseCaptureError::PlanningStateChanged)?
+            }
+            CaptureEntryKind::Directory | CaptureEntryKind::Symlink => {
+                capture_entry_fingerprint(directory, &name, kind, &metadata, &display_path)?
+            }
         };
         self.entries.push(CapturePlanEntry {
             path,
@@ -1046,7 +1287,8 @@ impl<'a> CapturePlanner<'a> {
             bytes,
             executable,
             symlink_target,
-            observed: capture_entry_fingerprint(directory, &name, kind, &metadata, &display_path)?,
+            observed,
+            link_commitment,
         });
         Ok(None)
     }
@@ -1240,52 +1482,6 @@ fn windows_file_identity(file: &fs::File) -> io::Result<String> {
         let _ = write!(encoded, "{byte:02x}");
     }
     Ok(encoded)
-}
-
-#[cfg(unix)]
-fn regular_file_link_count(
-    _directory: &Dir,
-    _name: &OsStr,
-    _display_path: &Path,
-    metadata: &Metadata,
-) -> Result<usize, FolderbaseCaptureError> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(metadata.nlink() as usize)
-}
-
-#[cfg(windows)]
-fn regular_file_link_count(
-    directory: &Dir,
-    name: &OsStr,
-    display_path: &Path,
-    _metadata: &Metadata,
-) -> Result<usize, FolderbaseCaptureError> {
-    use cap_std::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .access_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-    let file =
-        directory
-            .open_with(name, &options)
-            .map_err(|source| FolderbaseCaptureError::Io {
-                path: display_path.to_path_buf(),
-                source,
-            })?;
-    let information = winapi_util::file::information(file.into_std()).map_err(|source| {
-        FolderbaseCaptureError::Io {
-            path: display_path.to_path_buf(),
-            source,
-        }
-    })?;
-    Ok(information.number_of_links() as usize)
 }
 
 #[cfg(unix)]
