@@ -175,6 +175,19 @@ if (JSON.stringify(declaredPaths) !== JSON.stringify(expectedPaths)) {
   );
 }
 
+const coreCargoManifest = readFileSync(
+  join(repositoryRoot, "crates", "folderbase-core", "Cargo.toml"),
+  "utf8",
+);
+if (
+  !coreCargoManifest.includes('protocol-version = "0.4"') ||
+  !coreCargoManifest.includes('candidate-protocol-version = "0.5"')
+) {
+  throw new Error(
+    "folderbase-core package metadata must distinguish released 0.4 from candidate 0.5",
+  );
+}
+
 for (const member of release.files) {
   const absolute = join(repositoryRoot, member.path);
   const stat = lstatSync(absolute);

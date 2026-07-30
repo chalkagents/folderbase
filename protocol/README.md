@@ -125,8 +125,13 @@ The source repository/tag is the normative cross-language protocol bundle. The
 does not duplicate workspace-level schemas, fixtures, or independent reference
 encoders. The immutable released 0.4 manifest remains
 `releases/0.4/folderbase-version-v1.json`. The separately hashed 0.5 candidate
-inventory is `releases/0.5/folderbase-version-v1.json`; its independent verifier
-does not reinterpret or mutate any 0.4 release or conformance bytes. The
+inventory is `releases/0.5/folderbase-version-v1.json`. That inventory binds the
+candidate schemas, fixtures, independent digest encoders, implementing Rust
+sources, Rust conformance test, package metadata, package proof scripts, and CI
+gates as one exact source surface. The Rust conformance test decodes both valid
+0.5 Version vectors and compares each runtime digest with its independently
+generated `.sha256` sidecar. The candidate verifier does not reinterpret or
+mutate any 0.4 release or conformance bytes. The
 accepted profile decision is
 `../docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md`.
 

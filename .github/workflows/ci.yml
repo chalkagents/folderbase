@@ -87,6 +87,9 @@ jobs:
       - name: Test the public Folderbase Version contract
         run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
 
+      - name: Test the Folderbase Version 0.5 candidate contract
+        run: cargo test --package folderbase-core --test folderbase_version_05_conformance --locked
+
       - name: Test metadata-only Folderbase capture planning
         run: cargo test --package folderbase-core --test folderbase_capture --locked
 

@@ -8,11 +8,111 @@
   "files": [
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "550c7012675b088aea8cf4f66840e6c93df71ae745d7459d21fe3c37222026c7"
+      "sha256": "e0a3be502528118c91af64919f0038c89d4923dedd447c4983c4304695585b36"
     },
     {
       "path": "README.md",
       "sha256": "0250ec97ce07073d4385b374cc79eca344903986ba507406a5abe776ce2a188d"
+    },
+    {
+      "path": "crates/folderbase-cli/src/main.rs",
+      "sha256": "88e24a34c37b755398d3d92b20ffad9d567d9d8668a385721385e230e9db2706"
+    },
+    {
+      "path": "crates/folderbase-cli/tests/cli.rs",
+      "sha256": "f616bc0cb9855dbbf086ad1c9b7693d4bb0bd0f07d90c305d88c99c1bf8532f8"
+    },
+    {
+      "path": "crates/folderbase-core/Cargo.toml",
+      "sha256": "77a8ea555d9ce43948859b0579fd27f5099532e802c9ac8a542288abfcf5da70"
+    },
+    {
+      "path": "crates/folderbase-core/src/error.rs",
+      "sha256": "43b120c382ef77e115e51e13d11050765c382f005cf91ecf8a757de216933774"
+    },
+    {
+      "path": "crates/folderbase-core/src/folder_analysis.rs",
+      "sha256": "1bb35ce7e7c51c58c7e1689034fb18cc18926011cf31dc2be0ff4b8f9d83fd1a"
+    },
+    {
+      "path": "crates/folderbase-core/src/folderbase_capture.rs",
+      "sha256": "7fc410fb0bb1401791bdc83576668c801a4284c2c5e4cb4087391028df5c0477"
+    },
+    {
+      "path": "crates/folderbase-core/src/folderbase_seal.rs",
+      "sha256": "dad5ac855a53067ebf2bc6f2396399e5556c08e893b5b43a888854c329dc9bf5"
+    },
+    {
+      "path": "crates/folderbase-core/src/folderbase_state.rs",
+      "sha256": "1d5f439ec93a7862fc820992fb167bde75769eaadaf17273af09097ef712ac97"
+    },
+    {
+      "path": "crates/folderbase-core/src/folderbase_version.rs",
+      "sha256": "d1bfeeb3ea27fb429f2ca2fbebee97be891a89683e25b1b9e1ebedd223062eec"
+    },
+    {
+      "path": "crates/folderbase-core/src/initialization.rs",
+      "sha256": "6104701f6a99ed7a53785397956b0728f02b12d29d9ad7d84e2032b2b8293b3f"
+    },
+    {
+      "path": "crates/folderbase-core/src/lib.rs",
+      "sha256": "620fb68648f1a37218205d03dcbfbe5af59e8f2807bede6f1753221cd3219852"
+    },
+    {
+      "path": "crates/folderbase-core/src/local_versions.rs",
+      "sha256": "b3c655487a03f8f3c18b9f52045655942d4a7460dffe00eb5fad901abf415c1e"
+    },
+    {
+      "path": "crates/folderbase-core/src/migration.rs",
+      "sha256": "31af3498994e2a380127054321c8315dd741935761d5187e64ebee641626dbc0"
+    },
+    {
+      "path": "crates/folderbase-core/src/model.rs",
+      "sha256": "0a7c7e0c77d00c4f3e6c59ab307243670fa971f0973e6daa945bd48814d13fbf"
+    },
+    {
+      "path": "crates/folderbase-core/src/protocol_upgrade.rs",
+      "sha256": "d9b07a0b0ff753897d0e1754e39bfe2efe6a2ddba0debd88551ab12f0e17fe63"
+    },
+    {
+      "path": "crates/folderbase-core/src/reorganization.rs",
+      "sha256": "e367d92eda01024f38d9a86beebc6c3cc3371972c35494ccbc81d6be0acbc6ae"
+    },
+    {
+      "path": "crates/folderbase-core/src/root_attestation.rs",
+      "sha256": "7e8f58f3ccb4128b94dcd74b2782353f5a62a1e2118260adf4ee4fb8d7d659fc"
+    },
+    {
+      "path": "crates/folderbase-core/src/template_expansion.rs",
+      "sha256": "7313b50fe3cbff70ced293b88e2b44a7a0fdc0982fa7185cc1fefee4b45aabf4"
+    },
+    {
+      "path": "crates/folderbase-core/src/transfer_source.rs",
+      "sha256": "4e7c21caf118e256d294d084e2a85d470f888012e66401f574731acc607d4cae"
+    },
+    {
+      "path": "crates/folderbase-core/src/traversal_policy.rs",
+      "sha256": "5388ebe4624edc8b8a6f169a378b2e0851bb3c243f969e2a9e1ace990dc9f638"
+    },
+    {
+      "path": "crates/folderbase-core/src/validation.rs",
+      "sha256": "e8bdb2ac93627368eaebb5fe09abf6ee40a329aa7ac2ac825003c3c0579765ce"
+    },
+    {
+      "path": "crates/folderbase-core/src/workspace.rs",
+      "sha256": "7c58e1902894b51efd0d3483aee2fadf906a1ec071be26dabbf05f3501d6fd8e"
+    },
+    {
+      "path": "crates/folderbase-core/tests/fb41h_optional_narratives.rs",
+      "sha256": "431116330cec33686efecd0f55ff9f5ceb2b8ba1ce11ef5273c8e8631c0602c7"
+    },
+    {
+      "path": "crates/folderbase-core/tests/folderbase_version_05_conformance.rs",
+      "sha256": "0c5bcb0e44fa88750a046130eb3b013b9c59a009ac4522f6944c271ef8882ce4"
+    },
+    {
+      "path": "crates/folderbase-core/tests/protocol_upgrade_security.rs",
+      "sha256": "f0b6fd198e443d3618ff14e071867c184cf28cd98b3fd24e18e4a92aa74355a1"
     },
     {
       "path": "docs/adr/0003-attest-exact-folderbase-roots.md",
@@ -28,11 +128,11 @@
     },
     {
       "path": "docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md",
-      "sha256": "0513f778997e9c6a4cd01ba68a4a4f3eb11c9b76cbeea751cb6b9653f447e72e"
+      "sha256": "54e92fd559707a935589cb4f9b2425c02311c76c430a3b7162424901389298c2"
     },
     {
       "path": "docs/protocol-spec.md",
-      "sha256": "89e8bc6983f0821bc588e28e3e9f10e7bc1a5bcc25de6a95fdc5c90bb6b3fb3e"
+      "sha256": "cf49c7a16714766fdc611b69b8f2aa267386cfba8ec4b0158dbc1ea6d59d2627"
     },
     {
       "path": "docs/reorganization-protocol.md",
@@ -44,7 +144,7 @@
     },
     {
       "path": "protocol/README.md",
-      "sha256": "01c7ddb3dc7e9364d76a2263d8f6c54ae79161053e94f8f8f525a1741a0126ea"
+      "sha256": "27b1fd5c38eb7e792bda7680e23923a125b2f39b02843de8ffd5a241cef7ddda"
     },
     {
       "path": "protocol/conformance/folderbase-version-0.5/README.md",
@@ -256,11 +356,11 @@
     },
     {
       "path": "protocol/schemas/0.5/folderbase.schema.json",
-      "sha256": "fa359c904dd0db0580ed5ea03c211095443430be0dc12c999ec70c818b71fada"
+      "sha256": "a3c287482cea76da2feacddcf6733284b12329e60c446f9476784871cb07ccee"
     },
     {
       "path": "scripts/test-extracted-packages.sh",
-      "sha256": "1fba4d9a04b4059c4e2597584d808def63a5b1083bbbaa2f178e8dd00fe2ba1b"
+      "sha256": "4793dec12210b632ce29ebf4770f10dadeed067ac330653f20411577ce460fc5"
     },
     {
       "path": "scripts/test-package-install.sh",
@@ -272,7 +372,7 @@
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-distribution.mjs",
-      "sha256": "70ec356e49c83d82a5f414b78bee81bf4886c80897d68a9448556c24347e2198"
+      "sha256": "99cf5157ad8cc5d0c5122ff156af8a1129867db373eed0fa6c12980555d87977"
     }
   ]
 }
