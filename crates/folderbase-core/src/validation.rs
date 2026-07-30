@@ -1159,7 +1159,7 @@ fn protocol_compatibility(version: &str) -> ProtocolCompatibility {
         return ProtocolCompatibility::Unsupported;
     };
     match (major, minor) {
-        (0, 1) => ProtocolCompatibility::Supported,
+        (0, 1 | 5) => ProtocolCompatibility::Supported,
         (0, minor) if minor > 1 => ProtocolCompatibility::FutureMinor,
         _ => ProtocolCompatibility::Unsupported,
     }
