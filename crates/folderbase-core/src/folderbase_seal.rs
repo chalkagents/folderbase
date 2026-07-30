@@ -51,6 +51,8 @@ const ACTIVE_RESTORE_TRANSACTION_PATH: &str =
 const RESTORE_CLEANUP_RECOVERY_PATH: &str =
     ".folderbase/transactions/folderbase-version-restores/cleanup.json";
 const RESTORE_CLEANUP_RECOVERY_FORMAT_V1: &str = "folderbase-restore-cleanup-v1";
+const RESTORE_COMPLETION_PATH: &str = ".folderbase/local/completed-restore.json";
+const RESTORE_COMPLETION_FORMAT_V1: &str = "folderbase-restore-completion-v1";
 const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
 const CAPTURE_IDENTITIES_DIRECTORY: &str = ".folderbase/local/capture-identities";
 const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
@@ -141,6 +143,7 @@ enum RestoreCheckpoint {
     BeforeStageRetirement,
     AfterStageRetirement,
     CleanupIntentRetired,
+    CompletionDurable,
     CleanupComplete,
 }
 
@@ -291,6 +294,13 @@ struct RestoreCleanupRecovery {
     transaction: RestoreTransaction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreCompletionReceipt {
+    format: String,
+    transaction: RestoreTransaction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LocalHeadRecord {
@@ -431,6 +441,14 @@ impl FolderbaseVersionStore {
                     Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
                 }
             };
+        }
+        if active.is_none()
+            && let Some(completion) = read_restore_completion_receipt(&state)?
+            && completion.transaction.path == path_string
+            && let Some(restored) =
+                completed_restore_result(self, &local, &state, &completion.transaction)?
+        {
+            return Ok(restored);
         }
         let transaction = match active {
             Some(transaction) => {
@@ -1195,6 +1213,8 @@ fn finish_restore_cleanup(
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
+    write_restore_completion_receipt(state, transaction)?;
+    checkpoint(&RestoreCheckpoint::CompletionDurable);
     remove_restore_cleanup_recovery(state)
 }
 
@@ -1420,11 +1440,20 @@ fn rederive_authoritative_modified_restore_transaction(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
-    validate_restore_transaction(store, transaction)?;
     let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
     if JournalHead::from(&current_head) != transaction.expected_head {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     }
+    rederive_authoritative_restore_transaction(store, local, state, transaction)
+}
+
+fn rederive_authoritative_restore_transaction(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    validate_restore_transaction(store, transaction)?;
     let current = read_and_verify_folderbase_version(
         store,
         local,
@@ -1447,14 +1476,99 @@ fn rederive_authoritative_modified_restore_transaction(
             )
         })?;
     let binding = find_restore_binding(store, local, state, &current, &tombstone)?;
-    let authoritative =
-        build_restore_transaction(store, &current_head, &current, tombstone, binding)?;
+    let authoritative = build_restore_transaction(
+        store,
+        &LocalHeadRecord {
+            format: "folderbase-local-head-v2".to_owned(),
+            folderbase_id: transaction.folderbase_id.clone(),
+            root_instance_sha256: transaction.root_instance_sha256.clone(),
+            version_id: transaction.expected_head.version_id.clone(),
+            version_sha256: transaction.expected_head.version_sha256.clone(),
+            authority: transaction.expected_head.authority.clone(),
+        },
+        &current,
+        tombstone,
+        binding,
+    )?;
     if authoritative != *transaction {
         return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-            "modified cleanup transaction does not match immutable restore authority".to_owned(),
+            "restore transaction does not match immutable restore authority".to_owned(),
         ));
     }
     Ok(())
+}
+
+fn completed_restore_result(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<Option<RestoredTombstone>, FolderbaseCaptureError> {
+    validate_restore_transaction(store, transaction)?;
+    let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+    let target_head = JournalHead {
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
+    };
+    if JournalHead::from(&current_head) != target_head {
+        return Ok(None);
+    }
+    rederive_authoritative_restore_transaction(store, local, state, transaction)?;
+    let installed =
+        read_and_verify_folderbase_version(store, local, state, &transaction.target_version_id)?;
+    if installed.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "completed restore version digest changed".to_owned(),
+        ));
+    }
+
+    let path = Path::new(&transaction.path);
+    let display = store.root_attestation.root.join(path);
+    let mut file = match state.open_workspace_regular_file(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let before = match fingerprint_std_file(&file, &display) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => return Ok(None),
+    };
+    let bytes = transaction
+        .binding
+        .bytes()
+        .expect("validated regular binding");
+    let executable = transaction
+        .binding
+        .executable()
+        .expect("validated regular binding");
+    if before.bytes != bytes || before.executable != executable {
+        return Ok(None);
+    }
+    let observed = match hash_reader(&mut file, &display, bytes) {
+        Ok(digest) => digest,
+        Err(_) => return Ok(None),
+    };
+    let after = match fingerprint_std_file(&file, &display) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => return Ok(None),
+    };
+    if before != after
+        || observed.bytes != bytes
+        || observed.digest
+            != transaction
+                .binding
+                .content_sha256()
+                .expect("validated regular binding")
+    {
+        return Ok(None);
+    }
+    Ok(Some(restored_tombstone(transaction, false)))
 }
 
 fn rollback_restore_head(
@@ -3338,6 +3452,51 @@ fn remove_restore_cleanup_recovery(state: &FolderbaseState) -> Result<(), Folder
     }
 }
 
+fn read_restore_completion_receipt(
+    state: &FolderbaseState,
+) -> Result<Option<RestoreCompletionReceipt>, FolderbaseCaptureError> {
+    let relative = Path::new(RESTORE_COMPLETION_PATH);
+    let Some(encoded) = state.read_bounded(relative, MAX_CAPTURE_TRANSACTION_BYTES)? else {
+        return Ok(None);
+    };
+    let completion: RestoreCompletionReceipt =
+        serde_json::from_slice(&encoded).map_err(|source| {
+            FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+                "restore completion receipt is invalid JSON: {source}"
+            ))
+        })?;
+    if completion.format != RESTORE_COMPLETION_FORMAT_V1 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore completion receipt format is unsupported".to_owned(),
+        ));
+    }
+    Ok(Some(completion))
+}
+
+fn write_restore_completion_receipt(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let completion = RestoreCompletionReceipt {
+        format: RESTORE_COMPLETION_FORMAT_V1.to_owned(),
+        transaction: transaction.clone(),
+    };
+    let mut encoded = serde_json::to_vec_pretty(&completion).map_err(|source| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+            "restore completion receipt encoding failed: {source}"
+        ))
+    })?;
+    encoded.push(b'\n');
+    if encoded.len() as u64 > MAX_CAPTURE_TRANSACTION_BYTES {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore completion receipt exceeds its bounded record limit".to_owned(),
+        ));
+    }
+    state
+        .replace(Path::new(RESTORE_COMPLETION_PATH), &encoded)
+        .map_err(Into::into)
+}
+
 fn encode_restore_transaction(
     transaction: &RestoreTransaction,
 ) -> Result<Vec<u8>, FolderbaseCaptureError> {
@@ -3970,6 +4129,7 @@ mod tests {
             RestoreCheckpoint::BeforeStageRetirement,
             RestoreCheckpoint::AfterStageRetirement,
             RestoreCheckpoint::CleanupIntentRetired,
+            RestoreCheckpoint::CompletionDurable,
             RestoreCheckpoint::CleanupComplete,
         ] {
             let root = folderbase();
@@ -5385,6 +5545,87 @@ mod tests {
             transaction_entries.is_empty(),
             "successful cleanup must not leak one directory per restore"
         );
+    }
+
+    #[test]
+    fn completion_receipt_is_a_bounded_singleton_and_never_blocks_capture() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("first delete");
+        store
+            .seal_capture(store.plan_capture().expect("first deletion"))
+            .expect("first deletion");
+        let first = store
+            .restore_tombstone("active.bin")
+            .expect("first restore");
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let first_receipt = read_restore_completion_receipt(&state)
+            .expect("first completion receipt")
+            .expect("durable first completion");
+        assert_eq!(
+            first_receipt.transaction.target_version_id,
+            first.version_id()
+        );
+        assert!(
+            fs::metadata(root.path().join(RESTORE_COMPLETION_PATH))
+                .expect("completion metadata")
+                .len()
+                <= MAX_CAPTURE_TRANSACTION_BYTES
+        );
+
+        let unchanged = store
+            .seal_capture(store.plan_capture().expect("unchanged capture"))
+            .expect("completion receipt must not block capture");
+        assert!(!unchanged.created());
+        fs::remove_file(root.path().join("active.bin")).expect("second delete");
+        store
+            .seal_capture(store.plan_capture().expect("second deletion"))
+            .expect("stale completion must not block a later deletion");
+        let second = store
+            .restore_tombstone("active.bin")
+            .expect("second restore");
+        let second_receipt = read_restore_completion_receipt(&state)
+            .expect("second completion receipt")
+            .expect("durable second completion");
+        assert_eq!(
+            second_receipt.transaction.target_version_id,
+            second.version_id()
+        );
+        assert_ne!(
+            second_receipt.transaction.target_version_id,
+            first_receipt.transaction.target_version_id,
+            "later completion must replace, not append to, the singleton"
+        );
+    }
+
+    #[test]
+    fn completion_receipt_never_blesses_changed_workspace_bytes() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("completed restore");
+        fs::write(root.path().join("active.bin"), b"later workspace edit")
+            .expect("edit completed target");
+
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == Path::new("active.bin")
+        ));
+        store
+            .seal_capture(store.plan_capture().expect("edited capture"))
+            .expect("advisory completion evidence must not block later work");
     }
 
     #[cfg(unix)]
