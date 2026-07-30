@@ -685,6 +685,41 @@ bounded transfer operations. Checkout hydration and historical recovery use
 separate authorization flows; a caller cannot turn an arbitrary historical
 version identifier into Live Folder materialization authority.
 
+## Device-local root identity
+
+`root_instance_sha256` is device-local integrity and recovery evidence, not a
+portable Folderbase identity or permission grant. Unix uses the released
+`folderbase-physical-root-instance-v1` domain over `unix`, big-endian `u64`
+device, and big-endian `u64` inode. Those bytes remain unchanged.
+
+Released Windows records used the same V1 domain over `windows`, big-endian
+`u32` volume serial, and big-endian `u64` file index. New Windows attestations
+use `folderbase-physical-root-instance-v2` over `windows`, the complete
+big-endian `u64` volume serial, and all 16 bytes of
+`FILE_ID_INFO.FileId.Identifier`. Both values are queried from one retained
+no-follow root handle. The digest domain selects the encoding; the public
+attestation receipt remains the same five-field record.
+
+On Windows, Core may admit an exact released V1 digest for a durable record
+when it matches the released digest computed from the retained root. Admission
+preserves the exact recorded value. Active capture and restore journals, their
+deterministic derivations, rollback, cleanup, completion, and authority receipts
+are never normalized or rewritten. Only mutable Local Head may move to the
+current V2 root under the transaction lock, after the named immutable Version
+and digest verify and no pending recovery remains, or as the normal next Head
+CAS. Capture-transaction authority keeps the SHA-256 of the exact journal
+bytes; version-derived authority is recomputed for the current root. Once a
+Head records V2, a different full identity is rejected even if the two roots
+would have collided under V1 truncation.
+
+First-upgrade admission of a released Windows V1 record is necessarily trust on
+first use within trusted local `.folderbase`. V1 cannot manufacture the upper
+identity bits it never recorded, so a copied, self-consistent legacy record on
+a rare root with the same truncated tuple is not distinguishable from same-root
+legacy state. That compatibility fact grants no portable, actor, sharing, or
+Cloud authority. Mutable Head moves to V2 at the safe boundary above; immutable
+legacy transaction evidence remains explicitly legacy through retirement.
+
 ## Canonical Folderbase Version 0.4
 
 `folderbase-version-v1` is the portable bounded full state of one Folderbase
@@ -833,6 +868,12 @@ silently reinterpreted as version-derived authority. Recovery after Head
 publication refuses any journal mutation and requires the committed version's
 exact parents and timestamp to match the anchored capture intent before
 projecting identity evidence.
+When a durable Head or active journal carries an admitted released Windows V1
+root, the journal's plan digest is reproduced with that exact recorded root.
+Recovery never hashes a current-root normalization in place of the recorded
+pre-Head or post-Head authority. A released-root Head is rebound only after its
+immutable Version verifies and pending capture work is retired, unless the
+normal next Head CAS already writes the current root.
 
 The closed v2 wire shape is:
 
@@ -987,6 +1028,12 @@ Folderbase ID, physical-root instance, parent Version ID, and parent Version
 digest. The rebound parent and restore-produced Heads are v2 records with
 `version_derived_v1` authority. Committed recovery rejects a journal-supplied
 prior Head digest that cannot be rederived after the prior Head is gone.
+For an admitted released-root restore, every transaction and target
+derivation uses `transaction.root_instance_sha256`, not the current
+attestation. Target and rollback Heads retain that recorded root until cleanup
+retires pending state; cleanup, completion, and authority records remain exact
+immutable compatibility evidence. Core then independently verifies the
+installed Version and atomically rebinds only Local Head to the current root.
 Post-Head projection remains confined to the retained state capability, and
 projection failure restores the exact prior Head. An in-place edit of the
 transaction-owned published target preserves the user's bytes. Cleanup

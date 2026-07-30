@@ -5,18 +5,21 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(not(windows))]
+use folderbase_core::ROOT_INSTANCE_FORMAT_V1 as CURRENT_ROOT_INSTANCE_FORMAT;
+#[cfg(windows)]
+use folderbase_core::ROOT_INSTANCE_FORMAT_V2 as CURRENT_ROOT_INSTANCE_FORMAT;
 use folderbase_core::{
     ApprovedMigration, FolderbaseCaptureError, FolderbaseError, FolderbaseKind,
     FolderbaseVersionStore, InitializationOptions, InitializationPlan, InitializationPlanDigest,
     InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
     MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview, MigrationResult,
-    MigrationState, ROOT_INSTANCE_FORMAT_V1, RollbackResult, RootAttestationError,
-    TemplateAnswerType, TemplateAnswerValue, TemplatePackage, ValidationLevel, ValidationReport,
-    ValidationSeverity, VersionId, analyze_migration, apply_migration, approve_migration,
-    attest_folderbase_root, initialize, initialize_with_expected_plan_digest, inspect,
-    list_workspace, load_builtin_template, plan_initialization, plan_migration,
-    plan_template_initialization, preview_migration, read_workspace_text, save_workspace_text,
-    validate,
+    MigrationState, RollbackResult, RootAttestationError, TemplateAnswerType, TemplateAnswerValue,
+    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
+    analyze_migration, apply_migration, approve_migration, attest_folderbase_root, initialize,
+    initialize_with_expected_plan_digest, inspect, list_workspace, load_builtin_template,
+    plan_initialization, plan_migration, plan_template_initialization, preview_migration,
+    read_workspace_text, save_workspace_text, validate,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -410,7 +413,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 println!("Protocol version: {}", receipt.protocol_version);
                 println!("Manifest SHA-256: {}", receipt.manifest_sha256);
                 println!(
-                    "Physical root instance ({ROOT_INSTANCE_FORMAT_V1}): {}",
+                    "Physical root instance ({CURRENT_ROOT_INSTANCE_FORMAT}): {}",
                     receipt.root_instance_sha256
                 );
             }

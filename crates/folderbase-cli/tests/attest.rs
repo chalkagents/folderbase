@@ -5,6 +5,10 @@ use predicates::prelude::*;
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
 const MANIFEST_SHA256: &str = "29a1ad6f2d1c5591b35951a39bc38603728527f8be808510f080db1922c3f8be";
+#[cfg(not(windows))]
+const CURRENT_ROOT_INSTANCE_FORMAT: &str = "folderbase-physical-root-instance-v1";
+#[cfg(windows)]
+const CURRENT_ROOT_INSTANCE_FORMAT: &str = "folderbase-physical-root-instance-v2";
 const MANIFEST: &[u8] = br#"{
   "protocol_version": "0.2.0+attestation",
   "folderbase": {
@@ -82,9 +86,9 @@ fn attest_human_output_names_the_same_evidence() {
         .stdout(predicate::str::contains(format!(
             "Manifest SHA-256: {MANIFEST_SHA256}"
         )))
-        .stdout(predicate::str::contains(
-            "Physical root instance (folderbase-physical-root-instance-v1): ",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "Physical root instance ({CURRENT_ROOT_INSTANCE_FORMAT}): "
+        )));
 }
 
 #[test]

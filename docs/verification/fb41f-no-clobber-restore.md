@@ -365,6 +365,44 @@ authorities, new Tombstone restore fails closed until a future explicit
 maintenance protocol is available; this slice performs no automatic garbage
 collection.
 
+## Root identity continuity and migration unlink authority
+
+- `628d219` retains the exact source and destination leaf identities, their
+  parent identities, and one shared no-follow root capability through
+  structural recovery. Immediately before unlink, Core reopens the exact
+  destination parent from that root, reopens the destination parent-relative,
+  and compares full identities. POSIX unlinks while child handles remain live.
+  Windows releases only the child handles after final proof while retaining
+  root and parent capabilities for the cooperative exact-name removal window.
+  A deterministic same-byte destination substitution at that final boundary is
+  refused and preserved with the journal still in flight.
+- `e410460` leaves Unix root-instance V1 unchanged and makes new Windows roots
+  use `folderbase-physical-root-instance-v2`, the complete 64-bit volume serial
+  plus all 128 `FILE_ID_INFO` bits. Released Windows V1 remains an exact,
+  in-memory compatibility authority rather than being redefined.
+- Compatibility admission carries the exact recorded root into active capture
+  plan digests, restore transaction and target identities, Head authority,
+  rollback, cleanup, completion, and retained authority receipts. Immutable
+  journals and receipts are never normalized or rewritten.
+- Local Head is rebound only under the transaction lock after its immutable
+  Version and digest verify and no pending work remains, after recovery retires
+  pending work, or through the normal next Head CAS. Capture-transaction
+  authority keeps the exact journal SHA; version-derived authority is
+  recomputed. Pre-CAS and post-CAS process faults prove the only outcomes are an
+  exact old-valid or new-valid Head.
+- Released-root capture recovery reproduces the plan digest with the journal's
+  recorded root before and after Head publication. Released-root restore
+  recovery converges across all 12 post-journal durability boundaries while
+  retaining exact cleanup, completion, and authority bytes and digests.
+- Fixed vectors independently preserve Unix V1 and distinguish Windows V2
+  identities that collided under the released truncation. The native Windows
+  integration encoder queries `FILE_ID_INFO` directly rather than calling the
+  production identity helper.
+- V1 compatibility is explicitly trusted-local TOFU: a released record cannot
+  prove upper identity bits it never stored. Once a Head records V2, a
+  different full identity is rejected. Neither identity format grants portable
+  or Cloud authority.
+
 ## Gates
 
 The frozen implementation passed:
@@ -374,7 +412,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-644 passed; 3 ignored
+654 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
@@ -384,17 +422,17 @@ RUSTDOCFLAGS="-D warnings" \
 passed
 
 RUSTFLAGS="-D warnings" \
-  cargo check -p folderbase-core \
+  cargo check -p folderbase-core --lib \
   --target x86_64-pc-windows-msvc --locked --all-features
 passed
 
 RUSTFLAGS="-D warnings" \
-  cargo check -p folderbase-core \
+  cargo check -p folderbase-core --lib \
   --target aarch64-unknown-linux-gnu --locked --all-features
 passed
 
 bash scripts/test-package-install.sh
-passed; Core packaged 56 files, CLI packaged 10 files, extracted package
+passed; Core packaged 57 files, CLI packaged 10 files, extracted package
 tests passed, and the fresh release install reported folderbase 0.4.0
 
 bash scripts/check-ci-policy.sh

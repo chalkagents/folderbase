@@ -49,7 +49,8 @@ Rust retains `root` as the exact `PathBuf`. JSON renders it explicitly as a
 lossy display string so a valid Unix path containing non-UTF-8 bytes cannot
 panic or make the otherwise portable receipt unserializable.
 
-The root-instance digest v1 is:
+The root-instance digest has a versioned domain. Unix continues to use the
+released v1 encoding:
 
 ```text
 SHA-256(
@@ -60,12 +61,56 @@ SHA-256(
 ```
 
 On Unix, `platform_tag` is `unix` and `physical_identity_bytes` is the
-big-endian `u64` device identifier followed by the big-endian `u64` inode. On
-Windows, `platform_tag` is `windows` and the bytes are the big-endian `u32`
-volume serial number followed by the big-endian `u64` file index. A rename on
-one filesystem retains this instance identity; a physical copy or replacement
-does not. The digest is deliberately device-local, non-portable, and is neither
-an actor identity nor proof of permission.
+big-endian `u64` device identifier followed by the big-endian `u64` inode.
+Those bytes and their v1 domain are unchanged.
+
+Released Windows records also used the v1 domain, with `platform_tag`
+`windows`, a big-endian `u32` volume serial number, and a big-endian `u64` file
+index. That released encoding remains a compatibility authority for already
+durable local records; it is not redefined.
+
+New Windows attestations use:
+
+```text
+SHA-256(
+  UTF8("folderbase-physical-root-instance-v2") || 0x00 ||
+  UTF8("windows") || 0x00 ||
+  BE_U64(volume_serial_number) ||
+  FILE_ID_INFO.FileId.Identifier[16]
+)
+```
+
+Both current and released Windows identities are queried from the same retained
+no-follow root handle. V2 retains the complete 64-bit volume serial and all 128
+bits of `FILE_ID_INFO`, so two ReFS identities that collided after the released
+truncation remain distinct. The digest domain itself selects the identity
+version; the five-field public receipt gains no separate wire discriminator.
+A rename on one filesystem retains the current instance identity; a physical
+copy or replacement does not. The digest is deliberately device-local,
+non-portable, and is neither an actor identity nor proof of permission.
+
+Windows Core retains an in-memory root authority containing the current V2
+digest and, when available, the exact released V1 digest. It admits a durable
+record only when the record contains one of those exact values and carries that
+recorded value forward into every transitive derivation. Active capture and
+restore journals, deterministic restore IDs, rollback, cleanup, completion,
+and retained authority receipts are never normalized or rewritten to V2.
+Only mutable Local Head may be rebound: under the shared transaction lock,
+after its immutable Version and digest verify and no pending operation remains,
+or as part of the normal next Head compare-and-swap. Capture-transaction
+authority continues to hash the exact journal bytes; version-derived authority
+is recomputed for the new root digest. A crash before that Head CAS leaves the
+exact old-valid Head, and a crash after it leaves the new-valid Head.
+
+This compatibility cannot retroactively recover identity bits that V1 never
+recorded. On first upgrade, a released Windows V1 record whose digest matches
+the retained root's released tuple is admitted as trust on first use within the
+trusted local `.folderbase` boundary. If a same-user process copied a
+self-consistent released record onto a rare physical root with the same
+truncated tuple, V1 alone cannot distinguish the two. That ambiguity is neither
+portable authorization nor a V2 collision. Once mutable Head is rebound, its
+V2 root rejects any different full identity; immutable legacy evidence remains
+explicitly legacy until its pending transaction is retired.
 
 Attestation opens the exact supplied root without following a symbolic link or
 Windows reparse point and retains its handle. It then resolves
@@ -111,8 +156,9 @@ folderbase attest PATH [--json]
 ```
 
 Successful JSON is the same flat receipt. Human output names the same five
-facts. Failures use the CLI's stable JSON error envelope when `--json` is set
-and exit with operational status 2.
+facts and labels the platform-current digest domain (V1 on Unix, V2 on
+Windows). Failures use the CLI's stable JSON error envelope when `--json` is
+set and exit with operational status 2.
 
 Attestation is evidence about a local materialization. It does not prove share
 grants, actor authority, cloud readiness, sync completeness, object history, or
@@ -154,6 +200,10 @@ The decision is implemented when Core and CLI tests prove:
 - recursive duplicate-key rejection and the 16 MiB bound;
 - invalid canonical IDs and SemVer rejection without normalization;
 - retained-identity change detection where a deterministic race can be staged;
+- unchanged Unix v1 vectors and independent native Windows v2 encoding;
+- rejection of Windows identities that collided under the released truncation;
+- exact recovery of released-root capture and restore journals across Head and
+  cleanup boundaries without rewriting immutable receipts;
 - stable human and JSON CLI output and JSON error envelopes with exit status 2;
 - macOS and Windows execution in CI; and
 - no filesystem mutation during attestation.

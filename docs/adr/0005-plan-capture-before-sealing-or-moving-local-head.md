@@ -28,6 +28,33 @@ transaction lock after ruling out restore activity. It never reinterprets a v1
 field as version-derived authority. Local Head is device-local state, not shared
 or Cloud authority.
 
+On Windows, current root authority is V2 (full 64-bit volume serial and 128-bit
+`FILE_ID_INFO`), while the exact released Windows V1 digest remains admissible
+only through the released compatibility path for durable records. The
+admission result carries the record's exact digest; it does not normalize it to
+the current attestation. Capture plan digests for an active released-root
+journal use that recorded root, including both pre-Head execution and
+committed-Head recovery.
+Restore transaction and target IDs, expected and target Head authority,
+rollback, cleanup, completion, and authority receipts likewise derive from or
+retain the transaction's recorded root. Immutable journal and receipt bytes are
+never rewritten during compatibility recovery.
+
+Local Head is the sole mutable rebind point. Under the shared transaction lock,
+Core first verifies the named immutable Folderbase Version and its canonical
+digest. It rebinds a released-root Head only when no capture or restore work is
+pending, after recovery retires all pending work, or in the normal next Head
+compare-and-swap. A capture-transaction Head keeps the SHA-256 of the exact
+journal bytes while changing only its root binding; a version-derived Head
+recomputes its authority with the current root. Faults on either side of that
+CAS therefore leave exactly one old-valid or new-valid Head. A V2 Head never
+admits a different full Windows identity merely because both would have
+collided under the released truncation. One-time admission of a released V1
+record is necessarily TOFU inside trusted local `.folderbase`: V1 cannot
+retroactively prove upper identity bits it did not store. A copied,
+self-consistent V1 record on a rare colliding tuple is therefore part of the
+same-user local-state trust boundary, not a portable or Cloud authority claim.
+
 ### Local trust boundary
 
 `.folderbase/` is trusted, engine-owned local state in the same sense as
