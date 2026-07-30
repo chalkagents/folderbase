@@ -795,6 +795,8 @@ fn verify_regular_file(
     executable: bool,
     display: &Path,
 ) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = executable;
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let mut file = parent
