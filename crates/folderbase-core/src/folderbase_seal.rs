@@ -3725,8 +3725,26 @@ mod tests {
             .expect("journal")
             .expect("active");
         let parent = store.read_version(deletion.version_id()).expect("parent");
-        transaction.target_version_id = format!("fbversion_{}", Uuid::now_v7());
-        transaction.created_at = "2035-01-02T03:04:05Z".to_owned();
+        transaction.expected_head.transaction_sha256 = "a".repeat(64);
+        let forged_parent_head = LocalHeadRecord {
+            format: "folderbase-local-head-v1".to_owned(),
+            folderbase_id: transaction.folderbase_id.clone(),
+            root_instance_sha256: transaction.root_instance_sha256.clone(),
+            version_id: transaction.expected_head.version_id.clone(),
+            version_sha256: transaction.expected_head.version_sha256.clone(),
+            transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+        };
+        let (transaction_id, target_version_id, created_at) = assigned_restore_identity(
+            &store,
+            &forged_parent_head,
+            &parent,
+            &transaction.tombstone,
+            &transaction.binding,
+        )
+        .expect("forge every dependent deterministic assignment");
+        transaction.transaction_id = transaction_id;
+        transaction.target_version_id = target_version_id;
+        transaction.created_at = created_at;
         let forged = restored_version(
             &store,
             &parent,
@@ -3739,6 +3757,16 @@ mod tests {
         transaction.target_version_sha256 =
             forged.canonical_digest().expect("forged target digest");
         install_test_version(root.path(), &forged);
+        let forged_stage_directory = root
+            .path()
+            .join(RESTORE_TRANSACTIONS_DIRECTORY)
+            .join(&transaction.transaction_id);
+        fs::create_dir(&forged_stage_directory).expect("forged transaction directory");
+        fs::hard_link(
+            root.path().join("active.bin"),
+            forged_stage_directory.join("content"),
+        )
+        .expect("retain the published destination under the forged assignment");
         state
             .replace(
                 Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
