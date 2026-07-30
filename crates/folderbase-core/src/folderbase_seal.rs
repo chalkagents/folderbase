@@ -7698,6 +7698,7 @@ mod tests {
             assert!(interrupted.is_err(), "fault {fault:?}");
 
             let transaction = active_transaction(root.path()).expect("active capture");
+            let original_transaction_id = transaction.transaction_id.clone();
             assert!(
                 transaction.expected_head.is_some(),
                 "fixture must be non-genesis"
@@ -7707,6 +7708,12 @@ mod tests {
                 "ordinary capture Heads must retain the exact released flat-Head v1 plan digest"
             );
             let released_bytes = released_journal_bytes(&transaction, &released_plan_sha256);
+            let released_json: serde_json::Value =
+                serde_json::from_slice(&released_bytes).expect("released journal value");
+            assert_eq!(
+                released_json["transaction_id"], original_transaction_id,
+                "released recovery must preserve the original transaction identity"
+            );
             let released_sha256 = format!("{:x}", Sha256::digest(&released_bytes));
             let normalized_current_bytes =
                 encode_active_transaction(&transaction, MAX_CAPTURE_TRANSACTION_BYTES)
@@ -7720,6 +7727,100 @@ mod tests {
             state
                 .replace(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &released_bytes)
                 .expect("install exact released active journal bytes");
+            if fault == CaptureCheckpoint::JournalDurable {
+                let original_head =
+                    fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("prior Head bytes");
+
+                let mut hybrid = released_json.clone();
+                hybrid["assignments"][0]["link_commitment"] = serde_json::json!({
+                    "expected_live_link_count": 1,
+                    "authority_set_sha256": null,
+                    "authorities": []
+                });
+                let hybrid_bytes =
+                    serde_json::to_vec_pretty(&hybrid).expect("hybrid active journal");
+                state
+                    .replace(
+                        Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                        &hybrid_bytes,
+                    )
+                    .expect("install hybrid active journal");
+                assert!(
+                    read_active_transaction_with_limit(
+                        &state,
+                        u64::try_from(hybrid_bytes.len()).expect("hybrid length")
+                    )
+                    .is_err(),
+                    "a flat released Head with a current-only assignment must not be classified as released v1"
+                );
+                assert_eq!(
+                    fs::read(root.path().join(LOCAL_HEAD_PATH)).expect("unchanged prior Head"),
+                    original_head,
+                    "rejecting a hybrid journal must not move Head"
+                );
+
+                let mut maximum_released = released_bytes.clone();
+                maximum_released.resize(
+                    usize::try_from(MAX_CAPTURE_TRANSACTION_BYTES)
+                        .expect("capture transaction maximum fits usize"),
+                    b' ',
+                );
+                state
+                    .replace(
+                        Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                        &maximum_released,
+                    )
+                    .expect("install released journal at the exact raw maximum");
+                let maximum_active =
+                    read_active_transaction_with_limit(&state, MAX_CAPTURE_TRANSACTION_BYTES)
+                        .expect("read exact-maximum released journal")
+                        .expect("active exact-maximum released journal");
+                assert_eq!(maximum_active.transaction_id, original_transaction_id);
+                assert_eq!(
+                    maximum_active.wire,
+                    CaptureTransactionWire::ReleasedV1 {
+                        encoded_bytes: MAX_CAPTURE_TRANSACTION_BYTES
+                    },
+                    "accepted trailing JSON whitespace remains part of the exact released authority wire"
+                );
+
+                use std::io::Write as _;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH))
+                    .expect("open exact-maximum journal")
+                    .write_all(b" ")
+                    .expect("grow journal one byte beyond maximum");
+                assert!(
+                    read_active_transaction_with_limit(&state, MAX_CAPTURE_TRANSACTION_BYTES)
+                        .is_err(),
+                    "a released raw journal one byte beyond the actual maximum must fail closed"
+                );
+
+                let mut truncated_released = released_bytes.clone();
+                while truncated_released.last().is_some_and(u8::is_ascii_whitespace) {
+                    truncated_released.pop();
+                }
+                assert_eq!(truncated_released.pop(), Some(b'}'));
+                state
+                    .replace(
+                        Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH),
+                        &truncated_released,
+                    )
+                    .expect("install truncated released journal");
+                assert!(
+                    read_active_transaction_with_limit(
+                        &state,
+                        u64::try_from(truncated_released.len()).expect("truncated length")
+                    )
+                    .is_err(),
+                    "raw released JSON truncation must fail closed"
+                );
+
+                state
+                    .replace(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &released_bytes)
+                    .expect("restore exact released active journal bytes");
+            }
             assert!(
                 read_active_transaction_with_limit(&state, released_limit - 1).is_err(),
                 "oversized released raw wire must still fail its exact read bound"
