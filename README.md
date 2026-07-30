@@ -85,6 +85,17 @@ folderbase init /path/to/project \
 folderbase validate /path/to/project --json
 ```
 
+After a captured deletion, restore the current Local Head's exact ordinary-file
+Tombstone without overwriting anything already at that path:
+
+```sh
+folderbase version restore-tombstone /path/to/project path/to/file --json
+```
+
+This restores the sealed opaque bytes and executable fidelity under the
+original Object ID and Object Version, then creates one new full-state
+Folderbase Version. Directory and symlink Tombstones are not restored by v1.
+
 The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
 Core compares it and performs a bounded, metadata-only preflight immediately
 before its first write. The digest includes the physical filesystem identity of

@@ -828,12 +828,36 @@ to the approved plan and verified parent before object writes.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 
+`FolderbaseVersionStore::restore_tombstone(path)` restores only a regular-file
+Tombstone selected from the current verified Local Head. It searches the
+bounded ancestor DAG for the nearest verified live binding with the exact
+path, Object ID, and Object Version. That binding supplies the authoritative
+opaque-byte digest, length, and executable fidelity. Missing, ambiguous,
+cyclic, corrupt, or over-limit ancestry is refused.
+
+Restore uses a separate bounded journal under the shared local transaction
+lock. Capture and restore refuse each other's active intent. The journal binds
+the expected Head, selected Tombstone, recovered live binding, target version,
+timestamp, and digest. A private copied stage retains transaction ownership
+while Core hard-links it into the absent same-path destination. Existing
+regular files, directories, symlinks, and dangling symlinks are never replaced;
+even identical foreign bytes are refused. Retry may accept the destination
+only when it has the exact retained-stage filesystem identity.
+
+The resulting full-state Folderbase Version preserves the root manifest,
+exclusions, every unrelated live binding, and every unrelated Tombstone,
+removes only the selected Tombstone, restores the original Object ID and Object
+Version, and names the deletion Head as its sole parent. The target file and
+every immutable reference verify before Local Head changes. Journal, stage,
+target, version, Head, projection, and cleanup boundaries are recoverable.
+Directory and symlink Tombstone reconstruction remain outside v1 restore.
+
 This remains Proposed. Productive captured-absence and supported-kind
-replacement Tombstones are implemented, including crash convergence. Durable
-App filesystem-event or explicit Core deletion evidence, cross-path moves, full
-no-clobber restore/crash recovery, database snapshot coordination, Remote Head
-publication, sync, sharing, authorization, and Cloud behavior remain out of
-scope.
+replacement Tombstones and exact ordinary-file no-clobber restore are
+implemented, including crash convergence. Durable App filesystem-event or
+explicit Core deletion evidence, cross-path moves, directory/symlink restore,
+database snapshot coordination, Remote Head publication, sync, sharing,
+authorization, and Cloud behavior remain out of scope.
 
 ## Checkout
 

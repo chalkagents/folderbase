@@ -148,12 +148,41 @@ journal, Object Version, Folderbase Version, Local Head, or cleanup boundaries
 converges on the exact journal-assigned version. A stale attempt may discard
 only its intent; verified immutable records remain safe, reusable orphans.
 
+An explicit `restore_tombstone(path)` operation now closes the ordinary-file
+capture/restore loop. It accepts only an exact regular-file Tombstone in the
+current verified Local Head. A bounded, cycle-detecting ancestor search finds
+the nearest verified live binding with the same path, Object ID, and last
+Object Version ID; that binding is the authority for content digest, byte
+length, and executable fidelity. Missing, ambiguous, cyclic, corrupt, or
+out-of-bounds lineage fails closed. Directories and symlinks remain unsupported
+until they have equally strong cross-platform no-clobber ownership proofs.
+
+Restore is same-path and no-clobber. Core copies the immutable content blob to a
+private transaction stage, applies executable fidelity to that independent
+inode, and hard-links the retained stage into an absent destination through
+no-follow root capabilities. Recovery accepts an existing target only when it
+is the same filesystem object as the retained stage; byte equality alone never
+authorizes adoption. A preexisting regular file, directory, symlink, or
+dangling symlink is left untouched.
+
+The restore journal binds the exact expected Local Head, selected Tombstone,
+recovered binding, new Folderbase Version ID, timestamp, and canonical digest.
+The new full-state version copies every other live binding, Tombstone,
+exclusion, and root-manifest reference, removes only the selected Tombstone,
+and has the deletion Head as its sole parent. Local Head advances only after
+the target file, Object Version, blob, and complete Folderbase Version verify.
+The capture and restore journals mutually exclude each other under the shared
+transaction lock. Interruption at journal, stage, target publication, version,
+Head, projection, or cleanup converges on the one assigned version without
+overwriting foreign content.
+
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records
-supported-kind replacement as Tombstone plus new identity. It does not yet
+supported-kind replacement as Tombstone plus new identity. Exact regular-file
+Tombstone restoration is no-clobber and crash-recoverable. It does not yet
 ingest an App filesystem-event deletion journal or expose an explicit Core
-deletion operation, detect cross-path moves, or implement full no-clobber
-restore reconstruction, restore crash recovery, filesystem/database snapshot
-coordination, Remote Head publication, sync, sharing, authorization, or Cloud
-durability. Acceptance still requires explicit deletion-evidence intake and the
-restore transaction to close the complete capture/restore lifecycle.
+deletion operation, detect cross-path moves, restore directory or symlink
+Tombstones, coordinate filesystem/database snapshots, publish Remote Head, or
+implement sync, sharing, authorization, or Cloud durability. Acceptance still
+requires explicit deletion-evidence intake; the implemented regular-file
+restore transaction no longer blocks acceptance by itself.

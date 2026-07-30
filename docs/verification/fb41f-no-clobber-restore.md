@@ -1,0 +1,135 @@
+# FB-41F exact no-clobber Tombstone restore
+
+This evidence covers the first explicit restore operation for productive
+Folderbase Version Tombstones. The public seam is:
+
+```rust
+FolderbaseVersionStore::restore_tombstone(portable_path)
+```
+
+The CLI seam is:
+
+```text
+folderbase version restore-tombstone ROOT PORTABLE_PATH --json
+```
+
+## Transition base
+
+The branch starts from accepted capture/Tombstone merge:
+
+```text
+70a999b345ae46deba062c89dac5078ab1a5a1c0
+feat(core): seal productive tombstones safely (#27)
+```
+
+No second object, version, or content store was introduced. Restore consumes
+the existing immutable `LocalVersionStore` Object Version record and SHA-256
+blob named by the current Head Tombstone.
+
+## RED evidence
+
+- `b1ee74f` required exact ordinary-file bytes, executable fidelity, original
+  Object ID/Object Version, immutable deletion history, and a new Local Head.
+  It failed to compile because `restore_tombstone` did not exist.
+- `869b443` required retry convergence across journal, stage, target
+  publication, version, Head, projection, and cleanup checkpoints. It failed to
+  compile because no restore checkpoint/recovery seam existed.
+- `c2f288c` required a fresh-process CLI JSON round trip. It failed because
+  `restore-tombstone` was an unrecognized subcommand.
+- `f5561df` required active-journal exclusion, tamper refusal, bounded and
+  hostile ancestry handling, and root confinement. The nested-Folderbase
+  regression failed because restore initially crossed a newly created child
+  boundary.
+- `20ecf87` strengthened journal tamper coverage by changing only executable
+  fidelity and recomputing the target digest. It failed because recovery had
+  not yet re-derived fidelity from verified ancestry.
+
+## GREEN behavior
+
+- `04dc017` restores exact opaque bytes and v1 executable fidelity, reactivates
+  the same Object ID and Object Version, creates one full-state child version,
+  removes only the selected Tombstone, and advances Local Head after complete
+  verification.
+- `1bf3942` adds a bounded durable restore journal, retained private stage,
+  same-inode retry proof, and seven-checkpoint crash convergence.
+- `7fc2646` exposes the fresh-process CLI and stable JSON result.
+- `9109526` covers same-byte foreign competitors, every occupied leaf kind,
+  corrupt/missing immutable state, newest deletion generation, carried
+  Tombstones, multiple Tombstones, capture/restore exclusion, bounded,
+  ambiguous, and cyclic ancestry, symlink-parent swaps, and new nested
+  Folderbase boundaries.
+- `8158080` binds pending journal fidelity back to the current verified
+  Tombstone and nearest verified live ancestor before staging.
+
+The transaction is same-path and no-clobber. A preexisting regular file,
+directory, symlink, or dangling symlink is unchanged. Matching bytes are not
+ownership evidence. Recovery accepts an already published target only when it
+is the exact same filesystem object as the retained private stage.
+
+The current verified Head must contain an exact regular-file Tombstone. A
+bounded, cycle-detecting ancestor DAG search selects the nearest live binding
+with the same path, Object ID, and Object Version. Competing nearest bindings
+must agree exactly, including executable fidelity. Missing, corrupt,
+ambiguous, cyclic, or over-limit lineage fails before restore publication.
+
+## Gates
+
+The frozen implementation passed:
+
+```text
+cargo fmt --all -- --check
+git diff --check
+
+cargo test --workspace --all-features --locked
+576 passed; 3 ignored
+
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+passed
+
+RUSTDOCFLAGS="-D warnings" \
+  cargo doc --workspace --all-features --no-deps --locked
+passed
+
+RUSTFLAGS="-D warnings" \
+  cargo check -p folderbase-core \
+  --target x86_64-pc-windows-msvc --locked --all-features
+passed
+
+RUSTFLAGS="-D warnings" \
+  cargo check -p folderbase-core \
+  --target aarch64-unknown-linux-gnu --locked --all-features
+passed
+
+bash scripts/test-package-install.sh
+passed; Core packaged 55 files, CLI packaged 10 files, extracted package
+tests passed, and the fresh release install reported folderbase 0.4.0
+
+bash scripts/check-ci-policy.sh
+passed
+
+bash scripts/check-public-eclipse.sh
+passed
+
+node scripts/verify-folderbase-version-distribution.mjs
+passed; 32 files
+
+node scripts/verify-folderbase-version-digest-vectors.mjs
+passed
+
+node scripts/verify-reorganization-digest-vector.mjs
+passed
+```
+
+The Windows and Linux commands are compile checks. Runtime proof on those
+platforms remains owned by the repository CI matrix.
+
+## Claims and nonclaims
+
+This slice claims exact no-clobber restore only for a current-Head
+regular-file Tombstone whose nearest verified live ancestor preserves the v1
+binding. It preserves opaque bytes and the v1 executable boolean. It does not
+claim complete POSIX mode, ACL, xattr, Finder metadata, database snapshot
+coordination, directory restore, symlink restore, arbitrary-destination
+checkout, Remote Head, sync, sharing, authorization, Cloud durability, or
+hosted deployment.
+
