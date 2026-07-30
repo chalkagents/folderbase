@@ -8,11 +8,23 @@ use folderbase_core::{
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
-const LEGACY_FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
+const LEGACY_FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475";
 const LEGACY_MANIFEST: &[u8] = br#"{
-  "protocol_version": "0.4.0",
+  "$schema": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "protocol_version": "0.1.0",
   "folderbase": {
-    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475",
+    "name": "Legacy Folderbase",
+    "kind": "project",
+    "status": "active",
+    "created_at": "2026-07-26T00:00:00Z",
+    "entry": "FOLDERBASE.md"
+  },
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "approve",
+    "cloud_sync": "disabled"
   }
 }
 "#;
@@ -23,6 +35,10 @@ fn ordinary_options() -> InitializationOptions {
         kind: FolderbaseKind::Project,
         create_agent_adapters: false,
     }
+}
+
+fn planned_paths(plan: &folderbase_core::CapturePlan) -> Vec<&str> {
+    plan.entries().iter().map(|entry| entry.path()).collect()
 }
 
 fn initialize_ordinary(root: &Path) {
@@ -342,5 +358,104 @@ fn released_v04_fixture_and_root_keep_their_exact_protocol_semantics() {
     assert_eq!(
         fs::read(root.path().join("proposal.docx")).expect("legacy restored bytes"),
         b"released bytes"
+    );
+}
+
+#[test]
+fn default_initialization_is_engine_state_only_and_agent_adapters_are_opt_in() {
+    let root = tempdir().expect("ordinary folder");
+    let options = InitializationOptions::default();
+    assert!(
+        !options.create_agent_adapters,
+        "agent adapters are an explicit opt-in"
+    );
+    let plan = plan_initialization(root.path(), options).expect("default plan");
+    assert!(
+        plan.writes()
+            .iter()
+            .all(|write| write.path().starts_with(".folderbase"))
+    );
+    initialize(&plan).expect("default initialization");
+    for path in [
+        "FOLDERBASE.md",
+        ".folderbaseignore",
+        "AGENTS.md",
+        "CLAUDE.md",
+    ] {
+        assert!(!root.path().join(path).exists(), "{path} is not implicit");
+    }
+}
+
+#[test]
+fn absent_and_empty_ignore_policies_are_distinct_stable_and_stale_in_both_directions() {
+    let root = tempdir().expect("ordinary folder");
+    initialize_ordinary(root.path());
+    fs::write(root.path().join("FOLDERBASE.md"), b"ordinary narrative").expect("ordinary file");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+
+    let absent = store.plan_capture().expect("absent policy");
+    let absent_digest = absent.ignore_policy_sha256().to_owned();
+    assert!(planned_paths(&absent).contains(&"FOLDERBASE.md"));
+
+    fs::write(root.path().join(".folderbaseignore"), b"").expect("empty policy");
+    assert!(
+        store.seal_capture(absent).is_err(),
+        "an absent-policy plan is stale after an empty policy appears"
+    );
+    let empty = store.plan_capture().expect("empty policy");
+    let empty_digest = empty.ignore_policy_sha256().to_owned();
+    assert_ne!(
+        absent_digest, empty_digest,
+        "missing and present-empty are separately committed"
+    );
+    assert!(planned_paths(&empty).contains(&".folderbaseignore"));
+
+    fs::remove_file(root.path().join(".folderbaseignore")).expect("remove policy");
+    assert!(
+        store.seal_capture(empty).is_err(),
+        "a present-policy plan is stale after the policy disappears"
+    );
+    assert_eq!(
+        store
+            .plan_capture()
+            .expect("absent policy again")
+            .ignore_policy_sha256(),
+        absent_digest,
+        "absence has a stable domain-separated commitment"
+    );
+
+    fs::write(root.path().join(".folderbaseignore"), b"FOLDERBASE.md\n")
+        .expect("policy that ignores ordinary narrative");
+    let ignored = store.plan_capture().expect("present policy");
+    assert!(planned_paths(&ignored).contains(&".folderbaseignore"));
+    assert!(
+        !planned_paths(&ignored).contains(&"FOLDERBASE.md"),
+        "FOLDERBASE.md has no force-inclusion or authority privilege"
+    );
+}
+
+#[test]
+fn v05_has_a_separate_conformance_tree_while_the_released_v04_tree_stays_exact() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol");
+    let v05 =
+        fs::read(root.join("conformance/folderbase-version-0.5/valid/minimal-ordinary-v1.json"))
+            .expect("separate v0.5 fixture");
+    let version =
+        folderbase_core::folderbase_version::FolderbaseVersion::decode_bounded(Cursor::new(v05))
+            .expect("valid v0.5 ordinary-folder version");
+    assert!(version.lookup_binding("FOLDERBASE.md").is_none());
+    assert!(version.lookup_binding(".folderbaseignore").is_none());
+
+    let released_manifest =
+        fs::read_to_string(root.join("conformance/folderbase-version/release-manifest.json"))
+            .expect("released v0.4 inventory");
+    assert!(
+        released_manifest.contains("\"file_count\": 32"),
+        "the released v0.4 fixture distribution remains frozen"
+    );
+    assert!(
+        root.join("conformance/folderbase-version-0.5/release-manifest.json")
+            .is_file(),
+        "v0.5 has an independent release inventory"
     );
 }
