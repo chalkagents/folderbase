@@ -7344,6 +7344,44 @@ mod tests {
         }
 
         #[derive(Serialize)]
+        struct ReleasedPlanHead<'a> {
+            version_id: &'a str,
+            version_sha256: &'a str,
+            transaction_sha256: &'a str,
+        }
+
+        #[derive(Serialize)]
+        struct ReleasedPlanDigest<'a> {
+            format: &'static str,
+            folderbase_id: &'a str,
+            root_instance_sha256: &'a str,
+            root_manifest_sha256: &'a str,
+            root_manifest_bytes: u64,
+            ignore_policy_sha256: &'a str,
+            current_head: Option<ReleasedPlanHead<'a>>,
+            entries: Vec<ReleasedPlanDigestEntry<'a>>,
+            exclusions: Vec<ReleasedPlanDigestExclusion<'a>>,
+            ignored_paths: Vec<&'a str>,
+        }
+
+        #[derive(Serialize)]
+        struct ReleasedPlanDigestEntry<'a> {
+            path: &'a str,
+            kind: CaptureEntryKind,
+            bytes: Option<u64>,
+            executable: Option<bool>,
+            symlink_target: Option<&'a str>,
+            observed: &'a CaptureMetadataFingerprint,
+        }
+
+        #[derive(Serialize)]
+        struct ReleasedPlanDigestExclusion<'a> {
+            path: &'a str,
+            kind: CaptureExclusionKind,
+            reason: CaptureExclusionReason,
+        }
+
+        #[derive(Serialize)]
         struct ReleasedCaptureAssignment {
             path: String,
             kind: CaptureEntryKind,
@@ -7372,7 +7410,67 @@ mod tests {
             target_tombstones: Vec<Tombstone>,
         }
 
-        fn released_journal_bytes(transaction: &CaptureTransaction) -> Vec<u8> {
+        fn released_plan_sha256(plan: &CapturePlan) -> String {
+            assert!(
+                plan.entries()
+                    .iter()
+                    .all(|entry| entry.link_commitment().is_legacy_default()),
+                "released v1 had no retained-authority link commitment"
+            );
+            let current_head = plan.current_local_head().map(|head| {
+                let LocalHeadAuthority::CaptureTransactionV1 { sha256 } = head.authority() else {
+                    panic!("released v1 cannot encode version-derived Head authority");
+                };
+                ReleasedPlanHead {
+                    version_id: head.version_id(),
+                    version_sha256: head.version_sha256(),
+                    transaction_sha256: sha256,
+                }
+            });
+            let released = ReleasedPlanDigest {
+                format: "folderbase-capture-plan-digest-v1",
+                folderbase_id: plan.folderbase_id(),
+                root_instance_sha256: plan.root_instance_sha256(),
+                root_manifest_sha256: plan.root_manifest_sha256(),
+                root_manifest_bytes: plan.root_manifest_bytes(),
+                ignore_policy_sha256: plan.ignore_policy_sha256(),
+                current_head,
+                entries: plan
+                    .entries()
+                    .iter()
+                    .map(|entry| ReleasedPlanDigestEntry {
+                        path: entry.path(),
+                        kind: entry.kind(),
+                        bytes: entry.bytes(),
+                        executable: entry.executable(),
+                        symlink_target: entry.symlink_target(),
+                        observed: entry.observed(),
+                    })
+                    .collect(),
+                exclusions: plan
+                    .exclusions()
+                    .iter()
+                    .map(|exclusion| ReleasedPlanDigestExclusion {
+                        path: exclusion.path(),
+                        kind: exclusion.kind(),
+                        reason: exclusion.reason(),
+                    })
+                    .collect(),
+                ignored_paths: plan
+                    .ignored_paths()
+                    .iter()
+                    .map(|path| path.path())
+                    .collect(),
+            };
+            let encoded =
+                serde_json::to_vec(&released).expect("independent released v1 plan digest bytes");
+            format!("{:x}", Sha256::digest(encoded))
+        }
+
+        fn released_journal_bytes(
+            transaction: &CaptureTransaction,
+            released_plan_sha256: &str,
+        ) -> Vec<u8> {
             let expected_head = transaction.expected_head.as_ref().map(|head| {
                 let LocalHeadAuthority::CaptureTransactionV1 { sha256 } = &head.authority else {
                     panic!("released capture parent must retain capture authority");
@@ -7388,7 +7486,7 @@ mod tests {
                 transaction_id: transaction.transaction_id.clone(),
                 folderbase_id: transaction.folderbase_id.clone(),
                 root_instance_sha256: transaction.root_instance_sha256.clone(),
-                plan_sha256: transaction.plan_sha256.clone(),
+                plan_sha256: released_plan_sha256.to_owned(),
                 expected_head,
                 target_version_id: transaction.target_version_id.clone(),
                 created_at: transaction.created_at.clone(),
@@ -7449,6 +7547,7 @@ mod tests {
             fs::write(root.path().join("active.bin"), b"non-genesis update")
                 .expect("update live file");
             let plan = store.plan_capture().expect("update plan");
+            let released_plan_sha256 = released_plan_sha256(&plan);
             let interrupted = catch_unwind(AssertUnwindSafe(|| {
                 store.seal_capture_with_hook(plan, |checkpoint| {
                     if checkpoint == &fault {
@@ -7463,7 +7562,11 @@ mod tests {
                 transaction.expected_head.is_some(),
                 "fixture must be non-genesis"
             );
-            let released_bytes = released_journal_bytes(&transaction);
+            assert_ne!(
+                transaction.plan_sha256, released_plan_sha256,
+                "fixture must use the genuine flat-Head v1 digest, not the current typed digest"
+            );
+            let released_bytes = released_journal_bytes(&transaction, &released_plan_sha256);
             let released_sha256 = format!("{:x}", Sha256::digest(&released_bytes));
             FolderbaseState::open(root.path())
                 .expect("state")
