@@ -3241,53 +3241,7 @@ impl MigrationResult {
     /// conservatively rolled back; verified and rolled-back results are simply
     /// reopened.
     pub fn recover(root: impl AsRef<Path>, migration_id: &str) -> Result<Self> {
-        let root = canonical_root(root.as_ref())?;
-        let (journal_path, mut journal) = load_journal(&root, migration_id)?;
-        if matches!(
-            journal.state,
-            MigrationState::Applying | MigrationState::RollingBack
-        ) {
-            if is_structural_journal(&journal) {
-                rollback_structural_journal(&root, &journal_path, &mut journal)?;
-            } else {
-                rollback_journal(&root, &journal_path, &mut journal)?;
-            }
-            persist_plan_transition(
-                &root,
-                migration_id,
-                &[
-                    MigrationState::Approved,
-                    MigrationState::Applying,
-                    MigrationState::Verified,
-                    MigrationState::RollingBack,
-                ],
-                MigrationState::RolledBack,
-            )?;
-        } else if journal.state == MigrationState::Verified {
-            persist_plan_transition(
-                &root,
-                migration_id,
-                &[MigrationState::Applying, MigrationState::Verified],
-                MigrationState::Verified,
-            )?;
-            cleanup_staging(&root, migration_id);
-        } else if journal.state == MigrationState::RolledBack {
-            let plan = load_plan(&root, migration_id)?;
-            if plan.state != MigrationState::Conflicted {
-                persist_plan_transition(
-                    &root,
-                    migration_id,
-                    &[
-                        MigrationState::Applying,
-                        MigrationState::Verified,
-                        MigrationState::RolledBack,
-                    ],
-                    MigrationState::RolledBack,
-                )?;
-            }
-            cleanup_staging(&root, migration_id);
-        }
-        Ok(result_from_journal(root, journal_path, &journal))
+        recover_migration_with_hook(root, migration_id, || {})
     }
 
     /// Roll back a verified migration using only its durable ID.
@@ -3308,6 +3262,61 @@ impl MigrationResult {
         )?;
         Ok(result)
     }
+}
+
+fn recover_migration_with_hook(
+    root: impl AsRef<Path>,
+    migration_id: &str,
+    after_transaction_coordinator: impl FnOnce(),
+) -> Result<MigrationResult> {
+    let root = canonical_root(root.as_ref())?;
+    after_transaction_coordinator();
+    let (journal_path, mut journal) = load_journal(&root, migration_id)?;
+    if matches!(
+        journal.state,
+        MigrationState::Applying | MigrationState::RollingBack
+    ) {
+        if is_structural_journal(&journal) {
+            rollback_structural_journal(&root, &journal_path, &mut journal)?;
+        } else {
+            rollback_journal(&root, &journal_path, &mut journal)?;
+        }
+        persist_plan_transition(
+            &root,
+            migration_id,
+            &[
+                MigrationState::Approved,
+                MigrationState::Applying,
+                MigrationState::Verified,
+                MigrationState::RollingBack,
+            ],
+            MigrationState::RolledBack,
+        )?;
+    } else if journal.state == MigrationState::Verified {
+        persist_plan_transition(
+            &root,
+            migration_id,
+            &[MigrationState::Applying, MigrationState::Verified],
+            MigrationState::Verified,
+        )?;
+        cleanup_staging(&root, migration_id);
+    } else if journal.state == MigrationState::RolledBack {
+        let plan = load_plan(&root, migration_id)?;
+        if plan.state != MigrationState::Conflicted {
+            persist_plan_transition(
+                &root,
+                migration_id,
+                &[
+                    MigrationState::Applying,
+                    MigrationState::Verified,
+                    MigrationState::RolledBack,
+                ],
+                MigrationState::RolledBack,
+            )?;
+        }
+        cleanup_staging(&root, migration_id);
+    }
+    Ok(result_from_journal(root, journal_path, &journal))
 }
 
 /// Roll back only additive, unchanged paths recorded by a verified migration.
@@ -6796,6 +6805,69 @@ mod tests {
             "an existing-Folderbase migration must exclude protocol activation for its full apply"
         );
         crate::protocol_upgrade::apply_protocol_upgrade(&upgrade, upgrade.plan_digest()).unwrap();
+    }
+
+    #[test]
+    fn protocol_upgrade_serializes_behind_existing_folderbase_migration_recovery() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let migration = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let migration_id = migration.id.clone();
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            apply_migration_with_hook(approve_migration(migration).unwrap(), |checkpoint| {
+                if checkpoint == ApplyCheckpoint::OperationPlanned(0) {
+                    panic!("leave a durable applying migration");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let recovery_root = root.path().to_path_buf();
+        let recovery_id = migration_id.clone();
+        let (paused_sender, paused_receiver) = mpsc::sync_channel(0);
+        let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
+        let recovery = thread::spawn(move || {
+            recover_migration_with_hook(recovery_root, &recovery_id, || {
+                paused_sender.send(()).unwrap();
+                resume_receiver.recv().unwrap();
+            })
+        });
+        paused_receiver.recv().unwrap();
+
+        let lock_path = root.path().join(".folderbase/locks/transactions.lock");
+        let transaction_is_locked = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .and_then(|file| match file.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+                Err(std::fs::TryLockError::Error(source)) => Err(source),
+                Ok(()) => {
+                    let _ = file.unlock();
+                    Err(io::Error::other(
+                        "migration recovery did not hold the transaction lock",
+                    ))
+                }
+            })
+            .is_ok();
+
+        resume_sender.send(()).unwrap();
+        assert_eq!(
+            recovery.join().unwrap().unwrap().state,
+            MigrationState::RolledBack
+        );
+        assert!(
+            transaction_is_locked,
+            "an existing-Folderbase migration recovery must exclude protocol activation"
+        );
     }
 
     #[cfg(unix)]
