@@ -27,7 +27,7 @@ use crate::{
     folderbase_capture::validate_folderbaseignore_content,
     folderbase_state::FolderbaseState,
     local_versions::{LocalVersionStore, StoreTransactionLock},
-    migration_filesystem::MigrationFilesystem,
+    migration_filesystem::{MigrationFilesystem, VerifiedPrivateDirectory},
     physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity},
     root_attestation::{DEFAULT_V05_CAPTURE_IGNORE_RULES, metadata_is_link_or_reparse},
     template::{
@@ -2767,6 +2767,16 @@ struct PreparedTransactionV1 {
     program: MutationProgramV1,
     program_digest: String,
     generations: Vec<TransactionJournalGenerationV1>,
+    private: PrivateTransactionV1,
+}
+
+struct PrivateTransactionV1 {
+    _transaction: VerifiedPrivateDirectory,
+    journal: VerifiedPrivateDirectory,
+    _stages: VerifiedPrivateDirectory,
+    _claims: VerifiedPrivateDirectory,
+    _snapshots: VerifiedPrivateDirectory,
+    _receipts: VerifiedPrivateDirectory,
 }
 
 fn append_transaction_v1_generation(
@@ -2778,10 +2788,17 @@ fn append_transaction_v1_generation(
         .join(transaction.program.transaction_id())
         .join(TRANSACTION_DIRECTORY)
         .join("journal");
-    let path = journal_root.join(generation.file_name());
+    let generation_name = generation.file_name();
+    let path = journal_root.join(&generation_name);
     let bytes = generation.encode(&filesystem.display(&path))?;
-    filesystem.publish_private_new(&path, &bytes)?;
-    let reopened_bytes = filesystem.read_regular_bounded(&path, MAX_JOURNAL_GENERATION_BYTES)?;
+    transaction
+        .private
+        .journal
+        .publish_new(&generation_name, &bytes)?;
+    let reopened_bytes = transaction
+        .private
+        .journal
+        .read_regular_bounded(OsStr::new(&generation_name), MAX_JOURNAL_GENERATION_BYTES)?;
     let reopened =
         TransactionJournalGenerationV1::decode(&filesystem.display(&path), &reopened_bytes)?;
     if reopened != generation {
@@ -2842,9 +2859,12 @@ fn prepare_transaction_v1(
     ] {
         filesystem.ensure_private_directory(&directory)?;
     }
+    let private = filesystem.open_private_directory(&transaction_root)?;
+    let private_journal = private.open_directory("journal")?;
     let program_bytes = program.encode(&filesystem.display(&program_path))?;
-    filesystem.publish_private_new(&program_path, &program_bytes)?;
-    let reopened_bytes = filesystem.read_regular_bounded(&program_path, MAX_PROGRAM_BYTES)?;
+    private.publish_new("program.json", &program_bytes)?;
+    let reopened_bytes =
+        private.read_regular_bounded(OsStr::new("program.json"), MAX_PROGRAM_BYTES)?;
     let reopened = MutationProgramV1::decode(&filesystem.display(&program_path), &reopened_bytes)?;
     if reopened != program {
         return Err(FolderbaseError::MigrationVerificationFailed(
@@ -2855,18 +2875,8 @@ fn prepare_transaction_v1(
     let initial = TransactionJournalGenerationV1::prepared(&reopened, program_digest.clone())?;
     let initial_path = journal_root.join(initial.file_name());
     let initial_bytes = initial.encode(&filesystem.display(&initial_path))?;
-    filesystem.publish_private_new(&initial_path, &initial_bytes)?;
-    let prepared = PreparedTransactionV1 {
-        program: reopened,
-        program_digest,
-        generations: vec![initial],
-    };
-    validate_chain(
-        &prepared.program,
-        &prepared.program_digest,
-        &prepared.generations,
-    )?;
-    Ok(prepared)
+    private_journal.publish_new(&initial.file_name(), &initial_bytes)?;
+    reopen_transaction_v1(filesystem, &migration_root, Some(&reopened))
 }
 
 fn reopen_transaction_v1(
@@ -2876,16 +2886,12 @@ fn reopen_transaction_v1(
 ) -> Result<PreparedTransactionV1> {
     let transaction_root = migration_root.join(TRANSACTION_DIRECTORY);
     let program_path = transaction_root.join("program.json");
-    for directory in [
-        transaction_root.clone(),
-        transaction_root.join("journal"),
-        transaction_root.join("stages"),
-        transaction_root.join("claims"),
-        transaction_root.join("snapshots"),
-        transaction_root.join("receipts"),
-    ] {
-        filesystem.validate_private_directory(&directory)?;
-    }
+    let transaction = filesystem.open_private_directory(&transaction_root)?;
+    let journal = transaction.open_directory("journal")?;
+    let stages = transaction.open_directory("stages")?;
+    let claims = transaction.open_directory("claims")?;
+    let snapshots = transaction.open_directory("snapshots")?;
+    let receipts = transaction.open_directory("receipts")?;
     let expected_root_entries = BTreeSet::from([
         (OsString::from("claims"), true),
         (OsString::from("journal"), true),
@@ -2894,8 +2900,8 @@ fn reopen_transaction_v1(
         (OsString::from("snapshots"), true),
         (OsString::from("stages"), true),
     ]);
-    let actual_root_entries = filesystem
-        .closed_directory_entries(&transaction_root, expected_root_entries.len())?
+    let actual_root_entries = transaction
+        .closed_entries(expected_root_entries.len())?
         .into_iter()
         .collect::<BTreeSet<_>>();
     if actual_root_entries != expected_root_entries {
@@ -2904,17 +2910,22 @@ fn reopen_transaction_v1(
             message: "transaction-v1 root contains missing or unknown entries".to_owned(),
         });
     }
-    filesystem.validate_private_regular_mode(&program_path)?;
-    let program_bytes = filesystem.read_regular_bounded(&program_path, MAX_PROGRAM_BYTES)?;
+    let program_bytes =
+        transaction.read_regular_bounded(OsStr::new("program.json"), MAX_PROGRAM_BYTES)?;
     let program = MutationProgramV1::decode(&filesystem.display(&program_path), &program_bytes)?;
     if expected_program.is_some_and(|expected| expected != &program) {
         return Err(FolderbaseError::MigrationApprovalMismatch);
     }
     let program_digest = program.digest(&filesystem.display(&program_path))?;
-    for directory in ["stages", "claims", "snapshots", "receipts"] {
+    for (directory, private_directory) in [
+        ("stages", &stages),
+        ("claims", &claims),
+        ("snapshots", &snapshots),
+        ("receipts", &receipts),
+    ] {
         let relative = transaction_root.join(directory);
-        let names = filesystem
-            .closed_regular_file_names(&relative, program.operation_count().saturating_add(1))?;
+        let names = private_directory
+            .closed_regular_file_names(program.operation_count().saturating_add(1))?;
         let allowed = program.allowed_private_file_names(directory);
         for name in names {
             if !allowed.contains(&name) {
@@ -2923,12 +2934,12 @@ fn reopen_transaction_v1(
                     message: "transaction-v1 contains an unknown private artifact".to_owned(),
                 });
             }
-            filesystem.validate_private_regular_mode(&relative.join(name))?;
+            private_directory.verify_regular(&name)?;
         }
     }
     let journal_root = transaction_root.join("journal");
-    let mut generation_names = filesystem
-        .closed_regular_file_names(&journal_root, program.maximum_journal_generations())?;
+    let mut generation_names =
+        journal.closed_regular_file_names(program.maximum_journal_generations())?;
     generation_names.sort();
     let mut generations = Vec::with_capacity(generation_names.len());
     for (index, name) in generation_names.into_iter().enumerate() {
@@ -2940,8 +2951,8 @@ fn reopen_transaction_v1(
             });
         }
         let path = journal_root.join(&expected_name);
-        filesystem.validate_private_regular_mode(&path)?;
-        let bytes = filesystem.read_regular_bounded(&path, MAX_JOURNAL_GENERATION_BYTES)?;
+        let bytes = journal
+            .read_regular_bounded(OsStr::new(&expected_name), MAX_JOURNAL_GENERATION_BYTES)?;
         generations.push(TransactionJournalGenerationV1::decode(
             &filesystem.display(&path),
             &bytes,
@@ -2952,6 +2963,14 @@ fn reopen_transaction_v1(
         program,
         program_digest,
         generations,
+        private: PrivateTransactionV1 {
+            _transaction: transaction,
+            journal,
+            _stages: stages,
+            _claims: claims,
+            _snapshots: snapshots,
+            _receipts: receipts,
+        },
     })
 }
 

@@ -577,6 +577,7 @@ fn validate_transition(
 ) -> Result<()> {
     let apply_intent = next.direction == TransactionDirectionV1::Apply
         && next.phase == TransactionPhaseV1::Applying
+        && next.conflicts == previous.conflicts
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == Some(previous.operation_cursor)
         && next.receipts == previous.receipts
@@ -588,6 +589,7 @@ fn validate_transition(
         );
     let apply_receipt = next.direction == TransactionDirectionV1::Apply
         && next.phase == TransactionPhaseV1::Applying
+        && next.conflicts == previous.conflicts
         && previous.phase == TransactionPhaseV1::Applying
         && previous.in_flight_operation == Some(previous.operation_cursor)
         && next.in_flight_operation.is_none()
@@ -600,6 +602,7 @@ fn validate_transition(
             .is_some_and(|receipt| receipt.operation_index == previous.operation_cursor);
     let applied = next.direction == TransactionDirectionV1::Apply
         && next.phase == TransactionPhaseV1::Applied
+        && next.conflicts == previous.conflicts
         && next.in_flight_operation.is_none()
         && next.operation_cursor == program.operation_count()
         && next.receipts == previous.receipts

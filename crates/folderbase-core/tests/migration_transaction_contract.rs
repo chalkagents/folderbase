@@ -160,6 +160,7 @@ fn transaction_v1_rejects_insecure_reopened_private_state() {
 
     for (relative, mode) in [
         ("", 0o755),
+        ("receipts", 0o755),
         ("program.json", 0o644),
         ("journal/00000000000000000000.json", 0o644),
     ] {
@@ -185,6 +186,21 @@ fn transaction_v1_rejects_an_inner_symlink() {
         transaction.join("stages/00000000.stage"),
     )
     .expect("inner symlink");
+
+    assert_recovery_fails_closed(root.path(), &migration_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_v1_rejects_a_private_file_hardlink_alias() {
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    let transaction = transaction_root(root.path(), &migration_id);
+    fs::hard_link(
+        transaction.join("program.json"),
+        root.path().join(".folderbase/migrations/program-alias"),
+    )
+    .expect("private alias");
 
     assert_recovery_fails_closed(root.path(), &migration_id);
 }
@@ -305,4 +321,20 @@ fn structural_apply_rejects_a_windows_reparse_leaf_without_touching_its_target()
             .state,
         folderbase_core::MigrationState::Conflicted
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn transaction_v1_rejects_a_private_regular_file_reparse_point() {
+    use std::os::windows::fs::symlink_file;
+
+    let root = initialized_folderbase();
+    let migration_id = applied_move(root.path());
+    let transaction = transaction_root(root.path(), &migration_id);
+    let program = transaction.join("program.json");
+    let foreign = root.path().join("foreign-program.json");
+    fs::rename(&program, &foreign).expect("retain admitted bytes");
+    symlink_file(&foreign, &program).expect("GitHub Windows runners permit file symlinks");
+
+    assert_recovery_fails_closed(root.path(), &migration_id);
 }

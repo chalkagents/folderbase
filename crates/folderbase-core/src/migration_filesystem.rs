@@ -17,13 +17,215 @@ use cap_std::fs::{Dir, Metadata, OpenOptions};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-#[cfg(windows)]
 use crate::root_attestation::metadata_is_link_or_reparse;
 use crate::{FolderbaseError, Result, folderbase_state::FolderbaseState};
 
 pub(crate) struct MigrationFilesystem {
     root: Dir,
     display_root: PathBuf,
+}
+
+pub(crate) struct VerifiedPrivateDirectory {
+    directory: Dir,
+    display: PathBuf,
+}
+
+impl VerifiedPrivateDirectory {
+    pub(crate) fn open_directory(&self, name: &str) -> Result<Self> {
+        validate_private_name(name)?;
+        let display = self.display.join(name);
+        let directory = open_directory_nofollow(&self.directory, OsStr::new(name), &display)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        validate_private_directory_metadata(&directory, &display)?;
+        Ok(Self { directory, display })
+    }
+
+    pub(crate) fn closed_entries(&self, maximum_entries: usize) -> Result<Vec<(OsString, bool)>> {
+        let mut entries = Vec::new();
+        for entry in self
+            .directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&self.display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&self.display, source))?;
+            if entries.len() == maximum_entries {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: self.display.clone(),
+                    message: "private migration directory exceeds its entry bound".to_owned(),
+                });
+            }
+            let file_type = entry
+                .file_type()
+                .map_err(|source| FolderbaseError::io(&self.display, source))?;
+            if !file_type.is_file() && !file_type.is_dir() {
+                return Err(FolderbaseError::UnsafePath(
+                    self.display.join(entry.file_name()),
+                ));
+            }
+            entries.push((entry.file_name(), file_type.is_dir()));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries)
+    }
+
+    pub(crate) fn closed_regular_file_names(
+        &self,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        self.closed_entries(maximum_entries)?
+            .into_iter()
+            .map(|(name, is_directory)| {
+                if is_directory {
+                    Err(FolderbaseError::InvalidRecord {
+                        path: self.display.join(&name),
+                        message: "private migration file directory contains a nested directory"
+                            .to_owned(),
+                    })
+                } else {
+                    Ok(name)
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn verify_regular(&self, name: &OsStr) -> Result<()> {
+        let _ = self.open_regular(name)?;
+        Ok(())
+    }
+
+    pub(crate) fn read_regular_bounded(&self, name: &OsStr, maximum_bytes: u64) -> Result<Vec<u8>> {
+        self.read_regular_bounded_with(name, maximum_bytes, || {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_regular_bounded_with_hook(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        after_verified_open: impl FnOnce(),
+    ) -> Result<Vec<u8>> {
+        self.read_regular_bounded_with(name, maximum_bytes, after_verified_open)
+    }
+
+    fn read_regular_bounded_with(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        after_verified_open: impl FnOnce(),
+    ) -> Result<Vec<u8>> {
+        let (mut file, metadata, display) = self.open_regular(name)?;
+        if metadata.len() > maximum_bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file exceeds its byte bound".to_owned(),
+            });
+        }
+        after_verified_open();
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if bytes.len() as u64 > maximum_bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file exceeds its byte bound".to_owned(),
+            });
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        validate_private_name(name)?;
+        let name = OsStr::new(name);
+        let display = self.display.join(name);
+        let temporary = OsString::from(format!(".migration-{}.tmp", Uuid::now_v7()));
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| -> Result<()> {
+            let mut file = self
+                .directory
+                .open_with(&temporary, &options)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            drop(file);
+            self.directory
+                .hard_link(&temporary, &self.directory, name)
+                .map_err(|source| {
+                    if source.kind() == std::io::ErrorKind::AlreadyExists {
+                        FolderbaseError::WouldOverwrite(display.clone())
+                    } else {
+                        FolderbaseError::io(&display, source)
+                    }
+                })?;
+            self.directory
+                .remove_file(&temporary)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            sync_directory(&self.directory, &display)?;
+            self.verify_regular(name)
+        })();
+        if result.is_err() {
+            let _ = self.directory.remove_file(&temporary);
+        }
+        result
+    }
+
+    fn open_regular(&self, name: &OsStr) -> Result<(std::fs::File, std::fs::Metadata, PathBuf)> {
+        validate_private_name_os(name)?;
+        let display = self.display.join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+
+            options
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        let file = self
+            .directory
+            .open_with(name, &options)
+            .map_err(|source| FolderbaseError::io(&display, source))?
+            .into_std();
+        let metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
+        if private_regular_link_count(&file, &metadata, &display)? != 1 {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file has a hard-link alias".to_owned(),
+            });
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            if metadata.permissions().mode() & 0o777 != 0o600 {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private migration file is not owner-only".to_owned(),
+                });
+            }
+        }
+        Ok((file, metadata, display))
+    }
 }
 
 impl MigrationFilesystem {
@@ -244,65 +446,18 @@ impl MigrationFilesystem {
         Ok(())
     }
 
-    pub(crate) fn validate_private_directory(&self, relative: &Path) -> Result<()> {
+    pub(crate) fn open_private_directory(
+        &self,
+        relative: &Path,
+    ) -> Result<VerifiedPrivateDirectory> {
         let directory = self.open_directory(relative)?;
         let display = self.display(relative);
-        #[cfg(unix)]
-        {
-            use cap_std::fs::PermissionsExt;
-
-            if directory
-                .dir_metadata()
-                .map_err(|source| FolderbaseError::io(&display, source))?
-                .permissions()
-                .mode()
-                & 0o777
-                != 0o700
-            {
-                return Err(FolderbaseError::InvalidRecord {
-                    path: display,
-                    message: "private migration directory is not owner-only".to_owned(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn validate_private_regular_mode(&self, relative: &Path) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use cap_std::fs::PermissionsExt;
-
-            let (parent, name) = self.open_parent(relative)?;
-            let display = self.display(relative);
-            let metadata = parent
-                .symlink_metadata(&name)
-                .map_err(|source| FolderbaseError::io(&display, source))?;
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(FolderbaseError::UnsafePath(display));
-            }
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o600 {
-                return Err(FolderbaseError::InvalidRecord {
-                    path: display,
-                    message: "private migration file is not owner-only".to_owned(),
-                });
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = relative;
-        }
-        Ok(())
+        validate_private_directory_metadata(&directory, &display)?;
+        Ok(VerifiedPrivateDirectory { directory, display })
     }
 
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
         self.publish_new_with_hook(relative, bytes, || {})
-    }
-
-    pub(crate) fn publish_private_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
-        self.publish_new(relative, bytes)?;
-        self.validate_private_regular_mode(relative)
     }
 
     pub(crate) fn publish_new_with_hook(
@@ -595,6 +750,78 @@ fn validate_relative(path: &Path, allow_empty: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_private_name(name: &str) -> Result<()> {
+    validate_private_name_os(OsStr::new(name))
+}
+
+fn validate_private_name_os(name: &OsStr) -> Result<()> {
+    let path = Path::new(name);
+    let mut components = path.components();
+    if name.is_empty()
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn validate_private_directory_metadata(directory: &Dir, display: &Path) -> Result<()> {
+    let file = directory
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std_file();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "private migration directory is not owner-only".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn private_regular_link_count(
+    _file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+    _display: &Path,
+) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(metadata.nlink())
+}
+
+#[cfg(windows)]
+fn private_regular_link_count(
+    file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+    display: &Path,
+) -> Result<u64> {
+    winapi_util::file::information(file)
+        .map(|information| information.number_of_links())
+        .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn private_regular_link_count(
+    _file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+    _display: &Path,
+) -> Result<u64> {
+    Ok(1)
+}
+
 #[cfg(not(windows))]
 fn open_directory_nofollow(parent: &Dir, name: &OsStr, _display: &Path) -> std::io::Result<Dir> {
     parent.open_dir_nofollow(name)
@@ -638,6 +865,75 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
 #[cfg(windows)]
 fn sync_directory(_directory: &Dir, _display: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt};
+
+    use cap_fs_ext::DirExt;
+    use cap_std::fs::Dir;
+
+    use super::{VerifiedPrivateDirectory, validate_private_directory_metadata};
+    use crate::FolderbaseError;
+
+    fn private_fixture() -> (tempfile::TempDir, VerifiedPrivateDirectory) {
+        let root = tempfile::tempdir().expect("fixture");
+        let private = root.path().join("private");
+        fs::create_dir(&private).expect("private");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).expect("private mode");
+        let ambient =
+            Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).expect("root cap");
+        let directory = ambient
+            .open_dir_nofollow("private")
+            .expect("private capability");
+        validate_private_directory_metadata(&directory, &private).expect("private verification");
+        (
+            root,
+            VerifiedPrivateDirectory {
+                directory,
+                display: private,
+            },
+        )
+    }
+
+    #[test]
+    fn retained_private_file_read_is_not_redirected_by_a_path_replacement() {
+        let (root, private) = private_fixture();
+        let path = root.path().join("private/program.json");
+        fs::write(&path, b"original admitted bytes").expect("program");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("program mode");
+
+        let bytes = private
+            .read_regular_bounded_with_hook(OsStr::new("program.json"), 1024, || {
+                fs::rename(&path, root.path().join("detached-program.json"))
+                    .expect("detach admitted file");
+                fs::write(&path, b"replacement bytes").expect("replacement");
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                    .expect("replacement mode");
+            })
+            .expect("retained read");
+
+        assert_eq!(bytes, b"original admitted bytes");
+        assert_eq!(
+            fs::read(path).expect("visible replacement"),
+            b"replacement bytes"
+        );
+    }
+
+    #[test]
+    fn private_file_hardlink_alias_is_rejected_before_read() {
+        let (root, private) = private_fixture();
+        let path = root.path().join("private/program.json");
+        fs::write(&path, b"admitted bytes").expect("program");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("program mode");
+        fs::hard_link(&path, root.path().join("alias")).expect("hardlink alias");
+
+        let error = private
+            .read_regular_bounded(OsStr::new("program.json"), 1024)
+            .expect_err("aliased private state must fail closed");
+        assert!(matches!(error, FolderbaseError::InvalidRecord { .. }));
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
