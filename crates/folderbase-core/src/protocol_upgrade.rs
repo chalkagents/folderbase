@@ -1081,7 +1081,7 @@ mod tests {
         fs::write(root.join(".folderbaseignore"), b"node_modules/\n").expect("ignore");
     }
 
-    fn write_near_maximum_legacy_root(root: &Path) {
+    fn write_legacy_root_with_manifest_bytes(root: &Path, target_bytes: usize) {
         let mut manifest: Value =
             serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest value");
         manifest
@@ -1094,7 +1094,6 @@ mod tests {
                 .expect("encoded legacy manifest")
         };
         let baseline = encode(&manifest);
-        let target_bytes = MAX_FOLDERBASE_MANIFEST_BYTES as usize - 64 * 1024;
         let padding_bytes = target_bytes
             .checked_sub(baseline.len())
             .expect("manifest budget");
@@ -1112,6 +1111,13 @@ mod tests {
         fs::write(root.join(".folderbase/manifest.json"), encoded).expect("large manifest");
         fs::write(root.join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
         fs::write(root.join(".folderbaseignore"), b"node_modules/\n").expect("ignore");
+    }
+
+    fn write_near_maximum_legacy_root(root: &Path) {
+        write_legacy_root_with_manifest_bytes(
+            root,
+            MAX_FOLDERBASE_MANIFEST_BYTES as usize - 64 * 1024,
+        );
     }
 
     fn substitute_root_with_recovery_surface(root: &Path, ignore: &[u8]) {
@@ -1460,6 +1466,46 @@ mod tests {
             .expect("every published durable intent must be restart-readable");
         apply_protocol_upgrade(&retry, retry.plan_digest()).expect("restart recovery");
         assert!(!intent.exists(), "restart retires the durable intent");
+    }
+
+    #[test]
+    fn an_exact_maximum_source_that_expands_past_the_target_bound_is_never_published() {
+        let root = tempdir().expect("legacy root");
+        write_legacy_root_with_manifest_bytes(root.path(), MAX_FOLDERBASE_MANIFEST_BYTES as usize);
+        let manifest_path = root.path().join(MANIFEST_PATH);
+        let source_manifest = fs::read(&manifest_path).expect("source manifest");
+
+        let result = plan_protocol_upgrade(root.path());
+
+        assert!(
+            result.is_err(),
+            "planning must reject a generated target above the live manifest bound"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("unchanged source manifest"),
+            source_manifest
+        );
+        assert!(
+            !root
+                .path()
+                .join(".folderbase")
+                .join(UPGRADE_INTENT_PATH)
+                .exists(),
+            "a rejected target must not publish durable intent"
+        );
+        let exchange_artifact = fs::read_dir(root.path().join(".folderbase"))
+            .expect("state directory")
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".exchange-")
+            });
+        assert!(
+            !exchange_artifact,
+            "a rejected target must not begin exchange"
+        );
     }
 
     #[test]
