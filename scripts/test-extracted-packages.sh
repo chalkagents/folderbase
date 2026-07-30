@@ -41,16 +41,16 @@ for package in folderbase-core folderbase-cli
 do
   source_root="$repository_root/crates/$package"
   extracted_root="$extraction_root/$(basename "$(resolve_archive "$package")" .crate)"
-  while IFS= read -r source_path
+  while IFS= read -r extracted_path
   do
-    relative_path=${source_path#"$source_root/"}
-    cmp "$source_path" "$extracted_root/$relative_path"
+    relative_path=${extracted_path#"$extracted_root/"}
+    cmp "$source_root/$relative_path" "$extracted_path"
   done < <(
-    find "$source_root" \
+    find "$extracted_root" \
       -type f \
       \( \
-        -path "$source_root/src/*" -o \
-        -path "$source_root/assets/*" \
+        -name '*.rs' -o \
+        -path "$extracted_root/assets/*" \
       \) \
       -print 2>/dev/null |
       LC_ALL=C sort

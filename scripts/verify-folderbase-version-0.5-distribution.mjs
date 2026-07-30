@@ -141,6 +141,7 @@ const requiredNonConformanceFiles = [
   "protocol/schemas/0.3/reorganization-draft.schema.json",
   "protocol/schemas/0.5/folderbase-version.schema.json",
   "protocol/schemas/0.5/folderbase.schema.json",
+  "scripts/test-extracted-package-source-sensitivity.sh",
   "scripts/test-extracted-packages.sh",
   "scripts/test-package-install.sh",
   "scripts/verify-folderbase-version-0.5-digest-vectors.mjs",
