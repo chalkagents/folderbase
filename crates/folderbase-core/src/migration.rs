@@ -2311,6 +2311,7 @@ pub fn apply_migration(approved: ApprovedMigration) -> Result<MigrationResult> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyCheckpoint {
+    ExistingFolderbaseDetected,
     MigrationDirectoryPrepared,
     JournalStaged,
     JournalPrepared,
@@ -2343,7 +2344,10 @@ fn apply_migration_with_hook(
     if plan_digest(&in_memory_plan)? != approved.approval_digest {
         return Err(FolderbaseError::MigrationApprovalMismatch);
     }
-    let _transaction_lock = acquire_existing_folderbase_transaction_lock(&in_memory_plan.root)?;
+    let _transaction_lock =
+        acquire_existing_folderbase_transaction_lock_with_hook(&in_memory_plan.root, || {
+            checkpoint(ApplyCheckpoint::ExistingFolderbaseDetected);
+        })?;
     let mut plan = load_plan(&in_memory_plan.root, &in_memory_plan.id)?;
     require_state(plan.state, MigrationState::Approved)?;
     if plan.approval_digest.as_deref() != Some(approved.approval_digest.as_str())
@@ -2452,9 +2456,17 @@ fn apply_migration_with_hook(
 fn acquire_existing_folderbase_transaction_lock(
     root: &Path,
 ) -> Result<Option<crate::local_versions::StoreTransactionLock>> {
+    acquire_existing_folderbase_transaction_lock_with_hook(root, || {})
+}
+
+fn acquire_existing_folderbase_transaction_lock_with_hook(
+    root: &Path,
+    after_marker_probe: impl FnOnce(),
+) -> Result<Option<crate::local_versions::StoreTransactionLock>> {
     if !has_nested_folderbase_marker(root)? {
         return Ok(None);
     }
+    after_marker_probe();
     LocalVersionStore::open_read_only(root)?
         .acquire_transaction_lock()
         .map(Some)
@@ -6818,6 +6830,48 @@ mod tests {
         crate::protocol_upgrade::apply_protocol_upgrade(&upgrade, upgrade.plan_digest()).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn migration_apply_never_publishes_a_lock_into_a_replacement_root_after_detection() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let migration = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let approved = approve_migration(migration).unwrap();
+        let visible_root = root.path().to_path_buf();
+        let detached_root = visible_root.with_file_name(format!(
+            ".folderbase-detached-{}",
+            Uuid::now_v7()
+        ));
+
+        let result = apply_migration_with_hook(approved, |checkpoint| {
+            if checkpoint == ApplyCheckpoint::ExistingFolderbaseDetected {
+                fs::rename(&visible_root, &detached_root).unwrap();
+                fs::create_dir(&visible_root).unwrap();
+                fs::create_dir(visible_root.join(".folderbase")).unwrap();
+            }
+        });
+        let foreign_state_is_empty = fs::read_dir(visible_root.join(".folderbase"))
+            .unwrap()
+            .next()
+            .is_none();
+        fs::remove_dir_all(&visible_root).unwrap();
+        fs::rename(&detached_root, &visible_root).unwrap();
+
+        assert!(result.is_err(), "the replaced root must lose apply authority");
+        assert!(
+            foreign_state_is_empty,
+            "migration detection must not publish protocol state into a foreign replacement root"
+        );
+    }
+
     #[test]
     fn protocol_upgrade_serializes_behind_existing_folderbase_migration_recovery() {
         let root = legacy_structural_folderbase_fixture();
@@ -7072,7 +7126,8 @@ mod tests {
             let (_, journal) =
                 load_journal(&canonical_root(root.path()).unwrap(), &migration_id).unwrap();
             let expected_completed = match fault {
-                ApplyCheckpoint::MigrationDirectoryPrepared
+                ApplyCheckpoint::ExistingFolderbaseDetected
+                | ApplyCheckpoint::MigrationDirectoryPrepared
                 | ApplyCheckpoint::JournalStaged
                 | ApplyCheckpoint::JournalPrepared
                 | ApplyCheckpoint::JournalCreated
