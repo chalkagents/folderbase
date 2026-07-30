@@ -1294,6 +1294,11 @@ mod tests {
         let temp = initialized_folderbase();
         let report = validate(temp.path(), ValidationLevel::Shallow).unwrap();
         assert!(report.valid, "{:?}", report.findings);
+        assert!(
+            report.findings.is_empty(),
+            "the exact native 0.5 profile is supported without compatibility warnings: {:?}",
+            report.findings
+        );
     }
 
     #[test]
