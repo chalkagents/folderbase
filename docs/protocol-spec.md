@@ -863,8 +863,14 @@ on the retained root capability before reporting conflict. Journal, stage,
 target, version, Head, projection, and cleanup boundaries are recoverable.
 Both prior-Head execution and committed-Head recovery re-derive the selected
 Tombstone, live binding, deterministic assignment, and exact child Version
-from the verified expected parent. Unix staging explicitly applies its final
-`0700` or `0600` permissions after creation, independently of process umask.
+from the verified expected parent. After all read-only eligibility checks and
+before journal publication, Core atomically rebinds the verified parent Local
+Head to `folderbase-local-head-authority-v1`, a digest of the attested
+Folderbase ID, physical-root instance, parent Version ID, and parent Version
+digest. Restore-produced Heads use the same derivable authority. Committed
+recovery rejects a journal-supplied prior Head digest that cannot be rederived
+after the prior Head is gone. Unix staging explicitly applies its final `0700`
+or `0600` permissions after creation, independently of process umask.
 Directory and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind

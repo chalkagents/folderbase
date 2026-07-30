@@ -180,7 +180,14 @@ remain valid. The cycle pass operates on the complete bounded adjacency graph,
 independently of traversal deduplication and candidate selection. Both
 prior-Head execution and committed-Head recovery re-derive the Tombstone,
 binding, deterministic assignment, and exact child Version from the verified
-expected parent before accepting mutable journal state. Local Head advances
+expected parent before accepting mutable journal state. After read-only
+eligibility checks and before the restore journal exists, Core atomically
+rebinds the verified parent Local Head to a domain-separated authority digest
+derived only from the attested physical root, parent Version ID, and parent
+Version digest. Restore-produced Heads use the same independently derivable
+authority form. Recovery therefore cannot treat the journal's copy of the
+prior Head transaction digest as assignment authority after the prior Head has
+been replaced. Local Head advances
 only after the target still has the exact
 retained-stage identity, bytes, length, and executable fidelity, the physical
 root is still attached, every path ancestor remains outside a case-folded

@@ -58,6 +58,10 @@ blob named by the current Head Tombstone.
   valid-target rewrite.
 - `28a6fdb` used an isolated restrictive-umask child process to prove that
   create-time mode bits alone did not preserve executable restore fidelity.
+- `4ef4fa5` extended committed recovery tamper to rewrite the journal's prior
+  Head transaction digest, every dependent deterministic assignment, the valid
+  target Version, retained stage, and current Head. The prior implementation
+  accepted that coordinated rewrite.
 
 ## GREEN behavior
 
@@ -90,6 +94,11 @@ blob named by the current Head Tombstone.
   authority in both prior-Head and committed-Head recovery branches.
 - `9841f2d` explicitly applies Unix restore-stage permissions through the open
   capability after creation, before sync and verification.
+- `c476afc` atomically pre-binds the verified parent Head to a
+  domain-separated digest of surviving root and Version authority before the
+  restore journal exists. Both restore execution branches and rollback require
+  the rederived parent/target Head authorities; capture journal binding remains
+  unchanged.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -106,6 +115,10 @@ convergent DAG is accepted.
 Committed-Head recovery performs the same parent, Tombstone, binding,
 assignment, and exact-child derivation as first execution; a coordinated
 journal, Head, and installed-target rewrite is not recovery authority.
+The journal's copy of the prior Head transaction digest is not authority
+either. Restore first binds the verified parent Head to an independently
+derivable digest, and target-Head recovery rejects any replacement value even
+when every journal-dependent ID and digest was recomputed consistently.
 
 The mutable journal is not assignment authority. Transaction and target
 Version IDs are deterministic domain-separated derivations of the verified
