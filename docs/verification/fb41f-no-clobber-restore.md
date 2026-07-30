@@ -133,6 +133,14 @@ blob named by the current Head Tombstone.
   old preflight rejected the valid pre-Head journal even though the bounded
   reader had admitted its exact old wire; one byte below the raw length still
   fails.
+- `f7eca5b` moves the destination parent after its capability opens and again
+  after the publication link is created. The prior implementation published
+  into the detached parent in the first race and had no explicit scoped
+  namespace contract for the second.
+- `913b9f0` retries after the post-link detach. The prior implementation
+  attempted another hard link instead of refusing the unresolved
+  transaction-owned orphan, allowing recovery topology to grow rather than
+  converge.
 
 ## GREEN behavior
 
@@ -283,6 +291,17 @@ blob named by the current Head Tombstone.
   no-follow metadata identities; Windows uses zero-data-access no-follow
   handles and the complete File ID. Seal-time byte and opened-handle topology
   verification are unchanged.
+- `03a9ac5` retains an exact target-parent capability across publication and
+  multi-step restore observations, freshly reopens and identity-checks that
+  parent before and after every success-relevant boundary, and refuses
+  unresolved extra stage links with typed
+  `RestoreNamespaceRepairRequired`. A post-link POSIX detach leaves only the
+  exact operation-owned orphan, never touches a replacement directory, never
+  moves the pre-publication Head, and never grows link topology on retry.
+  Returning the moved parent to the intended path makes retry converge.
+  Cleanup-time detach likewise preserves the forward Head plus durable recovery
+  evidence and completes only after explicit repair. On Windows, the retained
+  parent handle denies the equivalent directory rename.
 
 The local threat boundary is intentionally KISS: `.folderbase/` is trusted
 engine-owned state analogous to `.git/`. The regressions prove malformed or
@@ -295,6 +314,17 @@ The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
 ownership evidence. Recovery accepts an already published target only when it
 is the exact same filesystem object as the retained private stage.
+
+The namespace claim is deliberately scoped. Core retains the exact workspace
+parent identity and freshly reopens it from the attested root around every
+publication and success boundary. A replacement path cannot receive the write
+or be blessed. POSIX still permits an uncoordinated process to rename the exact
+opened parent; the operation-owned hard link can travel with that directory.
+Core leaves the durable stage and recovery record in place, refuses a new link
+with typed repair-required, and never guesses at pathname deletion. Returning
+the moved parent or explicitly removing the inspected orphan allows retry.
+Windows blocks the detach while the retained parent handle is open. This slice
+does not claim global namespace exclusion against arbitrary concurrent rename.
 
 The current verified Head must contain an exact regular-file Tombstone. A
 bounded, cycle-detecting ancestor DAG search selects the nearest live binding
@@ -344,7 +374,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-639 passed; 3 ignored
+644 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed

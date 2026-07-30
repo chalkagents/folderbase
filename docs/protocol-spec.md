@@ -942,6 +942,32 @@ candidate, so a binding cannot mask a deeper cycle and a legitimate
 convergent DAG remains accepted. Cycle validation runs over the complete
 bounded adjacency graph independently of global traversal deduplication.
 
+Workspace publication and every multi-step restore observation retain a
+no-follow parent-directory capability, its physical identity, the validated
+leaf, and the attested Folderbase Root. Core freshly reopens that parent from
+the root and compares its exact identity before mutation and after mutation,
+hooks, authority retention, and completion proof. Ancestor replacement
+therefore cannot redirect publication or produce a false success.
+
+On POSIX systems this guarantee is scoped to the retained capability and
+coordinated Folderbase namespace. An uncoordinated same-user rename may move the
+exact opened directory after an attachment proof; if it races after hard-link
+publication, the moved directory may contain that exact transaction-owned
+link. Core does not claim global pathname confinement and does not unlink
+through a replacement pathname. It retains journal, stage, and cleanup evidence
+and fails closed. Windows parent capabilities deny delete sharing while held,
+so the equivalent directory rename is blocked.
+
+Publication topology is exact. A missing destination is eligible only when the
+private stage has one link. An existing destination is resumable only when it
+is the same filesystem object as the stage and that object has exactly the two
+expected links. A missing destination with any extra link returns typed
+`RestoreNamespaceRepairRequired` before another hard link is created. Recovery
+continues after the user either returns the moved parent to the intended path or
+inspects and explicitly removes the operation-owned orphan. A future managed
+workspace may provide a stronger platform-specific namespace mutation
+invariant; v1 does not depend on it.
+
 The resulting full-state Folderbase Version preserves the root manifest,
 exclusions, every unrelated live binding, and every unrelated Tombstone,
 removes only the selected Tombstone, restores the original Object ID and Object

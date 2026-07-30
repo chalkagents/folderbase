@@ -224,6 +224,40 @@ is the same filesystem object as the retained stage; byte equality alone never
 authorizes adoption. A preexisting regular file, directory, symlink, or
 dangling symlink is left untouched.
 
+Every multi-step workspace observation or restore publication retains a scoped
+target capability: the no-follow parent directory handle, its exact physical
+identity, the validated relative leaf, and the attested Folderbase Root. Before
+publication mutation and again after mutation, hooks, authority retention, and
+the final success proof, Core reopens the parent from the retained root without
+following links and requires the reopened parent to have that exact identity.
+A replacement ancestor can neither redirect an operation into another
+directory nor be mistaken for the intended publication. Core moves no Head and
+returns no `Restored` result after that proof fails.
+
+This is a cooperative namespace invariant, not a claim that POSIX pathnames
+cannot be renamed by an uncoordinated same-user process. On Unix, a process may
+move the exact opened parent after the final attachment proof and before or
+after the hard link. The held capability still confines mutation to that exact
+directory, so the only possible orphan is the exact transaction-owned link in
+the moved directory; Core never follows the replacement path and never attempts
+a racy pathname rollback that could delete unrelated content. Windows directory
+capabilities deny delete sharing while held, so the equivalent parent detach is
+blocked by the operating system.
+
+Retry also preserves exact link topology. An absent destination may be
+published only while the retained stage has exactly one link. An already
+published destination may resume only when it is the same inode as the stage
+and the inode has exactly the two expected names: private stage and visible
+destination. If an absent destination is paired with an extra link left in a
+concurrently moved parent, Core returns typed
+`RestoreNamespaceRepairRequired` before adding another link. The user may
+inspect and return the moved directory to its intended location, or explicitly
+remove the known transaction-owned orphan, then retry. The journal, private
+stage, and any committed cleanup receipt remain durable until that repair
+converges. Stronger global namespace exclusion would require a managed-workspace
+or platform-conditional mutation protocol and is future architecture, not an
+implicit v1 guarantee.
+
 The restore journal binds the exact expected Local Head, selected Tombstone,
 recovered binding, new Folderbase Version ID, timestamp, and canonical digest.
 The transaction and target Version IDs are deterministic domain-separated
