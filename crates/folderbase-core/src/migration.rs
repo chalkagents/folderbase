@@ -2343,6 +2343,7 @@ fn apply_migration_with_hook(
     if plan_digest(&in_memory_plan)? != approved.approval_digest {
         return Err(FolderbaseError::MigrationApprovalMismatch);
     }
+    let _transaction_lock = acquire_existing_folderbase_transaction_lock(&in_memory_plan.root)?;
     let mut plan = load_plan(&in_memory_plan.root, &in_memory_plan.id)?;
     require_state(plan.state, MigrationState::Approved)?;
     if plan.approval_digest.as_deref() != Some(approved.approval_digest.as_str())
@@ -2446,6 +2447,17 @@ fn apply_migration_with_hook(
         created_paths: journal.created_paths,
         journal_path,
     })
+}
+
+fn acquire_existing_folderbase_transaction_lock(
+    root: &Path,
+) -> Result<Option<crate::local_versions::StoreTransactionLock>> {
+    if !has_nested_folderbase_marker(root)? {
+        return Ok(None);
+    }
+    LocalVersionStore::open_read_only(root)?
+        .acquire_transaction_lock()
+        .map(Some)
 }
 
 fn record_unstarted_additive_rollback(
