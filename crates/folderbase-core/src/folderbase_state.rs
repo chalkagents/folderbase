@@ -36,6 +36,7 @@ enum StateAccess {
 
 pub(crate) struct FolderbaseState {
     root: Dir,
+    root_identity: Handle,
     state: Dir,
     state_identity: Handle,
     display_root: PathBuf,
@@ -74,9 +75,11 @@ impl FolderbaseState {
                 return Err(FolderbaseError::io(root.join(STATE_COMPONENT), source));
             }
         };
+        let root_identity = directory_identity(&root_cap, root)?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
         Ok(Self {
             root: root_cap,
+            root_identity,
             state,
             state_identity,
             display_root: root.to_path_buf(),
@@ -101,9 +104,11 @@ impl FolderbaseState {
             access,
         )
         .map_err(|source| FolderbaseError::io(root.join(STATE_COMPONENT), source))?;
+        let root_identity = directory_identity(&root_cap, root)?;
         let state_identity = directory_identity(&state, &root.join(STATE_COMPONENT))?;
         Ok(Self {
             root: root_cap,
+            root_identity,
             state,
             state_identity,
             display_root: root.to_path_buf(),
@@ -470,6 +475,76 @@ impl FolderbaseState {
         }
     }
 
+    /// Revalidate one published restore against its retained private stage.
+    ///
+    /// Success proves that the ambient Folderbase root is still the retained
+    /// physical root, every destination ancestor remains inside this
+    /// Folderbase boundary, and the destination still names the exact staged
+    /// filesystem object with its sealed bytes and executable fidelity.
+    pub(crate) fn verify_workspace_restore(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<()> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut stage_file =
+            open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+        verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display)?;
+
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let mut destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )
+        .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+        let destination_identity =
+            open_regular_file_identity(&destination_file, &destination_display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+        if destination_identity != stage_identity {
+            return Err(FolderbaseError::WouldOverwrite(destination_display));
+        }
+        verify_open_regular_file(
+            &mut destination_file,
+            digest,
+            bytes,
+            executable,
+            &destination_display,
+        )?;
+
+        // Reopen through the retained root after byte verification. This
+        // closes over ordinary replacement races and repeats the boundary
+        // walk immediately before the coordinator advances durable state.
+        let (visible_parent, visible_name) = self.open_workspace_parent(&destination)?;
+        let mut visible_file =
+            open_regular_file_nofollow(&visible_parent, &visible_name, &destination_display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+        let visible_identity = open_regular_file_identity(&visible_file, &destination_display)
+            .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+        if visible_identity != stage_identity {
+            return Err(FolderbaseError::WouldOverwrite(destination_display));
+        }
+        verify_open_regular_file(
+            &mut visible_file,
+            digest,
+            bytes,
+            executable,
+            &destination_display,
+        )?;
+        self.verify_still_attached()
+    }
+
     #[cfg(test)]
     fn verify_sha256_blob_with_hook(
         &self,
@@ -549,8 +624,13 @@ impl FolderbaseState {
     }
 
     pub(crate) fn verify_still_attached(&self) -> Result<()> {
+        let visible_root = open_root_nofollow(&self.display_root, self.access)?;
+        let visible_root_identity = directory_identity(&visible_root, &self.display_root)?;
+        if visible_root_identity != self.root_identity {
+            return Err(FolderbaseError::UnsafePath(self.display_root.clone()));
+        }
         let visible = open_directory_nofollow(
-            &self.root,
+            &visible_root,
             OsStr::new(STATE_COMPONENT),
             &self.display_root.join(STATE_COMPONENT),
             self.access,
@@ -809,18 +889,37 @@ fn copy_exact_sha256(
 }
 
 fn regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<Handle> {
+    let file = open_regular_file_nofollow(parent, name, display)?;
+    open_regular_file_identity(&file, display)
+}
+
+fn open_regular_file_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> Result<cap_std::fs::File> {
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let file = parent
         .open_with(name, &options)
-        .map_err(|source| FolderbaseError::io(display, source))?
-        .into_std();
+        .map_err(|source| FolderbaseError::io(display, source))?;
     let metadata = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std()
         .metadata()
         .map_err(|source| FolderbaseError::io(display, source))?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
         return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
     }
+    Ok(file)
+}
+
+fn open_regular_file_identity(file: &cap_std::fs::File, display: &Path) -> Result<Handle> {
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
     Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
 }
 
@@ -832,13 +931,19 @@ fn verify_regular_file(
     executable: bool,
     display: &Path,
 ) -> Result<()> {
+    let mut file = open_regular_file_nofollow(parent, name, display)?;
+    verify_open_regular_file(&mut file, digest, bytes, executable, display)
+}
+
+fn verify_open_regular_file(
+    file: &mut cap_std::fs::File,
+    digest: &str,
+    bytes: u64,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
     #[cfg(not(unix))]
     let _ = executable;
-    let mut options = CapOpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let mut file = parent
-        .open_with(name, &options)
-        .map_err(|source| FolderbaseError::io(display, source))?;
     verify_open_regular_metadata(&file, bytes, display)?;
     #[cfg(unix)]
     {
@@ -860,7 +965,7 @@ fn verify_regular_file(
     let mut hasher = Sha256::new();
     let mut observed = 0_u64;
     let mut buffer = [0_u8; COPY_BUFFER_BYTES];
-    let mut bounded = Read::by_ref(&mut file).take(bytes.saturating_add(1));
+    let mut bounded = Read::by_ref(file).take(bytes.saturating_add(1));
     loop {
         let read = bounded
             .read(&mut buffer)
