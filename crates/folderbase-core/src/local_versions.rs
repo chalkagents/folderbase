@@ -4013,11 +4013,6 @@ mod tests {
         .unwrap();
         fs::create_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
         fs::copy(
-            child_fixture.path().join("FOLDERBASE.md"),
-            fixture.path().join("Client/FOLDERBASE.md"),
-        )
-        .unwrap();
-        fs::copy(
             child_fixture.path().join(".folderbase/manifest.json"),
             fixture.path().join("Client/.folderbase/manifest.json"),
         )

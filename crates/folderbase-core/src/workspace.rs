@@ -7,6 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -15,6 +16,7 @@ use crate::{
     ContentDigest, FolderbaseError, LocalVersionStore, ObjectId, Result, VersionId,
     root_attestation::metadata_is_link_or_reparse,
     traversal_policy::{
+        NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary,
         is_reconstructable_directory, is_reserved_workspace_component as is_reserved_component,
     },
 };
@@ -335,55 +337,15 @@ pub(crate) fn is_reserved_workspace_component(name: &OsStr) -> bool {
 }
 
 pub(crate) fn has_nested_folderbase_marker(path: &Path) -> Result<bool> {
-    let mut has_folderbase_entry = false;
-    let mut state_entries = Vec::new();
-    let entries = fs::read_dir(path).map_err(|source| FolderbaseError::io(path, source))?;
-    for entry in entries {
-        let entry = entry.map_err(|source| FolderbaseError::io(path, source))?;
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case("FOLDERBASE.md"))
-        {
-            has_folderbase_entry = true;
-        } else if name
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(".folderbase"))
-        {
-            state_entries.push(entry);
+    let directory = Dir::open_ambient_dir(path, ambient_authority())
+        .map_err(|source| FolderbaseError::io(path, source))?;
+    match classify_nested_folderbase_boundary(&directory, path)? {
+        NestedFolderbaseBoundaryKind::ExactBoundary => Ok(true),
+        NestedFolderbaseBoundaryKind::None => Ok(false),
+        NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+            Err(FolderbaseError::UnsafePath(path.to_path_buf()))
         }
     }
-    if !has_folderbase_entry {
-        return Ok(false);
-    }
-
-    for state_entry in state_entries {
-        let state_path = state_entry.path();
-        let file_type = state_entry
-            .file_type()
-            .map_err(|source| FolderbaseError::io(&state_path, source))?;
-        if file_type.is_symlink() {
-            return Ok(true);
-        }
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let entries =
-            fs::read_dir(&state_path).map_err(|source| FolderbaseError::io(&state_path, source))?;
-        for entry in entries {
-            let entry = entry.map_err(|source| FolderbaseError::io(&state_path, source))?;
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
-            {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
 }
 
 fn displayable_path(path: &Path) -> Result<String> {

@@ -4692,14 +4692,9 @@ fn ensure_move_content_path(path: &Path) -> Result<()> {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
-                [
-                    "FOLDERBASE.md",
-                    "AGENTS.md",
-                    "CLAUDE.md",
-                    ".folderbaseignore",
-                ]
-                .iter()
-                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+                ["AGENTS.md", "CLAUDE.md", ".folderbaseignore"]
+                    .iter()
+                    .any(|reserved| name.eq_ignore_ascii_case(reserved))
             })
     {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
@@ -4817,7 +4812,7 @@ fn refuse_unapproved_nested_folderbase_path(
         let directory = safe_join(root, &prefix)?;
         match fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                if has_nested_folderbase_marker(&directory)?
+                if migration_nested_folderbase_marker(&directory, &prefix)?
                     && !approved_boundaries.contains(&prefix)
                 {
                     return Err(FolderbaseError::UnsafePath(prefix));
@@ -5563,7 +5558,7 @@ fn refuse_nested_folderbase_path(root: &Path, relative: &Path) -> Result<()> {
         let directory = safe_join(root, &prefix)?;
         match fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                if has_nested_folderbase_marker(&directory)? {
+                if migration_nested_folderbase_marker(&directory, &prefix)? {
                     return Err(FolderbaseError::UnsafePath(prefix));
                 }
             }
@@ -5573,6 +5568,13 @@ fn refuse_nested_folderbase_path(root: &Path, relative: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn migration_nested_folderbase_marker(directory: &Path, prefix: &Path) -> Result<bool> {
+    has_nested_folderbase_marker(directory).map_err(|error| match error {
+        FolderbaseError::UnsafePath(_) => FolderbaseError::UnsafePath(prefix.to_path_buf()),
+        error => error,
+    })
 }
 
 fn humanize_name(name: &str) -> String {

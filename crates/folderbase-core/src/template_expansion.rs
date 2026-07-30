@@ -25,7 +25,7 @@ use crate::{
     TemplateApplicationCreatedPath, TemplateApplicationRecord, TemplateApplicationResult,
     TemplateApplicationState, TemplateArtifactKind, TemplateComparisonSource,
     TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest, TemplateStructuralChange,
-    TemplateStructuralChangeKind, render_template,
+    TemplateStructuralChangeKind, attest_folderbase_root, render_template,
 };
 
 const MANIFEST: &str = ".folderbase/manifest.json";
@@ -141,10 +141,11 @@ pub fn plan_template_expansion(
                 target.version()
             ),
         });
-    } else if !target
-        .upgrade_edges
-        .iter()
-        .any(|edge| edge.from == comparison.version && edge.to == target.version())
+    } else if comparison.source != TemplateComparisonSource::Unmanaged
+        && !target
+            .upgrade_edges
+            .iter()
+            .any(|edge| edge.from == comparison.version && edge.to == target.version())
     {
         structural_changes.push(TemplateStructuralChange {
             kind: TemplateStructuralChangeKind::UnsupportedTransition,
@@ -474,13 +475,30 @@ fn derive_comparison(
         }
     }
 
-    let provenance = manifest
+    let Some(provenance) = manifest
         .pointer("/folderbase/template_provenance")
         .and_then(Value::as_object)
-        .ok_or_else(|| FolderbaseError::InvalidRecord {
+    else {
+        if history.is_empty() {
+            return Ok(Comparison {
+                template_id: template_id.to_owned(),
+                version: "0.0.0".to_owned(),
+                package_digest: TemplatePlanDigest {
+                    algorithm: "sha256".to_owned(),
+                    digest: format!(
+                        "{:x}",
+                        Sha256::digest(b"folderbase-unmanaged-template-origin-v1\0")
+                    ),
+                },
+                source: TemplateComparisonSource::Unmanaged,
+                application_id: None,
+            });
+        }
+        return Err(FolderbaseError::InvalidRecord {
             path: manifest_path.to_path_buf(),
-            message: "template expansion requires immutable origin provenance".to_owned(),
-        })?;
+            message: "template history has no immutable origin".to_owned(),
+        });
+    };
     let origin_id = provenance
         .get("id")
         .and_then(Value::as_str)
@@ -523,16 +541,25 @@ fn validate_application_history_chain(
         return Ok(());
     }
 
-    let origin_id = required_string(
-        manifest,
-        &["folderbase", "template_provenance", "id"],
-        manifest_path,
-    )?;
-    let origin_version = required_string(
-        manifest,
-        &["folderbase", "template_provenance", "version"],
-        manifest_path,
-    )?;
+    let provenance = manifest
+        .pointer("/folderbase/template_provenance")
+        .and_then(Value::as_object);
+    let origin = provenance
+        .map(|_| {
+            Ok::<_, FolderbaseError>((
+                required_string(
+                    manifest,
+                    &["folderbase", "template_provenance", "id"],
+                    manifest_path,
+                )?,
+                required_string(
+                    manifest,
+                    &["folderbase", "template_provenance", "version"],
+                    manifest_path,
+                )?,
+            ))
+        })
+        .transpose()?;
     let records_by_id = history
         .iter()
         .map(|record| (record.id.as_str(), record))
@@ -556,12 +583,38 @@ fn validate_application_history_chain(
         }
 
         match record.comparison.source {
-            TemplateComparisonSource::Origin => {
-                if record.template.id != origin_id || record.comparison.version != origin_version {
+            TemplateComparisonSource::Unmanaged => {
+                if provenance.is_some()
+                    || record.comparison.version != "0.0.0"
+                    || !origin_roots.insert(record.template.id.as_str())
+                {
                     return Err(FolderbaseError::InvalidRecord {
                         path: manifest_path.to_path_buf(),
                         message: format!(
-                            "template application {} does not extend the active template origin",
+                            "template application {} has invalid unmanaged origin",
+                            record.id
+                        ),
+                    });
+                }
+            }
+            TemplateComparisonSource::Origin => {
+                if let Some((origin_id, origin_version)) = origin {
+                    if record.template.id != origin_id
+                        || record.comparison.version != origin_version
+                    {
+                        return Err(FolderbaseError::InvalidRecord {
+                            path: manifest_path.to_path_buf(),
+                            message: format!(
+                                "template application {} does not extend the active template origin",
+                                record.id
+                            ),
+                        });
+                    }
+                } else {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: manifest_path.to_path_buf(),
+                        message: format!(
+                            "template application {} claims a missing manifest origin",
                             record.id
                         ),
                     });
@@ -776,18 +829,12 @@ fn add_missing_parent_directories(
 }
 
 fn validate_folderbase_root(root: &Path) -> Result<()> {
-    for marker in [Path::new("FOLDERBASE.md"), Path::new(MANIFEST)] {
-        let destination = root.join(marker);
-        let metadata = fs::symlink_metadata(&destination)
-            .map_err(|source| FolderbaseError::io(&destination, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(FolderbaseError::InvalidRecord {
-                path: destination,
-                message: "folderbase marker must be a regular file".to_owned(),
-            });
-        }
-    }
-    Ok(())
+    attest_folderbase_root(root)
+        .map(drop)
+        .map_err(|source| FolderbaseError::InvalidRecord {
+            path: root.join(MANIFEST),
+            message: source.to_string(),
+        })
 }
 
 fn verify_preserved_preconditions(plan: &TemplateExpansionPlan) -> Result<()> {

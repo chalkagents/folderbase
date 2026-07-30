@@ -4,12 +4,14 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use cap_std::{ambient_authority, fs::Dir};
 use walkdir::WalkDir;
 
 use crate::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseError, InventorySummary,
     NestedFolderbaseBoundary, NestedFolderbaseState, ReconstructableTree, Result,
     traversal_policy::{
+        NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary,
         is_folderbase_state_component, is_git_metadata_component, is_reconstructable_directory,
     },
 };
@@ -286,50 +288,17 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
 }
 
 fn nested_folderbase_state(root: &Path) -> Result<Option<NestedFolderbaseState>> {
-    let mut entries = fs::read_dir(root)
-        .map_err(|source| FolderbaseError::io(root, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
+    let directory = Dir::open_ambient_dir(root, ambient_authority())
         .map_err(|source| FolderbaseError::io(root, source))?;
-    entries.sort_by_key(|entry| entry.file_name());
-    if !entries.iter().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case("FOLDERBASE.md"))
-    }) {
-        return Ok(None);
-    }
-    for state_entry in entries.iter().filter(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(".folderbase"))
-    }) {
-        let state_path = state_entry.path();
-        let state = fs::symlink_metadata(&state_path)
-            .map_err(|source| FolderbaseError::io(&state_path, source))?;
-        if state.file_type().is_symlink() {
-            return Ok(Some(NestedFolderbaseState::Unchecked));
-        }
-        if !state.is_dir() {
-            continue;
-        }
-        let state_entries = match fs::read_dir(&state_path) {
-            Ok(entries) => entries,
-            Err(_) => return Ok(Some(NestedFolderbaseState::Unchecked)),
-        };
-        for manifest in state_entries {
-            let manifest = manifest.map_err(|source| FolderbaseError::io(&state_path, source))?;
-            if manifest
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
-            {
-                return Ok(Some(NestedFolderbaseState::Unchecked));
+    Ok(
+        match classify_nested_folderbase_boundary(&directory, root)? {
+            NestedFolderbaseBoundaryKind::ExactBoundary
+            | NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+                Some(NestedFolderbaseState::Unchecked)
             }
-        }
-    }
-    Ok(None)
+            NestedFolderbaseBoundaryKind::None => None,
+        },
+    )
 }
 
 fn safe_relative(root: &Path, child: &Path) -> Result<PathBuf> {

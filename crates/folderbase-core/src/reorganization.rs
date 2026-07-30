@@ -1286,14 +1286,9 @@ fn validate_ordinary_content_path(path: &str) -> Result<()> {
         })
         .any(is_reserved_workspace_component)
         || (!path.contains('/')
-            && [
-                "FOLDERBASE.md",
-                "AGENTS.md",
-                "CLAUDE.md",
-                ".folderbaseignore",
-            ]
-            .iter()
-            .any(|reserved| path.eq_ignore_ascii_case(reserved)))
+            && ["AGENTS.md", "CLAUDE.md", ".folderbaseignore"]
+                .iter()
+                .any(|reserved| path.eq_ignore_ascii_case(reserved)))
     {
         return invalid_record(format!(
             "ordinary operation path is reserved and requires an exact typed operation: {path}"

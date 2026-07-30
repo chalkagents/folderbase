@@ -14,12 +14,13 @@ use folderbase_core::{
     FolderbaseVersionStore, InitializationOptions, InitializationPlan, InitializationPlanDigest,
     InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
     MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview, MigrationResult,
-    MigrationState, RollbackResult, RootAttestationError, TemplateAnswerType, TemplateAnswerValue,
-    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
-    analyze_migration, apply_migration, approve_migration, attest_folderbase_root, initialize,
-    initialize_with_expected_plan_digest, inspect, list_workspace, load_builtin_template,
-    plan_initialization, plan_migration, plan_template_initialization, preview_migration,
-    read_workspace_text, save_workspace_text, validate,
+    MigrationState, ProtocolUpgradePlanDigest, RollbackResult, RootAttestationError,
+    TemplateAnswerType, TemplateAnswerValue, TemplatePackage, ValidationLevel, ValidationReport,
+    ValidationSeverity, VersionId, analyze_migration, apply_migration, apply_protocol_upgrade,
+    approve_migration, attest_folderbase_root, initialize, initialize_with_expected_plan_digest,
+    inspect, list_workspace, load_builtin_template, plan_initialization, plan_migration,
+    plan_protocol_upgrade, plan_template_initialization, preview_migration, read_workspace_text,
+    save_workspace_text, validate,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -74,9 +75,9 @@ enum Command {
         #[arg(long, value_enum, default_value_t = FolderbaseKindArg::Project)]
         kind: FolderbaseKindArg,
 
-        /// Do not create adapters for supported agents.
+        /// Create bootstrap adapters for supported agents.
         #[arg(long)]
-        no_agent_adapters: bool,
+        agent_adapters: bool,
 
         /// Adopt with one exact built-in template, such as folderbase.project@0.2.2.
         #[arg(long)]
@@ -93,6 +94,23 @@ enum Command {
         /// Apply only if Core replans to this approved SHA-256 digest.
         #[arg(long, conflicts_with = "dry_run")]
         expected_plan_digest: Option<String>,
+    },
+
+    /// Review or apply the explicit legacy-root transition to protocol 0.5.
+    Upgrade {
+        path: PathBuf,
+
+        /// Print the upgrade plan without changing the manifest.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Apply only the exact reviewed protocol-upgrade plan digest.
+        #[arg(long, conflicts_with = "dry_run")]
+        expected_plan_digest: Option<String>,
+
+        /// Emit the plan or result as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Validate a folderbase without repairing it.
@@ -424,7 +442,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             dry_run,
             name,
             kind,
-            no_agent_adapters,
+            agent_adapters,
             template,
             answers,
             json,
@@ -433,7 +451,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             let options = InitializationOptions {
                 name,
                 kind: kind.into(),
-                create_agent_adapters: !no_agent_adapters,
+                create_agent_adapters: agent_adapters,
             };
             let plan = if let Some(template) = template {
                 let (id, version) = parse_template_selector(&template)?;
@@ -471,7 +489,50 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     print_initialization_result(&result);
                 }
             }
-
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Upgrade {
+            path,
+            dry_run,
+            expected_plan_digest,
+            json,
+        } => {
+            let plan = plan_protocol_upgrade(path)?;
+            if dry_run {
+                if json {
+                    print_json(&plan)?;
+                } else {
+                    println!(
+                        "Upgrade {} from legacy protocol to 0.5.0",
+                        plan.root().display()
+                    );
+                    println!(
+                        "Plan digest {}:{}",
+                        plan.plan_digest().algorithm(),
+                        plan.plan_digest().digest()
+                    );
+                }
+            } else {
+                let expected =
+                    expected_plan_digest.ok_or_else(|| FolderbaseError::InvalidRecord {
+                        path: plan.root().to_path_buf(),
+                        message:
+                            "protocol upgrade apply requires --expected-plan-digest after review"
+                                .to_owned(),
+                    })?;
+                let expected = ProtocolUpgradePlanDigest::parse_sha256(expected)?;
+                let result = apply_protocol_upgrade(&plan, &expected)?;
+                if json {
+                    print_json(&result)?;
+                } else {
+                    println!(
+                        "Upgraded {} from {} to {}",
+                        result.root.display(),
+                        result.from_protocol_version,
+                        result.to_protocol_version
+                    );
+                }
+            }
             Ok(EXIT_SUCCESS)
         }
         Command::Validate { path, level, json } => {
@@ -830,6 +891,9 @@ fn command_emits_json_errors(command: &Command) -> bool {
     if let Command::Init { json, .. } = command {
         return *json;
     }
+    if let Command::Upgrade { json, .. } = command {
+        return *json;
+    }
     if let Command::Version { command } = command {
         return match command {
             VersionCommand::Capture { json, .. }
@@ -889,6 +953,9 @@ fn error_code(error: &CliError) -> &'static str {
         FolderbaseError::InvalidInitializationPlanDigest => "invalid_initialization_plan_digest",
         FolderbaseError::InitializationPlanChanged { .. } => "initialization_plan_changed",
         FolderbaseError::InitializationDestinationChanged(_) => "initialization_plan_changed",
+        FolderbaseError::InvalidProtocolUpgradePlanDigest => "invalid_protocol_upgrade_plan_digest",
+        FolderbaseError::ProtocolUpgradePlanChanged { .. } => "protocol_upgrade_plan_changed",
+        FolderbaseError::ProtocolUpgradeBlocked(_) => "protocol_upgrade_blocked",
         FolderbaseError::InitializationInventoryLimitExceeded { .. } => {
             "initialization_inventory_limit_exceeded"
         }
@@ -1270,7 +1337,7 @@ mod tests {
             "Example",
             "--kind",
             "organization",
-            "--no-agent-adapters",
+            "--agent-adapters",
             "--json",
         ])
         .expect("valid CLI");
@@ -1280,7 +1347,7 @@ mod tests {
             dry_run,
             name,
             kind,
-            no_agent_adapters,
+            agent_adapters,
             template,
             answers,
             json,
@@ -1294,7 +1361,7 @@ mod tests {
         assert!(dry_run);
         assert_eq!(name.as_deref(), Some("Example"));
         assert!(matches!(kind, FolderbaseKindArg::Organization));
-        assert!(no_agent_adapters);
+        assert!(agent_adapters);
         assert!(template.is_none());
         assert!(answers.is_empty());
         assert!(json);

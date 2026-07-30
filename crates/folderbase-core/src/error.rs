@@ -57,6 +57,19 @@ pub enum FolderbaseError {
     )]
     InitializationPlanChanged { expected: String, actual: String },
 
+    #[error(
+        "protocol upgrade plan digest must be exactly 64 lowercase hexadecimal SHA-256 characters"
+    )]
+    InvalidProtocolUpgradePlanDigest,
+
+    #[error(
+        "protocol upgrade plan changed after approval: expected {expected}, current plan is {actual}"
+    )]
+    ProtocolUpgradePlanChanged { expected: String, actual: String },
+
+    #[error("protocol upgrade is blocked by pending work: {0}")]
+    ProtocolUpgradeBlocked(&'static str),
+
     #[error("initialization destination changed after approval: {0}")]
     InitializationDestinationChanged(PathBuf),
 

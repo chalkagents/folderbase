@@ -34,9 +34,12 @@ use crate::{
     },
     physical_identity::PhysicalIdentity,
     root_attestation::{
-        RootInstanceAuthority, attest_folderbase_root, attest_folderbase_root_with_authority,
+        ManifestProtocolProfile, RootInstanceAuthority, attest_folderbase_root_with_profile,
     },
-    traversal_policy::{RECONSTRUCTABLE_DIRECTORIES, is_folderbase_state_component},
+    traversal_policy::{
+        NestedFolderbaseBoundaryKind, RECONSTRUCTABLE_DIRECTORIES,
+        classify_nested_folderbase_boundary, is_folderbase_state_component,
+    },
 };
 
 #[cfg(unix)]
@@ -460,6 +463,7 @@ impl CaptureLocalHead {
 pub struct CapturePlan {
     root_attestation: FolderbaseRootAttestation,
     root_manifest_bytes: u64,
+    folderbase_version_protocol: &'static str,
     current_local_head: Option<CaptureLocalHead>,
     ignore_policy_sha256: String,
     entries: Vec<CapturePlanEntry>,
@@ -486,6 +490,10 @@ impl CapturePlan {
 
     pub fn root_manifest_bytes(&self) -> u64 {
         self.root_manifest_bytes
+    }
+
+    pub(crate) fn folderbase_version_protocol(&self) -> &'static str {
+        self.folderbase_version_protocol
     }
 
     pub fn current_local_head(&self) -> Option<&CaptureLocalHead> {
@@ -622,13 +630,15 @@ pub enum FolderbaseCaptureError {
 pub struct FolderbaseVersionStore {
     pub(crate) root_attestation: FolderbaseRootAttestation,
     pub(crate) root_instance_authority: RootInstanceAuthority,
+    pub(crate) protocol_profile: ManifestProtocolProfile,
 }
 
 impl FolderbaseVersionStore {
     /// Open one exact, existing Folderbase Root without writing any state.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, FolderbaseCaptureError> {
         let requested_root = root.as_ref();
-        let (requested_attestation, _) = attest_folderbase_root_with_authority(requested_root)?;
+        let (requested_attestation, _, requested_profile) =
+            attest_folderbase_root_with_profile(requested_root)?;
         let canonical_root =
             requested_root
                 .canonicalize()
@@ -636,22 +646,26 @@ impl FolderbaseVersionStore {
                     path: requested_root.to_path_buf(),
                     source,
                 })?;
-        let (root_attestation, root_instance_authority) =
-            attest_folderbase_root_with_authority(&canonical_root)?;
+        let (root_attestation, root_instance_authority, protocol_profile) =
+            attest_folderbase_root_with_profile(&canonical_root)?;
         if requested_attestation.folderbase_id != root_attestation.folderbase_id
             || requested_attestation.protocol_version != root_attestation.protocol_version
             || requested_attestation.manifest_sha256 != root_attestation.manifest_sha256
             || requested_attestation.root_instance_sha256 != root_attestation.root_instance_sha256
+            || requested_profile != protocol_profile
         {
             return Err(RootAttestationError::RootChangedDuringAttestation.into());
         }
         let root_capability = open_planning_root(&canonical_root)?;
         verify_root_capability(&root_capability, &canonical_root)?;
-        require_regular_marker(
-            &root_capability,
-            &canonical_root,
-            Path::new(".folderbaseignore"),
-        )?;
+        let legacy_root_files = protocol_profile.requires_legacy_root_files();
+        if legacy_root_files {
+            require_regular_marker(
+                &root_capability,
+                &canonical_root,
+                Path::new(".folderbaseignore"),
+            )?;
+        }
         read_local_head(
             &root_attestation,
             &root_instance_authority,
@@ -661,28 +675,36 @@ impl FolderbaseVersionStore {
         Ok(Self {
             root_attestation,
             root_instance_authority,
+            protocol_profile,
         })
     }
 
     /// Plan a bounded metadata inventory without reading ordinary file bytes.
     pub fn plan_capture(&self) -> Result<CapturePlan, FolderbaseCaptureError> {
-        let (current, _) = attest_folderbase_root_with_authority(&self.root_attestation.root)?;
+        let (current, _, current_profile) =
+            attest_folderbase_root_with_profile(&self.root_attestation.root)?;
         if current.root_instance_sha256 != self.root_attestation.root_instance_sha256 {
+            return Err(RootAttestationError::RootChangedDuringAttestation.into());
+        }
+        if current_profile != self.protocol_profile {
             return Err(RootAttestationError::RootChangedDuringAttestation.into());
         }
         let root_capability = open_planning_root(&current.root)?;
         verify_root_capability(&root_capability, &current.root)?;
-        require_regular_marker(
-            &root_capability,
-            &current.root,
-            Path::new(".folderbaseignore"),
-        )?;
+        let legacy_root_files = current_profile.requires_legacy_root_files();
+        if legacy_root_files {
+            require_regular_marker(
+                &root_capability,
+                &current.root,
+                Path::new(".folderbaseignore"),
+            )?;
+        }
         let root_manifest_bytes = protocol_file_length(
             &root_capability,
             &current.root,
             Path::new(".folderbase/manifest.json"),
         )?;
-        let ignore = read_ignore_policy(&root_capability, &current.root)?;
+        let ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let current_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
         let restore_authorities = read_restore_authorities(
@@ -691,7 +713,12 @@ impl FolderbaseVersionStore {
             MAX_RESTORE_AUTHORITIES,
         )?;
 
-        let mut planner = CapturePlanner::new(&current.root, &ignore, restore_authorities);
+        let mut planner = CapturePlanner::new(
+            &current.root,
+            &ignore,
+            restore_authorities,
+            legacy_root_files,
+        );
         planner.visit_directory(&root_capability, Path::new(""))?;
         verify_root_capability(&root_capability, &current.root)?;
 
@@ -716,7 +743,7 @@ impl FolderbaseVersionStore {
             &nested_boundaries,
         )
         .map_err(|path| FolderbaseCaptureError::UnsafeSymlinkTarget(PathBuf::from(path)))?;
-        let final_ignore = read_ignore_policy(&root_capability, &current.root)?;
+        let final_ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let final_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
         let final_manifest_bytes = protocol_file_length(
@@ -725,10 +752,12 @@ impl FolderbaseVersionStore {
             Path::new(".folderbase/manifest.json"),
         )?;
         verify_root_capability(&root_capability, &current.root)?;
-        let final_attestation = attest_folderbase_root(&current.root)?;
+        let (final_attestation, _, final_profile) =
+            attest_folderbase_root_with_profile(&current.root)?;
         if final_local_head != current_local_head
             || final_ignore.sha256 != ignore.sha256
             || final_attestation != current
+            || final_profile != current_profile
             || final_manifest_bytes != root_manifest_bytes
         {
             return Err(FolderbaseCaptureError::PlanningStateChanged);
@@ -737,6 +766,7 @@ impl FolderbaseVersionStore {
         Ok(CapturePlan {
             root_attestation: current,
             root_manifest_bytes,
+            folderbase_version_protocol: current_profile.folderbase_version_protocol(),
             current_local_head,
             ignore_policy_sha256: ignore.sha256,
             entries,
@@ -750,6 +780,7 @@ struct CapturePlanner<'a> {
     root: &'a Path,
     ignore: &'a IgnorePolicy,
     restore_authorities: RestoreAuthorityRegistry,
+    legacy_root_files: bool,
     entries: Vec<CapturePlanEntry>,
     exclusions: Vec<CapturePlanExclusion>,
     ignored_paths: Vec<CaptureIgnoredPath>,
@@ -1057,11 +1088,13 @@ impl<'a> CapturePlanner<'a> {
         root: &'a Path,
         ignore: &'a IgnorePolicy,
         restore_authorities: RestoreAuthorityRegistry,
+        legacy_root_files: bool,
     ) -> Self {
         Self {
             root,
             ignore,
             restore_authorities,
+            legacy_root_files,
             entries: Vec::new(),
             exclusions: Vec::new(),
             ignored_paths: Vec::new(),
@@ -1159,9 +1192,11 @@ impl<'a> CapturePlanner<'a> {
             return Err(FolderbaseCaptureError::UnsafePortablePath(relative));
         }
 
-        let required_marker =
-            relative == Path::new(".folderbaseignore") || relative == Path::new("FOLDERBASE.md");
-        if !required_marker
+        let required_marker = relative == Path::new(".folderbaseignore")
+            || (self.legacy_root_files && relative == Path::new("FOLDERBASE.md"));
+        let force_included = relative == Path::new(".folderbaseignore")
+            || (self.legacy_root_files && relative == Path::new("FOLDERBASE.md"));
+        if !force_included
             && matches!(
                 self.ignore
                     .matcher
@@ -1184,14 +1219,20 @@ impl<'a> CapturePlanner<'a> {
 
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             let (child, identity) = open_stable_child(directory, &name, &display_path)?;
-            if is_nested_folderbase(&child, &display_path)? {
-                verify_child_identity(directory, &name, &identity, &display_path)?;
-                self.exclusions.push(CapturePlanExclusion {
-                    path,
-                    kind: CaptureExclusionKind::NestedFolderbase,
-                    reason: CaptureExclusionReason::NestedFolderbaseBoundary,
-                });
-                return Ok(None);
+            match classify_nested_folderbase_boundary(&child, &display_path)? {
+                NestedFolderbaseBoundaryKind::ExactBoundary => {
+                    verify_child_identity(directory, &name, &identity, &display_path)?;
+                    self.exclusions.push(CapturePlanExclusion {
+                        path,
+                        kind: CaptureExclusionKind::NestedFolderbase,
+                        reason: CaptureExclusionReason::NestedFolderbaseBoundary,
+                    });
+                    return Ok(None);
+                }
+                NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+                    return Err(FolderbaseCaptureError::UnsafePortablePath(display_path));
+                }
+                NestedFolderbaseBoundaryKind::None => {}
             }
             self.entries.push(CapturePlanEntry {
                 path,
@@ -1858,86 +1899,42 @@ fn read_local_head(
     }))
 }
 
-fn is_nested_folderbase(
-    directory: &Dir,
-    display_path: &Path,
-) -> Result<bool, FolderbaseCaptureError> {
-    let entry_path = display_path.join("FOLDERBASE.md");
-    match directory.symlink_metadata("FOLDERBASE.md") {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => {
-            return Err(FolderbaseCaptureError::Io {
-                path: entry_path,
-                source,
-            });
-        }
-    };
-    let state_path = display_path.join(".folderbase");
-    let state = match directory.symlink_metadata(".folderbase") {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => {
-            return Err(FolderbaseCaptureError::Io {
-                path: state_path,
-                source,
-            });
-        }
-    };
-    if state.file_type().is_symlink() {
-        return Ok(true);
-    }
-    if !state.is_dir() {
-        return Ok(false);
-    }
-
-    let manifest_path = state_path.join("manifest.json");
-    let state_directory = directory
-        .open_dir_nofollow(".folderbase")
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: state_path,
-            source,
-        })?;
-    match state_directory.symlink_metadata("manifest.json") {
-        Ok(_) => Ok(true),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(FolderbaseCaptureError::Io {
-            path: manifest_path,
-            source,
-        }),
-    }
-}
-
 fn read_ignore_policy(
     root_directory: &Dir,
     root: &Path,
+    profile: &ManifestProtocolProfile,
 ) -> Result<IgnorePolicy, FolderbaseCaptureError> {
+    let required = profile.requires_legacy_root_files();
     let path = root.join(".folderbaseignore");
-    let mut file = open_regular_nofollow(root_directory, Path::new(".folderbaseignore")).map_err(
-        |source| FolderbaseCaptureError::Io {
-            path: path.clone(),
-            source,
-        },
-    )?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    if metadata.len() > MAX_FOLDERBASEIGNORE_BYTES {
-        return Err(FolderbaseCaptureError::IgnorePolicyTooLarge {
-            maximum_bytes: MAX_FOLDERBASEIGNORE_BYTES,
-        });
-    }
     let mut encoded = Vec::new();
-    file.by_ref()
-        .take(MAX_FOLDERBASEIGNORE_BYTES + 1)
-        .read_to_end(&mut encoded)
-        .map_err(|source| FolderbaseCaptureError::Io {
-            path: path.clone(),
-            source,
-        })?;
+    let present = match root_directory.symlink_metadata(".folderbaseignore") {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(FolderbaseCaptureError::RequiredMarker(path));
+            }
+            if metadata.len() > MAX_FOLDERBASEIGNORE_BYTES {
+                return Err(FolderbaseCaptureError::IgnorePolicyTooLarge {
+                    maximum_bytes: MAX_FOLDERBASEIGNORE_BYTES,
+                });
+            }
+            let mut file = open_regular_nofollow(root_directory, Path::new(".folderbaseignore"))
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            file.by_ref()
+                .take(MAX_FOLDERBASEIGNORE_BYTES + 1)
+                .read_to_end(&mut encoded)
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            true
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound && !required => false,
+        Err(_) if required => return Err(FolderbaseCaptureError::RequiredMarker(path)),
+        Err(source) => return Err(FolderbaseCaptureError::Io { path, source }),
+    };
     if encoded.len() as u64 > MAX_FOLDERBASEIGNORE_BYTES {
         return Err(FolderbaseCaptureError::IgnorePolicyTooLarge {
             maximum_bytes: MAX_FOLDERBASEIGNORE_BYTES,
@@ -1947,16 +1944,26 @@ fn read_ignore_policy(
         std::str::from_utf8(&encoded).map_err(|_| FolderbaseCaptureError::IgnorePolicyNotUtf8)?;
     let mut builder = GitignoreBuilder::new(root);
     let mut digest = Sha256::new();
-    digest.update(b"folderbase-ignore-policy-v1\0");
-    for directory in RECONSTRUCTABLE_DIRECTORIES {
-        let pattern = format!("{directory}/");
-        builder
-            .add_line(None, &pattern)
-            .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;
-        digest.update(pattern.as_bytes());
-        digest.update(b"\n");
-    }
-    for pattern in [".DS_Store", "*.tmp", "~$*"] {
+    let engine_rules = if required {
+        digest.update(b"folderbase-ignore-policy-v1\0");
+        RECONSTRUCTABLE_DIRECTORIES
+            .iter()
+            .map(|directory| format!("{directory}/"))
+            .chain([".DS_Store", "*.tmp", "~$*"].into_iter().map(str::to_owned))
+            .collect::<Vec<_>>()
+    } else {
+        digest.update(b"folderbase-ignore-policy-v2\0");
+        digest.update(if present {
+            b"present\0".as_slice()
+        } else {
+            b"absent\0".as_slice()
+        });
+        profile
+            .capture_ignore_rules()
+            .expect("ordinary profile carries exact engine rules")
+            .to_vec()
+    };
+    for pattern in &engine_rules {
         builder
             .add_line(None, pattern)
             .map_err(|error| FolderbaseCaptureError::InvalidIgnorePolicy(error.to_string()))?;

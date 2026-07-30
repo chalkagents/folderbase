@@ -18,8 +18,12 @@ use crate::model::{
     InitializationDestinationEntry, InitializationDestinationKind, InitializationRequest,
 };
 use crate::physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity};
+use crate::root_attestation::DEFAULT_V05_CAPTURE_IGNORE_RULES;
 use crate::template::template_package_sha256;
-use crate::traversal_policy::{is_git_metadata_component, is_reconstructable_directory};
+use crate::traversal_policy::{
+    NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary_with_observer,
+    is_git_metadata_component, is_reconstructable_directory,
+};
 use crate::{
     FolderbaseError, FolderbaseKind, InitializationInventoryLimitKind, InitializationOptions,
     InitializationPlan, InitializationPlanDigest, InitializationResult, PlannedDirectory,
@@ -27,9 +31,9 @@ use crate::{
     TemplateArtifactPrecondition, TemplatePackage, TemplateRenderPlan, render_template,
 };
 
-const FOLDERBASE_ENTRY: &str = "FOLDERBASE.md";
 const MANIFEST: &str = ".folderbase/manifest.json";
-const IGNORE_FILE: &str = ".folderbaseignore";
+#[cfg(test)]
+const FOLDERBASE_ENTRY: &str = "FOLDERBASE.md";
 const CODEX_ADAPTER: &str = "AGENTS.md";
 const CLAUDE_ADAPTER: &str = "CLAUDE.md";
 const MAX_INITIALIZATION_INVENTORY_ENTRIES: usize = 50_000;
@@ -154,92 +158,57 @@ fn plan_initialization_with_template(
         .collect::<Vec<_>>();
     let mut warnings = Vec::new();
 
-    let template_provenance = if let Some((rendered, preconditions, package_digest)) =
-        rendered_template
-    {
-        template_preconditions = preconditions;
-        for path in rendered
-            .additions
-            .iter()
-            .map(|addition| addition.path.as_path())
-            .chain(rendered.existing_paths.iter().map(PathBuf::as_path))
-        {
-            refuse_template_target_inside_nested_folderbase_capability(
-                &root_dir,
-                &root,
-                path,
-                &mut inventory_budget,
-            )?;
-        }
-        for addition in rendered.additions {
-            match addition.kind {
-                TemplateArtifactKind::Directory => {
-                    let destination = safe_destination(&root, &addition.path)?;
-                    match fs::symlink_metadata(&destination) {
-                        Ok(_) => return Err(FolderbaseError::WouldOverwrite(destination)),
-                        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                            directories.push(PlannedDirectory {
-                                path: addition.path,
-                                purpose: "Template-proposed additive directory".to_owned(),
-                            });
+    let template_provenance =
+        if let Some((rendered, preconditions, package_digest)) = rendered_template {
+            template_preconditions = preconditions;
+            for path in rendered
+                .additions
+                .iter()
+                .map(|addition| addition.path.as_path())
+                .chain(rendered.existing_paths.iter().map(PathBuf::as_path))
+            {
+                refuse_template_target_inside_nested_folderbase_capability(
+                    &root_dir,
+                    &root,
+                    path,
+                    &mut inventory_budget,
+                )?;
+            }
+            for addition in rendered.additions {
+                match addition.kind {
+                    TemplateArtifactKind::Directory => {
+                        let destination = safe_destination(&root, &addition.path)?;
+                        match fs::symlink_metadata(&destination) {
+                            Ok(_) => return Err(FolderbaseError::WouldOverwrite(destination)),
+                            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                                directories.push(PlannedDirectory {
+                                    path: addition.path,
+                                    purpose: "Template-proposed additive directory".to_owned(),
+                                });
+                            }
+                            Err(source) => return Err(FolderbaseError::io(destination, source)),
                         }
-                        Err(source) => return Err(FolderbaseError::io(destination, source)),
+                    }
+                    TemplateArtifactKind::Text => {
+                        plan_file(
+                            &root,
+                            &addition.path,
+                            "Template-rendered additive file",
+                            addition.content.unwrap_or_default(),
+                            &mut writes,
+                            &mut preserved_paths,
+                        )?;
                     }
                 }
-                TemplateArtifactKind::Text => {
-                    plan_file(
-                        &root,
-                        &addition.path,
-                        "Template-rendered additive file",
-                        addition.content.unwrap_or_default(),
-                        &mut writes,
-                        &mut preserved_paths,
-                    )?;
-                }
             }
-        }
-        let folderbase_entry_path = safe_destination(&root, Path::new(FOLDERBASE_ENTRY))?;
-        match fs::symlink_metadata(&folderbase_entry_path) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(FolderbaseError::WouldOverwrite(folderbase_entry_path)),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                if !writes
-                    .iter()
-                    .any(|write| write.path == Path::new(FOLDERBASE_ENTRY))
-                {
-                    return Err(FolderbaseError::InvalidRecord {
-                        path: root.clone(),
-                        message: "template adoption must provide a FOLDERBASE.md folderbase entry"
-                            .to_owned(),
-                    });
-                }
-            }
-            Err(source) => return Err(FolderbaseError::io(folderbase_entry_path, source)),
-        }
-        Some((
-            rendered.template_id,
-            rendered.template_version,
-            package_digest,
-        ))
-    } else {
-        plan_file(
-            &root,
-            Path::new(FOLDERBASE_ENTRY),
-            "Canonical human and agent entry point",
-            folderbase_entry(&folderbase_name),
-            &mut writes,
-            &mut preserved_paths,
-        )?;
-        None
-    };
-    plan_file(
-        &root,
-        Path::new(IGNORE_FILE),
-        "Default local inventory and synchronization exclusions",
-        default_ignore(),
-        &mut writes,
-        &mut preserved_paths,
-    )?;
+            Some((
+                rendered.template_id,
+                rendered.template_version,
+                package_digest,
+            ))
+        } else {
+            None
+        };
 
     let adapter_paths = if options.create_agent_adapters {
         vec![
@@ -254,8 +223,7 @@ fn plan_initialization_with_template(
             "name": folderbase_name,
             "kind": folderbase_kind_name(options.kind),
             "status": "active",
-            "created_at": created_at,
-            "entry": FOLDERBASE_ENTRY
+            "created_at": created_at
     });
     if let Some((id, version, package_digest)) = template_provenance {
         folderbase["template_provenance"] = json!({
@@ -268,21 +236,20 @@ fn plan_initialization_with_template(
             }
         });
     }
-    let is_template_adoption = folderbase.get("template_provenance").is_some();
     let manifest = json!({
-        "$schema": if is_template_adoption {
-            "https://folderbase.ai/protocol/0.2/folderbase.schema.json"
-        } else {
-            "https://folderbase.ai/protocol/0.1/folderbase.schema.json"
-        },
-        "protocol_version": if is_template_adoption { "0.2.0" } else { "0.1.0" },
+        "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+        "protocol_version": "0.5.0",
         "folderbase": folderbase,
         "adapters": adapter_paths,
         "policies": {
             "availability": "keep_local",
             "structural_changes": "approve",
             "archive": "approve",
-            "cloud_sync": "disabled"
+            "cloud_sync": "disabled",
+            "capture_ignore": {
+                "format": "folderbase-capture-ignore-v1",
+                "rules": DEFAULT_V05_CAPTURE_IGNORE_RULES
+            }
         }
     });
     let manifest = serde_json::to_string_pretty(&manifest)
@@ -1334,48 +1301,15 @@ fn has_nested_folderbase_marker_capability(
     display_path: PathBuf,
     budget: &mut InitializationInventoryBudget,
 ) -> Result<bool> {
-    let mut has_entry = false;
-    let mut has_state_marker = false;
-    for entry in directory
-        .read_dir(".")
-        .map_err(|source| FolderbaseError::io(&display_path, source))?
-    {
-        let entry = entry.map_err(|source| FolderbaseError::io(&display_path, source))?;
-        budget.observe_directory_entry()?;
-        let name = entry.file_name();
-        if os_name_eq_ignore_ascii_case(&name, "FOLDERBASE.md") {
-            has_entry = true;
-        } else if os_name_eq_ignore_ascii_case(&name, ".folderbase") {
-            let metadata = directory
-                .symlink_metadata(&name)
-                .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?;
-            if metadata.file_type().is_symlink() {
-                has_state_marker = true;
-            } else if metadata.is_dir() {
-                let state_dir = directory
-                    .open_dir_nofollow(&name)
-                    .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?;
-                for state_entry in state_dir
-                    .read_dir(".")
-                    .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?
-                {
-                    let state_entry = state_entry
-                        .map_err(|source| FolderbaseError::io(display_path.join(&name), source))?;
-                    budget.observe_directory_entry()?;
-                    if os_name_eq_ignore_ascii_case(&state_entry.file_name(), "manifest.json") {
-                        has_state_marker = true;
-                        break;
-                    }
-                }
-            }
+    match classify_nested_folderbase_boundary_with_observer(directory, &display_path, || {
+        budget.observe_directory_entry()
+    })? {
+        NestedFolderbaseBoundaryKind::ExactBoundary => Ok(true),
+        NestedFolderbaseBoundaryKind::None => Ok(false),
+        NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+            Err(FolderbaseError::UnsafePath(display_path))
         }
     }
-    Ok(has_entry && has_state_marker)
-}
-
-fn os_name_eq_ignore_ascii_case(name: &OsStr, expected: &str) -> bool {
-    name.to_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
 }
 
 fn plan_missing_parent_directories(
@@ -1707,49 +1641,12 @@ fn folderbase_kind_name(kind: FolderbaseKind) -> &'static str {
     }
 }
 
-fn folderbase_entry(name: &str) -> String {
-    format!(
-        "# {name}\n\n\
-         ## Purpose\n\n\
-         Describe why this folderbase exists and who it serves.\n\n\
-         ## Current state\n\n\
-         This folder was initialized as a Folderbase. Review its files and update this summary.\n\n\
-         ## Navigate\n\n\
-         - Add links to the canonical documents and folders a new collaborator should read.\n\n\
-         ## Operating rules\n\n\
-         - Read this file before changing the folderbase.\n\
-         - Preserve ordinary file compatibility.\n\
-         - Propose structural migrations before moving canonical knowledge.\n\n\
-         ## Unresolved work\n\n\
-         - Replace the starter text with the folderbase's real current state.\n"
-    )
-}
-
-fn default_ignore() -> String {
-    [
-        "node_modules/",
-        ".next/",
-        "dist/",
-        "build/",
-        "coverage/",
-        ".venv/",
-        "__pycache__/",
-        ".dart_tool/",
-        "Pods/",
-        ".DS_Store",
-        "*.tmp",
-        "~$*",
-        "",
-    ]
-    .join("\n")
-}
-
 fn agent_adapter() -> String {
     "<!-- folderbase:begin -->\n\
      # Folderbase\n\n\
-     Read `FOLDERBASE.md` before working in this directory. Follow its navigation and \
-     operating rules. Record durable project context in the folderbase rather than \
-     only in the current conversation.\n\
+     Confirm this root through `.folderbase/manifest.json`, then work with its ordinary \
+     files using Folderbase Core context and boundary rules. Treat summaries and questions \
+     as optional hints, never as mutation or sharing authority.\n\
      <!-- folderbase:end -->\n"
         .to_owned()
 }
@@ -1768,10 +1665,9 @@ mod tests {
 
         let result = initialize(&plan).unwrap();
         assert_eq!(result.folderbase_id, plan.folderbase_id);
-        assert!(temp.path().join(FOLDERBASE_ENTRY).exists());
         assert!(temp.path().join(MANIFEST).exists());
-        assert!(temp.path().join(CODEX_ADAPTER).exists());
-        assert!(temp.path().join(CLAUDE_ADAPTER).exists());
+        assert!(!temp.path().join(CODEX_ADAPTER).exists());
+        assert!(!temp.path().join(CLAUDE_ADAPTER).exists());
     }
 
     #[test]
@@ -1810,7 +1706,10 @@ mod tests {
         fs::write(temp.path().join(FOLDERBASE_ENTRY), "# Arrived later\n").unwrap();
 
         let error = initialize(&plan).unwrap_err();
-        assert!(matches!(error, FolderbaseError::WouldOverwrite(_)));
+        assert!(matches!(
+            error,
+            FolderbaseError::InitializationDestinationChanged(_)
+        ));
         assert_eq!(
             fs::read_to_string(temp.path().join(FOLDERBASE_ENTRY)).unwrap(),
             "# Arrived later\n"
@@ -1845,7 +1744,10 @@ mod tests {
         symlink("missing-user-target.md", &entry).unwrap();
 
         let error = initialize(&plan).unwrap_err();
-        assert!(matches!(error, FolderbaseError::WouldOverwrite(_)));
+        assert!(matches!(
+            error,
+            FolderbaseError::InitializationDestinationChanged(_)
+        ));
         assert!(
             fs::symlink_metadata(&entry)
                 .unwrap()
