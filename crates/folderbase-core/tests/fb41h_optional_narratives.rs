@@ -1,0 +1,346 @@
+use std::{fs, io::Cursor, path::Path};
+
+use folderbase_core::{
+    ChunkTransferProfile, FolderbaseKind, FolderbaseVersionStore, InitializationOptions,
+    LocalVersionStore, ValidationLevel, attest_folderbase_root, initialize, plan_initialization,
+    validate,
+};
+use serde_json::Value;
+use tempfile::{TempDir, tempdir};
+
+const LEGACY_FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
+const LEGACY_MANIFEST: &[u8] = br#"{
+  "protocol_version": "0.4.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
+  }
+}
+"#;
+
+fn ordinary_options() -> InitializationOptions {
+    InitializationOptions {
+        name: Some("Ordinary files".to_owned()),
+        kind: FolderbaseKind::Project,
+        create_agent_adapters: false,
+    }
+}
+
+fn initialize_ordinary(root: &Path) {
+    let plan = plan_initialization(root, ordinary_options()).expect("ordinary-folder plan");
+    assert!(
+        plan.writes()
+            .iter()
+            .all(|write| write.path().starts_with(".folderbase")),
+        "ordinary initialization writes only engine-managed .folderbase state"
+    );
+    initialize(&plan).expect("ordinary-folder initialization");
+}
+
+fn legacy_folderbase() -> TempDir {
+    let root = tempdir().expect("legacy Folderbase");
+    fs::create_dir(root.path().join(".folderbase")).expect("legacy state directory");
+    fs::write(
+        root.path().join(".folderbase/manifest.json"),
+        LEGACY_MANIFEST,
+    )
+    .expect("legacy manifest");
+    fs::write(root.path().join(".folderbaseignore"), b"node_modules/\n").expect("legacy ignore");
+    fs::write(root.path().join("FOLDERBASE.md"), b"# Legacy Folderbase\n").expect("legacy entry");
+    root
+}
+
+#[test]
+fn ordinary_mixed_folder_runs_the_full_local_lifecycle_without_root_narrative_files() {
+    let root = tempdir().expect("ordinary folder");
+    let original_files = [
+        ("brief.docx", b"PK\x03\x04opaque-docx".as_slice()),
+        ("reference.pdf", b"%PDF opaque".as_slice()),
+        ("movie.mov", b"opaque-video".as_slice()),
+        ("data.csv", b"a,b\n1,2\n".as_slice()),
+        ("database.sqlite", b"SQLite format 3\0opaque".as_slice()),
+        (".git/objects/pack/test.pack", b"opaque-git-pack".as_slice()),
+    ];
+    for (path, bytes) in original_files {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().expect("file parent")).expect("parent");
+        fs::write(path, bytes).expect("ordinary bytes");
+    }
+
+    initialize_ordinary(root.path());
+
+    assert!(!root.path().join("FOLDERBASE.md").exists());
+    assert!(!root.path().join(".folderbaseignore").exists());
+    assert!(
+        validate(root.path(), ValidationLevel::Shallow)
+            .expect("validation report")
+            .valid
+    );
+    let attestation = attest_folderbase_root(root.path()).expect("attested ordinary root");
+    assert_eq!(attestation.protocol_version, "0.5.0");
+
+    let store = FolderbaseVersionStore::open(root.path()).expect("open ordinary Folderbase");
+    let plan = store.plan_capture().expect("metadata-first capture plan");
+    let planned = plan
+        .entries()
+        .iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    for expected in [
+        "brief.docx",
+        "reference.pdf",
+        "movie.mov",
+        "data.csv",
+        "database.sqlite",
+        ".git/objects/pack/test.pack",
+    ] {
+        assert!(planned.contains(&expected), "{expected} remains ordinary");
+    }
+
+    let genesis = store.seal_capture(plan).expect("seal genesis");
+    let encoded_version = fs::read(
+        root.path()
+            .join(".folderbase/versions/folderbase")
+            .join(format!("{}.json", genesis.version_id())),
+    )
+    .expect("durable Folderbase Version");
+    let wire: Value = serde_json::from_slice(&encoded_version).expect("version JSON");
+    assert_eq!(wire["format"], "folderbase-version-v1");
+    assert_eq!(wire["protocol_version"], "0.5");
+    assert!(
+        wire["bindings"]
+            .as_array()
+            .expect("bindings")
+            .iter()
+            .all(|binding| binding["path"] != "FOLDERBASE.md"
+                && binding["path"] != ".folderbaseignore")
+    );
+
+    let version = store
+        .read_version(genesis.version_id())
+        .expect("read v0.5 version");
+    let movie = version.lookup_binding("movie.mov").expect("movie binding");
+    let movie_object_version = movie.object_version_id().expect("movie Object Version");
+    let local = LocalVersionStore::open(root.path()).expect("local version store");
+    let mut source = local
+        .open_chunk_transfer(
+            &folderbase_core::VersionId::parse(movie_object_version).expect("version id"),
+            ChunkTransferProfile::StandardV1,
+        )
+        .expect("open immutable transfer");
+    let expected_manifest = source.manifest_digest().to_owned();
+    let mut transferred = Vec::new();
+    for index in 0..source.manifest().chunks.len() as u32 {
+        source
+            .copy_chunk(index, &mut transferred)
+            .expect("verified chunk");
+    }
+    assert_eq!(transferred, b"opaque-video");
+    local
+        .reopen_chunk_transfer(
+            &folderbase_core::VersionId::parse(movie_object_version).expect("version id"),
+            ChunkTransferProfile::StandardV1,
+            &expected_manifest,
+        )
+        .expect("reopen exact transfer");
+
+    let exact_docx = fs::read(root.path().join("brief.docx")).expect("docx before deletion");
+    fs::remove_file(root.path().join("brief.docx")).expect("delete docx");
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("seal tombstone");
+    assert!(
+        store
+            .read_version(deletion.version_id())
+            .expect("tombstone version")
+            .tombstones()
+            .iter()
+            .any(|tombstone| tombstone.path() == "brief.docx")
+    );
+    store
+        .restore_tombstone("brief.docx")
+        .expect("restore exact ordinary file");
+    assert_eq!(
+        fs::read(root.path().join("brief.docx")).expect("restored docx"),
+        exact_docx
+    );
+    for (path, bytes) in original_files
+        .into_iter()
+        .filter(|(path, _)| *path != "brief.docx")
+    {
+        assert_eq!(
+            fs::read(root.path().join(path)).expect("untouched ordinary bytes"),
+            bytes,
+            "{path} remains byte-exact"
+        );
+    }
+}
+
+#[test]
+fn optional_root_files_are_preserved_and_captured_as_ordinary_user_content() {
+    let root = tempdir().expect("ordinary folder");
+    let entry = b"\xff\x00not markdown";
+    let ignore = b"*.tmp\n";
+    fs::write(root.path().join("FOLDERBASE.md"), entry).expect("user entry");
+    fs::write(root.path().join(".folderbaseignore"), ignore).expect("user ignore");
+
+    let plan = plan_initialization(root.path(), ordinary_options()).expect("plan");
+    assert!(
+        plan.writes().iter().all(|write| {
+            write.path() != Path::new("FOLDERBASE.md")
+                && write.path() != Path::new(".folderbaseignore")
+        }),
+        "initialization never owns the optional root files"
+    );
+    initialize(&plan).expect("initialize");
+    assert_eq!(fs::read(root.path().join("FOLDERBASE.md")).unwrap(), entry);
+    assert_eq!(
+        fs::read(root.path().join(".folderbaseignore")).unwrap(),
+        ignore
+    );
+    assert!(
+        validate(root.path(), ValidationLevel::Shallow)
+            .expect("validate")
+            .valid,
+        "invalid Markdown is still valid ordinary content"
+    );
+
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    let sealed = store
+        .seal_capture(store.plan_capture().expect("plan capture"))
+        .expect("seal");
+    let version = store.read_version(sealed.version_id()).expect("version");
+    for path in ["FOLDERBASE.md", ".folderbaseignore"] {
+        assert!(
+            version.lookup_binding(path).is_some(),
+            "{path} is a normal captured Path Binding"
+        );
+    }
+}
+
+#[test]
+fn only_an_exact_nested_manifest_establishes_a_boundary_and_inert_context_never_overwrites() {
+    let root = tempdir().expect("parent folder");
+    fs::create_dir_all(root.path().join("notes/.folderbase/questions")).expect("inert state shape");
+    fs::write(
+        root.path().join("notes/.folderbase/summary.md"),
+        b"user-owned summary",
+    )
+    .expect("summary");
+    fs::write(
+        root.path().join("notes/.folderbase/questions/open.md"),
+        b"user-owned question",
+    )
+    .expect("question");
+    fs::write(root.path().join("notes/FOLDERBASE.md"), b"ordinary note").expect("ordinary entry");
+
+    fs::create_dir_all(root.path().join("client/.folderbase/questions"))
+        .expect("nested state shape");
+    fs::write(
+        root.path().join("client/.folderbase/manifest.json"),
+        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"}}"#,
+    )
+    .expect("nested authority");
+    fs::write(
+        root.path().join("client/.folderbase/summary.md"),
+        b"nested private summary",
+    )
+    .expect("nested summary");
+    fs::write(
+        root.path().join("client/private.pdf"),
+        b"nested private bytes",
+    )
+    .expect("nested content");
+
+    initialize_ordinary(root.path());
+
+    assert_eq!(
+        fs::read(root.path().join("notes/.folderbase/summary.md")).unwrap(),
+        b"user-owned summary"
+    );
+    assert_eq!(
+        fs::read(root.path().join("notes/.folderbase/questions/open.md")).unwrap(),
+        b"user-owned question"
+    );
+    let plan = FolderbaseVersionStore::open(root.path())
+        .expect("parent opens")
+        .plan_capture()
+        .expect("parent capture plan");
+    assert!(
+        !plan
+            .exclusions()
+            .iter()
+            .any(|exclusion| exclusion.path() == "notes"),
+        "summary/questions/FOLDERBASE.md alone grant no nested authority"
+    );
+    assert!(
+        plan.exclusions()
+            .iter()
+            .any(|exclusion| exclusion.path() == "client"),
+        "the exact nested manifest establishes the independent boundary"
+    );
+    assert!(
+        plan.entries()
+            .iter()
+            .all(|entry| !entry.path().starts_with("client/")),
+        "parent authority never crosses the nested boundary"
+    );
+}
+
+#[test]
+fn released_v04_fixture_and_root_keep_their_exact_protocol_semantics() {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../protocol/conformance/folderbase-version/valid/minimal-restorable-v1.json");
+    let fixture_bytes = fs::read(&fixture_path).expect("released v0.4 fixture");
+    let released = folderbase_core::folderbase_version::FolderbaseVersion::decode_bounded(
+        Cursor::new(&fixture_bytes),
+    )
+    .expect("released fixture still verifies");
+    assert_eq!(
+        released.canonical_digest().expect("released digest"),
+        fs::read_to_string(fixture_path.with_extension("sha256"))
+            .expect("independent released sidecar")
+            .trim()
+    );
+    let mut missing_entry: Value = serde_json::from_slice(&fixture_bytes).expect("fixture JSON");
+    missing_entry["bindings"]
+        .as_array_mut()
+        .expect("bindings")
+        .retain(|binding| binding["path"] != "FOLDERBASE.md");
+    assert!(
+        folderbase_core::folderbase_version::FolderbaseVersion::decode_bounded(Cursor::new(
+            serde_json::to_vec(&missing_entry).expect("changed fixture")
+        ))
+        .is_err(),
+        "v0.4 is not silently reinterpreted with optional marker semantics"
+    );
+
+    let root = legacy_folderbase();
+    fs::write(root.path().join("proposal.docx"), b"released bytes").expect("legacy content");
+    let attested = attest_folderbase_root(root.path()).expect("released root still attests");
+    assert_eq!(attested.folderbase_id, LEGACY_FOLDERBASE_ID);
+    let store = FolderbaseVersionStore::open(root.path()).expect("released root opens");
+    let genesis = store
+        .seal_capture(store.plan_capture().expect("legacy genesis plan"))
+        .expect("legacy genesis");
+    let encoded = fs::read(
+        root.path()
+            .join(".folderbase/versions/folderbase")
+            .join(format!("{}.json", genesis.version_id())),
+    )
+    .expect("legacy version");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encoded).unwrap()["protocol_version"],
+        "0.4"
+    );
+    fs::remove_file(root.path().join("proposal.docx")).expect("legacy delete");
+    store
+        .seal_capture(store.plan_capture().expect("legacy deletion plan"))
+        .expect("legacy tombstone");
+    store
+        .restore_tombstone("proposal.docx")
+        .expect("legacy restore");
+    assert_eq!(
+        fs::read(root.path().join("proposal.docx")).expect("legacy restored bytes"),
+        b"released bytes"
+    );
+}
