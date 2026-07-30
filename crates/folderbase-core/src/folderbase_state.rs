@@ -449,6 +449,7 @@ impl FolderbaseState {
     /// An existing destination is accepted only when it is the exact same
     /// filesystem object as the retained stage. This permits durable retry
     /// without treating same-byte foreign content as transaction-owned.
+    #[cfg(test)]
     pub(crate) fn publish_workspace_restore(
         &self,
         stage: &Path,

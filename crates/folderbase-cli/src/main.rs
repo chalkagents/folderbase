@@ -866,6 +866,9 @@ fn error_code(error: &CliError) -> &'static str {
                 FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { .. } => {
                     "restore_authority_maintenance_required"
                 }
+                FolderbaseCaptureError::RestoreNamespaceRepairRequired(_) => {
+                    "restore_namespace_repair_required"
+                }
                 FolderbaseCaptureError::ConflictingTransaction(_) => "conflicting_transaction",
                 _ => "capture_error",
             };
@@ -891,6 +894,7 @@ fn error_code(error: &CliError) -> &'static str {
         FolderbaseError::MigrationSourceChanged(_) => "migration_source_changed",
         FolderbaseError::MigrationVerificationFailed(_) => "migration_verification_failed",
         FolderbaseError::WouldOverwrite(_) => "would_overwrite",
+        FolderbaseError::RestoreNamespaceRepairRequired(_) => "restore_namespace_repair_required",
         FolderbaseError::StructuralTemplateChangeRequiresApproval => {
             "structural_template_change_requires_approval"
         }
