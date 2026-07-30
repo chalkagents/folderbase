@@ -224,7 +224,7 @@ impl Deref for ActiveCaptureTransaction {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleasedV1JournalHead {
     version_id: String,
@@ -2093,7 +2093,7 @@ impl From<&LocalHeadRecord> for JournalHead {
 }
 
 #[derive(Serialize)]
-struct PlanDigest<'a> {
+struct PlanDigestV2<'a> {
     format: &'static str,
     folderbase_id: &'a str,
     root_instance_sha256: &'a str,
@@ -2101,13 +2101,27 @@ struct PlanDigest<'a> {
     root_manifest_bytes: u64,
     ignore_policy_sha256: &'a str,
     current_head: Option<JournalHead>,
-    entries: Vec<PlanDigestEntry<'a>>,
-    exclusions: Vec<PlanDigestExclusion<'a>>,
+    entries: Vec<PlanDigestV2Entry<'a>>,
+    exclusions: Vec<PlanDigestV2Exclusion<'a>>,
     ignored_paths: Vec<&'a str>,
 }
 
 #[derive(Serialize)]
-struct PlanDigestEntry<'a> {
+struct ReleasedV1PlanDigest<'a> {
+    format: &'static str,
+    folderbase_id: &'a str,
+    root_instance_sha256: &'a str,
+    root_manifest_sha256: &'a str,
+    root_manifest_bytes: u64,
+    ignore_policy_sha256: &'a str,
+    current_head: Option<ReleasedV1JournalHead>,
+    entries: Vec<ReleasedV1PlanDigestEntry<'a>>,
+    exclusions: Vec<ReleasedV1PlanDigestExclusion<'a>>,
+    ignored_paths: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+struct PlanDigestV2Entry<'a> {
     path: &'a str,
     kind: CaptureEntryKind,
     bytes: Option<u64>,
@@ -2119,7 +2133,24 @@ struct PlanDigestEntry<'a> {
 }
 
 #[derive(Serialize)]
-struct PlanDigestExclusion<'a> {
+struct ReleasedV1PlanDigestEntry<'a> {
+    path: &'a str,
+    kind: CaptureEntryKind,
+    bytes: Option<u64>,
+    executable: Option<bool>,
+    symlink_target: Option<&'a str>,
+    observed: &'a CaptureMetadataFingerprint,
+}
+
+#[derive(Serialize)]
+struct PlanDigestV2Exclusion<'a> {
+    path: &'a str,
+    kind: CaptureExclusionKind,
+    reason: CaptureExclusionReason,
+}
+
+#[derive(Serialize)]
+struct ReleasedV1PlanDigestExclusion<'a> {
     path: &'a str,
     kind: CaptureExclusionKind,
     reason: CaptureExclusionReason,
@@ -2130,12 +2161,17 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
         .entries()
         .iter()
         .any(|entry| !entry.link_commitment().is_legacy_default());
-    let digest = PlanDigest {
-        format: if has_restore_authority {
-            "folderbase-capture-plan-digest-v2"
-        } else {
-            "folderbase-capture-plan-digest-v1"
-        },
+    let has_version_derived_head = plan.current_local_head().is_some_and(|head| {
+        matches!(
+            head.authority(),
+            LocalHeadAuthority::VersionDerivedV1 { .. }
+        )
+    });
+    if !has_restore_authority && !has_version_derived_head {
+        return released_v1_capture_plan_sha256(plan);
+    }
+    let digest = PlanDigestV2 {
+        format: "folderbase-capture-plan-digest-v2",
         folderbase_id: plan.folderbase_id(),
         root_instance_sha256: plan.root_instance_sha256(),
         root_manifest_sha256: plan.root_manifest_sha256(),
@@ -2145,7 +2181,7 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
         entries: plan
             .entries()
             .iter()
-            .map(|entry| PlanDigestEntry {
+            .map(|entry| PlanDigestV2Entry {
                 path: entry.path(),
                 kind: entry.kind(),
                 bytes: entry.bytes(),
@@ -2159,7 +2195,7 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
         exclusions: plan
             .exclusions()
             .iter()
-            .map(|exclusion| PlanDigestExclusion {
+            .map(|exclusion| PlanDigestV2Exclusion {
                 path: exclusion.path(),
                 kind: exclusion.kind(),
                 reason: exclusion.reason(),
@@ -2174,6 +2210,75 @@ fn capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureEr
     let encoded = serde_json::to_vec(&digest).map_err(|source| {
         FolderbaseCaptureError::InvalidCaptureTransaction(format!(
             "CapturePlan digest encoding failed: {source}"
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn released_v1_capture_plan_sha256(plan: &CapturePlan) -> Result<String, FolderbaseCaptureError> {
+    if plan
+        .entries()
+        .iter()
+        .any(|entry| !entry.link_commitment().is_legacy_default())
+    {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "released v1 CapturePlan digest cannot bind restore authority links".to_owned(),
+        ));
+    }
+    let current_head = match plan.current_local_head() {
+        Some(head) => {
+            let LocalHeadAuthority::CaptureTransactionV1 { sha256 } = head.authority() else {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                    "released v1 CapturePlan digest cannot bind version-derived Head authority"
+                        .to_owned(),
+                ));
+            };
+            Some(ReleasedV1JournalHead {
+                version_id: head.version_id().to_owned(),
+                version_sha256: head.version_sha256().to_owned(),
+                transaction_sha256: sha256.to_owned(),
+            })
+        }
+        None => None,
+    };
+    let digest = ReleasedV1PlanDigest {
+        format: "folderbase-capture-plan-digest-v1",
+        folderbase_id: plan.folderbase_id(),
+        root_instance_sha256: plan.root_instance_sha256(),
+        root_manifest_sha256: plan.root_manifest_sha256(),
+        root_manifest_bytes: plan.root_manifest_bytes(),
+        ignore_policy_sha256: plan.ignore_policy_sha256(),
+        current_head,
+        entries: plan
+            .entries()
+            .iter()
+            .map(|entry| ReleasedV1PlanDigestEntry {
+                path: entry.path(),
+                kind: entry.kind(),
+                bytes: entry.bytes(),
+                executable: entry.executable(),
+                symlink_target: entry.symlink_target(),
+                observed: entry.observed(),
+            })
+            .collect(),
+        exclusions: plan
+            .exclusions()
+            .iter()
+            .map(|exclusion| ReleasedV1PlanDigestExclusion {
+                path: exclusion.path(),
+                kind: exclusion.kind(),
+                reason: exclusion.reason(),
+            })
+            .collect(),
+        ignored_paths: plan
+            .ignored_paths()
+            .iter()
+            .map(|path| path.path())
+            .collect(),
+    };
+    let encoded = serde_json::to_vec(&digest).map_err(|source| {
+        FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "released v1 CapturePlan digest encoding failed: {source}"
         ))
     })?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
@@ -7562,9 +7667,9 @@ mod tests {
                 transaction.expected_head.is_some(),
                 "fixture must be non-genesis"
             );
-            assert_ne!(
+            assert_eq!(
                 transaction.plan_sha256, released_plan_sha256,
-                "fixture must use the genuine flat-Head v1 digest, not the current typed digest"
+                "ordinary capture Heads must retain the exact released flat-Head v1 plan digest"
             );
             let released_bytes = released_journal_bytes(&transaction, &released_plan_sha256);
             let released_sha256 = format!("{:x}", Sha256::digest(&released_bytes));
