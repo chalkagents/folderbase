@@ -138,6 +138,8 @@ enum RestoreCheckpoint {
     PublicationVerified,
     ProjectionDurable,
     CleanupRecoveryDurable,
+    BeforeStageRetirement,
+    AfterStageRetirement,
     CleanupIntentRetired,
     CleanupComplete,
 }
@@ -424,6 +426,7 @@ impl FolderbaseVersionStore {
                         &local,
                         &state,
                         &recovery.transaction,
+                        &mut checkpoint,
                     )?;
                     Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
                 }
@@ -496,7 +499,7 @@ impl FolderbaseVersionStore {
         let result =
             execute_restore_transaction(self, &local, &state, &transaction, &mut checkpoint);
         if result.is_err() {
-            retire_modified_restore(self, &local, &state, &transaction)?;
+            retire_modified_restore(self, &local, &state, &transaction, &mut checkpoint)?;
         }
         result
     }
@@ -1164,7 +1167,9 @@ fn finish_restore_cleanup(
         },
     )?;
     checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
+    checkpoint(&RestoreCheckpoint::BeforeStageRetirement);
     state.remove_durable(&restore_stage_path(transaction))?;
+    checkpoint(&RestoreCheckpoint::AfterStageRetirement);
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
@@ -1315,6 +1320,7 @@ fn retire_modified_restore(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<bool, FolderbaseCaptureError> {
     let digest = transaction
         .binding
@@ -1355,7 +1361,8 @@ fn retire_modified_restore(
             transaction: transaction.clone(),
         },
     )?;
-    finish_modified_restore_cleanup_recovery(store, local, state, transaction)?;
+    checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
+    finish_modified_restore_cleanup_recovery(store, local, state, transaction, checkpoint)?;
     Ok(true)
 }
 
@@ -1364,12 +1371,15 @@ fn finish_modified_restore_cleanup_recovery(
     local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
-    state.retire_modified_workspace_restore_stage(
+    state.retire_modified_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
         Path::new(&transaction.path),
+        || checkpoint(&RestoreCheckpoint::BeforeStageRetirement),
     )?;
+    checkpoint(&RestoreCheckpoint::AfterStageRetirement);
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     remove_restore_cleanup_recovery(state)
@@ -5197,6 +5207,110 @@ mod tests {
             root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists(),
             "global restore intent must remain until authority is proven"
         );
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum CleanupBoundarySwap {
+        Destination,
+        Stage,
+    }
+
+    #[cfg(unix)]
+    fn assert_cleanup_boundary_swap_fails_closed(modified: bool, swap: CleanupBoundarySwap) {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let owned_bytes: &[u8] = if modified {
+            b"user-edited restore at cleanup boundary"
+        } else {
+            b"first opaque bytes"
+        };
+        let competitor = b"unrelated replacement must survive";
+        let mut transaction_directory = None;
+
+        let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+            if modified && checkpoint == &RestoreCheckpoint::TargetPublished {
+                fs::write(root.path().join("active.bin"), owned_bytes)
+                    .expect("edit restored target in place");
+            }
+            if checkpoint == &RestoreCheckpoint::BeforeStageRetirement {
+                let transaction = read_active_restore_transaction(
+                    &FolderbaseState::open(root.path()).expect("state"),
+                )
+                .expect("restore journal")
+                .expect("active restore");
+                let directory = root
+                    .path()
+                    .join(restore_transaction_directory(&transaction));
+                transaction_directory = Some(directory.clone());
+                let target = match swap {
+                    CleanupBoundarySwap::Destination => root.path().join("active.bin"),
+                    CleanupBoundarySwap::Stage => directory.join("content"),
+                };
+                fs::remove_file(&target).expect("remove exact cleanup-owned name");
+                fs::write(&target, competitor).expect("install unrelated boundary replacement");
+            }
+        });
+        result.expect_err("a cleanup-boundary replacement must fail closed");
+
+        let transaction_directory = transaction_directory.expect("transaction directory");
+        assert_eq!(
+            fs::read(match swap {
+                CleanupBoundarySwap::Destination => root.path().join("active.bin"),
+                CleanupBoundarySwap::Stage => transaction_directory.join("content"),
+            })
+            .expect("unrelated replacement"),
+            competitor,
+            "cleanup must never delete or overwrite the boundary replacement"
+        );
+        assert!(
+            root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists(),
+            "uncertain cleanup must retain global restore intent"
+        );
+        assert!(
+            root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists(),
+            "uncertain cleanup must retain its durable receipt"
+        );
+        let retained_owned_bytes = fs::read_dir(&transaction_directory)
+            .expect("retained transaction directory")
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| fs::read(entry.path()).ok())
+            .any(|bytes| bytes == owned_bytes);
+        assert!(
+            retained_owned_bytes,
+            "a transaction-owned rescue name must retain the exact inode bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modified_cleanup_retains_owned_bytes_when_destination_swaps_at_unlink_boundary() {
+        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Destination);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modified_cleanup_never_unlinks_a_stage_name_replacement() {
+        assert_cleanup_boundary_swap_fails_closed(true, CleanupBoundarySwap::Stage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_cleanup_retains_owned_bytes_when_destination_swaps_at_unlink_boundary() {
+        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Destination);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_cleanup_never_unlinks_a_stage_name_replacement() {
+        assert_cleanup_boundary_swap_fails_closed(false, CleanupBoundarySwap::Stage);
     }
 
     #[test]

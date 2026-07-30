@@ -556,6 +556,15 @@ impl FolderbaseState {
         stage: &Path,
         destination: &Path,
     ) -> Result<bool> {
+        self.retire_modified_workspace_restore_stage_with_hook(stage, destination, || {})
+    }
+
+    pub(crate) fn retire_modified_workspace_restore_stage_with_hook(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        before_remove: impl FnOnce(),
+    ) -> Result<bool> {
         let stage = state_relative(stage)?;
         let destination = safe_workspace_relative(destination)?;
         self.require_mutable(&stage)?;
@@ -601,6 +610,7 @@ impl FolderbaseState {
                 message: "modified restore stage changed before retirement".to_owned(),
             });
         }
+        before_remove();
         stage_parent
             .remove_file(&stage_name)
             .map_err(|source| FolderbaseError::io(&stage_display, source))?;
