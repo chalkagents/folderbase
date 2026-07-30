@@ -108,6 +108,12 @@ blob named by the current Head Tombstone.
 - `7c24cda` replaced a completed restore with a distinct inode containing the
   same bytes and executable fidelity. The old completion singleton treated
   content equality as terminal-result authority.
+- `86e058e` coordinated a same-byte replacement of both private stage and
+  visible destination with one foreign inode. The old cleanup accepted their
+  agreement without binding either handle to the receipt identity.
+- `db8e465` edited the exact published inode at both cleanup hook boundaries.
+  The old cleanup had already consumed fidelity before those hooks and could
+  return restored success.
 
 ## GREEN behavior
 
@@ -198,9 +204,20 @@ blob named by the current Head Tombstone.
   retry returns its idempotent result only while the exact target Head,
   installed Version, published inode, sealed bytes, and executable fidelity all
   remain current. Identical bytes on a foreign inode are stale evidence.
-- `d2aaf52` proves the positive crash case: once both private names are absent,
-  exact recorded publication identity and fidelity still converge and retire
-  pending cleanup.
+- `d2aaf52` proved the previous positive crash case after both private names
+  were absent. ADR 0006 supersedes that terminal rule: a retained authority
+  link is now required.
+- `4e3554c` requires the cleanup receipt's publication identity on every
+  private and visible handle before mutation and before restored success.
+- `3ea91ec` supersedes destructive private-link retirement with one bounded
+  retained authority link. Capture validates exact per-path authority receipts
+  and admits only `1 + N` links, where `N` is the exact count of validated
+  Folderbase authorities. Same-inode edits remain capturable, an extra user
+  hard link remains excluded, an old anchor cannot authorize a replacement,
+  and the 4096-entry cap fails with typed maintenance required.
+- `dbd7336` revalidates the retained authority pathname after both cleanup hook
+  boundaries and requires the exact authority receipt and stage for terminal
+  completion evidence.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -230,16 +247,20 @@ root attachment, and nested-boundary proofs run immediately before and after
 Head CAS. Post-Head failure rolls the retained root back to its prior Head and
 never reports restore success. Projection uses the already-retained state
 capability. Cleanup records its obligation and published inode identity durably
-before removing the retained stage and per-transaction directory, rederives
-immutable cleanup authority, and uses quarantine-before-delete for every
-private name. The pending receipt survives active-journal retirement and
-resumes exact cleanup after restart. A separate bounded singleton completion
-receipt never blocks capture and survives the terminal return boundary only as
-conditional evidence: the exact target Head, installed Version, recorded inode,
-sealed bytes, and executable fidelity must all still match. If the published
-transaction-owned file is edited in place, Core preserves the edit, relinquishes
-only proven private ownership, reports no false restore success, and permits the
-ordinary next capture.
+before retiring mutable intent, rederives immutable cleanup authority, and
+retains the transaction-unique stage without rename or unlink. Capture treats
+that hard link as Folderbase-owned only when its bounded receipt, exact
+workspace path, current stable identity, and private stage all revalidate and
+no additional link exists. A separate bounded singleton completion receipt
+never blocks capture and survives the terminal return boundary only as
+conditional evidence: the exact target Head, installed Version, authority
+receipt, retained stage, recorded inode, sealed bytes, and executable fidelity
+must all still match. If the published transaction-owned file is edited in
+place, Core preserves the edit, reports no false restore success, and permits
+the next capture through that narrow authority exception. At 4096 retained
+authorities, new Tombstone restore fails closed until a future explicit
+maintenance protocol is available; this slice performs no automatic garbage
+collection.
 
 ## Gates
 

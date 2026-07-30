@@ -925,32 +925,38 @@ Post-Head projection remains confined to the retained state capability, and
 projection failure restores the exact prior Head. An in-place edit of the
 transaction-owned published target preserves the user's bytes. Cleanup
 publishes a durable closed v2 singleton receipt with `committed`, `modified`, or
-`committed_modified` disposition before removing private state. Every
+`committed_modified` disposition before retiring mutable intent. Every
 disposition rederives the exact deterministic transaction from the immutable
 parent, Tombstone, and ancestor binding, and the receipt binds the durable
-device-local identity of the published inode. Core protects that inode with a
-rescue hard link, moves each ordinary private name into a
-transaction-unique capability-relative quarantine, verifies the object moved,
-and deletes only an exact match. A moved replacement remains quarantined and
-pending; visible workspace paths are never unlinked. If all private names are
-already absent after a crash, committed recovery additionally requires the
-visible path to retain the recorded identity, sealed bytes, and executable
-fidelity.
+device-local identity of the published inode. Core retains the
+transaction-unique private stage as an authority link and never automatically
+renames or unlinks it. The private pathname, visible pathname, publication
+identity, and committed byte/mode fidelity are re-proved before and after both
+cleanup hook boundaries. A missing or replaced authority link leaves recovery
+pending and can never return restored success.
 
 A late same-inode edit after target Head publication transitions to
-`committed_modified`; cleanup preserves the edit and releases exact private
-ownership without reporting restored success. Modified cleanup does not require
+`committed_modified`; cleanup preserves the edit and retains exact private
+authority without reporting restored success. Modified cleanup does not require
 owned user bytes to remain different from sealed bytes. The pending receipt
 survives active-journal retirement, blocks capture, and drives restartable
 convergence. Successful committed cleanup atomically replaces one bounded
 device-local completion v2 receipt before retiring the pending receipt.
 Completion evidence never blocks capture. It recovers an idempotent terminal
 result only while the exact target Head and installed Version remain current
-and the workspace path retains the recorded published identity, sealed bytes,
-and executable fidelity. Missing, foreign, changed, or stale state produces no
-restored-success result. Unix staging explicitly applies its final `0700` or
-`0600` permissions after creation, independently of process umask. Directory
-and symlink Tombstone reconstruction remain outside v1 restore.
+and the authority receipt, retained stage, and workspace path still prove the
+recorded published identity, sealed bytes, and executable fidelity. Capture
+accepts the resulting hard-linked workspace file only when its link count is
+one visible link plus the exact count of validated Folderbase authorities for
+that path and identity; any ordinary extra hard link remains excluded.
+Authorities are capped at 4096 and new restore fails with typed maintenance
+required at the cap. There is no automatic authority garbage collection in
+this version. Unix identity is device plus inode while the retained link keeps
+that inode live; Windows uses volume serial plus the complete 128-bit
+`FILE_ID_INFO` identifier. Missing, foreign, changed, or stale state produces
+no restored-success result. Unix staging explicitly applies its final `0700`
+or `0600` permissions after creation, independently of process umask.
+Directory and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind
 replacement Tombstones and exact ordinary-file no-clobber restore are
