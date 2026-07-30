@@ -754,6 +754,15 @@ bounded `CapturePlan` containing filesystem metadata only. The plan binds the
 physical root, effective ordered ignore policy, and optional device-local head.
 It is inert and is not a Folderbase Version.
 
+`.folderbase/` is trusted engine-owned local state, analogous to `.git/`.
+Local Core guarantees bounded and closed decoding, torn-state recovery,
+ordinary race and substitution refusal, and no-clobber workspace mutation. Its
+digests and stable filesystem identities are integrity and linearization
+evidence; they are not signatures. Deliberate coordinated forgery of every
+related `.folderbase/` record by a process running as the same user is outside
+the local Core threat model. Cloud grants and hosted Live Folder authority are
+separately authenticated and cannot be obtained from local metadata.
+
 Core reads protocol control bytes needed to interpret the root—the manifest,
 `.folderbaseignore`, and optional `.folderbase/local/head.json`—but does not open
 ordinary file contents while planning. PDFs, videos, CSV, SQLite, Git packs, and
@@ -876,6 +885,16 @@ Assignment and Tombstone aggregate cardinality, every planned
 path/kind/observation, reused Object ID, prior Object Version, root-manifest
 lineage, expected Head, and the complete sorted target Tombstone set are matched
 to the approved plan and verified parent before object writes.
+For each regular source with retained restore links, the plan and journal also
+commit the opened handle's expected live link count and a canonical sorted set
+of exact authority receipt paths and byte digests, retained stage paths, and
+publication identities. Missing fields in released journals normalize only to
+one live link and an empty authority set and remain absent when serialized, so
+their original Head-anchored SHA-256 is preserved. Default-only plans retain the
+v1 plan-digest domain; authority-bearing plans use v2. Core re-enumerates and
+revalidates that exact set from the retained source handle immediately before
+and after its bounded byte read. Added links and same-count authority-set swaps
+are concurrent state changes.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 
@@ -891,8 +910,10 @@ lock. Capture and restore refuse each other's active intent. The journal binds
 the expected Head, selected Tombstone, recovered live binding, target version,
 timestamp, and digest. Target and transaction IDs are deterministic
 domain-separated derivations of the verified parent authority; the timestamp
-is re-derived from that parent, so self-consistent journal rewrites are
-refused. A private copied stage retains transaction ownership
+is re-derived from that parent, so rewriting the mutable journal alone is
+refused under the trusted-local-state boundary. Deliberate coordinated forgery
+of every related trusted local record is not a cryptographic guarantee. A
+private copied stage retains transaction ownership
 while Core hard-links it into the absent same-path destination. Existing
 regular files, directories, symlinks, and dangling symlinks are never replaced;
 even identical foreign bytes are refused. Retry may accept the destination
@@ -956,6 +977,12 @@ that inode live; Windows uses volume serial plus the complete 128-bit
 `FILE_ID_INFO` identifier. Missing, foreign, changed, or stale state produces
 no restored-success result. Unix staging explicitly applies its final `0700`
 or `0600` permissions after creation, independently of process umask.
+All cleanup hooks and mutable-state operations precede one final success
+linearization proof. Immediately before returning `Restored`, Core revalidates
+the exact transaction and target Version, target Head, completion and authority
+record bytes at their fixed paths, retained stage and visible destination
+identity, content digest and length, and executable mode. No hook or filesystem
+mutation follows that proof.
 Directory and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind

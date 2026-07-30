@@ -114,6 +114,16 @@ blob named by the current Head Tombstone.
 - `db8e465` edited the exact published inode at both cleanup hook boundaries.
   The old cleanup had already consumed fidelity before those hooks and could
   return restored success.
+- `f3546d4` edited the published inode after active-intent retirement, after
+  completion-receipt durability, and at cleanup completion. Every late hook
+  still returned `Restored`.
+- `6bb201f` replaced the published inode at those same three late boundaries.
+  The old cleanup acknowledged the foreign inode because no proof followed all
+  hooks and mutations.
+- `98d249d` added an ordinary user hard link at
+  `BeforeObjectBytesRead`. Planning had validated the retained restore link,
+  but sealing had discarded that topology and returned the unchanged prior
+  capture.
 
 ## GREEN behavior
 
@@ -180,7 +190,8 @@ blob named by the current Head Tombstone.
   identity proof even when the same inode was later reverted.
 - `86c8f90` rederives the exact deterministic modified restore transaction from
   the current immutable parent, Tombstone, and ancestor binding before cleanup;
-  coordinated mutable-journal rewrites have no retirement authority.
+  within trusted local state, coordinated rewrites of those mutable records
+  alone have no retirement authority.
 - `4ae2ad9` creates and syncs a transaction-owned rescue hard link before stage
   removal, re-proves stage/rescue/destination at the unlink boundary, and
   re-proves rescue/destination afterward. Pre- or post-unlink replacement keeps
@@ -205,8 +216,8 @@ blob named by the current Head Tombstone.
   installed Version, published inode, sealed bytes, and executable fidelity all
   remain current. Identical bytes on a foreign inode are stale evidence.
 - `d2aaf52` proved the previous positive crash case after both private names
-  were absent. ADR 0006 supersedes that terminal rule: a retained authority
-  link is now required.
+  were absent. ADR 0005 now supersedes that terminal rule: a retained authority
+  link is required.
 - `4e3554c` requires the cleanup receipt's publication identity on every
   private and visible handle before mutation and before restored success.
 - `3ea91ec` supersedes destructive private-link retirement with one bounded
@@ -218,6 +229,31 @@ blob named by the current Head Tombstone.
 - `dbd7336` revalidates the retained authority pathname after both cleanup hook
   boundaries and requires the exact authority receipt and stage for terminal
   completion evidence.
+- `f82b1ee` moves every cleanup hook and mutation before one final
+  linearization proof. Immediately before any `Restored` result, Core
+  revalidates the immutable transaction and target Version, target Head, exact
+  completion and authority receipt bytes and paths, retained stage,
+  destination identity, sealed bytes and length, and executable mode.
+- `73edf47` carries the exact opened-handle link count and canonical sorted
+  authority receipt/stage set from CapturePlan into the active journal.
+  Sealing re-enumerates and revalidates that exact set immediately before and
+  after every ordinary-file byte read. Extra links and same-count authority-set
+  swaps fail without moving Head; an authority-bearing journal recovers after a
+  fresh-process crash. Released journals keep byte-for-byte encoding and their
+  exact Head-anchored SHA-256.
+- `48a8957` proves a partial retained authority receipt fails closed during
+  metadata-only planning before capture can move Local Head.
+- `95e5609` keeps planning metadata-only for unreadable and sparse ordinary
+  files: Unix derives identity and link count from no-follow directory
+  metadata, Windows uses a zero-data-access metadata handle, and seal-time
+  topology checks remain bound to the actual opened content handle.
+
+The local threat boundary is intentionally KISS: `.folderbase/` is trusted
+engine-owned state analogous to `.git/`. The regressions prove malformed or
+partial record refusal, crash recovery, ordinary race and substitution safety,
+and no-clobber behavior. They do not claim cryptographic authenticity against a
+same-user process that deliberately forges every related local record into one
+internally consistent state. Cloud authority is separately authenticated.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -233,7 +269,8 @@ A nearer candidate cannot hide a deeper reachable cycle; a legitimate
 convergent DAG is accepted.
 Committed-Head recovery performs the same parent, Tombstone, binding,
 assignment, and exact-child derivation as first execution; a coordinated
-journal, Head, and installed-target rewrite is not recovery authority.
+journal, Head, and installed-target rewrite alone is not recovery authority
+under the trusted-local-state boundary.
 The journal's copy of the prior Head transaction digest is not authority
 either. Restore first binds the verified parent Head to an independently
 derivable digest, and target-Head recovery rejects any replacement value even
@@ -271,7 +308,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-628 passed; 3 ignored
+639 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed

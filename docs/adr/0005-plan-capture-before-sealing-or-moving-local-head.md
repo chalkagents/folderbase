@@ -28,6 +28,22 @@ transaction lock after ruling out restore activity. It never reinterprets a v1
 field as version-derived authority. Local Head is device-local state, not shared
 or Cloud authority.
 
+### Local trust boundary
+
+`.folderbase/` is trusted, engine-owned local state in the same sense as
+`.git/`. Core must reject malformed, partial, or mismatched records; survive
+torn execution; close ordinary filesystem races and substitution windows; and
+never overwrite an occupied workspace path. Device-local identity and journal
+digests provide those integrity and recovery properties, not cryptographic
+same-user authenticity.
+
+A same-user process that deliberately rewrites all related `.folderbase/`
+records into an internally consistent forgery is outside the local Core threat
+model. This decision intentionally does not introduce an OS-protected signing
+key, enrollment, recovery, or rotation UX. Cloud grants and server-side Live
+Folder authority remain separately authenticated and are never derived from
+possession of local `.folderbase/` metadata.
+
 Metadata planning treats every regular file identically, including PDFs, videos,
 CSV, SQLite, unknown formats, and Git pack files. It records length and executable
 fidelity without opening ordinary file bytes; the 10 GiB sparse-file test remains
@@ -144,6 +160,17 @@ Folderbase Version envelope. Its assignment and Tombstone aggregate, every
 path, kind, observed identity, reused Object ID, prior Object Version,
 root-manifest parent, and complete sorted target Tombstone set are matched
 exactly to the approved plan and verified prior Head.
+For a regular file with retained restore authority, the plan and active journal
+also bind the opened source's exact live link count and one canonical,
+ASCII-sorted set of authority receipt paths, SHA-256 digests of the exact
+receipt bytes, retained stage paths, and publication identities. Default or
+released records with no such field normalize only to one visible link and no
+authorities, and preserve their original serialized bytes and Head-anchored
+SHA-256. Authority-bearing plans use the v2 plan-digest domain; default-only
+plans retain the released v1 digest domain. Core re-enumerates that exact set
+and reads link count from the retained source handle immediately before and
+after content streaming. An added user link, missing receipt or stage, or
+same-count authority-set swap fails closed before capture can advance Head.
 Included content streams are capped at the exact approved length plus one byte:
 a growing source is refused as a concurrent state change and staging is
 removed, instead of reading an attacker-controlled stream to EOF. The active
@@ -183,8 +210,9 @@ The restore journal binds the exact expected Local Head, selected Tombstone,
 recovered binding, new Folderbase Version ID, timestamp, and canonical digest.
 The transaction and target Version IDs are deterministic domain-separated
 derivations of that verified immutable authority, and the target timestamp is
-re-derived from the verified parent. Rewriting those fields together with a
-self-consistent target digest therefore grants no authority.
+re-derived from the verified parent. Within the trusted-local-state boundary,
+rewriting only those mutable journal fields together with a self-consistent
+target digest therefore grants no authority.
 The new full-state version copies every other live binding, Tombstone,
 exclusion, and root-manifest reference, removes only the selected Tombstone,
 and has the deletion Head as its sole parent. Core validates the complete
@@ -223,8 +251,8 @@ closed singleton receipt with a `committed`, `modified`, or
 `committed_modified` disposition. Every disposition rederives the exact
 deterministic restore transaction from the immutable parent, Tombstone, and
 ancestor binding. Cleanup v2 also records the durable device-local identity of
-the published inode. Per ADR 0006, the transaction-unique stage remains as a
-bounded private authority link. Cleanup performs no authority-link rename or
+the published inode. The transaction-unique stage remains as a bounded private
+authority link under this ADR. Cleanup performs no authority-link rename or
 unlink. It re-proves the private pathname, visible destination, publication
 identity, and committed fidelity before and after both cleanup hook boundaries.
 A missing or replaced private authority fails closed.
@@ -248,6 +276,14 @@ automatic garbage collection. A missing path, authority, foreign inode
 (including identical bytes), changed bytes, changed fidelity, Head change, or
 Version change makes terminal evidence stale and can never produce a
 restored-success result.
+Every cleanup hook and state mutation, including active-intent retirement,
+completion-receipt durability, pending-receipt removal, and the exposed
+cleanup-complete boundary, occurs before one final success linearization proof.
+Immediately before returning `Restored`, Core revalidates the immutable
+transaction and exact target Version, target Head, exact completion and
+authority receipt bytes at their fixed paths, retained stage and destination
+identity, sealed digest and length, and executable mode. Nothing mutates or
+invokes a test hook after that proof.
 
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records
