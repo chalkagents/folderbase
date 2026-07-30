@@ -21,6 +21,7 @@ mod inspection;
 mod local_versions;
 mod migration;
 mod model;
+mod physical_identity;
 mod reorganization;
 mod root_attestation;
 mod sharing;
