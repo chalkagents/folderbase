@@ -1050,6 +1050,39 @@ mod tests {
         fs::write(root.join(".folderbaseignore"), b"node_modules/\n").expect("ignore");
     }
 
+    fn write_near_maximum_legacy_root(root: &Path) {
+        let mut manifest: Value =
+            serde_json::from_slice(LEGACY_MANIFEST).expect("legacy manifest value");
+        manifest
+            .as_object_mut()
+            .expect("legacy manifest object")
+            .insert("x-padding".to_owned(), Value::String(String::new()));
+        let encode = |manifest: &Value| {
+            serde_json::to_string_pretty(manifest)
+                .map(|encoded| format!("{encoded}\n").into_bytes())
+                .expect("encoded legacy manifest")
+        };
+        let baseline = encode(&manifest);
+        let target_bytes = MAX_FOLDERBASE_MANIFEST_BYTES as usize - 64 * 1024;
+        let padding_bytes = target_bytes
+            .checked_sub(baseline.len())
+            .expect("manifest budget");
+        manifest
+            .as_object_mut()
+            .expect("legacy manifest object")
+            .insert(
+                "x-padding".to_owned(),
+                Value::String("x".repeat(padding_bytes)),
+            );
+        let encoded = encode(&manifest);
+        assert_eq!(encoded.len(), target_bytes);
+
+        fs::create_dir_all(root.join(".folderbase")).expect("state");
+        fs::write(root.join(".folderbase/manifest.json"), encoded).expect("large manifest");
+        fs::write(root.join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+        fs::write(root.join(".folderbaseignore"), b"node_modules/\n").expect("ignore");
+    }
+
     fn substitute_root_with_recovery_surface(root: &Path, ignore: &[u8]) {
         let manifest = fs::read(root.join(".folderbase/manifest.json")).expect("live manifest");
         let intent =
@@ -1319,6 +1352,83 @@ mod tests {
             root.join(".folderbase").join(UPGRADE_INTENT_PATH).exists(),
             "source recovery must attest the root before retiring stale intent state"
         );
+    }
+
+    #[test]
+    fn post_activation_ack_never_accepts_a_replacement_physical_root() {
+        let parent = tempdir().expect("parent");
+        let root = parent.path().join("active");
+        let detached = parent.path().join("detached");
+        write_legacy_root(&root);
+        let plan = plan_protocol_upgrade(&root).expect("upgrade plan");
+        let expected = plan.plan_digest().clone();
+        let replacement_manifest = plan.upgraded_manifest.clone();
+        let visible_root = root.clone();
+        let detached_root = detached.clone();
+
+        let result = apply_protocol_upgrade_with_hooks(
+            &plan,
+            &expected,
+            || {},
+            || {
+                fs::rename(&visible_root, &detached_root).expect("detach activated root");
+                fs::create_dir_all(visible_root.join(".folderbase")).expect("replacement state");
+                fs::write(
+                    visible_root.join(".folderbase/manifest.json"),
+                    replacement_manifest,
+                )
+                .expect("replacement manifest");
+                Ok(())
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "activation acknowledgement must bind the visible physical root"
+        );
+        assert!(
+            detached
+                .join(".folderbase")
+                .join(UPGRADE_INTENT_PATH)
+                .exists(),
+            "detached recovery evidence must remain after root substitution"
+        );
+    }
+
+    #[test]
+    fn near_maximum_manifests_leave_a_restart_readable_durable_intent() {
+        let root = tempdir().expect("legacy root");
+        write_near_maximum_legacy_root(root.path());
+        let plan = plan_protocol_upgrade(root.path()).expect("large upgrade plan");
+        assert!(plan.attested_manifest.len() as u64 <= MAX_FOLDERBASE_MANIFEST_BYTES);
+        assert!(plan.upgraded_manifest.len() as u64 <= MAX_FOLDERBASE_MANIFEST_BYTES);
+        let expected = plan.plan_digest().clone();
+
+        apply_protocol_upgrade_with_hooks(
+            &plan,
+            &expected,
+            || {},
+            || {
+                Err(FolderbaseError::ProtocolUpgradeBlocked(
+                    "simulated process interruption",
+                ))
+            },
+        )
+        .expect_err("simulated interruption");
+        let intent = root.path().join(".folderbase").join(UPGRADE_INTENT_PATH);
+        if !intent.exists() {
+            assert_eq!(
+                fs::read(root.path().join(MANIFEST_PATH)).expect("source manifest"),
+                plan.attested_manifest,
+                "a pre-publication bound refusal must leave the source untouched"
+            );
+            return;
+        }
+
+        let retry = plan_protocol_upgrade(root.path())
+            .expect("every published durable intent must be restart-readable");
+        apply_protocol_upgrade(&retry, retry.plan_digest()).expect("restart recovery");
+        assert!(!intent.exists(), "restart retires the durable intent");
     }
 
     #[test]
