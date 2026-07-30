@@ -8581,6 +8581,54 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn planning_restored_unreadable_sparse_file_is_metadata_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const SPARSE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("restore with retained authority");
+
+        let workspace = root.path().join("active.bin");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&workspace)
+            .expect("open restored file before removing read access")
+            .set_len(SPARSE_BYTES)
+            .expect("expand restored inode sparsely");
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o000))
+            .expect("remove all data access from restored inode");
+
+        let plan = store
+            .plan_capture()
+            .expect("capture planning must inspect metadata without opening content");
+        let entry = plan
+            .entries()
+            .iter()
+            .find(|entry| entry.path() == "active.bin")
+            .expect("planned restored file");
+        assert_eq!(entry.bytes(), Some(SPARSE_BYTES));
+        assert!(
+            !entry.link_commitment().is_legacy_default(),
+            "metadata-only planning must still bind the retained restore authority"
+        );
+
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o600))
+            .expect("restore cleanup permissions");
+    }
+
     #[test]
     fn authority_bearing_capture_journal_recovers_with_exact_link_commitment() {
         let root = folderbase();
