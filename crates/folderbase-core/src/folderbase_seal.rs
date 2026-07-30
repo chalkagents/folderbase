@@ -419,7 +419,12 @@ impl FolderbaseVersionStore {
                     &mut checkpoint,
                 ),
                 RestoreCleanupDisposition::Modified => {
-                    finish_modified_restore_cleanup_recovery(self, &state, &recovery.transaction)?;
+                    finish_modified_restore_cleanup_recovery(
+                        self,
+                        &local,
+                        &state,
+                        &recovery.transaction,
+                    )?;
                     Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
                 }
             };
@@ -491,7 +496,7 @@ impl FolderbaseVersionStore {
         let result =
             execute_restore_transaction(self, &local, &state, &transaction, &mut checkpoint);
         if result.is_err() {
-            retire_modified_restore(self, &state, &transaction)?;
+            retire_modified_restore(self, &local, &state, &transaction)?;
         }
         result
     }
@@ -1307,6 +1312,7 @@ fn verify_restore_publication(
 
 fn retire_modified_restore(
     store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
 ) -> Result<bool, FolderbaseCaptureError> {
@@ -1349,12 +1355,29 @@ fn retire_modified_restore(
             transaction: transaction.clone(),
         },
     )?;
-    finish_modified_restore_cleanup_recovery(store, state, transaction)?;
+    finish_modified_restore_cleanup_recovery(store, local, state, transaction)?;
     Ok(true)
 }
 
 fn finish_modified_restore_cleanup_recovery(
     store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
+    state.retire_modified_workspace_restore_stage(
+        &restore_stage_path(transaction),
+        Path::new(&transaction.path),
+    )?;
+    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    remove_active_restore_transaction(state)?;
+    remove_restore_cleanup_recovery(state)
+}
+
+fn rederive_authoritative_modified_restore_transaction(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
@@ -1363,13 +1386,36 @@ fn finish_modified_restore_cleanup_recovery(
     if JournalHead::from(&current_head) != transaction.expected_head {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     }
-    state.retire_modified_workspace_restore_stage(
-        &restore_stage_path(transaction),
-        Path::new(&transaction.path),
+    let current = read_and_verify_folderbase_version(
+        store,
+        local,
+        state,
+        &transaction.expected_head.version_id,
     )?;
-    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
-    remove_active_restore_transaction(state)?;
-    remove_restore_cleanup_recovery(state)
+    if current.canonical_digest()? != transaction.expected_head.version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "modified cleanup parent digest changed".to_owned(),
+        ));
+    }
+    let tombstone = current
+        .tombstones()
+        .iter()
+        .find(|candidate| candidate.path() == transaction.path)
+        .cloned()
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidRestoreTransaction(
+                "modified cleanup path is not a current Tombstone".to_owned(),
+            )
+        })?;
+    let binding = find_restore_binding(store, local, state, &current, &tombstone)?;
+    let authoritative =
+        build_restore_transaction(store, &current_head, &current, tombstone, binding)?;
+    if authoritative != *transaction {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "modified cleanup transaction does not match immutable restore authority".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn rollback_restore_head(
