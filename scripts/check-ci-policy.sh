@@ -27,15 +27,18 @@ if ! awk '
   exit 1
 fi
 
-while IFS= read -r action_line
+for action_workflow in .github/workflows/*.yml
 do
-  action_reference=${action_line#*@}
-  action_reference=${action_reference%% *}
-  if [[ ! "$action_reference" =~ ^[0-9a-f]{40}$ ]]; then
-    printf 'CI action is not pinned to an immutable commit: %s\n' \
-      "$action_line" >&2
-    exit 1
-  fi
-done < <(grep -E '^[[:space:]]*uses:' "$workflow")
+  while IFS= read -r action_line
+  do
+    action_reference=${action_line#*@}
+    action_reference=${action_reference%% *}
+    if [[ ! "$action_reference" =~ ^[0-9a-f]{40}$ ]]; then
+      printf 'CI action is not pinned to an immutable commit in %s: %s\n' \
+        "$action_workflow" "$action_line" >&2
+      exit 1
+    fi
+  done < <(grep -E '^[[:space:]]*uses:' "$action_workflow")
+done
 
 echo "CI trigger policy is valid."

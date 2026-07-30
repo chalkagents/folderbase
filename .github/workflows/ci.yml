@@ -12,6 +12,32 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  npm-cli:
+    name: npm CLI distribution gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Test the npm launcher
+        run: npm test --prefix packages/npm-cli
+
+      - name: Test the packed npm command
+        run: node scripts/test-npm-cli-package.mjs
+
+      - name: Verify packaged legal notices
+        run: |
+          cmp LICENSE packages/npm-cli/LICENSE
+          cmp NOTICE packages/npm-cli/NOTICE
+
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest
