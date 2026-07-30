@@ -3078,6 +3078,19 @@ mod tests {
         root
     }
 
+    fn copy_directory(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).expect("create copied directory");
+        for entry in fs::read_dir(source).expect("read copied directory") {
+            let entry = entry.expect("directory entry");
+            let destination = destination.join(entry.file_name());
+            if entry.file_type().expect("entry type").is_dir() {
+                copy_directory(&entry.path(), &destination);
+            } else {
+                fs::copy(entry.path(), destination).expect("copy file");
+            }
+        }
+    }
+
     fn active_transaction(root: &Path) -> Option<CaptureTransaction> {
         read_active_transaction(&FolderbaseState::open(root).expect("state"))
             .expect("active intent")
@@ -3424,6 +3437,57 @@ mod tests {
             local_head(root.path()).expect("deletion Head").version_id,
             deletion.version_id()
         );
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::JournalDurable {
+                    panic!("leave restore journal");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut transaction = read_active_restore_transaction(&state)
+            .expect("journal")
+            .expect("active");
+        transaction.target_version_id = format!("fbversion_{}", Uuid::now_v7());
+        transaction.created_at = "2035-01-02T03:04:05Z".to_owned();
+        let parent = store.read_version(deletion.version_id()).expect("parent");
+        transaction.target_version_sha256 = restored_version(
+            &store,
+            &parent,
+            &transaction.target_version_id,
+            &transaction.created_at,
+            &transaction.tombstone,
+            &transaction.binding,
+        )
+        .expect("rewritten target")
+        .canonical_digest()
+        .expect("rewritten digest");
+        state
+            .replace(
+                Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+                &encode_restore_transaction(&transaction).expect("tampered journal"),
+            )
+            .expect("replace journal");
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreTransaction(_))
+        ));
+        assert!(!root.path().join("active.bin").exists());
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
     }
 
     #[test]
@@ -3616,6 +3680,204 @@ mod tests {
                 if message.contains("cycle")
         ));
         assert!(!root.path().join("active.bin").exists());
+    }
+
+    #[test]
+    fn nearest_candidate_does_not_hide_a_deeper_ancestor_cycle() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let genesis = store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let genesis_version = store.read_version(genesis.version_id()).expect("genesis");
+        let original = genesis_version
+            .lookup_binding("active.bin")
+            .expect("active")
+            .clone();
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let surviving = genesis_version
+            .bindings()
+            .iter()
+            .filter(|binding| binding.path() != "active.bin")
+            .cloned()
+            .collect::<Vec<_>>();
+        let tombstones = vec![Tombstone::from_verified_producer(
+            original.path(),
+            original.object_id(),
+            DeletedKind::RegularFile,
+            original.object_version_id().map(str::to_owned),
+        )];
+        let candidate_id = format!("fbversion_{}", Uuid::now_v7());
+        let deeper_id = format!("fbversion_{}", Uuid::now_v7());
+        let candidate = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                &candidate_id,
+                vec![deeper_id.clone()],
+                genesis_version.created_at(),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    genesis_version.bindings().to_vec(),
+                    Vec::new(),
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("candidate");
+        let deeper = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                &deeper_id,
+                vec![candidate_id.clone()],
+                genesis_version.created_at(),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    surviving.clone(),
+                    tombstones.clone(),
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("deeper cycle");
+        install_test_version(root.path(), &candidate);
+        install_test_version(root.path(), &deeper);
+        let current = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                genesis_version.folderbase_id(),
+                format!("fbversion_{}", Uuid::now_v7()),
+                vec![candidate_id],
+                genesis_version.created_at(),
+                genesis_version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    surviving,
+                    tombstones,
+                    genesis_version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("current");
+        install_test_version(root.path(), &current);
+        point_test_head(root.path(), &current);
+
+        assert!(matches!(
+            FolderbaseVersionStore::open(root.path())
+                .expect("reopen")
+                .restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreAncestry(message))
+                if message.contains("cycle")
+        ));
+        assert!(!root.path().join("active.bin").exists());
+    }
+
+    #[test]
+    fn restore_revalidates_owned_target_and_boundary_before_and_after_head() {
+        for mutation in ["same-byte-replacement", "in-place", "late-boundary", "post-head"] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            fs::remove_file(root.path().join("active.bin")).expect("delete");
+            let deletion = store
+                .seal_capture(store.plan_capture().expect("deletion"))
+                .expect("deletion");
+            let result = store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::TargetPublished {
+                    match mutation {
+                        "same-byte-replacement" => {
+                            fs::remove_file(root.path().join("active.bin")).expect("unlink target");
+                            fs::write(root.path().join("active.bin"), b"first opaque bytes")
+                                .expect("replace with same bytes");
+                        }
+                        "in-place" => {
+                            fs::write(root.path().join("active.bin"), b"mutated")
+                                .expect("mutate target inode");
+                        }
+                        "late-boundary" => {
+                            fs::create_dir_all(root.path().join(".folderbase-probe")).ok();
+                        }
+                        _ => {}
+                    }
+                }
+                if mutation == "post-head" && checkpoint == &RestoreCheckpoint::HeadReplaced {
+                    fs::remove_file(root.path().join("active.bin")).expect("unlink committed target");
+                    fs::write(root.path().join("active.bin"), b"first opaque bytes")
+                        .expect("post-Head same-byte replacement");
+                }
+            });
+            if mutation == "late-boundary" {
+                // Root-level content has no ancestor at which to introduce a
+                // nested boundary; this case is covered by the nested-path test.
+                assert!(result.is_ok());
+                continue;
+            }
+            assert!(result.is_err(), "{mutation} must fail closed");
+            assert_eq!(
+                local_head(root.path()).expect("deletion Head").version_id,
+                deletion.version_id(),
+                "{mutation} must not leave the restore Head committed"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_rechecks_a_nested_boundary_created_after_publication() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("client")).expect("client");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("client/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("client/active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let result = store.restore_tombstone_with_hook("client/active.bin", |checkpoint| {
+            if checkpoint == &RestoreCheckpoint::TargetPublished {
+                fs::create_dir(root.path().join("client/.FOLDERBASE"))
+                    .expect("late nested state");
+                fs::write(
+                    root.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
+                    MANIFEST,
+                )
+                .expect("late nested manifest");
+                fs::write(root.path().join("client/FOLDERBASE.md"), "# Child\n")
+                    .expect("late nested entry");
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            local_head(root.path()).expect("deletion Head").version_id,
+            deletion.version_id()
+        );
+    }
+
+    #[test]
+    fn stale_store_refuses_a_replacement_physical_root_with_copied_state() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let detached = root.path().with_extension("detached");
+        fs::rename(root.path(), &detached).expect("detach original root");
+        copy_directory(&detached, root.path());
+
+        assert!(store.restore_tombstone("active.bin").is_err());
+        assert!(!root.path().join("active.bin").exists());
+        assert_eq!(
+            local_head(root.path()).expect("copied deletion Head").version_id,
+            deletion.version_id()
+        );
     }
 
     #[cfg(unix)]
