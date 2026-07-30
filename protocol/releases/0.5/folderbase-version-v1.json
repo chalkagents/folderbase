@@ -164,7 +164,7 @@
     },
     {
       "path": "crates/folderbase-core/src/local_versions.rs",
-      "sha256": "246c30b1e562313309f1f29f3a05e6edcec2ae9cb06379206651adca13a52986"
+      "sha256": "5713640cce67b6950cb9901518fb74d5a28f30f0655589c53d7f6c7ee414c154"
     },
     {
       "path": "crates/folderbase-core/src/migration.rs",
@@ -180,7 +180,7 @@
     },
     {
       "path": "crates/folderbase-core/src/protocol_upgrade.rs",
-      "sha256": "56d8d325d1ab36956cb3de7addfc8b371a1875a8b6798bf523b324354a53f734"
+      "sha256": "b22be7eec96bfdcf6cf8c3a663d1d03541c9d8b147b9a629300bffbc74be571d"
     },
     {
       "path": "crates/folderbase-core/src/reorganization.rs",
@@ -228,7 +228,7 @@
     },
     {
       "path": "crates/folderbase-core/src/workspace.rs",
-      "sha256": "14b7071d33ab897ae9d6e3db4b0ae5cf4f0ea6585a6244143091797e3be3ebdb"
+      "sha256": "7e77aebb0b63cc76544ff2e04b1718e1f302ba1c0dcf528e98adae4570d0805f"
     },
     {
       "path": "crates/folderbase-core/tests/change_set_conformance.rs",
@@ -320,7 +320,7 @@
     },
     {
       "path": "crates/folderbase-core/tests/workspace.rs",
-      "sha256": "f2be8b2578d4a87b5e33a0e9eabd5b5a156cff0b32e1d6e21e03341fefd29318"
+      "sha256": "548e7a28c766d4d28471fb5148d4b8731208bf1a271947eb08bd3fae301f7dc7"
     },
     {
       "path": "docs/adr/0003-attest-exact-folderbase-roots.md",
