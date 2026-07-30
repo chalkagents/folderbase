@@ -1070,11 +1070,17 @@ that inode live; Windows uses volume serial plus the complete 128-bit
 no restored-success result. Unix staging explicitly applies its final `0700`
 or `0600` permissions after creation, independently of process umask.
 All cleanup hooks and mutable-state operations precede one final success
-linearization proof. Immediately before returning `Restored`, Core revalidates
-the exact transaction and target Version, target Head, completion and authority
-record bytes at their fixed paths, retained stage and visible destination
-identity, content digest and length, and executable mode. No hook or filesystem
-mutation follows that proof.
+linearization proof. A transaction-locked released-root Local Head rebind also
+precedes that proof. Final and terminal verification admit exactly one complete
+recorded-root target Head with independently derived recorded-root authority or
+one complete current-root rebound Head with independently derived current-root
+authority. They compare the full Folderbase ID, root digest, Version ID,
+Version digest, and authority rather than a root-free Head summary. The
+transaction, completion, and retained authority records keep their exact
+recorded-root bytes. Immediately before returning `Restored`, Core revalidates
+those bytes, the exact target Version and permitted Head, retained stage and
+visible destination identity, content digest and length, and executable mode.
+No hook or filesystem mutation follows that proof.
 Directory and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind

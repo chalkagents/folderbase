@@ -141,6 +141,14 @@ blob named by the current Head Tombstone.
   attempted another hard link instead of refusing the unresolved
   transaction-owned orphan, allowing recovery topology to grow rather than
   converge.
+- `a266099` converts two independent exact-head review findings into three
+  deterministic restore regressions. An ordinary edit and a same-byte inode
+  replacement at the released-root Head-rebind boundary both produced a false
+  `Restored` result. A process termination immediately after rebind CAS made
+  the next identical restore return target-occupied even though the immutable
+  completion and authority remained valid. The same retry test pins the exact
+  embedded legacy transaction and byte-identical completion and authority
+  records.
 
 ## GREEN behavior
 
@@ -302,6 +310,14 @@ blob named by the current Head Tombstone.
   Cleanup-time detach likewise preserves the forward Head plus durable recovery
   evidence and completes only after explicit repair. On Windows, the retained
   parent handle denies the equivalent directory rename.
+- `5f894bf` performs a complete preliminary restore evidence proof, rebinds the
+  released-root Local Head while holding the transaction lock, and then repeats
+  the comprehensive proof as the last success-relevant operation. Final and
+  terminal verification accept only the full recorded-root Head with
+  independently derived recorded authority or the full current-root rebound
+  Head with independently derived current authority. Both forms compare root,
+  Folderbase ID, Version, digest, and authority exactly while leaving the
+  immutable transaction, completion, and retained authority bytes unchanged.
 
 The local threat boundary is intentionally KISS: `.folderbase/` is trusted
 engine-owned state analogous to `.git/`. The regressions prove malformed or
@@ -390,6 +406,12 @@ collection.
   authority keeps the exact journal SHA; version-derived authority is
   recomputed. Pre-CAS and post-CAS process faults prove the only outcomes are an
   exact old-valid or new-valid Head.
+- Restore success performs preliminary validation, the transaction-locked
+  rebind, and then one comprehensive final proof. A crash immediately after the
+  CAS is idempotently acknowledged on every identical retry from the exact
+  current-root Head plus unchanged recorded-root receipts. Ordinary edits and
+  same-byte inode substitution around the rebind fail the final proof and
+  cannot return `Restored`.
 - Released-root capture recovery reproduces the plan digest with the journal's
   recorded root before and after Head publication. Released-root restore
   recovery converges across all 12 post-journal durability boundaries while
@@ -412,7 +434,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-654 passed; 3 ignored
+657 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed

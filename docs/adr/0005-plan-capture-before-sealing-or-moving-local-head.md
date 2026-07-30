@@ -358,11 +358,18 @@ restored-success result.
 Every cleanup hook and state mutation, including active-intent retirement,
 completion-receipt durability, pending-receipt removal, and the exposed
 cleanup-complete boundary, occurs before one final success linearization proof.
-Immediately before returning `Restored`, Core revalidates the immutable
-transaction and exact target Version, target Head, exact completion and
-authority receipt bytes at their fixed paths, retained stage and destination
-identity, sealed digest and length, and executable mode. Nothing mutates or
-invokes a test hook after that proof.
+For a released Windows-root transaction, the transaction-locked Local Head
+V1-to-V2 root rebind also occurs before that proof. Final and terminal
+verification accept exactly either the full recorded-root Head with its
+independently derived recorded-root authority or the full current-root rebound
+Head with its independently derived current-root authority; Folderbase ID,
+root, Version ID, Version digest, and authority must all match one complete
+form. The immutable transaction, completion receipt, and retained restore
+authority remain byte-for-byte bound to the recorded root. Immediately before
+returning `Restored`, Core revalidates those immutable bytes and the exact
+target Version and permitted Head, retained stage and destination identity,
+sealed digest and length, and executable mode. Nothing mutates or invokes a
+test hook after that proof.
 
 This decision remains **Proposed**. Core now produces productive Tombstones for
 captured absence, preserves same-path/same-kind logical continuity, and records
