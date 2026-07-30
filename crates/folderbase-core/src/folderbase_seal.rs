@@ -695,22 +695,15 @@ fn find_restore_binding_with_limit(
     })?;
     let mut queue = VecDeque::new();
     for parent in current.parents() {
-        queue.push_back((
-            parent.clone(),
-            vec![current.version_id().to_owned()],
-            1_usize,
-        ));
+        queue.push_back((parent.clone(), 1_usize));
     }
     let mut expanded = BTreeSet::new();
+    let mut adjacency =
+        BTreeMap::from([(current.version_id().to_owned(), current.parents().to_vec())]);
     let mut visited = 0_usize;
     let mut candidates = Vec::new();
     let mut candidate_depth = None;
-    while let Some((version_id, lineage, depth)) = queue.pop_front() {
-        if lineage.iter().any(|ancestor| ancestor == &version_id) {
-            return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
-                "cycle reaches {version_id}"
-            )));
-        }
+    while let Some((version_id, depth)) = queue.pop_front() {
         if !expanded.insert(version_id.clone()) {
             continue;
         }
@@ -726,6 +719,7 @@ fn find_restore_binding_with_limit(
                     "ancestor {version_id} could not be verified: {error}"
                 ))
             })?;
+        adjacency.insert(version_id.clone(), version.parents().to_vec());
         if let Some(binding) = version.lookup_binding(tombstone.path())
             && binding.kind() == PathBindingKind::RegularFile
             && binding.object_id() == tombstone.object_id()
@@ -735,17 +729,11 @@ fn find_restore_binding_with_limit(
             candidate_depth.get_or_insert(depth);
             candidates.push(binding.clone());
         }
-        let mut next_lineage = lineage;
-        next_lineage.push(version_id);
         for parent in version.parents() {
-            if next_lineage.iter().any(|ancestor| ancestor == parent) {
-                return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
-                    "cycle reaches {parent}"
-                )));
-            }
-            queue.push_back((parent.clone(), next_lineage.clone(), depth + 1));
+            queue.push_back((parent.clone(), depth + 1));
         }
     }
+    ensure_restore_ancestry_acyclic(&adjacency)?;
     if !candidates.is_empty() {
         return unique_restore_candidate(candidates, tombstone);
     }
@@ -753,6 +741,51 @@ fn find_restore_binding_with_limit(
         "no verified live ancestor preserves exact fidelity for {}",
         tombstone.path()
     )))
+}
+
+fn ensure_restore_ancestry_acyclic(
+    adjacency: &BTreeMap<String, Vec<String>>,
+) -> Result<(), FolderbaseCaptureError> {
+    let mut incoming = adjacency
+        .keys()
+        .map(|version_id| (version_id.clone(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    for parents in adjacency.values() {
+        for parent in parents {
+            let Some(count) = incoming.get_mut(parent) else {
+                return Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                    "ancestor graph omitted reachable version {parent}"
+                )));
+            };
+            *count = count.saturating_add(1);
+        }
+    }
+    let mut ready = incoming
+        .iter()
+        .filter_map(|(version_id, count)| (*count == 0).then_some(version_id.clone()))
+        .collect::<VecDeque<_>>();
+    let mut removed = 0_usize;
+    while let Some(version_id) = ready.pop_front() {
+        removed += 1;
+        for parent in adjacency
+            .get(&version_id)
+            .expect("ready versions came from adjacency")
+        {
+            let count = incoming
+                .get_mut(parent)
+                .expect("all reachable parents are in adjacency");
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(parent.clone());
+            }
+        }
+    }
+    if removed != adjacency.len() {
+        return Err(FolderbaseCaptureError::InvalidRestoreAncestry(
+            "ancestor graph contains a cycle".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn unique_restore_candidate(
@@ -789,6 +822,7 @@ fn execute_restore_transaction(
         version_sha256: transaction.target_version_sha256.clone(),
         transaction_sha256: restore_transaction_sha256(transaction)?,
     };
+    let target = derive_authoritative_restore_target(store, local, state, transaction)?;
     let created = if current_summary == target_summary {
         let installed = read_and_verify_folderbase_version(
             store,
@@ -809,73 +843,6 @@ fn execute_restore_transaction(
         }
         false
     } else if current_summary == transaction.expected_head {
-        let parent = read_and_verify_folderbase_version(
-            store,
-            local,
-            state,
-            &transaction.expected_head.version_id,
-        )?;
-        if parent.canonical_digest()? != transaction.expected_head.version_sha256 {
-            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                "restore parent digest changed".to_owned(),
-            ));
-        }
-        let parent_tombstone = parent
-            .tombstones()
-            .iter()
-            .find(|tombstone| tombstone.path() == transaction.path)
-            .ok_or_else(|| {
-                FolderbaseCaptureError::InvalidRestoreTransaction(
-                    "restore parent no longer contains the selected Tombstone".to_owned(),
-                )
-            })?;
-        if parent_tombstone != &transaction.tombstone {
-            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                "restore journal Tombstone differs from the verified parent".to_owned(),
-            ));
-        }
-        let authoritative = find_restore_binding(store, local, state, &parent, parent_tombstone)?;
-        if authoritative != transaction.binding {
-            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                "restore journal fidelity differs from verified ancestry".to_owned(),
-            ));
-        }
-        let parent_head = LocalHeadRecord {
-            format: "folderbase-local-head-v1".to_owned(),
-            folderbase_id: transaction.folderbase_id.clone(),
-            root_instance_sha256: transaction.root_instance_sha256.clone(),
-            version_id: transaction.expected_head.version_id.clone(),
-            version_sha256: transaction.expected_head.version_sha256.clone(),
-            transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
-        };
-        let (transaction_id, target_version_id, created_at) = assigned_restore_identity(
-            store,
-            &parent_head,
-            &parent,
-            parent_tombstone,
-            &authoritative,
-        )?;
-        if transaction.transaction_id != transaction_id
-            || transaction.target_version_id != target_version_id
-            || transaction.created_at != created_at
-        {
-            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                "restore assignment differs from verified immutable authority".to_owned(),
-            ));
-        }
-        let target = restored_version(
-            store,
-            &parent,
-            &transaction.target_version_id,
-            &transaction.created_at,
-            &transaction.tombstone,
-            &transaction.binding,
-        )?;
-        if target.canonical_digest()? != transaction.target_version_sha256 {
-            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
-                "restore target no longer matches its durable journal".to_owned(),
-            ));
-        }
         stage_and_publish_restore(state, transaction, checkpoint)?;
         install_folderbase_version(state, &target, &transaction.target_version_sha256)?;
         let installed = read_and_verify_folderbase_version(
@@ -930,6 +897,82 @@ fn execute_restore_transaction(
         version_sha256: transaction.target_version_sha256.clone(),
         created,
     })
+}
+
+fn derive_authoritative_restore_target(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
+    let parent = read_and_verify_folderbase_version(
+        store,
+        local,
+        state,
+        &transaction.expected_head.version_id,
+    )?;
+    if parent.canonical_digest()? != transaction.expected_head.version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore parent digest changed".to_owned(),
+        ));
+    }
+    let parent_tombstone = parent
+        .tombstones()
+        .iter()
+        .find(|tombstone| tombstone.path() == transaction.path)
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore parent no longer contains the selected Tombstone".to_owned(),
+            )
+        })?;
+    if parent_tombstone != &transaction.tombstone {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore journal Tombstone differs from the verified parent".to_owned(),
+        ));
+    }
+    let authoritative = find_restore_binding(store, local, state, &parent, parent_tombstone)?;
+    if authoritative != transaction.binding {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore journal fidelity differs from verified ancestry".to_owned(),
+        ));
+    }
+    let parent_head = LocalHeadRecord {
+        format: "folderbase-local-head-v1".to_owned(),
+        folderbase_id: transaction.folderbase_id.clone(),
+        root_instance_sha256: transaction.root_instance_sha256.clone(),
+        version_id: transaction.expected_head.version_id.clone(),
+        version_sha256: transaction.expected_head.version_sha256.clone(),
+        transaction_sha256: transaction.expected_head.transaction_sha256.clone(),
+    };
+    let (transaction_id, target_version_id, created_at) = assigned_restore_identity(
+        store,
+        &parent_head,
+        &parent,
+        parent_tombstone,
+        &authoritative,
+    )?;
+    if transaction.transaction_id != transaction_id
+        || transaction.target_version_id != target_version_id
+        || transaction.created_at != created_at
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore assignment differs from verified immutable authority".to_owned(),
+        ));
+    }
+    let target = restored_version(
+        store,
+        &parent,
+        &transaction.target_version_id,
+        &transaction.created_at,
+        &transaction.tombstone,
+        &transaction.binding,
+    )?;
+    if target.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore target no longer matches its durable journal".to_owned(),
+        ));
+    }
+    Ok(target)
 }
 
 fn verify_restore_root_instance(
