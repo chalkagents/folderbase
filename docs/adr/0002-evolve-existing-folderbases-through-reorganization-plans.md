@@ -179,9 +179,12 @@ is an apply conflict, not a zero-mutation stale result: Core stops, preserves ev
 competing byte, retains recoverable partial state, and reports the exact operation
 that must be recovered or rolled back.
 
-Application uses the existing durable migration journal. Every operation must be
-restart-safe, and recovery or rollback must preserve ordinary bytes, stable object
-identity, nested boundaries, and a truthful record of what completed.
+Application uses the migration module's durable execution machinery. ADR-0007
+defines the proposed one-method execution seam, immutable internal mutation
+program, transaction-v1 journal, claim-and-publish leaf transitions, and exact
+legacy-journal dispatch. Every operation must be restart-safe, and recovery or
+rollback must preserve ordinary bytes, stable object identity, nested boundaries,
+and a truthful record of what completed.
 
 Rollback follows exact postconditions:
 
