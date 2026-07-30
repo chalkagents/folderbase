@@ -4736,6 +4736,101 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn modified_restore_cleanup_failure_reopens_and_capture_adopts_preserved_bytes() {
+        use std::{
+            cell::RefCell,
+            os::unix::fs::{MetadataExt, PermissionsExt},
+        };
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let transaction_directory = RefCell::new(None);
+        let user_bytes = b"user work preserved across cleanup failure";
+
+        let cleanup_error = store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::TargetPublished {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    let directory = root
+                        .path()
+                        .join(restore_transaction_directory(&transaction));
+                    transaction_directory.replace(Some(directory.clone()));
+                    fs::write(root.path().join("active.bin"), user_bytes)
+                        .expect("edit restored target in place");
+                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
+                        .expect("deny private stage cleanup");
+                }
+            })
+            .expect_err("private-stage cleanup failure must be reported");
+        assert!(matches!(
+            cleanup_error,
+            FolderbaseCaptureError::LocalStore(FolderbaseError::Io { .. })
+        ));
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("preserved workspace bytes"),
+            user_bytes
+        );
+        assert!(
+            fs::metadata(root.path().join("active.bin"))
+                .expect("preserved workspace metadata")
+                .nlink()
+                > 1,
+            "failed cleanup must leave the visible file linked to its private stage"
+        );
+
+        let transaction_directory = transaction_directory
+            .into_inner()
+            .expect("transaction directory");
+        fs::set_permissions(&transaction_directory, fs::Permissions::from_mode(0o700))
+            .expect("restore cleanup permissions");
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh-process reopen");
+        assert!(matches!(
+            reopened.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == PathBuf::from("active.bin")
+        ));
+        let captured = reopened
+            .seal_capture(
+                reopened
+                    .plan_capture()
+                    .expect("capture preserved user work"),
+            )
+            .expect("completed cleanup must unblock capture");
+        let captured_version = reopened
+            .read_version(captured.version_id())
+            .expect("captured version");
+        let binding = captured_version
+            .lookup_binding("active.bin")
+            .expect("preserved user work must become a live binding");
+        assert_eq!(binding.bytes(), Some(user_bytes.len() as u64));
+        assert_eq!(
+            fs::metadata(root.path().join("active.bin"))
+                .expect("captured workspace metadata")
+                .nlink(),
+            1,
+            "cleanup must retire only the exact private hard link"
+        );
+        assert!(
+            !transaction_directory.exists(),
+            "cleanup retry must retire the empty private transaction directory"
+        );
+    }
+
     #[test]
     fn successful_restore_retires_its_private_transaction_directory() {
         let root = folderbase();
