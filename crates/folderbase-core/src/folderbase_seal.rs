@@ -3658,6 +3658,73 @@ mod tests {
     }
 
     #[test]
+    fn committed_restore_rederives_authority_before_recovery() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            store.restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::HeadReplaced {
+                    panic!("leave committed restore intent");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut transaction = read_active_restore_transaction(&state)
+            .expect("journal")
+            .expect("active");
+        let parent = store.read_version(deletion.version_id()).expect("parent");
+        transaction.target_version_id = format!("fbversion_{}", Uuid::now_v7());
+        transaction.created_at = "2035-01-02T03:04:05Z".to_owned();
+        let forged = restored_version(
+            &store,
+            &parent,
+            &transaction.target_version_id,
+            &transaction.created_at,
+            &transaction.tombstone,
+            &transaction.binding,
+        )
+        .expect("forged target");
+        transaction.target_version_sha256 =
+            forged.canonical_digest().expect("forged target digest");
+        install_test_version(root.path(), &forged);
+        state
+            .replace(
+                Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+                &encode_restore_transaction(&transaction).expect("forged journal"),
+            )
+            .expect("replace journal");
+        state
+            .replace(
+                Path::new(LOCAL_HEAD_PATH),
+                &json_bytes(&LocalHeadRecord {
+                    format: "folderbase-local-head-v1".to_owned(),
+                    folderbase_id: transaction.folderbase_id.clone(),
+                    root_instance_sha256: transaction.root_instance_sha256.clone(),
+                    version_id: transaction.target_version_id.clone(),
+                    version_sha256: transaction.target_version_sha256.clone(),
+                    transaction_sha256: restore_transaction_sha256(&transaction)
+                        .expect("forged journal digest"),
+                })
+                .expect("forged Head"),
+            )
+            .expect("replace Head");
+
+        assert!(matches!(
+            store.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::InvalidRestoreTransaction(_))
+        ));
+    }
+
+    #[test]
     fn restore_ancestor_search_is_bounded_before_any_restore_intent() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
@@ -4008,6 +4075,100 @@ mod tests {
             fs::read(root.path().join("active.bin")).expect("restored"),
             b"first opaque bytes"
         );
+    }
+
+    #[test]
+    fn convergent_edges_cannot_hide_any_reachable_ancestor_cycle() {
+        for shape in ["shared-cycle", "cross-branch-cycle"] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            let genesis = store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            let genesis_version = store.read_version(genesis.version_id()).expect("genesis");
+            let original = genesis_version
+                .lookup_binding("active.bin")
+                .expect("active")
+                .clone();
+            fs::remove_file(root.path().join("active.bin")).expect("delete");
+            let surviving = genesis_version
+                .bindings()
+                .iter()
+                .filter(|binding| binding.path() != "active.bin")
+                .cloned()
+                .collect::<Vec<_>>();
+            let tombstones = vec![Tombstone::from_verified_producer(
+                original.path(),
+                original.object_id(),
+                DeletedKind::RegularFile,
+                original.object_version_id().map(str::to_owned),
+            )];
+            let a = format!("fbversion_{}", Uuid::now_v7());
+            let b = format!("fbversion_{}", Uuid::now_v7());
+            let c = format!("fbversion_{}", Uuid::now_v7());
+            let d = format!("fbversion_{}", Uuid::now_v7());
+            let definitions = match shape {
+                "shared-cycle" => vec![
+                    (a.clone(), vec![c.clone()], true),
+                    (b.clone(), vec![c.clone()], false),
+                    (c.clone(), vec![b.clone()], false),
+                ],
+                "cross-branch-cycle" => vec![
+                    (a.clone(), vec![c.clone()], true),
+                    (b.clone(), vec![d.clone()], false),
+                    (c.clone(), vec![d.clone()], false),
+                    (d.clone(), vec![a.clone()], false),
+                ],
+                _ => unreachable!(),
+            };
+            for (version_id, parents, live) in definitions {
+                let version = FolderbaseVersion::from_verified_parts(
+                    FolderbaseVersionParts::portable_v1_from_verified_producer(
+                        genesis_version.folderbase_id(),
+                        version_id,
+                        parents,
+                        genesis_version.created_at(),
+                        genesis_version.root_manifest().clone(),
+                        FolderbaseVersionEntries::from_verified_producer(
+                            if live {
+                                genesis_version.bindings().to_vec()
+                            } else {
+                                surviving.clone()
+                            },
+                            if live { Vec::new() } else { tombstones.clone() },
+                            genesis_version.exclusions().to_vec(),
+                        ),
+                    ),
+                )
+                .expect("graph member");
+                install_test_version(root.path(), &version);
+            }
+            let current = FolderbaseVersion::from_verified_parts(
+                FolderbaseVersionParts::portable_v1_from_verified_producer(
+                    genesis_version.folderbase_id(),
+                    format!("fbversion_{}", Uuid::now_v7()),
+                    vec![a, b],
+                    genesis_version.created_at(),
+                    genesis_version.root_manifest().clone(),
+                    FolderbaseVersionEntries::from_verified_producer(
+                        surviving,
+                        tombstones,
+                        genesis_version.exclusions().to_vec(),
+                    ),
+                ),
+            )
+            .expect("current");
+            install_test_version(root.path(), &current);
+            point_test_head(root.path(), &current);
+
+            assert!(matches!(
+                FolderbaseVersionStore::open(root.path())
+                    .expect("reopen")
+                    .restore_tombstone("active.bin"),
+                Err(FolderbaseCaptureError::InvalidRestoreAncestry(message))
+                    if message.contains("cycle")
+            ));
+        }
     }
 
     #[test]
