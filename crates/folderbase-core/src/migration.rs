@@ -6826,6 +6826,174 @@ mod tests {
 "#;
 
     #[test]
+    fn typed_ignore_policy_proposal_rejects_content_above_the_capture_bound_without_mutation() {
+        assert_ignore_policy_proposal_rejected(
+            &"a".repeat(crate::MAX_FOLDERBASEIGNORE_BYTES as usize + 1),
+        );
+    }
+
+    #[test]
+    fn typed_ignore_policy_approval_rejects_content_above_the_capture_bound_without_mutation() {
+        assert_ignore_policy_approval_rejected(
+            &"a".repeat(crate::MAX_FOLDERBASEIGNORE_BYTES as usize + 1),
+        );
+    }
+
+    #[test]
+    fn typed_ignore_policy_apply_rejects_content_above_the_capture_bound_without_mutation() {
+        assert_ignore_policy_apply_rejected(
+            &"a".repeat(crate::MAX_FOLDERBASEIGNORE_BYTES as usize + 1),
+        );
+    }
+
+    #[test]
+    fn typed_ignore_policy_proposal_rejects_invalid_gitignore_syntax_without_mutation() {
+        assert_ignore_policy_proposal_rejected("{a,b\n");
+    }
+
+    #[test]
+    fn typed_ignore_policy_approval_rejects_invalid_gitignore_syntax_without_mutation() {
+        assert_ignore_policy_approval_rejected("{a,b\n");
+    }
+
+    #[test]
+    fn typed_ignore_policy_apply_rejects_invalid_gitignore_syntax_without_mutation() {
+        assert_ignore_policy_apply_rejected("{a,b\n");
+    }
+
+    fn assert_ignore_policy_proposal_rejected(content: &str) {
+        let root = initialized_structural_folderbase_fixture();
+        let policy_path = root.path().join(".folderbaseignore");
+        fs::write(&policy_path, b"node_modules/\n").unwrap();
+        let before = snapshot_regular_files(root.path());
+
+        let error = match MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::update_ignore_policy(content)],
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("capture-incompatible policy must fail during proposal"),
+        };
+
+        assert_invalid_ignore_policy(error);
+        assert_eq!(snapshot_regular_files(root.path()), before);
+    }
+
+    fn assert_ignore_policy_approval_rejected(content: &str) {
+        let root = initialized_structural_folderbase_fixture();
+        let policy_path = root.path().join(".folderbaseignore");
+        fs::write(&policy_path, b"node_modules/\n").unwrap();
+        let mut plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::update_ignore_policy("Derived/\n")],
+        )
+        .unwrap();
+        set_ignore_policy_content(&mut plan.operations[0], content);
+        let migration_directory = root.path().join(MIGRATIONS_DIR).join(&plan.id);
+        let plan_path = migration_directory.join("plan.json");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec_pretty(&plan).expect("tampered proposal"),
+        )
+        .unwrap();
+        let policy_before = fs::read(&policy_path).unwrap();
+        let plan_before = fs::read(&plan_path).unwrap();
+
+        let error = match approve_migration(plan) {
+            Err(error) => error,
+            Ok(_) => panic!("capture-incompatible policy must not be approved"),
+        };
+
+        assert_invalid_ignore_policy(error);
+        assert_eq!(fs::read(&policy_path).unwrap(), policy_before);
+        assert_eq!(fs::read(&plan_path).unwrap(), plan_before);
+        assert!(!migration_directory.join("snapshots").exists());
+    }
+
+    fn assert_ignore_policy_apply_rejected(content: &str) {
+        let root = initialized_structural_folderbase_fixture();
+        let policy_path = root.path().join(".folderbaseignore");
+        fs::write(&policy_path, b"node_modules/\n").unwrap();
+        let plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::update_ignore_policy("Derived/\n")],
+        )
+        .unwrap();
+        let migration_id = plan.id.clone();
+        let mut approved = approve_migration(plan).unwrap();
+        set_ignore_policy_content(&mut approved.plan.operations[0], content);
+        let result_sha256 = sha256_bytes(content.as_bytes());
+        match &mut approved.plan.operations[0] {
+            MigrationOperation::UpdateIgnorePolicy {
+                expected_result_sha256,
+                ..
+            } => *expected_result_sha256 = result_sha256,
+            operation => panic!("unexpected operation: {operation:?}"),
+        }
+        approved.approval_digest = plan_digest(&approved.plan).unwrap();
+        approved.plan.approval_digest = Some(approved.approval_digest.clone());
+        persist_plan(&approved.plan).unwrap();
+        let migration_directory = root.path().join(MIGRATIONS_DIR).join(migration_id);
+        let plan_path = migration_directory.join("plan.json");
+        let policy_before = fs::read(&policy_path).unwrap();
+        let plan_before = fs::read(&plan_path).unwrap();
+
+        let error = match apply_migration(approved) {
+            Err(error) => error,
+            Ok(_) => panic!("capture-incompatible policy must not be applied"),
+        };
+
+        assert_invalid_ignore_policy(error);
+        assert_eq!(fs::read(&policy_path).unwrap(), policy_before);
+        assert_eq!(fs::read(&plan_path).unwrap(), plan_before);
+        assert!(!migration_directory.join("result.json").exists());
+    }
+
+    fn set_ignore_policy_content(operation: &mut MigrationOperation, content: &str) {
+        match operation {
+            MigrationOperation::UpdateIgnorePolicy {
+                content: proposed, ..
+            } => proposed.clone_from(&content.to_owned()),
+            operation => panic!("unexpected operation: {operation:?}"),
+        }
+    }
+
+    fn assert_invalid_ignore_policy(error: FolderbaseError) {
+        assert!(
+            matches!(
+                error,
+                FolderbaseError::InvalidRecord {
+                    ref message,
+                    ..
+                } if message.contains("ignore policy")
+            ),
+            "{error:?}"
+        );
+    }
+
+    fn snapshot_regular_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn collect(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    collect(root, &path, files);
+                } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+
+        let mut files = BTreeMap::new();
+        collect(root, root, &mut files);
+        files
+    }
+
+    #[test]
     fn protocol_upgrade_serializes_behind_existing_folderbase_migration_apply() {
         let root = legacy_structural_folderbase_fixture();
         fs::create_dir(root.path().join("Archive")).unwrap();
