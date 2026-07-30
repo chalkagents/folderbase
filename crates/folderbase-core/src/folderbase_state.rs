@@ -617,6 +617,53 @@ impl FolderbaseState {
         Ok(stage_stable)
     }
 
+    /// Inspect the exact retained-stage/workspace inode relationship during
+    /// capture planning without requesting access to either file's content.
+    pub(crate) fn planned_workspace_restore_identity_sha256(
+        &self,
+        stage: &Path,
+        destination: &Path,
+    ) -> Result<String> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let stage_identity =
+            planning_regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
+
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let destination_identity = planning_regular_file_identity(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if destination_identity != stage_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display.clone(),
+                message: "restore destination no longer names the staged file".to_owned(),
+            });
+        }
+
+        let rechecked_stage =
+            planning_regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
+        let rechecked_destination = planning_regular_file_identity(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        if rechecked_stage != stage_identity || rechecked_destination != destination_identity {
+            return Err(FolderbaseError::InvalidRecord {
+                path: destination_display,
+                message: "restore destination identity changed during planning".to_owned(),
+            });
+        }
+        self.verify_still_attached()?;
+        Ok(stage_identity)
+    }
+
     /// Verify both exact publication identity and sealed file fidelity when
     /// every private hard link has already been retired.
     pub(crate) fn verify_workspace_regular_file_identity_and_fidelity(
@@ -1541,6 +1588,51 @@ fn copy_exact_sha256(
 fn regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<Handle> {
     let file = open_regular_file_nofollow(parent, name, display)?;
     open_regular_file_identity(&file, display)
+}
+
+#[cfg(unix)]
+fn planning_regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<String> {
+    use cap_std::fs::MetadataExt;
+
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    Ok(
+        crate::folderbase_restore_authority::stable_unix_file_identity_sha256(
+            metadata.dev(),
+            metadata.ino(),
+        ),
+    )
+}
+
+#[cfg(windows)]
+fn planning_regular_file_identity(parent: &Dir, name: &OsStr, display: &Path) -> Result<String> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    stable_file_identity_sha256(&file).map_err(|source| FolderbaseError::io(display, source))
 }
 
 fn open_regular_file_nofollow(

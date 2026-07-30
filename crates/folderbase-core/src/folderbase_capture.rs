@@ -787,7 +787,7 @@ fn validated_link_commitment(
                 "restore authority changed during capture planning".to_owned(),
             ));
         }
-        let observed_identity = state.workspace_restore_identity_sha256(
+        let observed_identity = state.planned_workspace_restore_identity_sha256(
             Path::new(&observed.record.private_stage_path),
             Path::new(workspace_path),
         )?;
