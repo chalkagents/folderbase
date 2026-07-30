@@ -53,6 +53,11 @@ blob named by the current Head Tombstone.
   same-byte replacement, in-place mutation, post-Head rollback, independently
   rewritten journal assignment, a nearer candidate hiding a deeper cycle,
   late nested-boundary closure, and copied replacement roots.
+- `be97f9c` converted the second fixed-head review into regressions for two
+  convergent-edge cycle shapes and a coordinated committed journal, Head, and
+  valid-target rewrite.
+- `28a6fdb` used an isolated restrictive-umask child process to prove that
+  create-time mode bits alone did not preserve executable restore fidelity.
 
 ## GREEN behavior
 
@@ -80,6 +85,11 @@ blob named by the current Head Tombstone.
   live publication proofs immediately before and after Head CAS, and restores
   the prior Head on the retained root capability before reporting a
   post-Head conflict.
+- `d338982` builds the complete bounded ancestry adjacency graph, validates it
+  independently with an iterative acyclic pass, and re-derives full restore
+  authority in both prior-Head and committed-Head recovery branches.
+- `9841f2d` explicitly applies Unix restore-stage permissions through the open
+  capability after creation, before sync and verification.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -93,6 +103,9 @@ must agree exactly, including executable fidelity. Missing, corrupt,
 ambiguous, cyclic, or over-limit lineage fails before restore publication.
 A nearer candidate cannot hide a deeper reachable cycle; a legitimate
 convergent DAG is accepted.
+Committed-Head recovery performs the same parent, Tombstone, binding,
+assignment, and exact-child derivation as first execution; a coordinated
+journal, Head, and installed-target rewrite is not recovery authority.
 
 The mutable journal is not assignment authority. Transaction and target
 Version IDs are deterministic domain-separated derivations of the verified
@@ -111,7 +124,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-590 passed; 3 ignored
+593 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed

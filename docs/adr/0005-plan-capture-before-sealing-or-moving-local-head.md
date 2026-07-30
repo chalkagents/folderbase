@@ -176,13 +176,21 @@ exclusion, and root-manifest reference, removes only the selected Tombstone,
 and has the deletion Head as its sole parent. Core validates the complete
 bounded reachable ancestor DAG for cycles before selecting the nearest
 candidate; a nearer binding cannot hide a deeper cycle, while convergent DAGs
-remain valid. Local Head advances only after the target still has the exact
+remain valid. The cycle pass operates on the complete bounded adjacency graph,
+independently of traversal deduplication and candidate selection. Both
+prior-Head execution and committed-Head recovery re-derive the Tombstone,
+binding, deterministic assignment, and exact child Version from the verified
+expected parent before accepting mutable journal state. Local Head advances
+only after the target still has the exact
 retained-stage identity, bytes, length, and executable fidelity, the physical
 root is still attached, every path ancestor remains outside a case-folded
 nested Folderbase boundary, and the Object Version, blob, and complete
 Folderbase Version verify. Those live proofs run again after the Head CAS.
 Failure rolls the exact retained root back to the prior Head before returning
 a conflict, including recovery after interruption at Head publication.
+On Unix, Core explicitly applies the staged `0700` or `0600` mode through the
+open file capability after creation, so process umask cannot erase the v1
+executable-fidelity decision.
 The capture and restore journals mutually exclude each other under the shared
 transaction lock. Interruption at journal, stage, target publication, version,
 Head, projection, or cleanup converges on the one assigned version without

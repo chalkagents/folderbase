@@ -848,7 +848,8 @@ even identical foreign bytes are refused. Retry may accept the destination
 only when it has the exact retained-stage filesystem identity. Core validates
 the complete bounded reachable ancestry DAG before accepting the nearest
 candidate, so a binding cannot mask a deeper cycle and a legitimate
-convergent DAG remains accepted.
+convergent DAG remains accepted. Cycle validation runs over the complete
+bounded adjacency graph independently of global traversal deduplication.
 
 The resulting full-state Folderbase Version preserves the root manifest,
 exclusions, every unrelated live binding, and every unrelated Tombstone,
@@ -860,6 +861,10 @@ nested boundaries, retained-stage/destination identity, exact bytes, length,
 and executable fidelity. A post-Head failure durably restores the prior Head
 on the retained root capability before reporting conflict. Journal, stage,
 target, version, Head, projection, and cleanup boundaries are recoverable.
+Both prior-Head execution and committed-Head recovery re-derive the selected
+Tombstone, live binding, deterministic assignment, and exact child Version
+from the verified expected parent. Unix staging explicitly applies its final
+`0700` or `0600` permissions after creation, independently of process umask.
 Directory and symlink Tombstone reconstruction remain outside v1 restore.
 
 This remains Proposed. Productive captured-absence and supported-kind
