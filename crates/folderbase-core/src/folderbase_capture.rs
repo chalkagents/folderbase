@@ -5,7 +5,7 @@
 //! write any protocol state.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fmt, fs,
     io::{self, Read},
@@ -23,6 +23,12 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     FolderbaseError, FolderbaseRootAttestation, RootAttestationError, attest_folderbase_root,
+    folderbase_restore_authority::{
+        MAX_RESTORE_AUTHORITIES, MAX_RESTORE_AUTHORITY_BYTES, RESTORE_AUTHORITIES_DIRECTORY,
+        RESTORE_AUTHORITY_FORMAT_V1, RestoreAuthorityRecord, restore_authority_record_path,
+        restore_stage_path, stable_file_identity_sha256,
+    },
+    folderbase_state::FolderbaseState,
     folderbase_version::{
         FolderbaseVersionError, MAX_OBJECT_BYTES, MAX_VERSION_ENTRIES, validate_capture_path,
         validate_capture_sha256, validate_capture_symlink_targets, validate_capture_version_id,
@@ -492,6 +498,11 @@ pub enum FolderbaseCaptureError {
     #[error("durable Tombstone restore transaction is invalid: {0}")]
     InvalidRestoreTransaction(String),
 
+    #[error(
+        "Tombstone restore authority maintenance is required at the bounded limit of {maximum}"
+    )]
+    RestoreAuthorityMaintenanceRequired { maximum: usize },
+
     #[error("Tombstone restore refuses to overwrite the occupied path: {0}")]
     RestoreTargetOccupied(PathBuf),
 
@@ -577,8 +588,9 @@ impl FolderbaseVersionStore {
         )?;
         let ignore = read_ignore_policy(&root_capability, &current.root)?;
         let current_local_head = read_local_head(&current, &root_capability)?;
+        let restore_authorities = read_restore_authorities(&current, MAX_RESTORE_AUTHORITIES)?;
 
-        let mut planner = CapturePlanner::new(&current.root, &ignore);
+        let mut planner = CapturePlanner::new(&current.root, &ignore, restore_authorities);
         planner.visit_directory(&root_capability, Path::new(""))?;
         verify_root_capability(&root_capability, &current.root)?;
 
@@ -635,10 +647,157 @@ impl FolderbaseVersionStore {
 struct CapturePlanner<'a> {
     root: &'a Path,
     ignore: &'a IgnorePolicy,
+    restore_authorities: RestoreAuthorityRegistry,
     entries: Vec<CapturePlanEntry>,
     exclusions: Vec<CapturePlanExclusion>,
     ignored_paths: Vec<CaptureIgnoredPath>,
     path_index: CapturePathIndex,
+}
+
+struct ObservedRestoreAuthority {
+    record: RestoreAuthorityRecord,
+    encoded: Vec<u8>,
+}
+
+struct RestoreAuthorityRegistry {
+    state: FolderbaseState,
+    records: Vec<ObservedRestoreAuthority>,
+}
+
+impl RestoreAuthorityRegistry {
+    fn validated_link_count(
+        &self,
+        directory: &Dir,
+        name: &OsStr,
+        workspace_path: &str,
+        display_path: &Path,
+    ) -> Result<usize, FolderbaseCaptureError> {
+        let workspace_file =
+            open_regular_nofollow(directory, Path::new(name)).map_err(|source| {
+                FolderbaseCaptureError::Io {
+                    path: display_path.to_path_buf(),
+                    source,
+                }
+            })?;
+        let workspace_identity =
+            stable_file_identity_sha256(&workspace_file).map_err(|source| {
+                FolderbaseCaptureError::Io {
+                    path: display_path.to_path_buf(),
+                    source,
+                }
+            })?;
+        let mut validated_paths = BTreeSet::new();
+        for observed in self.records.iter().filter(|observed| {
+            observed.record.workspace_path == workspace_path
+                && observed.record.published_identity_sha256 == workspace_identity
+        }) {
+            let record_path = restore_authority_record_path(&observed.record.transaction_id);
+            if self
+                .state
+                .read_bounded(&record_path, MAX_RESTORE_AUTHORITY_BYTES)?
+                .as_deref()
+                != Some(observed.encoded.as_slice())
+            {
+                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "restore authority changed during capture planning".to_owned(),
+                ));
+            }
+            let observed_identity = self.state.workspace_restore_identity_sha256(
+                Path::new(&observed.record.private_stage_path),
+                Path::new(workspace_path),
+            )?;
+            if observed_identity != workspace_identity {
+                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "restore authority no longer names the current workspace file".to_owned(),
+                ));
+            }
+            if !validated_paths.insert(observed.record.private_stage_path.as_str()) {
+                return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "restore authorities name one private link more than once".to_owned(),
+                ));
+            }
+        }
+        self.state.verify_still_attached()?;
+        Ok(validated_paths.len())
+    }
+}
+
+pub(crate) fn restore_authority_count(
+    root_attestation: &FolderbaseRootAttestation,
+    maximum: usize,
+) -> Result<usize, FolderbaseCaptureError> {
+    Ok(read_restore_authorities(root_attestation, maximum)?
+        .records
+        .len())
+}
+
+fn read_restore_authorities(
+    root_attestation: &FolderbaseRootAttestation,
+    maximum: usize,
+) -> Result<RestoreAuthorityRegistry, FolderbaseCaptureError> {
+    let state = FolderbaseState::open_existing_read_only(&root_attestation.root)?;
+    let names = match state.private_directory_names(
+        Path::new(RESTORE_AUTHORITIES_DIRECTORY),
+        MAX_RESTORE_AUTHORITIES.saturating_add(1024),
+    ) {
+        Ok(names) => names,
+        Err(FolderbaseError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut records = Vec::new();
+    for name in names {
+        let Some(transaction_id) = name.to_str() else {
+            continue;
+        };
+        let Some(uuid) = transaction_id.strip_prefix("fbrestore_") else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(uuid).is_err() {
+            continue;
+        }
+        let relative = restore_authority_record_path(transaction_id);
+        let Some(encoded) = state.read_bounded(&relative, MAX_RESTORE_AUTHORITY_BYTES)? else {
+            continue;
+        };
+        let record: RestoreAuthorityRecord =
+            serde_json::from_slice(&encoded).map_err(|source| {
+                FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+                    "restore authority is invalid JSON: {source}"
+                ))
+            })?;
+        validate_restore_authority(root_attestation, transaction_id, &record)?;
+        records.push(ObservedRestoreAuthority { record, encoded });
+        if records.len() > maximum {
+            return Err(FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { maximum });
+        }
+    }
+    state.verify_still_attached()?;
+    Ok(RestoreAuthorityRegistry { state, records })
+}
+
+fn validate_restore_authority(
+    root_attestation: &FolderbaseRootAttestation,
+    transaction_id: &str,
+    record: &RestoreAuthorityRecord,
+) -> Result<(), FolderbaseCaptureError> {
+    if record.format != RESTORE_AUTHORITY_FORMAT_V1
+        || record.folderbase_id != root_attestation.folderbase_id
+        || record.root_instance_sha256 != root_attestation.root_instance_sha256
+        || record.transaction_id != transaction_id
+        || record.private_stage_path
+            != restore_stage_path(transaction_id)
+                .to_str()
+                .expect("restore authority paths are UTF-8")
+        || validate_capture_path(&record.workspace_path).is_err()
+        || validate_capture_sha256(&record.published_identity_sha256).is_err()
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore authority does not match its Folderbase, path, identity, or slot".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 struct CaptureDirectoryFrame {
@@ -661,10 +820,15 @@ struct PendingCaptureDirectory {
 }
 
 impl<'a> CapturePlanner<'a> {
-    fn new(root: &'a Path, ignore: &'a IgnorePolicy) -> Self {
+    fn new(
+        root: &'a Path,
+        ignore: &'a IgnorePolicy,
+        restore_authorities: RestoreAuthorityRegistry,
+    ) -> Self {
         Self {
             root,
             ignore,
+            restore_authorities,
             entries: Vec::new(),
             exclusions: Vec::new(),
             ignored_paths: Vec::new(),
@@ -819,6 +983,29 @@ impl<'a> CapturePlanner<'a> {
                     display_path,
                 },
             }));
+        }
+
+        if metadata.is_file() && !metadata.file_type().is_symlink() {
+            let link_count = regular_file_link_count(directory, &name, &display_path, &metadata)?;
+            if link_count > 1 {
+                let authority_links = self.restore_authorities.validated_link_count(
+                    directory,
+                    &name,
+                    &path,
+                    &display_path,
+                )?;
+                if link_count != authority_links.saturating_add(1) {
+                    if required_marker {
+                        return Err(FolderbaseCaptureError::RequiredMarker(display_path));
+                    }
+                    self.exclusions.push(CapturePlanExclusion {
+                        path,
+                        kind: CaptureExclusionKind::HardLink,
+                        reason: CaptureExclusionReason::UnsupportedV1,
+                    });
+                    return Ok(None);
+                }
+            }
         }
 
         if let Some(kind) = unsupported_entry_kind(directory, &name, &display_path, &metadata)? {
@@ -1056,48 +1243,29 @@ fn windows_file_identity(file: &fs::File) -> io::Result<String> {
 }
 
 #[cfg(unix)]
-fn unsupported_entry_kind(
+fn regular_file_link_count(
     _directory: &Dir,
     _name: &OsStr,
     _display_path: &Path,
     metadata: &Metadata,
-) -> Result<Option<CaptureExclusionKind>, FolderbaseCaptureError> {
-    use cap_std::fs::{FileTypeExt, MetadataExt};
+) -> Result<usize, FolderbaseCaptureError> {
+    use cap_std::fs::MetadataExt;
 
-    let file_type = metadata.file_type();
-    let kind = if metadata.is_file() && metadata.nlink() > 1 {
-        Some(CaptureExclusionKind::HardLink)
-    } else if file_type.is_fifo() {
-        Some(CaptureExclusionKind::Fifo)
-    } else if file_type.is_socket() {
-        Some(CaptureExclusionKind::Socket)
-    } else if file_type.is_block_device() {
-        Some(CaptureExclusionKind::BlockDevice)
-    } else if file_type.is_char_device() {
-        Some(CaptureExclusionKind::CharacterDevice)
-    } else if !metadata.is_file() && !metadata.is_dir() && !metadata.file_type().is_symlink() {
-        Some(CaptureExclusionKind::OtherSpecial)
-    } else {
-        None
-    };
-    Ok(kind)
+    Ok(metadata.nlink() as usize)
 }
 
 #[cfg(windows)]
-fn unsupported_entry_kind(
+fn regular_file_link_count(
     directory: &Dir,
     name: &OsStr,
     display_path: &Path,
-    metadata: &Metadata,
-) -> Result<Option<CaptureExclusionKind>, FolderbaseCaptureError> {
+    _metadata: &Metadata,
+) -> Result<usize, FolderbaseCaptureError> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Ok(None);
-    }
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -1117,7 +1285,43 @@ fn unsupported_entry_kind(
             source,
         }
     })?;
-    Ok((information.number_of_links() > 1).then_some(CaptureExclusionKind::HardLink))
+    Ok(information.number_of_links() as usize)
+}
+
+#[cfg(unix)]
+fn unsupported_entry_kind(
+    _directory: &Dir,
+    _name: &OsStr,
+    _display_path: &Path,
+    metadata: &Metadata,
+) -> Result<Option<CaptureExclusionKind>, FolderbaseCaptureError> {
+    use cap_std::fs::FileTypeExt;
+
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_fifo() {
+        Some(CaptureExclusionKind::Fifo)
+    } else if file_type.is_socket() {
+        Some(CaptureExclusionKind::Socket)
+    } else if file_type.is_block_device() {
+        Some(CaptureExclusionKind::BlockDevice)
+    } else if file_type.is_char_device() {
+        Some(CaptureExclusionKind::CharacterDevice)
+    } else if !metadata.is_file() && !metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Some(CaptureExclusionKind::OtherSpecial)
+    } else {
+        None
+    };
+    Ok(kind)
+}
+
+#[cfg(windows)]
+fn unsupported_entry_kind(
+    _directory: &Dir,
+    _name: &OsStr,
+    _display_path: &Path,
+    _metadata: &Metadata,
+) -> Result<Option<CaptureExclusionKind>, FolderbaseCaptureError> {
+    Ok(None)
 }
 
 fn open_planning_root(root: &Path) -> Result<Dir, FolderbaseCaptureError> {

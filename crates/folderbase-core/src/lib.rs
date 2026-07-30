@@ -9,6 +9,7 @@ pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
 mod folderbase_capture;
+mod folderbase_restore_authority;
 mod folderbase_seal;
 mod folderbase_state;
 pub mod folderbase_version;

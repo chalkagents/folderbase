@@ -863,6 +863,9 @@ fn error_code(error: &CliError) -> &'static str {
                 FolderbaseCaptureError::InvalidRestoreTransaction(_) => {
                     "invalid_restore_transaction"
                 }
+                FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { .. } => {
+                    "restore_authority_maintenance_required"
+                }
                 FolderbaseCaptureError::ConflictingTransaction(_) => "conflicting_transaction",
                 _ => "capture_error",
             };

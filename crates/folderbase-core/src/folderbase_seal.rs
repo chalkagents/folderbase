@@ -25,7 +25,11 @@ use crate::{
         CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureLocalHead,
         CaptureMetadataFingerprint, CapturePlan, CapturePlanEntry, FolderbaseCaptureError,
         FolderbaseVersionStore, LocalHeadAuthority, capture_entry_fingerprint,
-        version_derived_local_head_sha256,
+        restore_authority_count, version_derived_local_head_sha256,
+    },
+    folderbase_restore_authority::{
+        MAX_RESTORE_AUTHORITIES, MAX_RESTORE_AUTHORITY_BYTES, RESTORE_AUTHORITY_FORMAT_V1,
+        RestoreAuthorityRecord, restore_authority_record_path,
     },
     folderbase_state::FolderbaseState,
     folderbase_version::{
@@ -39,6 +43,9 @@ use crate::{
     },
     root_attestation::{attest_folderbase_root, metadata_is_link_or_reparse},
 };
+
+#[cfg(test)]
+use crate::folderbase_restore_authority::RESTORE_AUTHORITY_FILENAME;
 
 const CAPTURE_TRANSACTION_FORMAT_V1: &str = "folderbase-capture-transaction-v1";
 const CAPTURE_TRANSACTIONS_DIRECTORY: &str = ".folderbase/transactions/folderbase-version-captures";
@@ -393,13 +400,31 @@ impl FolderbaseVersionStore {
         &self,
         portable_path: &str,
     ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
-        self.restore_tombstone_with_hook(portable_path, |_| {})
+        self.restore_tombstone_with_hook_and_authority_limit(
+            portable_path,
+            |_| {},
+            MAX_RESTORE_AUTHORITIES,
+        )
     }
 
+    #[cfg(test)]
     fn restore_tombstone_with_hook(
         &self,
         portable_path: &str,
+        checkpoint: impl FnMut(&RestoreCheckpoint),
+    ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+        self.restore_tombstone_with_hook_and_authority_limit(
+            portable_path,
+            checkpoint,
+            MAX_RESTORE_AUTHORITIES,
+        )
+    }
+
+    fn restore_tombstone_with_hook_and_authority_limit(
+        &self,
+        portable_path: &str,
         mut checkpoint: impl FnMut(&RestoreCheckpoint),
+        maximum_restore_authorities: usize,
     ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
         let path = safe_content_path(Path::new(portable_path))?;
         let path_string = path
@@ -490,6 +515,15 @@ impl FolderbaseVersionStore {
             None => {
                 if !state.workspace_path_is_absent(&path)? {
                     return Err(FolderbaseCaptureError::RestoreTargetOccupied(path));
+                }
+                if restore_authority_count(&self.root_attestation, maximum_restore_authorities)?
+                    >= maximum_restore_authorities
+                {
+                    return Err(
+                        FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired {
+                            maximum: maximum_restore_authorities,
+                        },
+                    );
                 }
                 let mut head =
                     read_head_record(&state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
@@ -1253,9 +1287,8 @@ fn finish_restore_cleanup_with_identity(
         .binding
         .executable()
         .expect("validated regular binding");
-    let retirement = match state.retire_workspace_restore_stage_with_hook(
+    let retirement = state.retain_workspace_restore_authority_with_hook(
         &restore_stage_path(transaction),
-        &restore_rescue_path(transaction),
         Path::new(&transaction.path),
         published_identity_sha256,
         Some((digest, bytes, executable)),
@@ -1266,47 +1299,34 @@ fn finish_restore_cleanup_with_identity(
                 &RestoreCheckpoint::BeforeStageRetirement
             });
         },
-    ) {
-        Ok(retired) => retired,
-        Err(error) => {
-            if matches!(
-                state.workspace_restore_was_modified_in_place(
-                    &restore_stage_path(transaction),
-                    Path::new(&transaction.path),
-                    digest,
-                    bytes,
-                    executable,
-                ),
-                Ok(true)
-            ) {
-                let modified = RestoreCleanupRecovery {
-                    format: RESTORE_CLEANUP_RECOVERY_FORMAT_V2.to_owned(),
-                    disposition: RestoreCleanupDisposition::CommittedModified,
-                    transaction: transaction.clone(),
-                    published_identity_sha256: published_identity_sha256.to_owned(),
-                };
-                replace_restore_cleanup_recovery(state, &committed, &modified)?;
-                finish_committed_modified_restore_cleanup_recovery_stage(
-                    state,
-                    transaction,
-                    published_identity_sha256,
-                    checkpoint,
-                )?;
-                return Ok(RestoreCleanupOutcome::WorkspaceModified);
-            }
-            return Err(error.into());
-        }
-    };
-    if !retirement {
-        state.verify_workspace_regular_file_identity_and_fidelity(
+    );
+    if let Err(error) = retirement {
+        let modified_observation = state.workspace_restore_was_modified_in_place(
+            &restore_stage_path(transaction),
             Path::new(&transaction.path),
-            published_identity_sha256,
             digest,
             bytes,
             executable,
-        )?;
+        );
+        if matches!(modified_observation, Ok(true)) {
+            let modified = RestoreCleanupRecovery {
+                format: RESTORE_CLEANUP_RECOVERY_FORMAT_V2.to_owned(),
+                disposition: RestoreCleanupDisposition::CommittedModified,
+                transaction: transaction.clone(),
+                published_identity_sha256: published_identity_sha256.to_owned(),
+            };
+            replace_restore_cleanup_recovery(state, &committed, &modified)?;
+            finish_committed_modified_restore_cleanup_recovery_stage(
+                state,
+                transaction,
+                published_identity_sha256,
+                checkpoint,
+            )?;
+            return Ok(RestoreCleanupOutcome::WorkspaceModified);
+        }
+        return Err(error.into());
     }
-    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    write_restore_authority_record(state, transaction, published_identity_sha256)?;
     remove_active_restore_transaction(state)?;
     checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
     write_restore_completion_receipt(state, transaction, published_identity_sha256)?;
@@ -1526,9 +1546,8 @@ fn finish_modified_restore_cleanup_recovery(
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
-    let retired = state.retire_workspace_restore_stage_with_hook(
+    state.retain_workspace_restore_authority_with_hook(
         &restore_stage_path(transaction),
-        &restore_rescue_path(transaction),
         Path::new(&transaction.path),
         published_identity_sha256,
         None,
@@ -1540,13 +1559,7 @@ fn finish_modified_restore_cleanup_recovery(
             });
         },
     )?;
-    if !retired {
-        state.verify_workspace_regular_file_identity(
-            Path::new(&transaction.path),
-            published_identity_sha256,
-        )?;
-    }
-    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    write_restore_authority_record(state, transaction, published_identity_sha256)?;
     remove_active_restore_transaction(state)?;
     remove_restore_cleanup_recovery(state)
 }
@@ -1602,9 +1615,8 @@ fn finish_committed_modified_restore_cleanup_recovery_stage(
     published_identity_sha256: &str,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
-    let retired = state.retire_workspace_restore_stage_with_hook(
+    state.retain_workspace_restore_authority_with_hook(
         &restore_stage_path(transaction),
-        &restore_rescue_path(transaction),
         Path::new(&transaction.path),
         published_identity_sha256,
         None,
@@ -1616,13 +1628,7 @@ fn finish_committed_modified_restore_cleanup_recovery_stage(
             });
         },
     )?;
-    if !retired {
-        state.verify_workspace_regular_file_identity(
-            Path::new(&transaction.path),
-            published_identity_sha256,
-        )?;
-    }
-    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    write_restore_authority_record(state, transaction, published_identity_sha256)?;
     remove_active_restore_transaction(state)?;
     remove_restore_cleanup_recovery(state)
 }
@@ -1913,10 +1919,6 @@ fn finish_restore_projection(
 
 fn restore_stage_path(transaction: &RestoreTransaction) -> PathBuf {
     restore_transaction_directory(transaction).join("content")
-}
-
-fn restore_rescue_path(transaction: &RestoreTransaction) -> PathBuf {
-    restore_transaction_directory(transaction).join("content.rescue")
 }
 
 fn restore_transaction_directory(transaction: &RestoreTransaction) -> PathBuf {
@@ -3690,6 +3692,54 @@ fn read_restore_completion_receipt(
     Ok(Some(completion))
 }
 
+fn write_restore_authority_record(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    published_identity_sha256: &str,
+) -> Result<(), FolderbaseCaptureError> {
+    let record = RestoreAuthorityRecord {
+        format: RESTORE_AUTHORITY_FORMAT_V1.to_owned(),
+        folderbase_id: transaction.folderbase_id.clone(),
+        root_instance_sha256: transaction.root_instance_sha256.clone(),
+        transaction_id: transaction.transaction_id.clone(),
+        workspace_path: transaction.path.clone(),
+        private_stage_path: restore_stage_path(transaction)
+            .to_str()
+            .expect("validated restore stage paths are UTF-8")
+            .to_owned(),
+        published_identity_sha256: published_identity_sha256.to_owned(),
+    };
+    let mut encoded = serde_json::to_vec_pretty(&record).map_err(|source| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(format!(
+            "restore authority encoding failed: {source}"
+        ))
+    })?;
+    encoded.push(b'\n');
+    if encoded.len() as u64 > MAX_RESTORE_AUTHORITY_BYTES {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore authority exceeds its bounded record limit".to_owned(),
+        ));
+    }
+    let relative = restore_authority_record_path(&transaction.transaction_id);
+    match state.publish_new(&relative, &encoded) {
+        Ok(()) => Ok(()),
+        Err(FolderbaseError::WouldOverwrite(_)) => {
+            if state
+                .read_bounded(&relative, MAX_RESTORE_AUTHORITY_BYTES)?
+                .as_deref()
+                == Some(encoded.as_slice())
+            {
+                Ok(())
+            } else {
+                Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "restore authority slot names different bytes".to_owned(),
+                ))
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn write_restore_completion_receipt(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
@@ -5449,12 +5499,14 @@ mod tests {
             fs::metadata(root.path().join("active.bin"))
                 .expect("captured workspace metadata")
                 .nlink(),
-            1,
-            "cleanup must retire only the exact private hard link"
+            2,
+            "capture keeps exactly one validated Folderbase authority link"
         );
         assert!(
-            !transaction_directory.exists(),
-            "cleanup retry must retire the empty private transaction directory"
+            transaction_directory
+                .join(RESTORE_AUTHORITY_FILENAME)
+                .is_file(),
+            "cleanup retry must retain a durable authority receipt"
         );
     }
 
@@ -5510,8 +5562,10 @@ mod tests {
                 if path == Path::new("active.bin")
         ));
         assert!(
-            !transaction_directory.exists(),
-            "durable modified ownership, not current bytes, must authorize private cleanup"
+            transaction_directory
+                .join(RESTORE_AUTHORITY_FILENAME)
+                .is_file(),
+            "durable modified ownership must become a retained capture authority"
         );
         reopened
             .seal_capture(reopened.plan_capture().expect("capture reverted file"))
@@ -5733,11 +5787,21 @@ mod tests {
                     CleanupBoundarySwap::Stage => directory.join("content"),
                     CleanupBoundarySwap::Rescue => directory.join("content.rescue"),
                 };
-                fs::remove_file(&target).expect("remove exact cleanup-owned name");
+                if !matches!(swap, CleanupBoundarySwap::Rescue) {
+                    fs::remove_file(&target).expect("remove exact cleanup-owned name");
+                }
                 fs::write(&target, competitor).expect("install unrelated boundary replacement");
             }
         });
-        result.expect_err("a cleanup-boundary replacement must fail closed");
+        if matches!(swap, CleanupBoundarySwap::Rescue) {
+            if modified {
+                result.expect_err("the prior same-inode edit still prevents Restored");
+            } else {
+                result.expect("unused legacy rescue names cannot block a restore");
+            }
+        } else {
+            result.expect_err("an authority-boundary replacement must fail closed");
+        }
 
         let transaction_directory = transaction_directory.expect("transaction directory");
         let replacement_survived = match swap {
@@ -5757,22 +5821,27 @@ mod tests {
             replacement_survived,
             "cleanup must preserve the boundary replacement under a private quarantine name"
         );
-        assert!(
+        let uncertain_authority = !matches!(swap, CleanupBoundarySwap::Rescue);
+        assert_eq!(
             root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists(),
-            "uncertain cleanup must retain global restore intent"
+            uncertain_authority,
+            "only an authority-path or destination replacement retains global restore intent"
         );
-        assert!(
+        assert_eq!(
             root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists(),
-            "uncertain cleanup must retain its durable receipt"
+            uncertain_authority,
+            "only an authority-path or destination replacement retains recovery evidence"
         );
-        let retained_owned_bytes = fs::read_dir(&transaction_directory)
+        let retained_owned_bytes_in_private_state = fs::read_dir(&transaction_directory)
             .expect("retained transaction directory")
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| fs::read(entry.path()).ok())
             .any(|bytes| bytes == owned_bytes);
+        let retained_owned_bytes = retained_owned_bytes_in_private_state
+            || fs::read(root.path().join("active.bin")).is_ok_and(|bytes| bytes == owned_bytes);
         assert!(
             retained_owned_bytes,
-            "a transaction-owned rescue name must retain the exact inode bytes"
+            "the workspace or retained authority must preserve the exact owned inode bytes"
         );
     }
 
@@ -5825,7 +5894,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_restore_retires_its_private_transaction_directory() {
+    fn successful_restore_retains_one_private_authority_link() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         store
@@ -5836,7 +5905,7 @@ mod tests {
             .seal_capture(store.plan_capture().expect("deletion"))
             .expect("deletion");
 
-        store
+        let restored = store
             .restore_tombstone("active.bin")
             .expect("successful restore");
 
@@ -5844,10 +5913,184 @@ mod tests {
             .expect("restore transaction directory")
             .collect::<std::io::Result<Vec<_>>>()
             .expect("transaction entries");
-        assert!(
-            transaction_entries.is_empty(),
-            "successful cleanup must not leak one directory per restore"
+        assert_eq!(transaction_entries.len(), 1);
+        let completion =
+            read_restore_completion_receipt(&FolderbaseState::open(root.path()).expect("state"))
+                .expect("completion receipt")
+                .expect("completed restore");
+        assert_eq!(
+            completion.transaction.target_version_id,
+            restored.version_id()
         );
+        let retained_stage = root
+            .path()
+            .join(restore_stage_path(&completion.transaction));
+        assert!(retained_stage.is_file());
+        assert!(
+            root.path()
+                .join(restore_authority_record_path(
+                    &completion.transaction.transaction_id
+                ))
+                .is_file()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&retained_stage)
+                    .expect("retained authority metadata")
+                    .nlink(),
+                2
+            );
+        }
+        let plan = store.plan_capture().expect("authority-aware capture plan");
+        assert!(
+            plan.entries()
+                .iter()
+                .any(|entry| entry.path() == "active.bin")
+        );
+        assert!(
+            !plan
+                .exclusions()
+                .iter()
+                .any(|entry| entry.path() == "active.bin")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_authority_allows_same_inode_edits_but_not_extra_user_hard_links() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("successful restore");
+        fs::write(root.path().join("active.bin"), b"same-inode user edit").expect("edit");
+
+        let edited_plan = store.plan_capture().expect("edited authority plan");
+        assert!(
+            edited_plan
+                .entries()
+                .iter()
+                .any(|entry| entry.path() == "active.bin")
+        );
+        store
+            .seal_capture(edited_plan)
+            .expect("same-inode edit with one authority link is capturable");
+
+        fs::hard_link(
+            root.path().join("active.bin"),
+            root.path().join("ordinary-user-link.bin"),
+        )
+        .expect("ordinary user hard link");
+        let linked_plan = store.plan_capture().expect("hard-link exclusion plan");
+        for path in ["active.bin", "ordinary-user-link.bin"] {
+            assert!(linked_plan.exclusions().iter().any(|exclusion| {
+                exclusion.path() == path && exclusion.kind() == CaptureExclusionKind::HardLink
+            }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_restore_authority_never_authorizes_a_replaced_workspace_inode() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("successful restore");
+
+        fs::remove_file(root.path().join("active.bin")).expect("replace restored inode");
+        fs::write(root.path().join("active.bin"), b"foreign replacement").expect("replacement");
+        fs::hard_link(
+            root.path().join("active.bin"),
+            root.path().join("foreign-user-link.bin"),
+        )
+        .expect("foreign hard link");
+
+        let plan = store.plan_capture().expect("replacement plan");
+        for path in ["active.bin", "foreign-user-link.bin"] {
+            assert!(plan.exclusions().iter().any(|exclusion| {
+                exclusion.path() == path && exclusion.kind() == CaptureExclusionKind::HardLink
+            }));
+        }
+    }
+
+    #[test]
+    fn restore_authority_limit_fails_closed_with_typed_maintenance_error() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("first delete");
+        store
+            .seal_capture(store.plan_capture().expect("first deletion"))
+            .expect("first deletion");
+        store
+            .restore_tombstone("active.bin")
+            .expect("first restore authority");
+        fs::remove_file(root.path().join("active.bin")).expect("second delete");
+        store
+            .seal_capture(store.plan_capture().expect("second deletion"))
+            .expect("second deletion");
+
+        assert!(matches!(
+            store.restore_tombstone_with_hook_and_authority_limit("active.bin", |_| {}, 1),
+            Err(FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { maximum: 1 })
+        ));
+        assert!(!root.path().join("active.bin").exists());
+    }
+
+    #[test]
+    fn retained_authority_never_overwrites_legacy_quarantine_names() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let foreign = b"foreign quarantine target";
+        let mut preserved = Vec::new();
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::CleanupRecoveryDurable {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    let stage = root.path().join(restore_stage_path(&transaction));
+                    for name in ["content.rescue", "content.folderbase-quarantine"] {
+                        let path = stage.with_file_name(name);
+                        fs::write(&path, foreign).expect("foreign legacy target");
+                        preserved.push(path);
+                    }
+                }
+            })
+            .expect("legacy names do not participate in retained authority");
+
+        for path in preserved {
+            assert_eq!(fs::read(path).expect("preserved legacy target"), foreign);
+        }
     }
 
     #[test]
@@ -6122,8 +6365,10 @@ mod tests {
             b"first opaque bytes"
         );
         assert!(
-            !transaction_directory.exists(),
-            "retry must finish private cleanup"
+            transaction_directory
+                .join(RESTORE_AUTHORITY_FILENAME)
+                .is_file(),
+            "retry must retain the private authority and its durable receipt"
         );
     }
 
@@ -6148,11 +6393,11 @@ mod tests {
                         )
                         .expect("restore journal")
                         .expect("active restore");
-                        fs::remove_file(root.path().join(restore_rescue_path(&transaction)))
-                            .expect("simulate crash after final private link removal");
+                        fs::remove_file(root.path().join(restore_stage_path(&transaction)))
+                            .expect("simulate lost retained authority link");
                     }
                 })
-                .expect_err("missing rescue must interrupt cleanup");
+                .expect_err("missing retained authority must interrupt cleanup");
             if replacement == "missing" {
                 fs::remove_file(root.path().join("active.bin")).expect("remove publication");
             } else {
@@ -6181,7 +6426,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_cleanup_without_private_links_converges_only_for_exact_publication() {
+    fn committed_cleanup_without_private_links_never_converges_as_restored() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
         store
@@ -6200,24 +6445,23 @@ mod tests {
                     )
                     .expect("restore journal")
                     .expect("active restore");
-                    fs::remove_file(root.path().join(restore_rescue_path(&transaction)))
-                        .expect("simulate crash after final private link removal");
+                    fs::remove_file(root.path().join(restore_stage_path(&transaction)))
+                        .expect("simulate lost retained authority link");
                 }
             })
-            .expect_err("missing rescue must interrupt cleanup");
+            .expect_err("missing retained authority must interrupt cleanup");
         drop(store);
 
-        let restored = FolderbaseVersionStore::open(root.path())
+        FolderbaseVersionStore::open(root.path())
             .expect("fresh-process reopen")
             .restore_tombstone("active.bin")
-            .expect("exact publication identity and fidelity prove completed restore");
-        assert!(!restored.created());
+            .expect_err("publication without its retained authority cannot return Restored");
         assert_eq!(
             fs::read(root.path().join("active.bin")).expect("restored bytes"),
             b"first opaque bytes"
         );
-        assert!(!root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists());
-        assert!(!root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists());
+        assert!(root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists());
+        assert!(root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists());
     }
 
     #[cfg(unix)]
@@ -6263,11 +6507,16 @@ mod tests {
             .expect("cleanup receipt retry");
         assert!(!restored.created());
         assert!(
+            !root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists()
+                && !root.path().join(RESTORE_CLEANUP_RECOVERY_PATH).exists(),
+            "receipt retry must retire only global mutable intent"
+        );
+        assert!(
             fs::read_dir(&restore_transactions)
                 .expect("restore transactions")
-                .next()
-                .is_none(),
-            "receipt retry must leave no private transaction state"
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.path().join(RESTORE_AUTHORITY_FILENAME).is_file()),
+            "receipt retry must retain one durable private authority"
         );
     }
 

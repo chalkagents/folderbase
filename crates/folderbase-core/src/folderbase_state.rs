@@ -6,7 +6,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -18,7 +18,10 @@ use same_file::Handle;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{FolderbaseError, Result, root_attestation::metadata_is_link_or_reparse};
+use crate::{
+    FolderbaseError, Result, folderbase_restore_authority::stable_file_identity_sha256,
+    root_attestation::metadata_is_link_or_reparse,
+};
 
 const STATE_COMPONENT: &str = ".folderbase";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -185,6 +188,31 @@ impl FolderbaseState {
             });
         }
         Ok(Some(bytes))
+    }
+
+    pub(crate) fn private_directory_names(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        let relative = state_relative(relative)?;
+        let directory = self.open_dir(&relative)?;
+        let display = self.display_path(&relative);
+        let mut names = Vec::new();
+        for entry in directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+            if names.len() >= maximum_entries {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private directory exceeds its bounded entry limit".to_owned(),
+                });
+            }
+            names.push(entry.file_name());
+        }
+        Ok(names)
     }
 
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
@@ -511,7 +539,6 @@ impl FolderbaseState {
     ) -> Result<bool> {
         let stage = state_relative(stage)?;
         let destination = safe_workspace_relative(destination)?;
-        self.require_mutable(&stage)?;
         self.verify_still_attached()?;
 
         let (stage_parent, stage_name) = self.open_parent(&stage)?;
@@ -557,7 +584,6 @@ impl FolderbaseState {
     ) -> Result<String> {
         let stage = state_relative(stage)?;
         let destination = safe_workspace_relative(destination)?;
-        self.require_mutable(&stage)?;
         self.verify_still_attached()?;
 
         let (stage_parent, stage_name) = self.open_parent(&stage)?;
@@ -589,20 +615,6 @@ impl FolderbaseState {
         }
         self.verify_still_attached()?;
         Ok(stage_stable)
-    }
-
-    /// Verify that a workspace path still names the exact durable device-local
-    /// inode recorded by a restore cleanup receipt.
-    pub(crate) fn verify_workspace_regular_file_identity(
-        &self,
-        destination: &Path,
-        expected_identity_sha256: &str,
-    ) -> Result<()> {
-        self.verify_workspace_regular_file_identity_inner(
-            destination,
-            expected_identity_sha256,
-            None,
-        )
     }
 
     /// Verify both exact publication identity and sealed file fidelity when
@@ -680,6 +692,73 @@ impl FolderbaseState {
         self.verify_still_attached()
     }
 
+    /// Retain and revalidate the exact private authority link for a restore.
+    ///
+    /// This performs no rename or unlink. The transaction-unique stage stays
+    /// linked to the visible workspace file so later capture can distinguish
+    /// one Folderbase authority link from ordinary user-created hard links.
+    pub(crate) fn retain_workspace_restore_authority_with_hook(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        expected_identity_sha256: &str,
+        expected_fidelity: Option<(&str, u64, bool)>,
+        mut checkpoint: impl FnMut(bool),
+    ) -> Result<()> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let stage_file = open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+
+        for after_stage_boundary in [false, true] {
+            verify_restore_retained_stage(
+                &stage_parent,
+                &stage_name,
+                &stage_display,
+                &stage_file,
+                expected_identity_sha256,
+            )?;
+            verify_restore_retirement_publication(
+                &stage_file,
+                &stage_display,
+                &destination_parent,
+                &destination_name,
+                &destination_display,
+                expected_identity_sha256,
+                expected_fidelity,
+            )?;
+            checkpoint(after_stage_boundary);
+        }
+        verify_restore_retained_stage(
+            &stage_parent,
+            &stage_name,
+            &stage_display,
+            &stage_file,
+            expected_identity_sha256,
+        )?;
+        verify_restore_retirement_publication(
+            &stage_file,
+            &stage_display,
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+            expected_identity_sha256,
+            expected_fidelity,
+        )?;
+        self.verify_still_attached()
+    }
+
+    /// Legacy destructive retirement is compiled out. Restore authorities are
+    /// retained until a future explicit maintenance protocol can prune them
+    /// without reintroducing pathname overwrite or check-then-unlink races.
+    #[cfg(any())]
+    #[allow(dead_code)]
     /// Retire only the exact private stage for a restore-owned workspace file.
     ///
     /// A transaction-owned rescue hard link protects the staged inode across
@@ -890,6 +969,15 @@ impl FolderbaseState {
                 });
             }
             checkpoint(false);
+            verify_restore_retirement_publication(
+                retained_file,
+                retained_display,
+                &destination_parent,
+                &destination_name,
+                &destination_display,
+                expected_identity_sha256,
+                expected_fidelity,
+            )?;
             stage_parent
                 .rename(
                     &stage_name,
@@ -960,6 +1048,15 @@ impl FolderbaseState {
                 });
             }
             checkpoint(true);
+            verify_restore_retirement_publication(
+                retained_file,
+                retained_display,
+                &destination_parent,
+                &destination_name,
+                &destination_display,
+                expected_identity_sha256,
+                expected_fidelity,
+            )?;
             rescue_parent
                 .rename(
                     &rescue_name,
@@ -1170,18 +1267,6 @@ impl FolderbaseState {
         };
         let display = self.display_path(&relative);
         match parent.remove_file(&name) {
-            Ok(()) => sync_directory(&parent, &display),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(FolderbaseError::io(display, source)),
-        }
-    }
-
-    pub(crate) fn remove_empty_dir_durable(&self, relative: &Path) -> Result<()> {
-        let relative = state_relative(relative)?;
-        self.require_mutable(&relative)?;
-        let (parent, name) = self.open_parent(&relative)?;
-        let display = self.display_path(&relative);
-        match parent.remove_dir(&name) {
             Ok(()) => sync_directory(&parent, &display),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(FolderbaseError::io(display, source)),
@@ -1488,48 +1573,87 @@ fn open_regular_file_identity(file: &cap_std::fs::File, display: &Path) -> Resul
     Handle::from_file(file).map_err(|source| FolderbaseError::io(display, source))
 }
 
+fn verify_restore_retirement_publication(
+    retained_file: &cap_std::fs::File,
+    retained_display: &Path,
+    destination_parent: &Dir,
+    destination_name: &OsStr,
+    destination_display: &Path,
+    expected_identity_sha256: &str,
+    expected_fidelity: Option<(&str, u64, bool)>,
+) -> Result<()> {
+    if stable_regular_file_identity_sha256(retained_file, retained_display)?
+        != expected_identity_sha256
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: retained_display.to_path_buf(),
+            message: "restore private state no longer has the published identity".to_owned(),
+        });
+    }
+    let mut retained_fidelity = retained_file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(retained_display, source))?;
+    if let Some((digest, bytes, executable)) = expected_fidelity {
+        verify_open_regular_file(
+            &mut retained_fidelity,
+            digest,
+            bytes,
+            executable,
+            retained_display,
+        )?;
+    }
+
+    let mut destination_file =
+        open_regular_file_nofollow(destination_parent, destination_name, destination_display)?;
+    if stable_regular_file_identity_sha256(&destination_file, destination_display)?
+        != expected_identity_sha256
+        || open_regular_file_identity(&destination_file, destination_display)?
+            != open_regular_file_identity(retained_file, retained_display)?
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: destination_display.to_path_buf(),
+            message: "workspace file no longer has the restore publication identity".to_owned(),
+        });
+    }
+    if let Some((digest, bytes, executable)) = expected_fidelity {
+        verify_open_regular_file(
+            &mut destination_file,
+            digest,
+            bytes,
+            executable,
+            destination_display,
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_restore_retained_stage(
+    stage_parent: &Dir,
+    stage_name: &OsStr,
+    stage_display: &Path,
+    retained_file: &cap_std::fs::File,
+    expected_identity_sha256: &str,
+) -> Result<()> {
+    let visible_stage = open_regular_file_nofollow(stage_parent, stage_name, stage_display)?;
+    if open_regular_file_identity(&visible_stage, stage_display)?
+        != open_regular_file_identity(retained_file, stage_display)?
+        || stable_regular_file_identity_sha256(&visible_stage, stage_display)?
+            != expected_identity_sha256
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: stage_display.to_path_buf(),
+            message: "restore authority path no longer names the retained stage".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn stable_regular_file_identity_sha256(file: &cap_std::fs::File, display: &Path) -> Result<String> {
     let file = file
         .try_clone()
         .map_err(|source| FolderbaseError::io(display, source))?
         .into_std();
-    let mut digest = Sha256::new();
-    digest.update(b"folderbase-workspace-file-identity-v1");
-    digest.update([0]);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let metadata = file
-            .metadata()
-            .map_err(|source| FolderbaseError::io(display, source))?;
-        digest.update(b"unix");
-        digest.update([0]);
-        digest.update(metadata.dev().to_be_bytes());
-        digest.update(metadata.ino().to_be_bytes());
-    }
-
-    #[cfg(windows)]
-    {
-        let information = winapi_util::file::information(&file)
-            .map_err(|source| FolderbaseError::io(display, source))?;
-        digest.update(b"windows");
-        digest.update([0]);
-        digest.update((information.volume_serial_number() as u32).to_be_bytes());
-        digest.update(information.file_index().to_be_bytes());
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = file;
-        return Err(FolderbaseError::InvalidRecord {
-            path: display.to_path_buf(),
-            message: "stable file identity is unavailable on this platform".to_owned(),
-        });
-    }
-
-    Ok(format!("{:x}", digest.finalize()))
+    stable_file_identity_sha256(&file).map_err(|source| FolderbaseError::io(display, source))
 }
 
 fn verify_regular_file(
@@ -1551,6 +1675,8 @@ fn verify_open_regular_file(
     executable: bool,
     display: &Path,
 ) -> Result<()> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| FolderbaseError::io(display, source))?;
     #[cfg(not(unix))]
     let _ = executable;
     verify_open_regular_metadata(file, bytes, display)?;
