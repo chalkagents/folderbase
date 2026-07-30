@@ -5053,6 +5053,106 @@ mod tests {
             .expect("completed cleanup must leave capture unblocked");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn coordinated_modified_receipt_and_active_rewrite_cannot_retire_forged_state() {
+        use std::{cell::RefCell, os::unix::fs::PermissionsExt};
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let transaction_directory = RefCell::new(None);
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::TargetPublished {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    let directory = root
+                        .path()
+                        .join(restore_transaction_directory(&transaction));
+                    transaction_directory.replace(Some(directory.clone()));
+                    fs::write(root.path().join("active.bin"), b"user-edited restore")
+                        .expect("edit restored target in place");
+                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
+                        .expect("deny private stage cleanup");
+                }
+            })
+            .expect_err("private-stage cleanup failure must be reported");
+
+        let real_transaction_directory = transaction_directory
+            .into_inner()
+            .expect("real transaction directory");
+        fs::set_permissions(
+            &real_transaction_directory,
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("restore cleanup permissions");
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let mut forged = read_active_restore_transaction(&state)
+            .expect("active restore")
+            .expect("durable active restore");
+        forged.transaction_id = "fbrestore_00000000-0000-8000-8000-000000000001".to_owned();
+        let forged_directory = root
+            .path()
+            .join(restore_transaction_directory(&forged));
+        fs::create_dir(&forged_directory).expect("forged transaction directory");
+        fs::hard_link(
+            root.path().join("active.bin"),
+            forged_directory.join("content"),
+        )
+        .expect("forged private link");
+        state
+            .replace(
+                Path::new(ACTIVE_RESTORE_TRANSACTION_PATH),
+                &encode_restore_transaction(&forged).expect("forged active bytes"),
+            )
+            .expect("coordinated active rewrite");
+        state
+            .replace(
+                Path::new(RESTORE_CLEANUP_RECOVERY_PATH),
+                &encode_restore_cleanup_recovery(&RestoreCleanupRecovery {
+                    format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
+                    disposition: RestoreCleanupDisposition::Modified,
+                    transaction: forged.clone(),
+                })
+                .expect("forged cleanup bytes"),
+            )
+            .expect("coordinated cleanup rewrite");
+        drop(state);
+        drop(store);
+
+        let error = FolderbaseVersionStore::open(root.path())
+            .expect("fresh-process reopen")
+            .restore_tombstone("active.bin")
+            .expect_err("mutable journals cannot assign cleanup ownership");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::InvalidRestoreTransaction(_)
+        ));
+        assert!(
+            real_transaction_directory.join("content").exists(),
+            "forged cleanup must not strand and forget the real private stage"
+        );
+        assert!(
+            forged_directory.join("content").exists(),
+            "untrusted forged state must not be deleted"
+        );
+        assert!(
+            root.path().join(ACTIVE_RESTORE_TRANSACTION_PATH).exists(),
+            "global restore intent must remain until authority is proven"
+        );
+    }
+
     #[test]
     fn successful_restore_retires_its_private_transaction_directory() {
         let root = folderbase();
