@@ -6360,6 +6360,21 @@ mod tests {
         assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::AfterStageRetirement);
     }
 
+    #[test]
+    fn same_inode_edit_after_cleanup_intent_retirement_never_returns_restored() {
+        assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::CleanupIntentRetired);
+    }
+
+    #[test]
+    fn same_inode_edit_after_completion_durability_never_returns_restored() {
+        assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::CompletionDurable);
+    }
+
+    #[test]
+    fn same_inode_edit_at_cleanup_completion_never_returns_restored() {
+        assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::CleanupComplete);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_failure_reopens_from_durable_recovery_and_converges() {
