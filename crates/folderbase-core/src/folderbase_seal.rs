@@ -6013,6 +6013,53 @@ mod tests {
         assert!(captured.created());
     }
 
+    fn assert_cleanup_hook_edit_never_returns_restored(checkpoint_to_edit: RestoreCheckpoint) {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let edited = b"user edit during restore cleanup";
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &checkpoint_to_edit {
+                    fs::write(root.path().join("active.bin"), edited)
+                        .expect("same-inode cleanup edit");
+                }
+            })
+            .expect_err("cleanup edit must prevent restored-success acknowledgement");
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("preserved cleanup edit"),
+            edited
+        );
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh-process reopen");
+        assert!(matches!(
+            reopened.restore_tombstone("active.bin"),
+            Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                if path == Path::new("active.bin")
+        ));
+        reopened
+            .seal_capture(reopened.plan_capture().expect("edited capture"))
+            .expect("cleanup edit must remain capturable");
+    }
+
+    #[test]
+    fn same_inode_edit_before_stage_retirement_never_returns_restored() {
+        assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::BeforeStageRetirement);
+    }
+
+    #[test]
+    fn same_inode_edit_after_stage_retirement_never_returns_restored() {
+        assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::AfterStageRetirement);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_failure_reopens_from_durable_recovery_and_converges() {
