@@ -447,6 +447,25 @@ impl FolderbaseState {
         bytes: u64,
         executable: bool,
     ) -> Result<bool> {
+        self.publish_workspace_restore_with_hook(
+            stage,
+            destination,
+            digest,
+            bytes,
+            executable,
+            |_| {},
+        )
+    }
+
+    pub(crate) fn publish_workspace_restore_with_hook(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+        mut checkpoint: impl FnMut(bool),
+    ) -> Result<bool> {
         let stage = state_relative(stage)?;
         let destination = safe_workspace_relative(destination)?;
         self.require_mutable(&stage)?;
@@ -461,9 +480,11 @@ impl FolderbaseState {
             &stage_display,
         )?;
         let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        checkpoint(false);
         let destination_display = self.display_root.join(&destination);
         match stage_parent.hard_link(&stage_name, &destination_parent, &destination_name) {
             Ok(()) => {
+                checkpoint(true);
                 sync_directory(&destination_parent, &destination_display)?;
                 verify_regular_file(
                     &destination_parent,

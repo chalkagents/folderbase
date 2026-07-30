@@ -143,6 +143,8 @@ enum CaptureCheckpoint {
 enum RestoreCheckpoint {
     JournalDurable,
     StageDurable,
+    WorkspaceParentOpened,
+    WorkspaceLinkCreated,
     TargetPublished,
     VersionDurable,
     HeadReplaced,
@@ -2041,12 +2043,19 @@ fn stage_and_publish_restore(
     state.stage_restore_blob(&source, &stage, digest, bytes, executable)?;
     checkpoint(&RestoreCheckpoint::StageDurable);
     let result = state
-        .publish_workspace_restore(
+        .publish_workspace_restore_with_hook(
             &stage,
             Path::new(&transaction.path),
             digest,
             bytes,
             executable,
+            |linked| {
+                checkpoint(if linked {
+                    &RestoreCheckpoint::WorkspaceLinkCreated
+                } else {
+                    &RestoreCheckpoint::WorkspaceParentOpened
+                });
+            },
         )
         .map(|_| ())
         .map_err(|error| match error {
@@ -7264,6 +7273,124 @@ mod tests {
         ));
         assert!(!outside.path().join("active.bin").exists());
         assert!(!root.path().join("detached-docs/active.bin").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_parent_detach_after_capability_open_never_publishes_or_moves_head() {
+        use std::os::unix::fs::symlink;
+
+        let root = folderbase();
+        fs::create_dir(root.path().join("docs")).expect("docs");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("docs/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("docs/active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let outside =
+            tempfile::tempdir_in(root.path().parent().expect("fixture parent")).expect("outside");
+        let detached = outside.path().join("detached-docs");
+        let redirect = outside.path().join("redirect");
+        fs::create_dir(&redirect).expect("redirect");
+
+        let error = store
+            .restore_tombstone_with_hook("docs/active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::WorkspaceParentOpened {
+                    fs::rename(root.path().join("docs"), &detached)
+                        .expect("detach opened workspace parent");
+                    symlink(&redirect, root.path().join("docs"))
+                        .expect("install redirecting workspace parent");
+                }
+            })
+            .expect_err("detached parent capability must fail before publication");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::LocalStore(_)
+                | FolderbaseCaptureError::RestoreTargetOccupied(_)
+        ));
+        assert!(!detached.join("active.bin").exists());
+        assert!(!redirect.join("active.bin").exists());
+        assert_eq!(
+            local_head(root.path())
+                .expect("deletion Head remains")
+                .version_id,
+            deletion.version_id()
+        );
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let transaction = read_active_restore_transaction(&state)
+            .expect("active restore read")
+            .expect("restore journal remains");
+        assert!(root.path().join(restore_stage_path(&transaction)).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_parent_detach_after_link_leaves_only_owned_orphan_and_never_moves_head() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("docs")).expect("docs");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("docs/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("docs/active.bin")).expect("delete");
+        let deletion = store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let outside =
+            tempfile::tempdir_in(root.path().parent().expect("fixture parent")).expect("outside");
+        let detached = outside.path().join("detached-docs");
+
+        let error = store
+            .restore_tombstone_with_hook("docs/active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::WorkspaceLinkCreated {
+                    fs::rename(root.path().join("docs"), &detached)
+                        .expect("detach linked workspace parent");
+                    fs::create_dir(root.path().join("docs"))
+                        .expect("install replacement workspace parent");
+                    fs::write(root.path().join("docs/sentinel"), b"replacement\n")
+                        .expect("replacement sentinel");
+                }
+            })
+            .expect_err("detached linked parent must fail before durable restore progress");
+        assert!(matches!(
+            error,
+            FolderbaseCaptureError::LocalStore(_)
+                | FolderbaseCaptureError::RestoreTargetOccupied(_)
+        ));
+        assert_eq!(
+            fs::read(detached.join("active.bin")).expect("operation-owned detached link"),
+            b"first opaque bytes",
+            "a concurrently moved directory may retain only the exact operation-owned link"
+        );
+        assert_eq!(
+            fs::read(root.path().join("docs/sentinel")).expect("replacement sentinel"),
+            b"replacement\n"
+        );
+        assert!(!root.path().join("docs/active.bin").exists());
+        assert_eq!(
+            local_head(root.path())
+                .expect("deletion Head remains")
+                .version_id,
+            deletion.version_id()
+        );
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let transaction = read_active_restore_transaction(&state)
+            .expect("active restore read")
+            .expect("restore journal remains");
+        assert!(root.path().join(restore_stage_path(&transaction)).exists());
     }
 
     #[test]
