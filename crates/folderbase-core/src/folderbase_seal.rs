@@ -132,6 +132,7 @@ enum RestoreCheckpoint {
     HeadReplaced,
     PublicationVerified,
     ProjectionDurable,
+    CleanupRecoveryDurable,
     CleanupComplete,
 }
 
@@ -4533,6 +4534,73 @@ mod tests {
         assert!(
             transaction_entries.is_empty(),
             "successful cleanup must not leak one directory per restore"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failure_reopens_from_durable_recovery_and_converges() {
+        use std::{cell::RefCell, os::unix::fs::PermissionsExt};
+
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let transaction_directory = RefCell::new(None);
+
+        let cleanup_error = store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::JournalDurable {
+                    let transaction = read_active_restore_transaction(
+                        &FolderbaseState::open(root.path()).expect("state"),
+                    )
+                    .expect("restore journal")
+                    .expect("active restore");
+                    transaction_directory.replace(Some(
+                        root.path()
+                            .join(restore_transaction_directory(&transaction)),
+                    ));
+                }
+                if checkpoint == &RestoreCheckpoint::CleanupRecoveryDurable {
+                    fs::set_permissions(
+                        transaction_directory
+                            .borrow()
+                            .as_ref()
+                            .expect("transaction directory"),
+                        fs::Permissions::from_mode(0o500),
+                    )
+                    .expect("deny stage cleanup");
+                }
+            })
+            .expect_err("stage cleanup failure must be reported");
+        assert!(matches!(
+            cleanup_error,
+            FolderbaseCaptureError::LocalStore(FolderbaseError::Io { .. })
+        ));
+        let transaction_directory = transaction_directory
+            .into_inner()
+            .expect("transaction directory");
+        fs::set_permissions(&transaction_directory, fs::Permissions::from_mode(0o700))
+            .expect("restore cleanup permissions");
+        drop(store);
+
+        let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
+        let restored = reopened
+            .restore_tombstone("active.bin")
+            .expect("durable cleanup retry");
+        assert!(!restored.created());
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("restored workspace bytes"),
+            b"first opaque bytes"
+        );
+        assert!(
+            !transaction_directory.exists(),
+            "retry must finish private cleanup"
         );
     }
 
