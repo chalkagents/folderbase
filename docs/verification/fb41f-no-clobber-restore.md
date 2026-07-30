@@ -267,6 +267,22 @@ blob named by the current Head Tombstone.
   its closed released schema, and all normalized semantic invariants instead
   of rejecting a larger typed reserialization that is never written. Current
   and newly assigned journals still pass the current bounded encoder.
+- `2038d92` / `7acf3e0` close the released assignment schema independently of
+  the current assignment type. A hybrid flat-Head journal carrying a
+  current-only link commitment is rejected rather than bypassing current-wire
+  preflight. The same regression preserves the original transaction ID, admits
+  valid released JSON plus trailing whitespace at the actual 64 MiB raw bound,
+  rejects one byte over and truncated JSON, and retains the separate
+  raw-smaller-than-normalized recovery case.
+- `35be1ca` locks the second exact authority-set revalidation after the
+  `AfterObjectBytesRead` hook: a same-link-count receipt/stage swap fails without
+  moving the restored Head.
+- `87b6729` / `f1f6c1a` prove and remove the last planning-time content access
+  for retained restore links. A restored 10 GiB sparse inode with mode `000`
+  remains plannable with its exact authority commitment. Unix/macOS compare
+  no-follow metadata identities; Windows uses zero-data-access no-follow
+  handles and the complete File ID. Seal-time byte and opened-handle topology
+  verification are unchanged.
 
 The local threat boundary is intentionally KISS: `.folderbase/` is trusted
 engine-owned state analogous to `.git/`. The regressions prove malformed or

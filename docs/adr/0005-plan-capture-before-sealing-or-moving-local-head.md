@@ -160,14 +160,18 @@ Folderbase Version envelope. Its assignment and Tombstone aggregate, every
 path, kind, observed identity, reused Object ID, prior Object Version,
 root-manifest parent, and complete sorted target Tombstone set are matched
 exactly to the approved plan and verified prior Head.
-For a regular file with retained restore authority, the plan and active journal
-also bind the opened source's exact live link count and one canonical,
+For a regular file with retained restore authority, metadata-only planning and
+the active journal also bind the exact live link count and one canonical,
 ASCII-sorted set of authority receipt paths, SHA-256 digests of the exact
-receipt bytes, retained stage paths, and publication identities. Default or
-released records with no such field normalize only to one visible link and no
-authorities, and preserve their original serialized bytes and Head-anchored
-SHA-256. Default-only plans whose Head is absent or capture-transaction-derived
-retain the released v1 digest domain and its exact flat
+receipt bytes, retained stage paths, and publication identities. Planning
+compares retained-stage and workspace identity without data access: Unix uses
+no-follow directory metadata and Windows uses zero-data-access, no-follow
+metadata handles. Default or released records with no such field normalize only
+to one visible link and no authorities, and preserve their original serialized
+bytes and Head-anchored SHA-256. The released-v1 decoder has its own closed
+assignment type and rejects current-only link-commitment fields. Default-only
+plans whose Head is absent or capture-transaction-derived retain the released
+v1 digest domain and its exact flat
 `current_head.transaction_sha256` encoding. Authority-bearing plans and plans
 whose Head is version-derived use the typed-authority v2 domain. Core
 re-enumerates that exact set and reads link count from the retained source
@@ -182,7 +186,9 @@ and normalized semantic invariants; it is not rejected merely because its
 larger typed in-memory representation would exceed the same wire bound.
 Newly assigned and current journals remain preflighted through the current
 encoder. The exact raw journal bytes continue to define capture-transaction
-Head authority.
+Head authority. Accepted trailing JSON whitespace remains in that exact raw
+authority. The actual maximum raw wire is accepted, one byte over is refused,
+and truncated JSON is rejected.
 Included content streams are capped at the exact approved length plus one byte:
 a growing source is refused as a concurrent state change and staging is
 removed, instead of reading an attacker-controlled stream to EOF. The active

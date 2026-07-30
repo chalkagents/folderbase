@@ -764,10 +764,13 @@ the local Core threat model. Cloud grants and hosted Live Folder authority are
 separately authenticated and cannot be obtained from local metadata.
 
 Core reads protocol control bytes needed to interpret the root—the manifest,
-`.folderbaseignore`, and optional `.folderbase/local/head.json`—but does not open
-ordinary file contents while planning. PDFs, videos, CSV, SQLite, Git packs, and
-unknown files are all opaque regular files. Nested Folderbases, hard links, and
-special nodes are typed exclusions; symlinks are not followed.
+`.folderbaseignore`, optional `.folderbase/local/head.json`, and bounded retained
+restore-authority receipts—but does not request data access to ordinary files or
+their retained private links while planning. Unix planning compares no-follow
+directory metadata; Windows uses zero-data-access, no-follow metadata handles.
+PDFs, videos, CSV, SQLite, Git packs, and unknown files are all opaque regular
+files. Nested Folderbases, hard links, and special nodes are typed exclusions;
+symlinks are not followed.
 
 Core defaults exclude known generated trees before applying ordered user rules.
 Required `.folderbaseignore` and `FOLDERBASE.md` bindings cannot be ignored, and
@@ -867,12 +870,14 @@ of this object in the displayed field order:
 
 Released v1 non-genesis capture journals stored the prior authority as
 `expected_head.transaction_sha256`. The bounded active-journal reader accepts
-that exact closed nested wire as capture authority, converts it to
+that exact closed nested wire and its exact released assignment shape as capture
+authority, converts it to
 `capture_transaction_v1` only in memory, and separately retains SHA-256 of the
 exact journal bytes that were read. Pre-Head execution and committed-Head
 recovery both bind and compare that retained byte digest; normalized typed
 serialization is never substituted for a digest already named by a released
-Head.
+Head. Current-only assignment fields cannot be smuggled through the released
+decoder under a flat released Head.
 
 Sealing opens the existing retained state capability and re-attests the inert
 plan before any lock, layout, recovery, or capture publication. Capture-specific
@@ -885,14 +890,16 @@ Assignment and Tombstone aggregate cardinality, every planned
 path/kind/observation, reused Object ID, prior Object Version, root-manifest
 lineage, expected Head, and the complete sorted target Tombstone set are matched
 to the approved plan and verified parent before object writes.
-For each regular source with retained restore links, the plan and journal also
-commit the opened handle's expected live link count and a canonical sorted set
+For each regular source with retained restore links, metadata-only planning and
+the journal also commit the expected live link count and a canonical sorted set
 of exact authority receipt paths and byte digests, retained stage paths, and
 publication identities. Missing fields in released journals normalize only to
 one live link and an empty authority set and remain absent when serialized, so
-their original Head-anchored SHA-256 is preserved. Default-only plans retain the
-v1 plan-digest domain when Head is absent or capture-transaction-derived. That
-v1 encoder reproduces the released flat
+their original Head-anchored SHA-256 is preserved. The released decoder uses a
+closed historical assignment type; a current-only link commitment is an unknown
+field rather than a compatibility alias. Default-only plans retain the v1
+plan-digest domain when Head is absent or capture-transaction-derived. That v1
+encoder reproduces the released flat
 `current_head.transaction_sha256` representation byte-for-byte. A
 version-derived Head or any authority-bearing entry uses the typed v2
 plan-digest domain. Core re-enumerates and revalidates that exact set from the
@@ -903,7 +910,10 @@ preserves that wire kind, exact raw byte length, and exact raw SHA-256.
 Preflight applies the byte bound to those raw bytes and validates the released
 closed schema plus normalized transaction semantics; it does not apply the same
 wire bound to a larger typed reserialization that is never persisted. Current
-and newly assigned journals remain bounded through the current encoder.
+and newly assigned journals remain bounded through the current encoder. JSON
+whitespace accepted by the released decoder remains part of its raw authority:
+the exact maximum is accepted, one byte over is refused, and truncated JSON is
+never normalized into a transaction.
 The journal makes every persistence boundary retryable with the exact assigned
 IDs and preserves the prior Head until the complete next version is durable.
 
