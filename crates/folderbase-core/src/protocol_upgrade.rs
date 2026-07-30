@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
     FolderbaseError, FolderbaseVersionStore, LocalVersionStore, MAX_FOLDERBASEIGNORE_BYTES, Result,
@@ -34,7 +35,7 @@ const ACTIVE_REORGANIZATION_PATH: &str = ".folderbase/reorganizations/active.jso
 const MIGRATIONS_PATH: &str = ".folderbase/migrations";
 const UPGRADE_INTENT_DIRECTORY: &str = "transactions/protocol-upgrades";
 const UPGRADE_INTENT_PATH: &str = "transactions/protocol-upgrades/active.json";
-const UPGRADE_INTENT_FORMAT: &str = "folderbase-protocol-upgrade-intent-v1";
+const UPGRADE_INTENT_FORMAT: &str = "folderbase-protocol-upgrade-intent-v2";
 const MAX_PENDING_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MIGRATION_DIRECTORIES: usize = 16_384;
 
@@ -88,6 +89,8 @@ pub struct ProtocolUpgradePlan {
     root_instance_sha256: String,
     #[serde(skip_serializing)]
     attested_ignore_snapshot: Option<IgnorePolicySnapshot>,
+    #[serde(skip_serializing)]
+    exchange_owner: Option<String>,
     #[serde(skip_serializing)]
     already_applied: bool,
 }
@@ -149,6 +152,7 @@ impl IgnorePolicySnapshot {
 #[serde(deny_unknown_fields)]
 struct ProtocolUpgradeIntent {
     format: String,
+    exchange_owner: String,
     folderbase_id: String,
     root_instance_sha256: String,
     from_protocol_version: String,
@@ -232,6 +236,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
                 attested_manifest_sha256: attestation.manifest_sha256,
                 root_instance_sha256: attestation.root_instance_sha256,
                 attested_ignore_snapshot: None,
+                exchange_owner: None,
                 already_applied: true,
             });
         };
@@ -248,6 +253,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
             attested_manifest_sha256: attestation.manifest_sha256,
             root_instance_sha256: attestation.root_instance_sha256,
             attested_ignore_snapshot: None,
+            exchange_owner: None,
             already_applied: true,
         });
     }
@@ -365,6 +371,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
         attested_manifest_sha256: attestation.manifest_sha256,
         root_instance_sha256: attestation.root_instance_sha256,
         attested_ignore_snapshot: Some(ignore_snapshot),
+        exchange_owner: None,
         already_applied: false,
     })
 }
@@ -423,10 +430,11 @@ fn apply_protocol_upgrade_with_hooks(
     let intent = ProtocolUpgradeIntent::from_plan(&current)?;
     prepare_protocol_upgrade_intent(&state, &plan.root, &intent)?;
     state
-        .compare_exchange_exact_with_hook(
+        .compare_exchange_exact_owned_with_hook(
             Path::new(MANIFEST_PATH),
             &plan.attested_manifest,
             &plan.upgraded_manifest,
+            &intent.exchange_owner,
             before_activation,
         )
         .map_err(|error| match error {
@@ -609,6 +617,10 @@ impl ProtocolUpgradeIntent {
             .map_err(|_| invalid_upgrade(&plan.root, "target manifest is not UTF-8"))?;
         Ok(Self {
             format: UPGRADE_INTENT_FORMAT.to_owned(),
+            exchange_owner: plan
+                .exchange_owner
+                .clone()
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
             folderbase_id: plan.folderbase_id.clone(),
             root_instance_sha256: plan.root_instance_sha256.clone(),
             from_protocol_version: plan.from_protocol_version.clone(),
@@ -624,6 +636,10 @@ impl ProtocolUpgradeIntent {
 
     fn validate(&self, root: &Path) -> Result<()> {
         if self.format != UPGRADE_INTENT_FORMAT
+            || !matches!(
+                Uuid::parse_str(&self.exchange_owner),
+                Ok(owner) if owner.hyphenated().to_string() == self.exchange_owner
+            )
             || self.to_protocol_version != "0.5.0"
             || !valid_sha256(&self.root_instance_sha256)
             || !valid_sha256(&self.source_manifest_sha256)
@@ -737,6 +753,7 @@ fn plan_from_pending_intent(
         attested_manifest_sha256: attestation.manifest_sha256,
         root_instance_sha256: attestation.root_instance_sha256,
         attested_ignore_snapshot: Some(intent.ignore_snapshot),
+        exchange_owner: Some(intent.exchange_owner),
         already_applied: false,
     })
 }
@@ -799,9 +816,18 @@ fn recover_pending_protocol_upgrade(
     let manifest = state
         .read_bounded(Path::new("manifest.json"), MAX_FOLDERBASE_MANIFEST_BYTES)?
         .ok_or_else(|| invalid_upgrade(root, "manifest disappeared during upgrade recovery"))?;
+    attest_protocol_upgrade_recovery_root(state, root, &intent, &manifest)?;
+    state.recover_owned_exchange_artifacts(
+        Path::new(MANIFEST_PATH),
+        &intent.exchange_owner,
+        intent.source_bytes(),
+        intent.target_bytes(),
+    )?;
+    state.verify_still_attached()?;
     if manifest == intent.target_bytes() {
         match read_ignore_snapshot(state, root) {
             Ok(snapshot) if snapshot == intent.ignore_snapshot => {
+                state.verify_still_attached()?;
                 state.remove_durable(Path::new(UPGRADE_INTENT_PATH))?;
                 return Ok(());
             }
@@ -819,8 +845,10 @@ fn recover_pending_protocol_upgrade(
             read_ignore_snapshot(state, root),
             Ok(ref snapshot) if snapshot == &intent.ignore_snapshot
         ) {
+            state.verify_still_attached()?;
             return Ok(());
         }
+        state.verify_still_attached()?;
         state.remove_durable(Path::new(UPGRADE_INTENT_PATH))?;
         return Err(FolderbaseError::ProtocolUpgradePlanChanged {
             expected: expected.digest.clone(),
@@ -839,10 +867,11 @@ fn rollback_protocol_upgrade(
     intent: &ProtocolUpgradeIntent,
 ) -> Result<()> {
     state
-        .compare_exchange_exact_with_hook(
+        .compare_exchange_exact_owned_with_hook(
             Path::new(MANIFEST_PATH),
             intent.target_bytes(),
             intent.source_bytes(),
+            &intent.exchange_owner,
             || {},
         )
         .map_err(|source| {
@@ -854,6 +883,30 @@ fn rollback_protocol_upgrade(
     attest_folderbase_root_with_profile_allowing_upgrade_recovery(root)
         .map_err(|source| invalid_upgrade(root, source.to_string()))?;
     state.remove_durable(Path::new(UPGRADE_INTENT_PATH))
+}
+
+fn attest_protocol_upgrade_recovery_root(
+    state: &FolderbaseState,
+    root: &Path,
+    intent: &ProtocolUpgradeIntent,
+    manifest: &[u8],
+) -> Result<()> {
+    state.verify_still_attached()?;
+    let (attestation, _, _) = attest_folderbase_root_with_profile_allowing_upgrade_recovery(root)
+        .map_err(|source| invalid_upgrade(root, source.to_string()))?;
+    state.verify_still_attached()?;
+    let manifest_sha256 = format!("{:x}", Sha256::digest(manifest));
+    if attestation.folderbase_id != intent.folderbase_id
+        || attestation.root_instance_sha256 != intent.root_instance_sha256
+        || attestation.manifest_sha256 != manifest_sha256
+        || (manifest != intent.source_bytes() && manifest != intent.target_bytes())
+    {
+        return Err(invalid_upgrade(
+            root,
+            "pending protocol-upgrade intent does not bind the attached physical root",
+        ));
+    }
+    Ok(())
 }
 
 fn read_ignore_snapshot(state: &FolderbaseState, root: &Path) -> Result<IgnorePolicySnapshot> {
@@ -999,18 +1052,15 @@ mod tests {
 
     fn substitute_root_with_recovery_surface(root: &Path, ignore: &[u8]) {
         let manifest = fs::read(root.join(".folderbase/manifest.json")).expect("live manifest");
-        let intent = fs::read(root.join(".folderbase").join(UPGRADE_INTENT_PATH))
-            .expect("durable intent");
+        let intent =
+            fs::read(root.join(".folderbase").join(UPGRADE_INTENT_PATH)).expect("durable intent");
         let detached = root.with_extension("detached");
         fs::rename(root, &detached).expect("detach original root");
         fs::create_dir_all(root.join(".folderbase").join(UPGRADE_INTENT_DIRECTORY))
             .expect("replacement state");
         fs::write(root.join(".folderbase/manifest.json"), manifest).expect("replacement manifest");
-        fs::write(
-            root.join(".folderbase").join(UPGRADE_INTENT_PATH),
-            intent,
-        )
-        .expect("replacement intent");
+        fs::write(root.join(".folderbase").join(UPGRADE_INTENT_PATH), intent)
+            .expect("replacement intent");
         fs::write(root.join("FOLDERBASE.md"), b"# User narrative\n").expect("replacement entry");
         fs::write(root.join(".folderbaseignore"), ignore).expect("replacement ignore");
     }
