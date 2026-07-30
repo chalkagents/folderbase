@@ -318,8 +318,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
     let upgraded_manifest_without_receipt = serde_json::to_string_pretty(&manifest)
         .map(|encoded| format!("{encoded}\n").into_bytes())
         .map_err(|source| FolderbaseError::json(&manifest_path, source))?;
-    decode_manifest_protocol_profile(&upgraded_manifest_without_receipt)
-        .map_err(|source| invalid_upgrade(&root, source.to_string()))?;
+    validate_generated_upgrade_manifest(&root, &upgraded_manifest_without_receipt)?;
 
     let mut digest = Sha256::new();
     digest.update(b"folderbase-protocol-upgrade-plan-v1\0");
@@ -361,8 +360,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
     let upgraded_manifest = serde_json::to_string_pretty(&manifest)
         .map(|encoded| format!("{encoded}\n").into_bytes())
         .map_err(|source| FolderbaseError::json(&manifest_path, source))?;
-    decode_manifest_protocol_profile(&upgraded_manifest)
-        .map_err(|source| invalid_upgrade(&root, source.to_string()))?;
+    validate_generated_upgrade_manifest(&root, &upgraded_manifest)?;
     Ok(ProtocolUpgradePlan {
         root,
         folderbase_id,
@@ -732,6 +730,18 @@ fn valid_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_generated_upgrade_manifest(root: &Path, manifest: &[u8]) -> Result<()> {
+    if u64::try_from(manifest.len()).unwrap_or(u64::MAX) > MAX_FOLDERBASE_MANIFEST_BYTES {
+        return Err(invalid_upgrade(
+            root,
+            "generated protocol-upgrade manifest exceeds the live manifest bound",
+        ));
+    }
+    decode_manifest_protocol_profile(manifest)
+        .map_err(|source| invalid_upgrade(root, source.to_string()))?;
+    Ok(())
 }
 
 fn plan_from_pending_intent(
