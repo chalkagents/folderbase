@@ -37,6 +37,10 @@ const UPGRADE_INTENT_DIRECTORY: &str = "transactions/protocol-upgrades";
 const UPGRADE_INTENT_PATH: &str = "transactions/protocol-upgrades/active.json";
 const UPGRADE_INTENT_FORMAT: &str = "folderbase-protocol-upgrade-intent-v2";
 const MAX_PENDING_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+// The intent embeds two manifests as JSON strings. Each manifest can require up
+// to twice its original bytes when quotes and escapes are encoded, while the
+// fixed record fields need only a small, closed amount of additional space.
+const MAX_PROTOCOL_UPGRADE_INTENT_BYTES: u64 = MAX_FOLDERBASE_MANIFEST_BYTES * 4 + 64 * 1024;
 const MAX_MIGRATION_DIRECTORIES: usize = 16_384;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -445,28 +449,33 @@ fn apply_protocol_upgrade_with_hooks(
             other => other,
         })?;
     after_activation()?;
-    let current_ignore_snapshot = read_ignore_snapshot(&state, &plan.root);
-    if !matches!(
-        current_ignore_snapshot,
-        Ok(ref actual) if actual == &intent.ignore_snapshot
-    ) {
-        rollback_protocol_upgrade(&state, &plan.root, &intent)?;
-        return Err(FolderbaseError::ProtocolUpgradePlanChanged {
-            expected: expected.digest.clone(),
-            actual: "ignore_policy_changed_at_activation".to_owned(),
-        });
-    }
-    let (attestation, _, profile) =
-        attest_folderbase_root_with_profile_allowing_upgrade_recovery(&plan.root)
-            .map_err(|source| invalid_upgrade(&plan.root, source.to_string()))?;
+    let activated_manifest = state
+        .read_bounded(Path::new("manifest.json"), MAX_FOLDERBASE_MANIFEST_BYTES)?
+        .ok_or_else(|| invalid_upgrade(&plan.root, "manifest disappeared after activation"))?;
+    let (attestation, profile) =
+        attest_protocol_upgrade_recovery_root(&state, &plan.root, &intent, &activated_manifest)?;
     if attestation.protocol_version != "0.5.0"
         || !matches!(profile, ManifestProtocolProfile::OrdinaryV05 { .. })
+        || activated_manifest != intent.target_bytes()
     {
         return Err(invalid_upgrade(
             &plan.root,
             "manifest activation did not produce the exact 0.5 profile",
         ));
     }
+    let current_ignore_snapshot = read_ignore_snapshot(&state, &plan.root);
+    if !matches!(
+        current_ignore_snapshot,
+        Ok(ref actual) if actual == &intent.ignore_snapshot
+    ) {
+        state.verify_still_attached()?;
+        rollback_protocol_upgrade(&state, &plan.root, &intent)?;
+        return Err(FolderbaseError::ProtocolUpgradePlanChanged {
+            expected: expected.digest.clone(),
+            actual: "ignore_policy_changed_at_activation".to_owned(),
+        });
+    }
+    state.verify_still_attached()?;
     state.remove_durable(Path::new(UPGRADE_INTENT_PATH))?;
     attest_folderbase_root_with_profile(&plan.root)
         .map_err(|source| invalid_upgrade(&plan.root, source.to_string()))?;
@@ -762,8 +771,10 @@ fn read_protocol_upgrade_intent(
     state: &FolderbaseState,
     root: &Path,
 ) -> Result<Option<ProtocolUpgradeIntent>> {
-    let Some(encoded) =
-        state.read_bounded_if_present(Path::new(UPGRADE_INTENT_PATH), MAX_PENDING_RECORD_BYTES)?
+    let Some(encoded) = state.read_bounded_if_present(
+        Path::new(UPGRADE_INTENT_PATH),
+        MAX_PROTOCOL_UPGRADE_INTENT_BYTES,
+    )?
     else {
         return Ok(None);
     };
@@ -785,12 +796,21 @@ fn prepare_protocol_upgrade_intent(
         .map_err(|source| {
             FolderbaseError::json(root.join(".folderbase").join(UPGRADE_INTENT_PATH), source)
         })?;
+    if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > MAX_PROTOCOL_UPGRADE_INTENT_BYTES {
+        return Err(invalid_upgrade(
+            root,
+            "protocol-upgrade intent exceeds its durable record bound",
+        ));
+    }
     state.ensure_private_dir(Path::new(UPGRADE_INTENT_DIRECTORY))?;
     match state.publish_new(Path::new(UPGRADE_INTENT_PATH), &encoded) {
         Ok(()) => Ok(()),
         Err(FolderbaseError::WouldOverwrite(_)) => {
             let existing = state
-                .read_bounded(Path::new(UPGRADE_INTENT_PATH), MAX_PENDING_RECORD_BYTES)?
+                .read_bounded(
+                    Path::new(UPGRADE_INTENT_PATH),
+                    MAX_PROTOCOL_UPGRADE_INTENT_BYTES,
+                )?
                 .ok_or_else(|| invalid_upgrade(root, "protocol-upgrade intent disappeared"))?;
             if existing == encoded {
                 Ok(())
@@ -866,6 +886,7 @@ fn rollback_protocol_upgrade(
     root: &Path,
     intent: &ProtocolUpgradeIntent,
 ) -> Result<()> {
+    state.verify_still_attached()?;
     state
         .compare_exchange_exact_owned_with_hook(
             Path::new(MANIFEST_PATH),
@@ -880,8 +901,17 @@ fn rollback_protocol_upgrade(
                 format!("protocol-upgrade rollback could not restore its source: {source}"),
             )
         })?;
-    attest_folderbase_root_with_profile_allowing_upgrade_recovery(root)
-        .map_err(|source| invalid_upgrade(root, source.to_string()))?;
+    let source_manifest = state
+        .read_bounded(Path::new("manifest.json"), MAX_FOLDERBASE_MANIFEST_BYTES)?
+        .ok_or_else(|| invalid_upgrade(root, "manifest disappeared during upgrade rollback"))?;
+    if source_manifest != intent.source_bytes() {
+        return Err(invalid_upgrade(
+            root,
+            "protocol-upgrade rollback did not restore its exact source",
+        ));
+    }
+    let _ = attest_protocol_upgrade_recovery_root(state, root, intent, &source_manifest)?;
+    state.verify_still_attached()?;
     state.remove_durable(Path::new(UPGRADE_INTENT_PATH))
 }
 
@@ -890,10 +920,11 @@ fn attest_protocol_upgrade_recovery_root(
     root: &Path,
     intent: &ProtocolUpgradeIntent,
     manifest: &[u8],
-) -> Result<()> {
+) -> Result<(crate::FolderbaseRootAttestation, ManifestProtocolProfile)> {
     state.verify_still_attached()?;
-    let (attestation, _, _) = attest_folderbase_root_with_profile_allowing_upgrade_recovery(root)
-        .map_err(|source| invalid_upgrade(root, source.to_string()))?;
+    let (attestation, _, profile) =
+        attest_folderbase_root_with_profile_allowing_upgrade_recovery(root)
+            .map_err(|source| invalid_upgrade(root, source.to_string()))?;
     state.verify_still_attached()?;
     let manifest_sha256 = format!("{:x}", Sha256::digest(manifest));
     if attestation.folderbase_id != intent.folderbase_id
@@ -906,7 +937,7 @@ fn attest_protocol_upgrade_recovery_root(
             "pending protocol-upgrade intent does not bind the attached physical root",
         ));
     }
-    Ok(())
+    Ok((attestation, profile))
 }
 
 fn read_ignore_snapshot(state: &FolderbaseState, root: &Path) -> Result<IgnorePolicySnapshot> {
