@@ -3992,19 +3992,13 @@ mod tests {
             drop(store);
 
             let reopened = FolderbaseVersionStore::open(root.path()).expect("reopen");
-            let restored = if fault == RestoreCheckpoint::CleanupComplete {
-                let head = local_head(root.path()).expect("completed Head");
-                assert_ne!(head.version_id, deletion.version_id());
-                reopened.read_version(&head.version_id).expect("completed")
-            } else {
-                let retry = reopened
-                    .restore_tombstone("active.bin")
-                    .expect("durable retry");
-                assert!(retry.created() || fault >= RestoreCheckpoint::HeadReplaced);
-                reopened
-                    .read_version(retry.version_id())
-                    .expect("restored version")
-            };
+            let retry = reopened
+                .restore_tombstone("active.bin")
+                .expect("every durable checkpoint must retain an exact retry result");
+            assert!(retry.created() || fault >= RestoreCheckpoint::HeadReplaced);
+            let restored = reopened
+                .read_version(retry.version_id())
+                .expect("restored version");
             assert_eq!(restored.parents(), &[deletion.version_id().to_owned()]);
             assert_eq!(
                 fs::read(root.path().join("active.bin")).expect("restored bytes"),
