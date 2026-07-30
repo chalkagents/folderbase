@@ -902,7 +902,12 @@ fn execute_restore_transaction(
             return Err(error);
         }
         checkpoint(&RestoreCheckpoint::PublicationVerified);
-        finish_restore_projection(store, local, state, transaction)?;
+        if let Err(error) = finish_restore_projection(store, local, state, transaction)
+            .and_then(|()| verify_restore_publication(store, state, transaction))
+        {
+            rollback_restore_head(store, state, transaction)?;
+            return Err(error);
+        }
         checkpoint(&RestoreCheckpoint::ProjectionDurable);
         true
     } else {
@@ -1122,6 +1127,7 @@ fn finish_restore_materialization(
     verify_restore_publication(store, state, transaction)?;
     checkpoint(&RestoreCheckpoint::PublicationVerified);
     finish_restore_projection(store, local, state, transaction)?;
+    verify_restore_publication(store, state, transaction)?;
     checkpoint(&RestoreCheckpoint::ProjectionDurable);
     Ok(())
 }
@@ -1177,7 +1183,7 @@ fn finish_restore_projection(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
-    let file = open_regular_beneath(&store.root_attestation.root, Path::new(&transaction.path))?;
+    let file = state.open_workspace_regular_file(Path::new(&transaction.path))?;
     let observed =
         fingerprint_std_file(&file, &store.root_attestation.root.join(&transaction.path))?;
     let assignment = CaptureAssignment {

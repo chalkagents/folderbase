@@ -486,6 +486,18 @@ impl FolderbaseState {
         }
     }
 
+    /// Open one ordinary workspace file through the retained physical-root
+    /// capability without consulting the ambient root path.
+    pub(crate) fn open_workspace_regular_file(&self, relative: &Path) -> Result<File> {
+        let relative = safe_workspace_relative(relative)?;
+        self.verify_still_attached()?;
+        let display = self.display_root.join(&relative);
+        let (parent, name) = self.open_workspace_parent(&relative)?;
+        let file = open_regular_file_nofollow(&parent, &name, &display)?;
+        self.verify_still_attached()?;
+        Ok(file.into_std())
+    }
+
     /// Revalidate one published restore against its retained private stage.
     ///
     /// Success proves that the ambient Folderbase root is still the retained
