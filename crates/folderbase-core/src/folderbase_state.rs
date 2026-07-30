@@ -498,6 +498,56 @@ impl FolderbaseState {
         Ok(file.into_std())
     }
 
+    /// Detect a user edit made through the exact workspace object published
+    /// by a restore transaction. A separately-created replacement is never
+    /// classified as transaction-owned, even when its bytes happen to match.
+    pub(crate) fn workspace_restore_was_modified_in_place(
+        &self,
+        stage: &Path,
+        destination: &Path,
+        digest: &str,
+        bytes: u64,
+        executable: bool,
+    ) -> Result<bool> {
+        let stage = state_relative(stage)?;
+        let destination = safe_workspace_relative(destination)?;
+        self.require_mutable(&stage)?;
+        self.verify_still_attached()?;
+
+        let (stage_parent, stage_name) = self.open_parent(&stage)?;
+        let stage_display = self.display_path(&stage);
+        let mut stage_file =
+            open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
+
+        let destination_display = self.display_root.join(&destination);
+        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let destination_file = open_regular_file_nofollow(
+            &destination_parent,
+            &destination_name,
+            &destination_display,
+        )?;
+        let destination_identity =
+            open_regular_file_identity(&destination_file, &destination_display)?;
+        if destination_identity != stage_identity {
+            return Ok(false);
+        }
+
+        let modified = match verify_open_regular_file(
+            &mut stage_file,
+            digest,
+            bytes,
+            executable,
+            &stage_display,
+        ) {
+            Ok(()) => false,
+            Err(FolderbaseError::InvalidRecord { .. }) => true,
+            Err(error) => return Err(error),
+        };
+        self.verify_still_attached()?;
+        Ok(modified)
+    }
+
     /// Revalidate one published restore against its retained private stage.
     ///
     /// Success proves that the ambient Folderbase root is still the retained

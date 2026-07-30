@@ -338,7 +338,12 @@ impl FolderbaseVersionStore {
             }
         };
 
-        execute_restore_transaction(self, &local, &state, &transaction, &mut checkpoint)
+        let result =
+            execute_restore_transaction(self, &local, &state, &transaction, &mut checkpoint);
+        if result.is_err() {
+            retire_modified_restore(&state, &transaction)?;
+        }
+        result
     }
 
     fn seal_capture_with_hook(
@@ -1066,6 +1071,50 @@ fn verify_restore_publication(
             }
             error => FolderbaseCaptureError::LocalStore(error),
         })
+}
+
+fn retire_modified_restore(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+) -> Result<bool, FolderbaseCaptureError> {
+    let digest = transaction
+        .binding
+        .content_sha256()
+        .expect("validated regular binding");
+    let bytes = transaction
+        .binding
+        .bytes()
+        .expect("validated regular binding");
+    let executable = transaction
+        .binding
+        .executable()
+        .expect("validated regular binding");
+    if !matches!(
+        state.workspace_restore_was_modified_in_place(
+            &restore_stage_path(transaction),
+            Path::new(&transaction.path),
+            digest,
+            bytes,
+            executable,
+        ),
+        Ok(true)
+    ) {
+        return Ok(false);
+    }
+    let Some(current_head) = read_head_record(state)? else {
+        return Ok(false);
+    };
+    if JournalHead::from(&current_head) != transaction.expected_head {
+        return Ok(false);
+    }
+
+    // The destination is the transaction-owned inode, but its bytes now
+    // belong to the user. Relinquish the durable intent before removing the
+    // private link so capture can immediately adopt that work without ever
+    // unlinking the visible workspace path.
+    remove_active_restore_transaction(state)?;
+    state.remove_durable(&restore_stage_path(transaction))?;
+    Ok(true)
 }
 
 fn rollback_restore_head(
