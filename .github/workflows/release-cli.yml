@@ -4,11 +4,23 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Core tag to build and backfill
+        required: true
+        type: string
+      publish_npm:
+        description: Publish npm after the native artifacts are ready
+        required: true
+        default: false
+        type: boolean
 
 permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 jobs:
   build-native:
@@ -31,8 +43,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
 
     steps:
-      - name: Check out the exact tag
+      - name: Check out distribution sources
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Check out the exact native Core tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: native-source
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -42,9 +60,9 @@ jobs:
       - name: Require tag and package versions to agree
         shell: bash
         run: |
-          release_version="${GITHUB_REF_NAME#v}"
+          release_version="${RELEASE_TAG#v}"
           package_version="$(
-            cargo metadata --format-version 1 --no-deps |
+            cargo metadata --manifest-path native-source/Cargo.toml --format-version 1 --no-deps |
               jq -r '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace package versions differ") end'
           )"
           npm_version="$(node -p "require('./packages/npm-cli/package.json').version")"
@@ -52,24 +70,30 @@ jobs:
           test "$release_version" = "$npm_version"
 
       - name: Build the native CLI
-        run: cargo build --locked --release --package folderbase-cli --target "${{ matrix.target }}"
+        run: |
+          cargo build \
+            --manifest-path native-source/Cargo.toml \
+            --locked \
+            --release \
+            --package folderbase-cli \
+            --target "${{ matrix.target }}"
 
       - name: Verify and stage the native CLI
         shell: bash
         run: |
-          release_version="${GITHUB_REF_NAME#v}"
-          binary="target/${{ matrix.target }}/release/folderbase"
+          release_version="${RELEASE_TAG#v}"
+          binary="native-source/target/${{ matrix.target }}/release/folderbase"
           test "$("$binary" --version)" = "folderbase $release_version"
           mkdir -p dist
           install -m 0755 \
             "$binary" \
-            "dist/folderbase-${GITHUB_REF_NAME}-${{ matrix.target }}"
+            "dist/folderbase-${RELEASE_TAG}-${{ matrix.target }}"
 
       - name: Upload the native CLI
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: native-${{ matrix.target }}
-          path: dist/folderbase-${{ github.ref_name }}-${{ matrix.target }}
+          path: dist/folderbase-${{ env.RELEASE_TAG }}-${{ matrix.target }}
           if-no-files-found: error
           retention-days: 1
 
@@ -84,7 +108,7 @@ jobs:
       id-token: write
 
     steps:
-      - name: Check out the exact tag
+      - name: Check out distribution sources
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Node.js
@@ -105,10 +129,10 @@ jobs:
         shell: bash
         run: |
           expected=(
-            "folderbase-${GITHUB_REF_NAME}-aarch64-apple-darwin"
-            "folderbase-${GITHUB_REF_NAME}-x86_64-apple-darwin"
-            "folderbase-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
-            "folderbase-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+            "folderbase-${RELEASE_TAG}-aarch64-apple-darwin"
+            "folderbase-${RELEASE_TAG}-x86_64-apple-darwin"
+            "folderbase-${RELEASE_TAG}-aarch64-unknown-linux-gnu"
+            "folderbase-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
           )
           test "$(find dist -maxdepth 1 -type f -name 'folderbase-*' | wc -l | tr -d ' ')" = "${#expected[@]}"
           for asset in "${expected[@]}"; do
@@ -129,35 +153,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             remote_assets="$(mktemp -d)"
             trap 'rm -rf "$remote_assets"' EXIT
             for asset in dist/*; do
               asset_name="$(basename "$asset")"
-              if gh release view "$GITHUB_REF_NAME" \
+              if gh release view "$RELEASE_TAG" \
                 --json assets \
                 --jq '.assets[].name' |
                 grep -Fqx "$asset_name"
               then
-                gh release download "$GITHUB_REF_NAME" \
+                gh release download "$RELEASE_TAG" \
                   --dir "$remote_assets" \
                   --pattern "$asset_name"
                 cmp "$asset" "$remote_assets/$asset_name"
               else
-                gh release upload "$GITHUB_REF_NAME" "$asset"
+                gh release upload "$RELEASE_TAG" "$asset"
               fi
             done
           else
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$RELEASE_TAG" \
               dist/* \
               --generate-notes \
-              --title "Folderbase Core $GITHUB_REF_NAME" \
+              --title "Folderbase Core $RELEASE_TAG" \
               --verify-tag
           fi
 
       - name: Use an OIDC-capable npm client
+        if: github.event_name == 'push' || inputs.publish_npm
         run: npm install --global npm@11.5.1
 
       - name: Publish the public npm launcher
+        if: github.event_name == 'push' || inputs.publish_npm
         working-directory: packages/npm-cli
         run: npm publish --access public
