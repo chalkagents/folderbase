@@ -2062,6 +2062,11 @@ fn stage_and_publish_restore(
             FolderbaseError::WouldOverwrite(path) => {
                 FolderbaseCaptureError::RestoreTargetOccupied(path)
             }
+            FolderbaseError::RestoreNamespaceRepairRequired(_) => {
+                FolderbaseCaptureError::RestoreNamespaceRepairRequired(
+                    Path::new(&transaction.path).to_path_buf(),
+                )
+            }
             error => FolderbaseCaptureError::LocalStore(error),
         });
     if result.is_ok() {
@@ -7434,6 +7439,121 @@ mod tests {
             b"first opaque bytes"
         );
         assert_ne!(restored.version_id(), deletion.version_id());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_parent_detach_during_cleanup_never_reports_success_and_can_resume_after_repair() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("docs")).expect("docs");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("docs/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("docs/active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let outside =
+            tempfile::tempdir_in(root.path().parent().expect("fixture parent")).expect("outside");
+        let detached = outside.path().join("detached-docs");
+
+        let error = store
+            .restore_tombstone_with_hook("docs/active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::BeforeStageRetirement {
+                    fs::rename(root.path().join("docs"), &detached)
+                        .expect("detach cleanup workspace parent");
+                    fs::create_dir(root.path().join("docs"))
+                        .expect("install replacement workspace parent");
+                    fs::write(root.path().join("docs/sentinel"), b"replacement\n")
+                        .expect("replacement sentinel");
+                }
+            })
+            .expect_err("cleanup must not acknowledge a detached publication");
+        assert!(matches!(error, FolderbaseCaptureError::LocalStore(_)));
+        assert_eq!(
+            fs::read(detached.join("active.bin")).expect("detached operation-owned publication"),
+            b"first opaque bytes"
+        );
+        assert_eq!(
+            fs::read(root.path().join("docs/sentinel")).expect("replacement sentinel"),
+            b"replacement\n"
+        );
+        assert!(!root.path().join("docs/active.bin").exists());
+
+        let state = FolderbaseState::open(root.path()).expect("state");
+        let transaction = read_active_restore_transaction(&state)
+            .expect("active restore read")
+            .expect("restore journal remains");
+        let cleanup = read_restore_cleanup_recovery(&state)
+            .expect("cleanup recovery read")
+            .expect("cleanup recovery remains");
+        assert_eq!(cleanup.transaction, transaction);
+        assert_eq!(
+            local_head(root.path())
+                .expect("forward Head remains recoverable")
+                .version_id,
+            transaction.target_version_id
+        );
+
+        fs::remove_dir_all(root.path().join("docs")).expect("remove replacement after inspection");
+        fs::rename(&detached, root.path().join("docs"))
+            .expect("explicitly return the operation-owned publication");
+        let restored = store
+            .restore_tombstone("docs/active.bin")
+            .expect("cleanup resumes after explicit namespace repair");
+        assert_eq!(restored.version_id(), transaction.target_version_id);
+        assert_eq!(
+            fs::read(root.path().join("docs/active.bin")).expect("restored bytes"),
+            b"first opaque bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restore_parent_capability_blocks_windows_directory_detach() {
+        let root = folderbase();
+        fs::create_dir(root.path().join("docs")).expect("docs");
+        fs::rename(
+            root.path().join("active.bin"),
+            root.path().join("docs/active.bin"),
+        )
+        .expect("nested active");
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("docs/active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let outside =
+            tempfile::tempdir_in(root.path().parent().expect("fixture parent")).expect("outside");
+        let detached = outside.path().join("detached-docs");
+        let mut rename_was_blocked = false;
+
+        store
+            .restore_tombstone_with_hook("docs/active.bin", |checkpoint| {
+                if checkpoint == &RestoreCheckpoint::WorkspaceParentOpened {
+                    rename_was_blocked = fs::rename(root.path().join("docs"), &detached).is_err();
+                    assert!(
+                        rename_was_blocked,
+                        "the retained Windows directory capability must deny delete-sharing"
+                    );
+                }
+            })
+            .expect("restore remains attached on Windows");
+        assert!(rename_was_blocked);
+        assert_eq!(
+            fs::read(root.path().join("docs/active.bin")).expect("restored bytes"),
+            b"first opaque bytes"
+        );
+        assert!(!detached.exists());
     }
 
     #[test]

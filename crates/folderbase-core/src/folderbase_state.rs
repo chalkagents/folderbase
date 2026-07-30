@@ -19,7 +19,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    FolderbaseError, Result, folderbase_restore_authority::stable_file_identity_sha256,
+    FolderbaseError, Result,
+    folderbase_restore_authority::{stable_file_identity_sha256, stable_file_link_count},
     root_attestation::metadata_is_link_or_reparse,
 };
 
@@ -44,6 +45,15 @@ pub(crate) struct FolderbaseState {
     state_identity: Handle,
     display_root: PathBuf,
     access: StateAccess,
+}
+
+struct WorkspaceTargetCapability {
+    parent: Dir,
+    parent_identity: Handle,
+    relative: PathBuf,
+    name: OsString,
+    parent_display: PathBuf,
+    display: PathBuf,
 }
 
 impl FolderbaseState {
@@ -471,79 +481,101 @@ impl FolderbaseState {
         self.require_mutable(&stage)?;
         let (stage_parent, stage_name) = self.open_parent(&stage)?;
         let stage_display = self.display_path(&stage);
-        verify_regular_file(
-            &stage_parent,
-            &stage_name,
-            digest,
-            bytes,
-            executable,
-            &stage_display,
-        )?;
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let mut stage_file =
+            open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
+        verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display)?;
+        let target = self.open_workspace_target_capability(&destination)?;
         checkpoint(false);
-        let destination_display = self.display_root.join(&destination);
-        match stage_parent.hard_link(&stage_name, &destination_parent, &destination_name) {
-            Ok(()) => {
-                checkpoint(true);
-                sync_directory(&destination_parent, &destination_display)?;
+        let visible_parent = self.reopen_workspace_target_capability(&target)?;
+        match visible_parent.symlink_metadata(&target.name) {
+            Ok(_) => {
+                let destination_identity =
+                    regular_file_identity(&visible_parent, &target.name, &target.display)
+                        .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+                if open_regular_file_identity(&stage_file, &stage_display)? != destination_identity
+                {
+                    return Err(FolderbaseError::WouldOverwrite(target.display));
+                }
+                require_restore_link_count(&stage_file, 2, &target.display)?;
                 verify_regular_file(
-                    &destination_parent,
-                    &destination_name,
+                    &visible_parent,
+                    &target.name,
                     digest,
                     bytes,
                     executable,
-                    &destination_display,
+                    &target.display,
                 )?;
+                self.reopen_workspace_target_capability(&target)?;
+                return Ok(false);
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(FolderbaseError::io(&target.display, source)),
+        }
+        require_restore_link_count(&stage_file, 1, &target.display)?;
+        match stage_parent.hard_link(&stage_name, &target.parent, &target.name) {
+            Ok(()) => {
+                checkpoint(true);
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                sync_directory(&target.parent, &target.display)?;
+                let visible_parent = self.reopen_workspace_target_capability(&target)?;
+                verify_regular_file(
+                    &visible_parent,
+                    &target.name,
+                    digest,
+                    bytes,
+                    executable,
+                    &target.display,
+                )?;
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                self.reopen_workspace_target_capability(&target)?;
                 Ok(true)
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
                 let stage_identity =
                     regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
-                let destination_identity = regular_file_identity(
-                    &destination_parent,
-                    &destination_name,
-                    &destination_display,
-                )
-                .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+                let visible_parent = self.reopen_workspace_target_capability(&target)?;
+                let destination_identity =
+                    regular_file_identity(&visible_parent, &target.name, &target.display)
+                        .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
                 if stage_identity != destination_identity {
-                    return Err(FolderbaseError::WouldOverwrite(destination_display));
+                    return Err(FolderbaseError::WouldOverwrite(target.display));
                 }
+                require_restore_link_count(&stage_file, 2, &target.display)?;
                 verify_regular_file(
-                    &destination_parent,
-                    &destination_name,
+                    &visible_parent,
+                    &target.name,
                     digest,
                     bytes,
                     executable,
-                    &self.display_root.join(&destination),
+                    &target.display,
                 )?;
+                require_restore_link_count(&stage_file, 2, &target.display)?;
+                self.reopen_workspace_target_capability(&target)?;
                 Ok(false)
             }
-            Err(source) => Err(FolderbaseError::io(destination_display, source)),
+            Err(source) => Err(FolderbaseError::io(target.display, source)),
         }
     }
 
     pub(crate) fn workspace_path_is_absent(&self, relative: &Path) -> Result<bool> {
         let relative = safe_workspace_relative(relative)?;
-        let (parent, name) = self.open_workspace_parent(&relative)?;
-        match parent.symlink_metadata(&name) {
-            Ok(_) => Ok(false),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(source) => Err(FolderbaseError::io(
-                self.display_root.join(relative),
-                source,
-            )),
-        }
+        let target = self.open_workspace_target_capability(&relative)?;
+        let absent = match target.parent.symlink_metadata(&target.name) {
+            Ok(_) => false,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => true,
+            Err(source) => return Err(FolderbaseError::io(&target.display, source)),
+        };
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(absent)
     }
 
     /// Open one ordinary workspace file through the retained physical-root
     /// capability without consulting the ambient root path.
     pub(crate) fn open_workspace_regular_file(&self, relative: &Path) -> Result<File> {
         let relative = safe_workspace_relative(relative)?;
-        self.verify_still_attached()?;
-        let display = self.display_root.join(&relative);
-        let (parent, name) = self.open_workspace_parent(&relative)?;
-        let file = open_regular_file_nofollow(&parent, &name, &display)?;
-        self.verify_still_attached()?;
+        let target = self.open_workspace_target_capability(&relative)?;
+        let file = open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        self.reopen_workspace_target_capability(&target)?;
         Ok(file.into_std())
     }
 
@@ -568,16 +600,12 @@ impl FolderbaseState {
             open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
         let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
 
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
-        let destination_file = open_regular_file_nofollow(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )?;
-        let destination_identity =
-            open_regular_file_identity(&destination_file, &destination_display)?;
+        let target = self.open_workspace_target_capability(&destination)?;
+        let destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        let destination_identity = open_regular_file_identity(&destination_file, &target.display)?;
         if destination_identity != stage_identity {
+            self.reopen_workspace_target_capability(&target)?;
             return Ok(false);
         }
 
@@ -592,7 +620,7 @@ impl FolderbaseState {
             Err(FolderbaseError::InvalidRecord { .. }) => true,
             Err(error) => return Err(error),
         };
-        self.verify_still_attached()?;
+        self.reopen_workspace_target_capability(&target)?;
         Ok(modified)
     }
 
@@ -612,29 +640,24 @@ impl FolderbaseState {
         let stage_file = open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
         let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
 
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
-        let destination_file = open_regular_file_nofollow(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )?;
-        if open_regular_file_identity(&destination_file, &destination_display)? != stage_identity {
+        let target = self.open_workspace_target_capability(&destination)?;
+        let destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        if open_regular_file_identity(&destination_file, &target.display)? != stage_identity {
             return Err(FolderbaseError::InvalidRecord {
-                path: destination_display,
+                path: target.display,
                 message: "restore destination no longer names the staged file".to_owned(),
             });
         }
         let stage_stable = stable_regular_file_identity_sha256(&stage_file, &stage_display)?;
-        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
-            != stage_stable
+        if stable_regular_file_identity_sha256(&destination_file, &target.display)? != stage_stable
         {
             return Err(FolderbaseError::InvalidRecord {
-                path: destination_display,
+                path: target.display,
                 message: "restore destination stable identity changed".to_owned(),
             });
         }
-        self.verify_still_attached()?;
+        self.reopen_workspace_target_capability(&target)?;
         Ok(stage_stable)
     }
 
@@ -654,34 +677,27 @@ impl FolderbaseState {
         let stage_identity =
             planning_regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
 
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
-        let destination_identity = planning_regular_file_identity(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )?;
+        let target = self.open_workspace_target_capability(&destination)?;
+        let destination_identity =
+            planning_regular_file_identity(&target.parent, &target.name, &target.display)?;
         if destination_identity != stage_identity {
             return Err(FolderbaseError::InvalidRecord {
-                path: destination_display.clone(),
+                path: target.display.clone(),
                 message: "restore destination no longer names the staged file".to_owned(),
             });
         }
 
         let rechecked_stage =
             planning_regular_file_identity(&stage_parent, &stage_name, &stage_display)?;
-        let rechecked_destination = planning_regular_file_identity(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )?;
+        let rechecked_destination =
+            planning_regular_file_identity(&target.parent, &target.name, &target.display)?;
         if rechecked_stage != stage_identity || rechecked_destination != destination_identity {
             return Err(FolderbaseError::InvalidRecord {
-                path: destination_display,
+                path: target.display,
                 message: "restore destination identity changed during planning".to_owned(),
             });
         }
-        self.verify_still_attached()?;
+        self.reopen_workspace_target_capability(&target)?;
         Ok(stage_identity)
     }
 
@@ -709,19 +725,14 @@ impl FolderbaseState {
         expected_fidelity: Option<(&str, u64, bool)>,
     ) -> Result<()> {
         let destination = safe_workspace_relative(destination)?;
-        self.verify_still_attached()?;
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
-        let mut destination_file = open_regular_file_nofollow(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )?;
-        if stable_regular_file_identity_sha256(&destination_file, &destination_display)?
+        let target = self.open_workspace_target_capability(&destination)?;
+        let mut destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)?;
+        if stable_regular_file_identity_sha256(&destination_file, &target.display)?
             != expected_identity_sha256
         {
             return Err(FolderbaseError::InvalidRecord {
-                path: destination_display,
+                path: target.display,
                 message: "workspace file no longer has the restore publication identity".to_owned(),
             });
         }
@@ -731,20 +742,18 @@ impl FolderbaseState {
                 digest,
                 bytes,
                 executable,
-                &destination_display,
+                &target.display,
             )?;
         }
 
-        let mut visible_file = open_regular_file_nofollow(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )?;
-        if stable_regular_file_identity_sha256(&visible_file, &destination_display)?
+        let visible_parent = self.reopen_workspace_target_capability(&target)?;
+        let mut visible_file =
+            open_regular_file_nofollow(&visible_parent, &target.name, &target.display)?;
+        if stable_regular_file_identity_sha256(&visible_file, &target.display)?
             != expected_identity_sha256
         {
             return Err(FolderbaseError::InvalidRecord {
-                path: destination_display,
+                path: target.display,
                 message: "workspace file identity changed during restore verification".to_owned(),
             });
         }
@@ -754,10 +763,10 @@ impl FolderbaseState {
                 digest,
                 bytes,
                 executable,
-                &destination_display,
+                &target.display,
             )?;
         }
-        self.verify_still_attached()
+        self.reopen_workspace_target_capability(&target).map(drop)
     }
 
     /// Retain and revalidate the exact private authority link for a restore.
@@ -781,8 +790,7 @@ impl FolderbaseState {
         let (stage_parent, stage_name) = self.open_parent(&stage)?;
         let stage_display = self.display_path(&stage);
         let stage_file = open_regular_file_nofollow(&stage_parent, &stage_name, &stage_display)?;
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
+        let target = self.open_workspace_target_capability(&destination)?;
 
         for after_stage_boundary in [false, true] {
             verify_restore_retained_stage(
@@ -795,13 +803,14 @@ impl FolderbaseState {
             verify_restore_retirement_publication(
                 &stage_file,
                 &stage_display,
-                &destination_parent,
-                &destination_name,
-                &destination_display,
+                &target.parent,
+                &target.name,
+                &target.display,
                 expected_identity_sha256,
                 expected_fidelity,
             )?;
             checkpoint(after_stage_boundary);
+            self.reopen_workspace_target_capability(&target)?;
         }
         verify_restore_retained_stage(
             &stage_parent,
@@ -813,13 +822,13 @@ impl FolderbaseState {
         verify_restore_retirement_publication(
             &stage_file,
             &stage_display,
-            &destination_parent,
-            &destination_name,
-            &destination_display,
+            &target.parent,
+            &target.name,
+            &target.display,
             expected_identity_sha256,
             expected_fidelity,
         )?;
-        self.verify_still_attached()
+        self.reopen_workspace_target_capability(&target).map(drop)
     }
 
     /// Legacy destructive retirement is compiled out. Restore authorities are
@@ -1211,48 +1220,44 @@ impl FolderbaseState {
         let stage_identity = open_regular_file_identity(&stage_file, &stage_display)?;
         verify_open_regular_file(&mut stage_file, digest, bytes, executable, &stage_display)?;
 
-        let destination_display = self.display_root.join(&destination);
-        let (destination_parent, destination_name) = self.open_workspace_parent(&destination)?;
-        let mut destination_file = open_regular_file_nofollow(
-            &destination_parent,
-            &destination_name,
-            &destination_display,
-        )
-        .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+        let target = self.open_workspace_target_capability(&destination)?;
+        let mut destination_file =
+            open_regular_file_nofollow(&target.parent, &target.name, &target.display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
         let destination_identity =
-            open_regular_file_identity(&destination_file, &destination_display)
-                .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+            open_regular_file_identity(&destination_file, &target.display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
         if destination_identity != stage_identity {
-            return Err(FolderbaseError::WouldOverwrite(destination_display));
+            return Err(FolderbaseError::WouldOverwrite(target.display));
         }
         verify_open_regular_file(
             &mut destination_file,
             digest,
             bytes,
             executable,
-            &destination_display,
+            &target.display,
         )?;
 
         // Reopen through the retained root after byte verification. This
         // closes over ordinary replacement races and repeats the boundary
         // walk immediately before the coordinator advances durable state.
-        let (visible_parent, visible_name) = self.open_workspace_parent(&destination)?;
+        let visible_parent = self.reopen_workspace_target_capability(&target)?;
         let mut visible_file =
-            open_regular_file_nofollow(&visible_parent, &visible_name, &destination_display)
-                .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
-        let visible_identity = open_regular_file_identity(&visible_file, &destination_display)
-            .map_err(|_| FolderbaseError::WouldOverwrite(destination_display.clone()))?;
+            open_regular_file_nofollow(&visible_parent, &target.name, &target.display)
+                .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
+        let visible_identity = open_regular_file_identity(&visible_file, &target.display)
+            .map_err(|_| FolderbaseError::WouldOverwrite(target.display.clone()))?;
         if visible_identity != stage_identity {
-            return Err(FolderbaseError::WouldOverwrite(destination_display));
+            return Err(FolderbaseError::WouldOverwrite(target.display));
         }
         verify_open_regular_file(
             &mut visible_file,
             digest,
             bytes,
             executable,
-            &destination_display,
+            &target.display,
         )?;
-        self.verify_still_attached()
+        self.reopen_workspace_target_capability(&target).map(drop)
     }
 
     #[cfg(test)]
@@ -1426,6 +1431,43 @@ impl FolderbaseState {
             }
         }
         Ok((directory, name))
+    }
+
+    fn open_workspace_target_capability(
+        &self,
+        relative: &Path,
+    ) -> Result<WorkspaceTargetCapability> {
+        self.verify_still_attached()?;
+        let (parent, name) = self.open_workspace_parent(relative)?;
+        let parent_display = relative.parent().map_or_else(
+            || self.display_root.clone(),
+            |path| self.display_root.join(path),
+        );
+        let parent_identity = directory_identity(&parent, &parent_display)?;
+        self.verify_still_attached()?;
+        Ok(WorkspaceTargetCapability {
+            parent,
+            parent_identity,
+            relative: relative.to_path_buf(),
+            name,
+            parent_display,
+            display: self.display_root.join(relative),
+        })
+    }
+
+    fn reopen_workspace_target_capability(
+        &self,
+        target: &WorkspaceTargetCapability,
+    ) -> Result<Dir> {
+        self.verify_still_attached()?;
+        let (parent, name) = self.open_workspace_parent(&target.relative)?;
+        if name != target.name
+            || directory_identity(&parent, &target.parent_display)? != target.parent_identity
+        {
+            return Err(FolderbaseError::UnsafePath(target.parent_display.clone()));
+        }
+        self.verify_still_attached()?;
+        Ok(parent)
     }
 
     fn require_mutable(&self, relative: &Path) -> Result<()> {
@@ -1757,6 +1799,26 @@ fn verify_restore_retained_stage(
             path: stage_display.to_path_buf(),
             message: "restore authority path no longer names the retained stage".to_owned(),
         });
+    }
+    require_restore_link_count(retained_file, 2, stage_display)?;
+    Ok(())
+}
+
+fn require_restore_link_count(
+    file: &cap_std::fs::File,
+    expected: u64,
+    display: &Path,
+) -> Result<()> {
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let actual =
+        stable_file_link_count(&file).map_err(|source| FolderbaseError::io(display, source))?;
+    if actual != expected {
+        return Err(FolderbaseError::RestoreNamespaceRepairRequired(
+            display.to_path_buf(),
+        ));
     }
     Ok(())
 }

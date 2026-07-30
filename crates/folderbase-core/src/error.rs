@@ -84,6 +84,9 @@ pub enum FolderbaseError {
     #[error("refusing to overwrite existing path: {0}")]
     WouldOverwrite(PathBuf),
 
+    #[error("restore namespace repair is required before retrying at: {0}")]
+    RestoreNamespaceRepairRequired(PathBuf),
+
     #[error("template expansion contains structural changes that require an approved migration")]
     StructuralTemplateChangeRequiresApproval,
 
