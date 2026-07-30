@@ -435,7 +435,7 @@ fn exact_root_ignore_policy_is_readable_but_only_typed_flows_may_edit_it() {
     assert!(matches!(
         error,
         folderbase_core::FolderbaseError::UnsafePath(path)
-            if path == PathBuf::from(".folderbaseignore")
+            if path == std::path::Path::new(".folderbaseignore")
     ));
     assert_eq!(
         fs::read(fixture.path().join(".folderbaseignore")).unwrap(),

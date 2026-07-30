@@ -24,7 +24,7 @@ use crate::{
     folderbase_state::FolderbaseState,
     workspace::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
-        resolve_existing_workspace_file,
+        refuse_generic_workspace_mutation_path, resolve_existing_workspace_file,
     },
 };
 
@@ -683,10 +683,12 @@ impl LocalVersionStore {
         new_bytes: &[u8],
     ) -> Result<VersionedReplaceResult> {
         let relative_path = safe_content_path(relative_path.as_ref())?;
+        refuse_generic_workspace_mutation_path(&relative_path)?;
         let _lock = self.acquire_transaction_lock()?;
         self.ensure_store_layout()?;
         let (materialized_path, relative_path) =
             resolve_existing_workspace_file(&self.root, &relative_path)?;
+        refuse_generic_workspace_mutation_path(&relative_path)?;
 
         let current_file = open_existing_nofollow(&materialized_path)?;
         let metadata = current_file
@@ -3746,7 +3748,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            FolderbaseError::UnsafePath(path) if path == PathBuf::from(".folderbaseignore")
+            FolderbaseError::UnsafePath(path) if path == Path::new(".folderbaseignore")
         ));
         assert_eq!(
             fs::read(fixture.path().join(".folderbaseignore")).unwrap(),
