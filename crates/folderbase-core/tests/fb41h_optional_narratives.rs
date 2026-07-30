@@ -435,6 +435,26 @@ fn absent_and_empty_ignore_policies_are_distinct_stable_and_stale_in_both_direct
 }
 
 #[test]
+fn a_present_v05_ignore_policy_cannot_be_an_unsupported_hardlink() {
+    let root = tempdir().expect("ordinary folder");
+    fs::write(root.path().join("policy-source"), b"*.tmp\n").expect("policy source");
+    fs::hard_link(
+        root.path().join("policy-source"),
+        root.path().join(".folderbaseignore"),
+    )
+    .expect("hard-linked active policy");
+    initialize_ordinary(root.path());
+
+    assert!(
+        FolderbaseVersionStore::open(root.path())
+            .expect("open")
+            .plan_capture()
+            .is_err(),
+        "a controlling policy cannot be silently excluded from the captured state"
+    );
+}
+
+#[test]
 fn v05_has_a_separate_conformance_tree_while_the_released_v04_tree_stays_exact() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol");
     let v05 =
@@ -446,15 +466,18 @@ fn v05_has_a_separate_conformance_tree_while_the_released_v04_tree_stays_exact()
     assert!(version.lookup_binding("FOLDERBASE.md").is_none());
     assert!(version.lookup_binding(".folderbaseignore").is_none());
 
-    let released_manifest =
-        fs::read_to_string(root.join("conformance/folderbase-version/release-manifest.json"))
-            .expect("released v0.4 inventory");
-    assert!(
-        released_manifest.contains("\"file_count\": 32"),
+    let released_manifest: Value = serde_json::from_slice(
+        &fs::read(root.join("releases/0.4/folderbase-version-v1.json"))
+            .expect("released v0.4 inventory"),
+    )
+    .expect("v0.4 release manifest");
+    assert_eq!(
+        released_manifest["files"].as_array().expect("files").len(),
+        32,
         "the released v0.4 fixture distribution remains frozen"
     );
     assert!(
-        root.join("conformance/folderbase-version-0.5/release-manifest.json")
+        root.join("releases/0.5/folderbase-version-v1.json")
             .is_file(),
         "v0.5 has an independent release inventory"
     );
