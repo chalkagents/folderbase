@@ -284,6 +284,13 @@ struct RestoreTransaction {
 enum RestoreCleanupDisposition {
     Committed,
     Modified,
+    CommittedModified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreCleanupOutcome {
+    Restored,
+    WorkspaceModified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +439,16 @@ impl FolderbaseVersionStore {
                 ),
                 RestoreCleanupDisposition::Modified => {
                     finish_modified_restore_cleanup_recovery(
+                        self,
+                        &local,
+                        &state,
+                        &recovery.transaction,
+                        &mut checkpoint,
+                    )?;
+                    Err(FolderbaseCaptureError::RestoreTargetOccupied(path))
+                }
+                RestoreCleanupDisposition::CommittedModified => {
+                    finish_committed_modified_restore_cleanup_recovery(
                         self,
                         &local,
                         &state,
@@ -1109,7 +1126,13 @@ fn execute_restore_transaction(
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     };
 
-    finish_restore_cleanup(state, transaction, checkpoint)?;
+    if finish_restore_cleanup(state, transaction, checkpoint)?
+        == RestoreCleanupOutcome::WorkspaceModified
+    {
+        return Err(FolderbaseCaptureError::RestoreTargetOccupied(
+            PathBuf::from(&transaction.path),
+        ));
+    }
     checkpoint(&RestoreCheckpoint::CleanupComplete);
     Ok(restored_tombstone(transaction, created))
 }
@@ -1166,7 +1189,13 @@ fn finish_restore_cleanup_recovery(
         ));
     }
 
-    finish_restore_cleanup(state, transaction, checkpoint)?;
+    if finish_restore_cleanup(state, transaction, checkpoint)?
+        == RestoreCleanupOutcome::WorkspaceModified
+    {
+        return Err(FolderbaseCaptureError::RestoreTargetOccupied(
+            PathBuf::from(&transaction.path),
+        ));
+    }
     checkpoint(&RestoreCheckpoint::CleanupComplete);
     Ok(restored_tombstone(transaction, false))
 }
@@ -1175,15 +1204,13 @@ fn finish_restore_cleanup(
     state: &FolderbaseState,
     transaction: &RestoreTransaction,
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
-) -> Result<(), FolderbaseCaptureError> {
-    write_restore_cleanup_recovery(
-        state,
-        &RestoreCleanupRecovery {
-            format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
-            disposition: RestoreCleanupDisposition::Committed,
-            transaction: transaction.clone(),
-        },
-    )?;
+) -> Result<RestoreCleanupOutcome, FolderbaseCaptureError> {
+    let committed = RestoreCleanupRecovery {
+        format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
+        disposition: RestoreCleanupDisposition::Committed,
+        transaction: transaction.clone(),
+    };
+    write_restore_cleanup_recovery(state, &committed)?;
     checkpoint(&RestoreCheckpoint::CleanupRecoveryDurable);
     let digest = transaction
         .binding
@@ -1197,7 +1224,7 @@ fn finish_restore_cleanup(
         .binding
         .executable()
         .expect("validated regular binding");
-    state.retire_workspace_restore_stage_with_hook(
+    let retirement = state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
         Path::new(&transaction.path),
@@ -1209,13 +1236,40 @@ fn finish_restore_cleanup(
                 &RestoreCheckpoint::BeforeStageRetirement
             });
         },
-    )?;
+    );
+    if let Err(error) = retirement {
+        if matches!(
+            state.workspace_restore_was_modified_in_place(
+                &restore_stage_path(transaction),
+                Path::new(&transaction.path),
+                digest,
+                bytes,
+                executable,
+            ),
+            Ok(true)
+        ) {
+            let modified = RestoreCleanupRecovery {
+                format: RESTORE_CLEANUP_RECOVERY_FORMAT_V1.to_owned(),
+                disposition: RestoreCleanupDisposition::CommittedModified,
+                transaction: transaction.clone(),
+            };
+            replace_restore_cleanup_recovery(state, &committed, &modified)?;
+            finish_committed_modified_restore_cleanup_recovery_stage(
+                state,
+                transaction,
+                checkpoint,
+            )?;
+            return Ok(RestoreCleanupOutcome::WorkspaceModified);
+        }
+        return Err(error.into());
+    }
     state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
     remove_active_restore_transaction(state)?;
     checkpoint(&RestoreCheckpoint::CleanupIntentRetired);
     write_restore_completion_receipt(state, transaction)?;
     checkpoint(&RestoreCheckpoint::CompletionDurable);
-    remove_restore_cleanup_recovery(state)
+    remove_restore_cleanup_recovery(state)?;
+    Ok(RestoreCleanupOutcome::Restored)
 }
 
 fn derive_authoritative_restore_target(
@@ -1416,6 +1470,68 @@ fn finish_modified_restore_cleanup_recovery(
     checkpoint: &mut impl FnMut(&RestoreCheckpoint),
 ) -> Result<(), FolderbaseCaptureError> {
     rederive_authoritative_modified_restore_transaction(store, local, state, transaction)?;
+    state.retire_workspace_restore_stage_with_hook(
+        &restore_stage_path(transaction),
+        &restore_rescue_path(transaction),
+        Path::new(&transaction.path),
+        None,
+        |stage_removed| {
+            checkpoint(if stage_removed {
+                &RestoreCheckpoint::AfterStageRetirement
+            } else {
+                &RestoreCheckpoint::BeforeStageRetirement
+            });
+        },
+    )?;
+    state.remove_empty_dir_durable(&restore_transaction_directory(transaction))?;
+    remove_active_restore_transaction(state)?;
+    remove_restore_cleanup_recovery(state)
+}
+
+fn finish_committed_modified_restore_cleanup_recovery(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
+) -> Result<(), FolderbaseCaptureError> {
+    validate_restore_transaction(store, transaction)?;
+    let target = derive_authoritative_restore_target(store, local, state, transaction)?;
+    if target.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "committed-modified cleanup target digest changed".to_owned(),
+        ));
+    }
+    let target_head = JournalHead {
+        version_id: transaction.target_version_id.clone(),
+        version_sha256: transaction.target_version_sha256.clone(),
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: local_head_authority_sha256(
+                store,
+                &transaction.target_version_id,
+                &transaction.target_version_sha256,
+            )?,
+        },
+    };
+    let current_head = read_head_record(state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+    if JournalHead::from(&current_head) != target_head {
+        return Err(FolderbaseCaptureError::LocalHeadChanged);
+    }
+    let installed =
+        read_and_verify_folderbase_version(store, local, state, &transaction.target_version_id)?;
+    if installed.canonical_digest()? != transaction.target_version_sha256 {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "committed-modified cleanup installed version changed".to_owned(),
+        ));
+    }
+    finish_committed_modified_restore_cleanup_recovery_stage(state, transaction, checkpoint)
+}
+
+fn finish_committed_modified_restore_cleanup_recovery_stage(
+    state: &FolderbaseState,
+    transaction: &RestoreTransaction,
+    checkpoint: &mut impl FnMut(&RestoreCheckpoint),
+) -> Result<(), FolderbaseCaptureError> {
     state.retire_workspace_restore_stage_with_hook(
         &restore_stage_path(transaction),
         &restore_rescue_path(transaction),
@@ -3422,6 +3538,39 @@ fn write_restore_cleanup_recovery(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn replace_restore_cleanup_recovery(
+    state: &FolderbaseState,
+    expected: &RestoreCleanupRecovery,
+    target: &RestoreCleanupRecovery,
+) -> Result<(), FolderbaseCaptureError> {
+    let relative = Path::new(RESTORE_CLEANUP_RECOVERY_PATH);
+    let expected = encode_restore_cleanup_recovery(expected)?;
+    let target = encode_restore_cleanup_recovery(target)?;
+    let current = state
+        .read_bounded(relative, MAX_CAPTURE_TRANSACTION_BYTES)?
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore cleanup recovery disappeared before transition".to_owned(),
+            )
+        })?;
+    if current != expected {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore cleanup recovery changed before transition".to_owned(),
+        ));
+    }
+    state.replace(relative, &target)?;
+    if state
+        .read_bounded(relative, MAX_CAPTURE_TRANSACTION_BYTES)?
+        .as_deref()
+        != Some(target.as_slice())
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore cleanup recovery transition did not verify".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn encode_restore_cleanup_recovery(
