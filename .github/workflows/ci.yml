@@ -54,7 +54,7 @@ jobs:
       - name: Verify independent Folderbase Version 0.5 digest vectors
         run: node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 
-      - name: Verify the Folderbase Version 0.5 candidate distribution
+      - name: Verify the complete Folderbase Version 0.5 candidate closure
         run: node scripts/verify-folderbase-version-0.5-distribution.mjs
 
       - name: Test

@@ -925,7 +925,11 @@ conformance tree, reference encoder, member-hashed inventory, release-manifest
 sidecar, and verifier under `protocol/releases/0.5/`. ADR-0006 records the
 accepted ordinary-folder and optional-narrative transition. Repository CI and
 package-install validation run both 0.5 verifiers while retaining the frozen
-0.4 digest and distribution gates.
+0.4 digest and distribution gates. The candidate inventory deterministically
+seals the complete Core and CLI crate trees plus workspace Cargo manifest and
+lockfile; the release manifest's external sidecar is its non-circular root
+proof. Extracted-package validation compares every packaged Rust source and
+embedded asset with those sealed checkout bytes.
 
 ### Proposed local capture, sealing, and Local Head
 

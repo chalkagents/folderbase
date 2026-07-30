@@ -134,8 +134,14 @@ profile.
 Protocol 0.5 is distributed separately as a candidate: a closed member-hashed
 inventory, manifest SHA-256 sidecar, separate schemas and conformance tree, and
 independent digest and distribution verifiers. Candidate status is not a claim
-of release. Repository CI and package-install validation run both new 0.5
-verifiers while retaining both frozen 0.4 gates.
+of release. Its verifier deterministically walks the complete Core and CLI crate
+trees and seals their sources, embedded assets, tests, manifests, and legal
+files together with the workspace Cargo manifest and lockfile. Any new unsealed
+runtime or package input fails the exact closure gate. The release manifest
+cannot hash itself; its external SHA-256 sidecar is the non-circular root proof.
+Repository CI and package-install validation run both new 0.5 verifiers while
+retaining both frozen 0.4 gates, and extracted-package validation compares every
+packaged Rust source and embedded asset with the sealed checkout bytes.
 
 ## Permission invariant
 

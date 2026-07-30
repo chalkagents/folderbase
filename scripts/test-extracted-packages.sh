@@ -37,6 +37,25 @@ core_source="$extraction_root/$(basename "$core_archive" .crate)"
 cli_source="$extraction_root/$(basename "$cli_archive" .crate)"
 
 test -f "$core_source/src/folderbase_version.rs"
+for package in folderbase-core folderbase-cli
+do
+  source_root="$repository_root/crates/$package"
+  extracted_root="$extraction_root/$(basename "$(resolve_archive "$package")" .crate)"
+  while IFS= read -r source_path
+  do
+    relative_path=${source_path#"$source_root/"}
+    cmp "$source_path" "$extracted_root/$relative_path"
+  done < <(
+    find "$source_root" \
+      -type f \
+      \( \
+        -path "$source_root/src/*" -o \
+        -path "$source_root/assets/*" \
+      \) \
+      -print 2>/dev/null |
+      LC_ALL=C sort
+  )
+done
 test ! -e "$core_source/protocol"
 test ! -e "$core_source/tests/folderbase_version_conformance.rs"
 grep -Fq 'contract = "folderbase-version-v1"' "$core_source/Cargo.toml"
