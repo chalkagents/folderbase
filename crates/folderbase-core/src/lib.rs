@@ -20,6 +20,7 @@ mod initialization;
 mod inspection;
 mod local_versions;
 mod migration;
+mod migration_filesystem;
 mod model;
 mod physical_identity;
 mod protocol_upgrade;

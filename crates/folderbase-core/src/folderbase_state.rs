@@ -1558,6 +1558,17 @@ impl FolderbaseState {
         classify_nested_folderbase_boundary(&self.root, &self.display_root)
     }
 
+    /// Clone the exact retained root authority for a sibling deep module.
+    ///
+    /// The clone names the same directory object even if the ambient display
+    /// path is concurrently renamed or replaced. Callers must use
+    /// `display_root` only for diagnostics.
+    pub(crate) fn clone_root_capability(&self) -> Result<Dir> {
+        self.root
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(&self.display_root, source))
+    }
+
     fn open_parent(&self, relative: &Path) -> Result<(Dir, OsString)> {
         let name = relative
             .file_name()

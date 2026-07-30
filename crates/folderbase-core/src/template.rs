@@ -172,6 +172,48 @@ pub fn render_template(
     })
 }
 
+/// Render every artifact for a destination whose presence and type have
+/// already been inspected through a retained filesystem capability.
+///
+/// Unlike `render_template`, this helper performs no ambient destination
+/// lookup. The capability-owning caller decides which rendered artifacts are
+/// already present and may be preserved.
+pub(crate) fn render_template_for_capability_destination(
+    package: &TemplatePackage,
+    destination_label: &Path,
+    answers: &BTreeMap<String, TemplateAnswerValue>,
+) -> Result<TemplateRenderPlan> {
+    validate_destination_root(destination_label)?;
+    validate_runtime_package(destination_label, package)?;
+    validate_answers(package, answers, destination_label)?;
+
+    let mut additions = Vec::new();
+    for artifact in &package.artifacts {
+        let content = match artifact.kind {
+            TemplateArtifactKind::Directory => None,
+            TemplateArtifactKind::Text => Some(render_content(
+                artifact.content.as_deref().unwrap_or_default(),
+                package,
+                answers,
+                destination_label,
+            )?),
+        };
+        additions.push(PlannedTemplateAddition {
+            path: artifact.target.clone(),
+            kind: artifact.kind,
+            content,
+        });
+    }
+    additions.sort_by(|left, right| left.path.cmp(&right.path));
+
+    Ok(TemplateRenderPlan {
+        template_id: package.id.clone(),
+        template_version: package.version.clone(),
+        additions,
+        existing_paths: Vec::new(),
+    })
+}
+
 pub fn template_package_sha256(package: &TemplatePackage) -> Result<String> {
     let source = PathBuf::from("<template-package>");
     validate_runtime_package(&source, package)?;
