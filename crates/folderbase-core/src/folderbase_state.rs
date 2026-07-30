@@ -944,7 +944,7 @@ fn verify_open_regular_file(
 ) -> Result<()> {
     #[cfg(not(unix))]
     let _ = executable;
-    verify_open_regular_metadata(&file, bytes, display)?;
+    verify_open_regular_metadata(file, bytes, display)?;
     #[cfg(unix)]
     {
         use cap_std::fs::PermissionsExt;
