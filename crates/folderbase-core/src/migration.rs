@@ -2314,6 +2314,7 @@ pub fn apply_migration(approved: ApprovedMigration) -> Result<MigrationResult> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyCheckpoint {
     ExistingFolderbaseDetected,
+    MutationAuthorityBound,
     MigrationDirectoryPrepared,
     JournalStaged,
     JournalPrepared,
@@ -2375,6 +2376,7 @@ fn apply_migration_with_hook(
     }
     verify_root_identity(&plan)?;
     verify_source_files(&plan)?;
+    checkpoint(ApplyCheckpoint::MutationAuthorityBound);
     if is_structural_plan(&plan) {
         return apply_structural_migration(plan, approved.approval_digest, &mut checkpoint);
     }
@@ -3315,11 +3317,11 @@ fn recover_migration_with_hook(
         .map_err(|source| FolderbaseError::io(&root, source))?;
     let transaction_coordinator =
         acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
-    after_transaction_coordinator();
     let (journal_path, mut journal) = load_journal(&root, migration_id)?;
     if let Some(coordinator) = &transaction_coordinator {
         coordinator.verify_still_attached()?;
     }
+    after_transaction_coordinator();
     if matches!(
         journal.state,
         MigrationState::Applying | MigrationState::RollingBack
@@ -3377,11 +3379,11 @@ fn rollback_migration_by_id_with_hook(
         .map_err(|source| FolderbaseError::io(&root, source))?;
     let transaction_coordinator =
         acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
-    after_transaction_coordinator();
     let (journal_path, mut journal) = load_journal(&root, migration_id)?;
     if let Some(coordinator) = &transaction_coordinator {
         coordinator.verify_still_attached()?;
     }
+    after_transaction_coordinator();
     require_state(journal.state, MigrationState::Verified)?;
     let result = if is_structural_journal(&journal) {
         rollback_structural_journal(&root, &journal_path, &mut journal)?
@@ -7183,6 +7185,7 @@ mod tests {
                 load_journal(&canonical_root(root.path()).unwrap(), &migration_id).unwrap();
             let expected_completed = match fault {
                 ApplyCheckpoint::ExistingFolderbaseDetected
+                | ApplyCheckpoint::MutationAuthorityBound
                 | ApplyCheckpoint::MigrationDirectoryPrepared
                 | ApplyCheckpoint::JournalStaged
                 | ApplyCheckpoint::JournalPrepared
@@ -7469,6 +7472,155 @@ mod tests {
             assert!(!root.path().join("Organized").exists());
             assert!(root.path().join("README.md").exists());
             assert!(root.path().join("Client-Shared/Overview.md").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_apply_never_mutates_a_replacement_root_after_authority_is_bound() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let approved = approve_migration(plan).unwrap();
+        let visible_root = root.path().to_path_buf();
+        let detached_root =
+            visible_root.with_file_name(format!(".folderbase-detached-{}", Uuid::now_v7()));
+
+        let result = apply_migration_with_hook(approved, |checkpoint| {
+            if checkpoint == ApplyCheckpoint::MutationAuthorityBound {
+                fs::rename(&visible_root, &detached_root).unwrap();
+                copy_directory_tree(&detached_root, &visible_root);
+            }
+        });
+        let foreign_source = fs::read(visible_root.join("notes.md")).ok();
+        let foreign_destination = fs::read(visible_root.join("Archive/notes.md")).ok();
+        fs::remove_dir_all(&visible_root).unwrap();
+        fs::rename(&detached_root, &visible_root).unwrap();
+
+        assert_eq!(result.unwrap().state, MigrationState::Verified);
+        assert_eq!(
+            foreign_source.as_deref(),
+            Some(b"source\n".as_slice()),
+            "apply must not remove a file from the foreign replacement"
+        );
+        assert_eq!(
+            foreign_destination, None,
+            "apply must not publish a file into the foreign replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_recovery_never_mutates_a_replacement_root_after_authority_is_bound() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let migration_id = plan.id.clone();
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            apply_migration_with_hook(approve_migration(plan).unwrap(), |checkpoint| {
+                if checkpoint == ApplyCheckpoint::OperationApplied(0) {
+                    panic!("leave a durable in-flight move");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        let visible_root = root.path().to_path_buf();
+        let detached_root =
+            visible_root.with_file_name(format!(".folderbase-detached-{}", Uuid::now_v7()));
+
+        let result = recover_migration_with_hook(&visible_root, &migration_id, || {
+            fs::rename(&visible_root, &detached_root).unwrap();
+            copy_directory_tree(&detached_root, &visible_root);
+        });
+        let foreign_source = fs::read(visible_root.join("notes.md")).ok();
+        let foreign_destination = fs::read(visible_root.join("Archive/notes.md")).ok();
+        fs::remove_dir_all(&visible_root).unwrap();
+        fs::rename(&detached_root, &visible_root).unwrap();
+
+        assert_eq!(result.unwrap().state, MigrationState::RolledBack);
+        assert_eq!(
+            foreign_source, None,
+            "recovery must not restore a file into the foreign replacement"
+        );
+        assert_eq!(
+            foreign_destination.as_deref(),
+            Some(b"source\n".as_slice()),
+            "recovery must not remove a file from the foreign replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rollback_never_mutates_a_replacement_root_after_authority_is_bound() {
+        let root = legacy_structural_folderbase_fixture();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+        fs::write(root.path().join("notes.md"), b"source\n").unwrap();
+        let plan = MigrationPlan::propose_structural(
+            root.path(),
+            vec![MigrationOperation::move_object(
+                "notes.md",
+                "Archive/notes.md",
+            )],
+        )
+        .unwrap();
+        let migration_id = plan.id.clone();
+        apply_migration(approve_migration(plan).unwrap()).unwrap();
+        let visible_root = root.path().to_path_buf();
+        let detached_root =
+            visible_root.with_file_name(format!(".folderbase-detached-{}", Uuid::now_v7()));
+
+        let result = rollback_migration_by_id_with_hook(&visible_root, &migration_id, || {
+            fs::rename(&visible_root, &detached_root).unwrap();
+            copy_directory_tree(&detached_root, &visible_root);
+        });
+        let foreign_source = fs::read(visible_root.join("notes.md")).ok();
+        let foreign_destination = fs::read(visible_root.join("Archive/notes.md")).ok();
+        fs::remove_dir_all(&visible_root).unwrap();
+        fs::rename(&detached_root, &visible_root).unwrap();
+
+        assert_eq!(result.unwrap().state, MigrationState::RolledBack);
+        assert_eq!(
+            foreign_source, None,
+            "rollback must not restore a file into the foreign replacement"
+        );
+        assert_eq!(
+            foreign_destination.as_deref(),
+            Some(b"source\n".as_slice()),
+            "rollback must not remove a file from the foreign replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    fn copy_directory_tree(source: &Path, destination: &Path) {
+        fs::create_dir(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                copy_directory_tree(&source_path, &destination_path);
+            } else if file_type.is_file() {
+                fs::copy(&source_path, &destination_path).unwrap();
+            } else {
+                panic!("race fixture contains an unsupported filesystem object");
+            }
         }
     }
 
