@@ -679,6 +679,29 @@ fn local_head_from_another_physical_root_is_rejected() {
     ));
 }
 
+#[test]
+fn public_capture_fails_closed_at_the_shared_boundary_work_ceiling() {
+    const EXPECTED_SHARED_WORK_CEILING: usize = 16_384;
+
+    let root = folderbase();
+    let crowded = root.path().join("crowded");
+    fs::create_dir(&crowded).expect("crowded directory");
+    for index in 0..=EXPECTED_SHARED_WORK_CEILING {
+        fs::write(crowded.join(format!("entry-{index:05}")), b"").expect("ordinary entry");
+    }
+
+    let error = FolderbaseVersionStore::open(root.path())
+        .expect("open Folderbase")
+        .plan_capture()
+        .expect_err("shared classifier work must be bounded");
+    assert!(
+        error
+            .to_string()
+            .contains("nested Folderbase boundary inspection exceeded"),
+        "public callers must inherit the shared classifier's hard work ceiling, got: {error}"
+    );
+}
+
 fn state_paths(root: &Path) -> Vec<String> {
     let mut paths = walkdir::WalkDir::new(root.join(".folderbase"))
         .into_iter()

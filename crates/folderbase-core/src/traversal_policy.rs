@@ -177,4 +177,23 @@ mod tests {
             NestedFolderbaseBoundaryKind::UnsafeAliasShape
         );
     }
+
+    #[test]
+    fn default_classifier_has_a_hard_marker_directory_work_ceiling() {
+        const EXPECTED_SHARED_WORK_CEILING: usize = 16_384;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let state = fixture.path().join(".folderbase");
+        fs::create_dir(&state).expect("state");
+        for index in 0..=EXPECTED_SHARED_WORK_CEILING {
+            fs::write(state.join(format!("entry-{index:05}")), b"").expect("state entry");
+        }
+        let root =
+            Dir::open_ambient_dir(fixture.path(), ambient_authority()).expect("root capability");
+
+        assert!(
+            classify_nested_folderbase_boundary(&root, fixture.path()).is_err(),
+            "the default observer must not make shared boundary classification unbounded"
+        );
+    }
 }

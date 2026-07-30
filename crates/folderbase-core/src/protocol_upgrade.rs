@@ -587,4 +587,40 @@ mod tests {
             foreign
         );
     }
+
+    #[test]
+    fn activation_refuses_concurrent_ignore_policy_presence_and_content_transitions() {
+        for replacement in [None, Some(b"dist/\n".as_slice())] {
+            let root = tempdir().expect("legacy root");
+            fs::create_dir(root.path().join(".folderbase")).expect("state");
+            fs::write(
+                root.path().join(".folderbase/manifest.json"),
+                LEGACY_MANIFEST,
+            )
+            .expect("manifest");
+            fs::write(root.path().join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+            let ignore_path = root.path().join(".folderbaseignore");
+            fs::write(&ignore_path, b"node_modules/\n").expect("ignore");
+
+            let plan = plan_protocol_upgrade(root.path()).expect("upgrade plan");
+            let expected = plan.plan_digest().clone();
+            let result = apply_protocol_upgrade_with_hook(&plan, &expected, || {
+                if let Some(bytes) = replacement {
+                    fs::write(&ignore_path, bytes).expect("concurrent ignore edit");
+                } else {
+                    fs::remove_file(&ignore_path).expect("concurrent ignore delete");
+                }
+            });
+
+            assert!(matches!(
+                result,
+                Err(FolderbaseError::ProtocolUpgradePlanChanged { .. })
+            ));
+            assert_eq!(
+                fs::read(root.path().join(MANIFEST_PATH)).expect("legacy manifest retained"),
+                LEGACY_MANIFEST
+            );
+            assert_eq!(fs::read(&ignore_path).ok().as_deref(), replacement);
+        }
+    }
 }
