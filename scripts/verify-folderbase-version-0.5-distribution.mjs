@@ -117,33 +117,15 @@ if (
 }
 
 const exactConformanceFiles = walk(conformanceRoot).sort();
-const implementingRustFiles = [
-  "crates/folderbase-cli/src/main.rs",
-  "crates/folderbase-cli/tests/cli.rs",
-  "crates/folderbase-core/Cargo.toml",
-  "crates/folderbase-core/src/error.rs",
-  "crates/folderbase-core/src/folder_analysis.rs",
-  "crates/folderbase-core/src/folderbase_capture.rs",
-  "crates/folderbase-core/src/folderbase_seal.rs",
-  "crates/folderbase-core/src/folderbase_state.rs",
-  "crates/folderbase-core/src/folderbase_version.rs",
-  "crates/folderbase-core/src/initialization.rs",
-  "crates/folderbase-core/src/lib.rs",
-  "crates/folderbase-core/src/local_versions.rs",
-  "crates/folderbase-core/src/migration.rs",
-  "crates/folderbase-core/src/model.rs",
-  "crates/folderbase-core/src/protocol_upgrade.rs",
-  "crates/folderbase-core/src/reorganization.rs",
-  "crates/folderbase-core/src/root_attestation.rs",
-  "crates/folderbase-core/src/template_expansion.rs",
-  "crates/folderbase-core/src/transfer_source.rs",
-  "crates/folderbase-core/src/traversal_policy.rs",
-  "crates/folderbase-core/src/validation.rs",
-  "crates/folderbase-core/src/workspace.rs",
-  "crates/folderbase-core/tests/fb41h_optional_narratives.rs",
-  "crates/folderbase-core/tests/folderbase_version_05_conformance.rs",
-  "crates/folderbase-core/tests/protocol_upgrade_security.rs",
-];
+const completeRuntimePackageClosure = [
+  "Cargo.lock",
+  "Cargo.toml",
+  "LICENSE",
+  "NOTICE",
+  "README.md",
+  ...walk(join(repositoryRoot, "crates", "folderbase-core")),
+  ...walk(join(repositoryRoot, "crates", "folderbase-cli")),
+].sort();
 const requiredNonConformanceFiles = [
   ".github/workflows/ci.yml",
   "README.md",
@@ -166,12 +148,21 @@ const requiredNonConformanceFiles = [
 ];
 const expectedPaths = [
   ...exactConformanceFiles,
-  ...implementingRustFiles,
+  ...completeRuntimePackageClosure,
   ...requiredNonConformanceFiles,
-].sort();
-if (JSON.stringify(declaredPaths) !== JSON.stringify(expectedPaths)) {
+];
+const uniqueExpectedPaths = [...new Set(expectedPaths)].sort();
+if (JSON.stringify(declaredPaths) !== JSON.stringify(uniqueExpectedPaths)) {
+  const declared = new Set(declaredPaths);
+  const expected = new Set(uniqueExpectedPaths);
+  const missing = uniqueExpectedPaths.filter((path) => !declared.has(path));
+  const unexpected = declaredPaths.filter((path) => !expected.has(path));
   throw new Error(
-    "protocol 0.5 release manifest does not enumerate the exact candidate surface",
+    [
+      "protocol 0.5 release manifest does not enumerate the exact candidate surface",
+      `missing: ${missing.join(", ") || "(none)"}`,
+      `unexpected: ${unexpected.join(", ") || "(none)"}`,
+    ].join("\n"),
   );
 }
 
