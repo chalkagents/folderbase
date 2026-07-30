@@ -4508,6 +4508,32 @@ mod tests {
     }
 
     #[test]
+    fn successful_restore_retires_its_private_transaction_directory() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+
+        store
+            .restore_tombstone("active.bin")
+            .expect("successful restore");
+
+        let transaction_entries = fs::read_dir(root.path().join(RESTORE_TRANSACTIONS_DIRECTORY))
+            .expect("restore transaction directory")
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("transaction entries");
+        assert!(
+            transaction_entries.is_empty(),
+            "successful cleanup must not leak one directory per restore"
+        );
+    }
+
+    #[test]
     fn projection_failure_after_head_restores_the_prior_head() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
