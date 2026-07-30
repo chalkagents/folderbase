@@ -167,10 +167,22 @@ dangling symlink is left untouched.
 
 The restore journal binds the exact expected Local Head, selected Tombstone,
 recovered binding, new Folderbase Version ID, timestamp, and canonical digest.
+The transaction and target Version IDs are deterministic domain-separated
+derivations of that verified immutable authority, and the target timestamp is
+re-derived from the verified parent. Rewriting those fields together with a
+self-consistent target digest therefore grants no authority.
 The new full-state version copies every other live binding, Tombstone,
 exclusion, and root-manifest reference, removes only the selected Tombstone,
-and has the deletion Head as its sole parent. Local Head advances only after
-the target file, Object Version, blob, and complete Folderbase Version verify.
+and has the deletion Head as its sole parent. Core validates the complete
+bounded reachable ancestor DAG for cycles before selecting the nearest
+candidate; a nearer binding cannot hide a deeper cycle, while convergent DAGs
+remain valid. Local Head advances only after the target still has the exact
+retained-stage identity, bytes, length, and executable fidelity, the physical
+root is still attached, every path ancestor remains outside a case-folded
+nested Folderbase boundary, and the Object Version, blob, and complete
+Folderbase Version verify. Those live proofs run again after the Head CAS.
+Failure rolls the exact retained root back to the prior Head before returning
+a conflict, including recovery after interruption at Head publication.
 The capture and restore journals mutually exclude each other under the shared
 transaction lock. Interruption at journal, stage, target publication, version,
 Head, projection, or cleanup converges on the one assigned version without

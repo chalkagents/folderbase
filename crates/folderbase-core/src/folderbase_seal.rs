@@ -4195,7 +4195,9 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(
-            local_head(&detached).expect("detached prior Head").version_id,
+            local_head(&detached)
+                .expect("detached prior Head")
+                .version_id,
             deletion.version_id()
         );
         fs::remove_dir_all(&detached).expect("remove detached fixture");

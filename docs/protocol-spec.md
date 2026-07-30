@@ -838,17 +838,27 @@ cyclic, corrupt, or over-limit ancestry is refused.
 Restore uses a separate bounded journal under the shared local transaction
 lock. Capture and restore refuse each other's active intent. The journal binds
 the expected Head, selected Tombstone, recovered live binding, target version,
-timestamp, and digest. A private copied stage retains transaction ownership
+timestamp, and digest. Target and transaction IDs are deterministic
+domain-separated derivations of the verified parent authority; the timestamp
+is re-derived from that parent, so self-consistent journal rewrites are
+refused. A private copied stage retains transaction ownership
 while Core hard-links it into the absent same-path destination. Existing
 regular files, directories, symlinks, and dangling symlinks are never replaced;
 even identical foreign bytes are refused. Retry may accept the destination
-only when it has the exact retained-stage filesystem identity.
+only when it has the exact retained-stage filesystem identity. Core validates
+the complete bounded reachable ancestry DAG before accepting the nearest
+candidate, so a binding cannot mask a deeper cycle and a legitimate
+convergent DAG remains accepted.
 
 The resulting full-state Folderbase Version preserves the root manifest,
 exclusions, every unrelated live binding, and every unrelated Tombstone,
 removes only the selected Tombstone, restores the original Object ID and Object
 Version, and names the deletion Head as its sole parent. The target file and
-every immutable reference verify before Local Head changes. Journal, stage,
+every immutable reference verify before Local Head changes. Immediately before
+and after the Local Head CAS, Core re-attests the physical root, case-folded
+nested boundaries, retained-stage/destination identity, exact bytes, length,
+and executable fidelity. A post-Head failure durably restores the prior Head
+on the retained root capability before reporting conflict. Journal, stage,
 target, version, Head, projection, and cleanup boundaries are recoverable.
 Directory and symlink Tombstone reconstruction remain outside v1 restore.
 

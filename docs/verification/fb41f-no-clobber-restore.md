@@ -46,6 +46,13 @@ blob named by the current Head Tombstone.
 - `7ee012e` required case-folded `.folderbase/manifest.json` aliases to remain
   nested restore boundaries on case-sensitive filesystems. The pure
   case-folding seam failed to compile before the boundary matcher existed.
+- `baffd20` required final retained-stage identity, byte/fidelity, nested
+  boundary, and physical-root attachment revalidation. It failed to compile
+  because the final verification seam did not exist.
+- `a7b429c` converted the first fixed-head review into regressions for
+  same-byte replacement, in-place mutation, post-Head rollback, independently
+  rewritten journal assignment, a nearer candidate hiding a deeper cycle,
+  late nested-boundary closure, and copied replacement roots.
 
 ## GREEN behavior
 
@@ -65,6 +72,14 @@ blob named by the current Head Tombstone.
   Tombstone and nearest verified live ancestor before staging.
 - `c807298` discovers nested state and manifest components capability-relatively
   with ASCII case folding and refuses ambiguous aliases.
+- `9f6d7f6` and `bd5fc2b` retain and compare exact stage/destination and
+  physical-root identities, stream-verify bytes and fidelity, and recheck
+  case-folded nested boundaries without cross-target warnings.
+- `981e22a` derives transaction and target Version identity from verified
+  immutable authority, validates the complete reachable ancestry DAG, performs
+  live publication proofs immediately before and after Head CAS, and restores
+  the prior Head on the retained root capability before reporting a
+  post-Head conflict.
 
 The transaction is same-path and no-clobber. A preexisting regular file,
 directory, symlink, or dangling symlink is unchanged. Matching bytes are not
@@ -76,6 +91,16 @@ bounded, cycle-detecting ancestor DAG search selects the nearest live binding
 with the same path, Object ID, and Object Version. Competing nearest bindings
 must agree exactly, including executable fidelity. Missing, corrupt,
 ambiguous, cyclic, or over-limit lineage fails before restore publication.
+A nearer candidate cannot hide a deeper reachable cycle; a legitimate
+convergent DAG is accepted.
+
+The mutable journal is not assignment authority. Transaction and target
+Version IDs are deterministic domain-separated derivations of the verified
+Head, Tombstone, binding, Folderbase, and physical root, while the timestamp is
+re-derived from the verified parent. Final target identity, content, fidelity,
+root attachment, and nested-boundary proofs run immediately before and after
+Head CAS. Post-Head failure rolls the retained root back to its prior Head and
+never reports restore success.
 
 ## Gates
 
@@ -86,7 +111,7 @@ cargo fmt --all -- --check
 git diff --check
 
 cargo test --workspace --all-features --locked
-578 passed; 3 ignored
+590 passed; 3 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 passed
