@@ -7673,10 +7673,22 @@ mod tests {
             );
             let released_bytes = released_journal_bytes(&transaction, &released_plan_sha256);
             let released_sha256 = format!("{:x}", Sha256::digest(&released_bytes));
-            FolderbaseState::open(root.path())
-                .expect("state")
+            let normalized_current_bytes =
+                encode_active_transaction(&transaction, MAX_CAPTURE_TRANSACTION_BYTES)
+                    .expect("normalized current journal");
+            assert!(
+                released_bytes.len() < normalized_current_bytes.len(),
+                "fixture needs a bound that accepts compact released v1 but rejects normalized current wire"
+            );
+            let released_limit = released_bytes.len() as u64;
+            let state = FolderbaseState::open(root.path()).expect("state");
+            state
                 .replace(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &released_bytes)
                 .expect("install exact released active journal bytes");
+            assert!(
+                read_active_transaction_with_limit(&state, released_limit - 1).is_err(),
+                "oversized released raw wire must still fail its exact read bound"
+            );
             let head_authority = if fault == CaptureCheckpoint::HeadReplaced {
                 released_sha256.clone()
             } else {
@@ -7691,7 +7703,12 @@ mod tests {
 
             let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh reopen");
             let recovered = reopened
-                .seal_capture(reopened.plan_capture().expect("recovery plan"))
+                .seal_capture_with_hook_and_limits(
+                    reopened.plan_capture().expect("recovery plan"),
+                    |_| {},
+                    released_limit,
+                    MAX_ENCODED_VERSION_BYTES,
+                )
                 .expect("released active journal recovery");
             assert_eq!(recovered.version_id(), transaction.target_version_id);
             assert!(active_transaction(root.path()).is_none());
