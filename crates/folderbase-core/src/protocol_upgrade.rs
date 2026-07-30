@@ -14,6 +14,7 @@ use crate::{
     folderbase_state::FolderbaseState,
     root_attestation::{
         DEFAULT_V05_CAPTURE_IGNORE_RULES, MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile,
+        PROTOCOL_UPGRADE_RECEIPT_FIELD, PROTOCOL_UPGRADE_RECEIPT_FORMAT,
         attest_folderbase_root_with_profile, decode_manifest_protocol_profile,
     },
 };
@@ -30,9 +31,9 @@ const ACTIVE_REORGANIZATION_PATH: &str = ".folderbase/reorganizations/active.jso
 const MIGRATIONS_PATH: &str = ".folderbase/migrations";
 const MAX_PENDING_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MIGRATION_DIRECTORIES: usize = 16_384;
-const UPGRADE_RECEIPT_FORMAT: &str = "folderbase-protocol-upgrade-receipt-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProtocolUpgradePlanDigest {
     algorithm: String,
     digest: String,
@@ -104,6 +105,7 @@ pub struct ProtocolUpgradeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProtocolUpgradeReceipt {
     format: String,
     from_protocol_version: String,
@@ -159,7 +161,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
         ));
     }
     if matches!(profile, ManifestProtocolProfile::OrdinaryV05 { .. }) {
-        let Some(_) = manifest.get("protocol_upgrade") else {
+        let Some(_) = manifest.get(PROTOCOL_UPGRADE_RECEIPT_FIELD) else {
             let mut digest = Sha256::new();
             digest.update(b"folderbase-protocol-current-plan-v1\0");
             update_bytes(&mut digest, folderbase_id.as_bytes());
@@ -198,7 +200,7 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
         });
     }
 
-    if manifest.get("protocol_upgrade").is_some()
+    if manifest.get(PROTOCOL_UPGRADE_RECEIPT_FIELD).is_some()
         || manifest.pointer("/policies/capture_ignore").is_some()
     {
         return Err(invalid_upgrade(
@@ -281,9 +283,9 @@ pub fn plan_protocol_upgrade(root: impl AsRef<Path>) -> Result<ProtocolUpgradePl
         .as_object_mut()
         .expect("manifest object was checked")
         .insert(
-            "protocol_upgrade".to_owned(),
+            PROTOCOL_UPGRADE_RECEIPT_FIELD.to_owned(),
             serde_json::to_value(ProtocolUpgradeReceipt {
-                format: UPGRADE_RECEIPT_FORMAT.to_owned(),
+                format: PROTOCOL_UPGRADE_RECEIPT_FORMAT.to_owned(),
                 from_protocol_version: from_protocol_version.clone(),
                 target_manifest_without_receipt_sha256,
                 plan_digest: plan_digest.clone(),
@@ -469,14 +471,18 @@ fn ensure_no_pending_transactions(state: &FolderbaseState) -> Result<()> {
 }
 
 fn decode_applied_receipt(root: &Path, manifest: &Value) -> Result<ProtocolUpgradeReceipt> {
-    let receipt: ProtocolUpgradeReceipt =
-        serde_json::from_value(manifest.get("protocol_upgrade").cloned().ok_or_else(|| {
-            invalid_upgrade(root, "0.5 manifest has no applied legacy-upgrade receipt")
-        })?)
-        .map_err(|source| {
-            invalid_upgrade(root, format!("invalid protocol-upgrade receipt: {source}"))
-        })?;
-    if receipt.format != UPGRADE_RECEIPT_FORMAT
+    let receipt: ProtocolUpgradeReceipt = serde_json::from_value(
+        manifest
+            .get(PROTOCOL_UPGRADE_RECEIPT_FIELD)
+            .cloned()
+            .ok_or_else(|| {
+                invalid_upgrade(root, "0.5 manifest has no applied legacy-upgrade receipt")
+            })?,
+    )
+    .map_err(|source| {
+        invalid_upgrade(root, format!("invalid protocol-upgrade receipt: {source}"))
+    })?;
+    if receipt.format != PROTOCOL_UPGRADE_RECEIPT_FORMAT
         || !matches!(
             semver::Version::parse(&receipt.from_protocol_version),
             Ok(version) if version.major == 0 && matches!(version.minor, 1 | 2)
@@ -497,7 +503,7 @@ fn decode_applied_receipt(root: &Path, manifest: &Value) -> Result<ProtocolUpgra
     target
         .as_object_mut()
         .ok_or_else(|| invalid_upgrade(root, "manifest root must be an object"))?
-        .remove("protocol_upgrade");
+        .remove(PROTOCOL_UPGRADE_RECEIPT_FIELD);
     let manifest_path = root.join(MANIFEST_PATH);
     let target_encoded = serde_json::to_string_pretty(&target)
         .map(|encoded| format!("{encoded}\n").into_bytes())

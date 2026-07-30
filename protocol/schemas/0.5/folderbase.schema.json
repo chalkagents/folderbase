@@ -82,6 +82,9 @@
         "additionalProperties": true
       }
     },
+    "folderbase_protocol_upgrade": {
+      "$ref": "#/$defs/protocolUpgradeReceipt"
+    },
     "policies": {
       "type": "object",
       "required": [
@@ -151,6 +154,48 @@
     "folderbaseId": {
       "type": "string",
       "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "protocolUpgradeReceipt": {
+      "type": "object",
+      "required": [
+        "format",
+        "from_protocol_version",
+        "target_manifest_without_receipt_sha256",
+        "plan_digest"
+      ],
+      "properties": {
+        "format": {
+          "const": "folderbase-protocol-upgrade-receipt-v1"
+        },
+        "from_protocol_version": {
+          "type": "string",
+          "minLength": 5
+        },
+        "target_manifest_without_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "plan_digest": {
+          "type": "object",
+          "required": [
+            "algorithm",
+            "digest"
+          ],
+          "properties": {
+            "algorithm": {
+              "const": "sha256"
+            },
+            "digest": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "safeRelativePath": {
       "type": "string",

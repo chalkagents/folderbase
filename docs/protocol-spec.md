@@ -333,6 +333,14 @@ ordered nonempty strings, each at most 4,096 UTF-8 bytes and containing no NUL.
 JSON Schema expresses the corresponding 4,096-character ceiling; runtimes must
 also enforce the UTF-8 byte ceiling.
 
+The optional top-level `folderbase_protocol_upgrade` record is the closed,
+Core-owned recovery receipt for a legacy-to-0.5 manifest activation. It binds
+the legacy protocol version, reviewed plan SHA-256, and SHA-256 of the activated
+manifest with the receipt removed. It provides integrity and lost-ack recovery
+only and grants no mutation, sharing, or hosted authority. Compatible clients
+must preserve an unknown top-level `protocol_upgrade` extension without
+interpreting it as this receipt.
+
 ### Folderbase kinds
 
 Version 0.1 reserves:

@@ -63,6 +63,14 @@ bytes. JSON Schema also fixes the corresponding character ceiling; runtime
 admission enforces the byte ceiling. Unknown members inside `capture_ignore`
 are rejected.
 
+The optional top-level `folderbase_protocol_upgrade` member is Core's
+namespaced, closed recovery receipt for a legacy-to-0.5 manifest activation.
+It records the legacy version, approved plan digest, and digest of the activated
+manifest with the receipt removed. It is integrity and lost-ack evidence only:
+it grants no mutation, sharing, or hosted authority. Core validates it whenever
+present. The generic `protocol_upgrade` name is not reserved; it remains an
+unknown extension that compatible clients preserve without interpreting.
+
 Adapter creation is opt-in. A managed adapter target must be an ordinary
 visible relative path: absolute and drive paths, backslashes, empty segments,
 `.` or `..` traversal, NUL, trailing separators, and `.folderbase` or `.git`

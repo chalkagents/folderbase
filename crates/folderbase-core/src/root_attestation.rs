@@ -33,6 +33,8 @@ const ENTRY_FILE: &str = "FOLDERBASE.md";
 const DUPLICATE_KEY_SENTINEL: &str = "folderbase_duplicate_json_object_key";
 const MAX_CAPTURE_IGNORE_RULES: usize = 1_024;
 const MAX_CAPTURE_IGNORE_RULE_BYTES: usize = 4_096;
+pub(crate) const PROTOCOL_UPGRADE_RECEIPT_FIELD: &str = "folderbase_protocol_upgrade";
+pub(crate) const PROTOCOL_UPGRADE_RECEIPT_FORMAT: &str = "folderbase-protocol-upgrade-receipt-v1";
 
 /// Portable defaults for native 0.5 roots.
 ///
@@ -659,7 +661,53 @@ fn validate_ordinary_manifest_shape(manifest: &Value) -> Result<(), RootAttestat
             }
         }
     }
+    if record
+        .get(PROTOCOL_UPGRADE_RECEIPT_FIELD)
+        .is_some_and(|receipt| !valid_protocol_upgrade_receipt(receipt))
+    {
+        return Err(RootAttestationError::InvalidManifestShape);
+    }
     Ok(())
+}
+
+fn valid_protocol_upgrade_receipt(receipt: &Value) -> bool {
+    let Some(receipt) = receipt.as_object() else {
+        return false;
+    };
+    if receipt.len() != 4
+        || receipt.get("format").and_then(Value::as_str) != Some(PROTOCOL_UPGRADE_RECEIPT_FORMAT)
+        || !receipt
+            .get("from_protocol_version")
+            .and_then(Value::as_str)
+            .is_some_and(|version| {
+                matches!(
+                    Version::parse(version),
+                    Ok(version) if version.major == 0 && matches!(version.minor, 1 | 2)
+                )
+            })
+        || !receipt
+            .get("target_manifest_without_receipt_sha256")
+            .and_then(Value::as_str)
+            .is_some_and(valid_sha256)
+    {
+        return false;
+    }
+    let Some(plan_digest) = receipt.get("plan_digest").and_then(Value::as_object) else {
+        return false;
+    };
+    plan_digest.len() == 2
+        && plan_digest.get("algorithm").and_then(Value::as_str) == Some("sha256")
+        && plan_digest
+            .get("digest")
+            .and_then(Value::as_str)
+            .is_some_and(valid_sha256)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn classify_root(root: &Path) -> Result<(), RootAttestationError> {
