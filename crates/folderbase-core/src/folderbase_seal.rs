@@ -6350,6 +6350,36 @@ mod tests {
             .expect("cleanup edit must remain capturable");
     }
 
+    fn assert_cleanup_hook_substitution_never_returns_restored(
+        checkpoint_to_replace: RestoreCheckpoint,
+    ) {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        fs::remove_file(root.path().join("active.bin")).expect("delete");
+        store
+            .seal_capture(store.plan_capture().expect("deletion"))
+            .expect("deletion");
+        let replacement = b"foreign replacement during restore cleanup";
+
+        store
+            .restore_tombstone_with_hook("active.bin", |checkpoint| {
+                if checkpoint == &checkpoint_to_replace {
+                    fs::remove_file(root.path().join("active.bin"))
+                        .expect("remove published inode");
+                    fs::write(root.path().join("active.bin"), replacement)
+                        .expect("install foreign inode");
+                }
+            })
+            .expect_err("cleanup substitution must prevent restored-success acknowledgement");
+        assert_eq!(
+            fs::read(root.path().join("active.bin")).expect("preserved replacement"),
+            replacement
+        );
+    }
+
     #[test]
     fn same_inode_edit_before_stage_retirement_never_returns_restored() {
         assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::BeforeStageRetirement);
@@ -6373,6 +6403,25 @@ mod tests {
     #[test]
     fn same_inode_edit_at_cleanup_completion_never_returns_restored() {
         assert_cleanup_hook_edit_never_returns_restored(RestoreCheckpoint::CleanupComplete);
+    }
+
+    #[test]
+    fn inode_substitution_after_cleanup_intent_retirement_never_returns_restored() {
+        assert_cleanup_hook_substitution_never_returns_restored(
+            RestoreCheckpoint::CleanupIntentRetired,
+        );
+    }
+
+    #[test]
+    fn inode_substitution_after_completion_durability_never_returns_restored() {
+        assert_cleanup_hook_substitution_never_returns_restored(
+            RestoreCheckpoint::CompletionDurable,
+        );
+    }
+
+    #[test]
+    fn inode_substitution_at_cleanup_completion_never_returns_restored() {
+        assert_cleanup_hook_substitution_never_returns_restored(RestoreCheckpoint::CleanupComplete);
     }
 
     #[cfg(unix)]
