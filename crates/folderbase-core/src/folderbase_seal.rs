@@ -5544,6 +5544,142 @@ mod tests {
     }
 
     #[test]
+    fn released_v1_non_genesis_active_journal_recovers_before_and_after_head() {
+        #[derive(Serialize)]
+        struct ReleasedJournalHead {
+            version_id: String,
+            version_sha256: String,
+            transaction_sha256: String,
+        }
+
+        #[derive(Serialize)]
+        struct ReleasedCaptureTransaction {
+            format: String,
+            transaction_id: String,
+            folderbase_id: String,
+            root_instance_sha256: String,
+            plan_sha256: String,
+            expected_head: Option<ReleasedJournalHead>,
+            target_version_id: String,
+            created_at: String,
+            root_manifest_object_id: String,
+            root_manifest_candidate_version_id: String,
+            prior_root_manifest_version_id: Option<String>,
+            assignments: Vec<CaptureAssignment>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            target_tombstones: Vec<Tombstone>,
+        }
+
+        fn released_journal_bytes(transaction: &CaptureTransaction) -> Vec<u8> {
+            let expected_head = transaction.expected_head.as_ref().map(|head| {
+                let LocalHeadAuthority::CaptureTransactionV1 { sha256 } = &head.authority else {
+                    panic!("released capture parent must retain capture authority");
+                };
+                ReleasedJournalHead {
+                    version_id: head.version_id.clone(),
+                    version_sha256: head.version_sha256.clone(),
+                    transaction_sha256: sha256.clone(),
+                }
+            });
+            let released = ReleasedCaptureTransaction {
+                format: transaction.format.clone(),
+                transaction_id: transaction.transaction_id.clone(),
+                folderbase_id: transaction.folderbase_id.clone(),
+                root_instance_sha256: transaction.root_instance_sha256.clone(),
+                plan_sha256: transaction.plan_sha256.clone(),
+                expected_head,
+                target_version_id: transaction.target_version_id.clone(),
+                created_at: transaction.created_at.clone(),
+                root_manifest_object_id: transaction.root_manifest_object_id.clone(),
+                root_manifest_candidate_version_id: transaction
+                    .root_manifest_candidate_version_id
+                    .clone(),
+                prior_root_manifest_version_id: transaction.prior_root_manifest_version_id.clone(),
+                assignments: transaction.assignments.clone(),
+                target_tombstones: transaction.target_tombstones.clone(),
+            };
+            let mut encoded =
+                serde_json::to_vec_pretty(&released).expect("released capture journal JSON");
+            encoded.push(b'\n');
+            encoded
+        }
+
+        fn write_released_head(root: &Path, transaction_sha256: &str) {
+            let head = local_head(root).expect("current Head");
+            FolderbaseState::open(root)
+                .expect("state")
+                .replace(
+                    Path::new(LOCAL_HEAD_PATH),
+                    &json_bytes(&serde_json::json!({
+                        "format": "folderbase-local-head-v1",
+                        "folderbase_id": head.folderbase_id,
+                        "root_instance_sha256": head.root_instance_sha256,
+                        "version_id": head.version_id,
+                        "version_sha256": head.version_sha256,
+                        "transaction_sha256": transaction_sha256
+                    }))
+                    .expect("released Head bytes"),
+                )
+                .expect("install released Head");
+        }
+
+        for fault in [
+            CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::HeadReplaced,
+        ] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            store
+                .seal_capture(store.plan_capture().expect("genesis"))
+                .expect("genesis");
+            fs::write(root.path().join("active.bin"), b"non-genesis update")
+                .expect("update live file");
+            let plan = store.plan_capture().expect("update plan");
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                store.seal_capture_with_hook(plan, |checkpoint| {
+                    if checkpoint == &fault {
+                        panic!("simulate released v1 process termination at {fault:?}");
+                    }
+                })
+            }));
+            assert!(interrupted.is_err(), "fault {fault:?}");
+
+            let transaction = active_transaction(root.path()).expect("active capture");
+            assert!(
+                transaction.expected_head.is_some(),
+                "fixture must be non-genesis"
+            );
+            let released_bytes = released_journal_bytes(&transaction);
+            let released_sha256 = format!("{:x}", Sha256::digest(&released_bytes));
+            FolderbaseState::open(root.path())
+                .expect("state")
+                .replace(Path::new(ACTIVE_CAPTURE_TRANSACTION_PATH), &released_bytes)
+                .expect("install exact released active journal bytes");
+            let head_authority = if fault == CaptureCheckpoint::HeadReplaced {
+                released_sha256.clone()
+            } else {
+                local_head(root.path())
+                    .expect("prior Head")
+                    .authority
+                    .sha256()
+                    .to_owned()
+            };
+            write_released_head(root.path(), &head_authority);
+            drop(store);
+
+            let reopened = FolderbaseVersionStore::open(root.path()).expect("fresh reopen");
+            let recovered = reopened
+                .seal_capture(reopened.plan_capture().expect("recovery plan"))
+                .expect("released active journal recovery");
+            assert_eq!(recovered.version_id(), transaction.target_version_id);
+            assert!(active_transaction(root.path()).is_none());
+            let head = local_head(root.path()).expect("normalized recovered Head");
+            assert_eq!(head.format, "folderbase-local-head-v2");
+            assert_eq!(head.authority.sha256(), released_sha256);
+        }
+    }
+
+    #[test]
     fn local_head_rejects_unknown_or_mismatched_authority_discriminators() {
         let root = folderbase();
         let store = FolderbaseVersionStore::open(root.path()).expect("open");
