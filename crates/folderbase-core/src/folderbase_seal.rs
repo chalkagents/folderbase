@@ -766,6 +766,26 @@ fn execute_restore_transaction(
                 "restore parent digest changed".to_owned(),
             ));
         }
+        let parent_tombstone = parent
+            .tombstones()
+            .iter()
+            .find(|tombstone| tombstone.path() == transaction.path)
+            .ok_or_else(|| {
+                FolderbaseCaptureError::InvalidRestoreTransaction(
+                    "restore parent no longer contains the selected Tombstone".to_owned(),
+                )
+            })?;
+        if parent_tombstone != &transaction.tombstone {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore journal Tombstone differs from the verified parent".to_owned(),
+            ));
+        }
+        let authoritative = find_restore_binding(store, local, state, &parent, parent_tombstone)?;
+        if authoritative != transaction.binding {
+            return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+                "restore journal fidelity differs from verified ancestry".to_owned(),
+            ));
+        }
         let target = restored_version(
             store,
             &parent,
