@@ -1315,6 +1315,78 @@ mod tests {
         (fixture, state, digest)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn executable_restore_stage_fidelity_is_independent_of_process_umask() {
+        const CHILD_MARKER: &str = "FOLDERBASE_RESTRICTIVE_UMASK_CHILD";
+        const TEST_NAME: &str = "folderbase_state::tests::executable_restore_stage_fidelity_is_independent_of_process_umask";
+
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("current unit-test executable"),
+            )
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD_MARKER, "1")
+            .output()
+            .expect("run restrictive-umask test in an isolated serial process");
+            assert!(
+                output.status.success(),
+                "restrictive-umask child failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        struct ScopedUmask(libc::mode_t);
+
+        impl ScopedUmask {
+            fn replace(mask: libc::mode_t) -> Self {
+                // SAFETY: this runs in an isolated single-test child process,
+                // and Drop restores the previous process-global mask.
+                Self(unsafe { libc::umask(mask) })
+            }
+        }
+
+        impl Drop for ScopedUmask {
+            fn drop(&mut self) {
+                // SAFETY: this restores the mask captured by `replace` in the
+                // same isolated process before it exits.
+                unsafe {
+                    libc::umask(self.0);
+                }
+            }
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir(fixture.path().join(".folderbase/transactions")).expect("transactions");
+        let expected = b"#!/bin/sh\nexit 0\n";
+        fs::write(fixture.path().join(RESTORE_SOURCE), expected).expect("restore source");
+        let digest = format!("{:x}", Sha256::digest(expected));
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+        let _umask = ScopedUmask::replace(0o777);
+        state
+            .stage_restore_blob(
+                Path::new(RESTORE_SOURCE),
+                Path::new(RESTORE_STAGE),
+                &digest,
+                expected.len() as u64,
+                true,
+            )
+            .expect("executable staging is independent of the creation mask");
+
+        let mode = fs::metadata(fixture.path().join(RESTORE_STAGE))
+            .expect("staged metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
     #[test]
     fn workspace_restore_revalidation_accepts_the_exact_retained_stage() {
         let expected = b"sealed opaque bytes\0\xff";
