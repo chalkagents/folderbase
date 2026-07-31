@@ -52,6 +52,11 @@ fn typed_answers(analysis: &MigrationAnalysis) -> Vec<MigrationAnswer> {
         .collect()
 }
 
+fn wire_relative_path(path: &Path) -> String {
+    crate::portable_wire_path::relative_to_wire(path)
+        .expect("test path has a canonical portable wire representation")
+}
+
 fn approved_structural_leaf(
     kind: StructuralLeafKind,
 ) -> (
@@ -264,9 +269,8 @@ fn assert_apply_leaf_substitution_conflicts(kind: StructuralLeafKind, byte_case:
     };
     let expected_source = source
         .strip_prefix(root.path())
-        .expect("structural source beneath root")
-        .to_string_lossy()
-        .into_owned();
+        .expect("structural source beneath root");
+    let expected_source = wire_relative_path(expected_source);
 
     let result = apply_migration_with_transaction_hook(approved, |checkpoint| {
         let TransactionV1Checkpoint::ApplyIntentPersisted(index) = checkpoint else {
@@ -1102,8 +1106,8 @@ fn persisted_step_index(fixture: &ClosedLeafFixture) -> usize {
     let expected_target = fixture
         .target
         .strip_prefix(fixture.root.path())
-        .expect("fixture target beneath root")
-        .to_string_lossy();
+        .expect("fixture target beneath root");
+    let expected_target = wire_relative_path(expected_target);
     steps
         .iter()
         .position(|step| {
@@ -1115,7 +1119,7 @@ fn persisted_step_index(fixture: &ClosedLeafFixture) -> usize {
                     })
                     .and_then(|target| target.get("path"))
                     .and_then(serde_json::Value::as_str)
-                    == Some(expected_target.as_ref())
+                    == Some(expected_target.as_str())
         })
         .expect("persisted closed-program step for fixture target")
 }
@@ -3376,8 +3380,8 @@ fn create_file_retained_parent_fixture() -> RetainedCreateParentFixture {
         .to_path_buf();
     let relative_parent = parent
         .strip_prefix(leaf.root.path())
-        .expect("created parent beneath root")
-        .to_string_lossy();
+        .expect("created parent beneath root");
+    let relative_parent = wire_relative_path(relative_parent);
     let program: serde_json::Value = serde_json::from_slice(
         &fs::read(program_path_for(leaf.root.path(), &leaf.migration_id))
             .expect("persisted mutation program"),
@@ -3389,7 +3393,7 @@ fn create_file_retained_parent_fixture() -> RetainedCreateParentFixture {
         .iter()
         .position(|step| {
             step["kind"].as_str() == Some("create_directory")
-                && step["target"]["path"].as_str() == Some(relative_parent.as_ref())
+                && step["target"]["path"].as_str() == Some(relative_parent.as_str())
         })
         .expect("transaction-created direct parent step");
     let parent_identity =
@@ -6250,13 +6254,13 @@ fn environment_leaf_step_index(fixture: &EnvironmentLeafFixture) -> usize {
     let relative = fixture
         .path
         .strip_prefix(fixture.root.path())
-        .expect("relative environment path")
-        .to_string_lossy();
+        .expect("relative environment path");
+    let relative = wire_relative_path(relative);
     program["steps"]
         .as_array()
         .expect("program steps")
         .iter()
-        .position(|step| step["target"]["path"].as_str() == Some(relative.as_ref()))
+        .position(|step| step["target"]["path"].as_str() == Some(relative.as_str()))
         .expect("environment step")
 }
 
@@ -6333,9 +6337,20 @@ fn apply_phase_propagates_an_initial_manifest_integrity_error() {
 
     let error = current_environment_validation(&fixture)
         .expect_err("invalid manifest shape must fail with its exact integrity error");
+    #[cfg(not(windows))]
     assert!(
         matches!(error, FolderbaseError::UnsafePath(ref path) if path == &fixture.path),
         "the phase validator must not swallow the exact no-follow integrity error: {error:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        matches!(
+            error,
+            FolderbaseError::Io { ref path, ref source }
+                if path == &fixture.path
+                    && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "the phase validator must preserve Windows' exact kernel denial: {error:?}"
     );
 }
 
@@ -6419,16 +6434,13 @@ fn apply_move_with_fact_change_after_claim(
             )
             .expect("persisted mutation program JSON");
             let step = &program["steps"][index];
+            let relative_destination = fixture
+                .target
+                .strip_prefix(fixture.root.path())
+                .expect("relative destination");
+            let relative_destination = wire_relative_path(relative_destination);
             if step["kind"] == "move_file"
-                && step["destination"]["path"].as_str()
-                    == Some(
-                        fixture
-                            .target
-                            .strip_prefix(fixture.root.path())
-                            .expect("relative destination")
-                            .to_string_lossy()
-                            .as_ref(),
-                    )
+                && step["destination"]["path"].as_str() == Some(relative_destination.as_str())
                 && let Some(change) = change.borrow_mut().take()
             {
                 change(&fixture);
@@ -6457,17 +6469,44 @@ fn mid_apply_manifest_change_is_rejected_before_visible_publication() {
 
 #[test]
 fn mid_apply_state_identity_change_is_rejected_before_visible_publication() {
+    #[cfg(windows)]
+    let kernel_blocked = RefCell::new(false);
     let (fixture, result) = apply_move_with_fact_change_after_claim(|fixture| {
         let state = fixture.root.path().join(".folderbase");
         let retained = fixture.root.path().join(".folderbase-retained");
-        fs::rename(&state, &retained).expect("retain approved state directory");
+        if let Err(error) = fs::rename(&state, &retained) {
+            #[cfg(windows)]
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                *kernel_blocked.borrow_mut() = true;
+                return;
+            }
+            panic!("retain approved state directory: {error}");
+        }
         fs::create_dir(&state).expect("install foreign state directory");
     });
-    assert!(
-        result.is_err(),
-        "changed immutable state identity must conflict"
-    );
-    assert!(!fixture.target.exists(), "no destination may be published");
+    #[cfg(not(windows))]
+    {
+        assert!(
+            result.is_err(),
+            "changed immutable state identity must conflict"
+        );
+        assert!(!fixture.target.exists(), "no destination may be published");
+    }
+    #[cfg(windows)]
+    {
+        assert!(
+            *kernel_blocked.borrow(),
+            "Windows must deny renaming the retained state capability"
+        );
+        assert!(
+            result.is_ok(),
+            "the migration may proceed when the kernel prevents state substitution: {result:?}"
+        );
+        assert!(
+            fixture.target.exists(),
+            "the uncontested destination is published after kernel protection"
+        );
+    }
 }
 
 #[test]
@@ -8363,8 +8402,7 @@ fn sibling_scan_classifies_all_legacy_execution_states_from_result_evidence() {
         plan.state = MigrationState::Rejected;
         persist_plan(&plan).expect("deliberately misleading terminal plan");
 
-        let canonical_root = root.path().canonicalize().expect("canonical root");
-        let state = FolderbaseState::open_existing(&canonical_root).expect("state");
+        let state = FolderbaseState::open_existing(&journal.root).expect("state");
         assert_eq!(
             durable_migration_execution_is_terminal(&state, &migration_id)
                 .expect("exact legacy execution classification"),

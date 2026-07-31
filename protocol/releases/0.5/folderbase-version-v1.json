@@ -188,7 +188,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",
-      "sha256": "b261b15f4e715d91a03962a1efe9c4bd3900465e6b4aedb479199a7e4521ac0c"
+      "sha256": "f66979a56f18304c79bf111bdc71b0b05ee6e42b48400da6b6378c357dd5a4ee"
     },
     {
       "path": "crates/folderbase-core/src/model.rs",
