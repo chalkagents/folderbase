@@ -387,8 +387,11 @@ impl VerifiedPrivateDirectory {
         name: &OsStr,
     ) -> Result<(MigrationRegularFact, String)> {
         #[cfg(target_os = "linux")]
-        let trace_claim =
-            self.display.ends_with("claims") && name == OsStr::new("00000000.publish.claim");
+        let trace_claim = self
+            .display
+            .to_string_lossy()
+            .contains("transaction-v1/claims")
+            && name.to_string_lossy().contains("00000000.publish.claim");
         #[cfg(target_os = "linux")]
         if trace_claim {
             eprintln!("[DEBUG-fb41h-fact] before open");
