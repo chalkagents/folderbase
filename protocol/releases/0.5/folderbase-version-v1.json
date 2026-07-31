@@ -184,11 +184,11 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
-      "sha256": "6b6ab9d5a0664026ac5a3dbb91a8c9c0af5f115ae33936a82c24be5d307bfb90"
+      "sha256": "55a0496169da8722caf419afb7f0ff2a4df631baffd65551968bc09904f0d343"
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",
-      "sha256": "9bd927e913154e0e57fe31e3b80d0407e65eaa819562daa5bd0066d1ed67e3d4"
+      "sha256": "68e69a6cdf4d177c34b182f5a8012aabe9ad3ff512d0e640b6c732dca7c0f803"
     },
     {
       "path": "crates/folderbase-core/src/model.rs",
