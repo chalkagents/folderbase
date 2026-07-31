@@ -97,10 +97,10 @@ jobs:
         run: cargo test --package folderbase-core --test folderbase_seal --locked
 
       - name: Test injected seal crash recovery
-        run: cargo test --package folderbase-core --lib --locked folderbase_seal::tests::
+        run: "cargo test --package folderbase-core --lib --locked folderbase_seal::tests::"
 
       - name: Test state confinement
-        run: cargo test --package folderbase-core --lib --locked folderbase_state::tests::
+        run: "cargo test --package folderbase-core --lib --locked folderbase_state::tests::"
 
       - name: Test independent-handle locking
         run: cargo test --package folderbase-core --lib --locked local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
