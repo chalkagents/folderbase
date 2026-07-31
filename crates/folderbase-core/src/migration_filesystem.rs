@@ -220,6 +220,12 @@ pub(crate) struct VerifiedPrivateDirectory {
     display: PathBuf,
 }
 
+struct BoundedPrivateRegularObservation {
+    _file: std::fs::File,
+    fact: MigrationRegularFact,
+    sha256: String,
+}
+
 pub(crate) struct VerifiedVisibleDirectory {
     directory: Dir,
     display: PathBuf,
@@ -957,21 +963,71 @@ impl VerifiedPrivateDirectory {
         name: &OsStr,
         maximum_bytes: u64,
     ) -> Result<()> {
-        self.retire_uncommitted_regular_write_with_hook(name, maximum_bytes, || {})
+        self.retire_uncommitted_regular_write_with_hooks(name, maximum_bytes, || {}, || {})
     }
 
-    fn retire_uncommitted_regular_write_with_hook(
+    fn retire_uncommitted_regular_write_with_hooks(
         &self,
         name: &OsStr,
         maximum_bytes: u64,
-        before_content_read: impl FnOnce(),
+        mut before_content_read: impl FnMut(),
+        after_initial_read: impl FnOnce(),
     ) -> Result<()> {
+        let Some(initial) = self.observe_uncommitted_regular_write_bounded(
+            name,
+            maximum_bytes,
+            &mut before_content_read,
+        )?
+        else {
+            return Ok(());
+        };
+        after_initial_read();
+        let current = self
+            .observe_uncommitted_regular_write_bounded(
+                name,
+                maximum_bytes,
+                &mut before_content_read,
+            )?
+            .ok_or_else(|| FolderbaseError::InvalidRecord {
+                path: self.display.join(name),
+                message: "uncommitted private write changed before cleanup".to_owned(),
+            })?;
+        require_exact_regular_fact(
+            &current.fact,
+            &current.sha256,
+            exact_regular_leaf(&initial.fact, &initial.sha256, 1),
+            &self.display.join(name),
+            ExactFactLocation::Private,
+        )?;
+        let display = self.display.join(name);
+        reject_windows_reparse(&self.directory, name, &display)?;
+        self.directory
+            .remove_file(name)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        sync_directory(&self.directory, &display)?;
+        match self.directory.symlink_metadata(name) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "uncommitted private write pathname was recreated during cleanup"
+                    .to_owned(),
+            }),
+            Err(source) => Err(FolderbaseError::io(display, source)),
+        }
+    }
+
+    fn observe_uncommitted_regular_write_bounded(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        before_content_read: &mut impl FnMut(),
+    ) -> Result<Option<BoundedPrivateRegularObservation>> {
         let (mut file, metadata, display) = match self.open_regular_relaxed(name) {
             Ok(opened) => opened,
             Err(FolderbaseError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Ok(());
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
@@ -1030,7 +1086,7 @@ impl VerifiedPrivateDirectory {
                 message: "uncommitted private write changed while it was read".to_owned(),
             });
         }
-        let observed_sha256 = format!("{:x}", digest.finalize());
+        let sha256 = format!("{:x}", digest.finalize());
         let fact = MigrationRegularFact {
             physical_identity_sha256: identity.stable_sha256(),
             device_sha256: identity.device_sha256(),
@@ -1039,7 +1095,11 @@ impl VerifiedPrivateDirectory {
             unix_mode: private_unix_mode(&metadata),
             link_count,
         };
-        self.remove_exact_regular(name, exact_regular_leaf(&fact, &observed_sha256, 1))
+        Ok(Some(BoundedPrivateRegularObservation {
+            _file: file,
+            fact,
+            sha256,
+        }))
     }
 
     #[cfg(test)]
@@ -1047,9 +1107,30 @@ impl VerifiedPrivateDirectory {
         &self,
         name: &OsStr,
         maximum_bytes: u64,
-        before_content_read: impl FnOnce(),
+        before_content_read: impl FnMut(),
     ) -> Result<()> {
-        self.retire_uncommitted_regular_write_with_hook(name, maximum_bytes, before_content_read)
+        self.retire_uncommitted_regular_write_with_hooks(
+            name,
+            maximum_bytes,
+            before_content_read,
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_uncommitted_regular_write_with_race_hooks(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        before_content_read: impl FnMut(),
+        after_initial_read: impl FnOnce(),
+    ) -> Result<()> {
+        self.retire_uncommitted_regular_write_with_hooks(
+            name,
+            maximum_bytes,
+            before_content_read,
+            after_initial_read,
+        )
     }
 
     fn verify_private_publication_ownership(

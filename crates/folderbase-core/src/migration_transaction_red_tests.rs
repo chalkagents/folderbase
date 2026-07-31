@@ -8003,6 +8003,60 @@ fn oversized_uncommitted_journal_write_is_rejected_before_content_read() {
 }
 
 #[test]
+fn replaced_uncommitted_journal_write_is_rejected_without_unbounded_reopen() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"scratch race\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let writing = root
+        .path()
+        .join(&journal_relative)
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    write_private_journal_artifact(&writing, b"admitted scratch");
+    let displaced = tempfile::tempdir().expect("displaced scratch directory");
+    let displaced_path = displaced.path().join("original-scratch");
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+    let content_reads = Cell::new(0_u8);
+
+    journal
+        .retire_uncommitted_regular_write_with_race_hooks(
+            OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            MAX_JOURNAL_GENERATION_BYTES,
+            || content_reads.set(content_reads.get().saturating_add(1)),
+            || {
+                fs::rename(&writing, &displaced_path).expect("retain admitted scratch");
+                write_private_journal_artifact(
+                    &writing,
+                    &vec![b'f'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+                );
+            },
+        )
+        .expect_err("a replacement scratch must fail closed");
+
+    assert_eq!(
+        content_reads.get(),
+        1,
+        "oversized replacement must be rejected from metadata before another content read"
+    );
+    assert_eq!(
+        fs::metadata(&writing)
+            .expect("foreign replacement retained")
+            .len(),
+        MAX_JOURNAL_GENERATION_BYTES + 1
+    );
+    assert_eq!(
+        fs::read(&displaced_path).expect("admitted inode remains displaced"),
+        b"admitted scratch"
+    );
+}
+
+#[test]
 fn generation_zero_scratch_only_is_rebuilt_by_public_apply() {
     let (root, migration_id, approval_digest) =
         prepared_additive_v1_fixture_with_digest(&[("README.md", b"generation zero\n")]);
