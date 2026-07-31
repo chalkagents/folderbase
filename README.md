@@ -1,6 +1,14 @@
-# Folderbase
+<p align="center">
+  <a href="https://folderbase.ai">
+    <img src="docs/assets/folderbase-readme-banner.png" alt="Folderbase — the open folder database for AI agents" width="100%">
+  </a>
+</p>
 
-**A folder-based database for agents.**
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-d7ff3f" alt="Apache-2.0 license"></a>
+  <img src="https://img.shields.io/badge/rust-1.96%2B-17120e?logo=rust&amp;logoColor=f5efe4" alt="Rust 1.96 or newer">
+  <a href="https://github.com/chalkagents/folderbase/actions/workflows/ci.yml"><img src="https://github.com/chalkagents/folderbase/actions/workflows/ci.yml/badge.svg" alt="Continuous integration status"></a>
+</p>
 
 Folderbase turns an ordinary folder into a structured, versioned workspace that
 humans and agents can understand and operate across sessions. Files remain
