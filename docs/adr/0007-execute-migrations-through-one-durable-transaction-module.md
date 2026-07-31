@@ -282,16 +282,17 @@ Windows portable fidelity maps the read-only file attribute to `read_only`.
 Regular files have no portable executable bit and therefore observe
 `executable: false`; directories are inherently traversable and observe
 `executable: true`. Core never synthesizes Unix mode bits on Windows. When an
-exact retained directory needs a narrower right such as `FILE_WRITE_ATTRIBUTES`
-or destination-entry creation plus traverse/read-attribute authority for a
-no-replace rename, Core reopens that same object with `ReOpenFile`, revalidates
-that it is a non-reparse directory, and closes the elevated handle after the
-leaf operation. File and directory moves request the closed union of the
-`FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` rights documented for the destination
-`RootDirectory`. Source leaves request `DELETE`, `FILE_READ_ATTRIBUTES`, and
-`SYNCHRONIZE`. The rename buffer uses the complete `FILE_RENAME_INFO` structure
-size plus the filename bytes. Core does not recover those rights by reopening
-`.` or an ambient pathname.
+exact retained directory needs `FILE_WRITE_ATTRIBUTES`, Core reopens that same
+object with `ReOpenFile`, revalidates that it is a non-reparse directory, and
+closes the elevated handle after the leaf operation. No-replace rename is
+different: child directory capabilities are initially opened with the closed
+union of `FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` documented for the
+destination `RootDirectory`, and that retained capability is passed directly
+to `SetFileInformationByHandle`. Core does not try to widen or ambiently reopen
+the destination directory while publishing. Source leaves request `DELETE`,
+`FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer uses the complete
+`FILE_RENAME_INFO` structure size plus the filename bytes. Core never recovers
+rights by reopening `.` or an ambient pathname.
 
 ### Claim and publish one leaf at a time
 
@@ -335,8 +336,14 @@ synchronized stage whose exact content, identity, fidelity, and link topology
 still prove the pending transaction publication may resume after a process
 exit. A partial, replaced, malformed, or otherwise unprovable stage is retained
 and reported; recovery never treats the reserved filename alone as proof of
-ownership. Legacy final-plus-stage hard-link checkpoints are retired only after
-both names are proven to reference the same exact two-link publication.
+ownership. Before a recoverable private claim reaches a hook or crash edge,
+Core synchronizes a canonical ownership record that binds the exact staged
+physical identity, device, digest, length, and portable fidelity to the pending
+program claim. Restart requires both that durable record and the exact leaf it
+names; equal bytes on a different inode or fidelity-only changes fail closed.
+The final claim retains the same ownership record until its transaction
+obligation ends. Legacy final-plus-stage hard-link checkpoints are retired only
+after both names are proven to reference the same exact two-link publication.
 
 Conflict records include a retained no-follow fingerprint of the affected
 ordinary leaves. Repeating an unchanged conflict returns the existing record

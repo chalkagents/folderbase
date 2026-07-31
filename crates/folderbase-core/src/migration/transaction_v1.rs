@@ -1236,9 +1236,12 @@ impl MutationProgramV1 {
                         .into_iter()
                         .flat_map(move |kind| {
                             let claim = format!("{index:08}.{kind}.claim");
+                            let ownership = format!(".{claim}.ownership.json");
                             [
                                 OsString::from(&claim),
                                 OsString::from(format!(".{claim}.preparing")),
+                                OsString::from(&ownership),
+                                OsString::from(format!(".{ownership}.preparing")),
                             ]
                         })
                 })

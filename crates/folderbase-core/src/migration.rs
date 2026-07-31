@@ -2733,10 +2733,31 @@ fn apply_transaction_v1_migration_in_with_hooks(
         execution_format,
         ExecutionFormat::None | ExecutionFormat::PrePreparedTransactionV1
     ) {
-        verify_source_files_in(migration_filesystem, &plan)?;
-        if !is_structural_plan(&plan) {
-            verify_additive_source_topology_in(migration_filesystem, &plan)?;
-            verify_expanded_reconstructable_trees_in(migration_filesystem, &plan)?;
+        let verification = (|| -> Result<()> {
+            verify_source_files_in(migration_filesystem, &plan)?;
+            if !is_structural_plan(&plan) {
+                verify_additive_source_topology_in(migration_filesystem, &plan)?;
+                verify_expanded_reconstructable_trees_in(migration_filesystem, &plan)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = verification {
+            // A no-follow leaf rejection reports its concrete absolute display
+            // path and is a durable migration conflict even before a journal
+            // exists. Topology drift remains an Approved plan that the user may
+            // restore and retry.
+            if matches!(
+                &error,
+                FolderbaseError::UnsafePath(path) if path.is_absolute()
+            ) {
+                persist_plan_transition_in(
+                    migration_filesystem,
+                    &plan.id,
+                    &[MigrationState::Approved],
+                    MigrationState::Conflicted,
+                )?;
+            }
+            return Err(error);
         }
     }
     checkpoint(ApplyCheckpoint::MutationAuthorityBound);
@@ -3153,7 +3174,23 @@ fn persist_private_leaf_receipt(
         &name,
         &format!(".{name}.preparing"),
         &receipt.encode()?,
-    )
+    )?;
+    retire_private_publication_ownership_for_receipt(transaction, receipt)
+}
+
+fn retire_private_publication_ownership_for_receipt(
+    transaction: &PreparedTransactionV1,
+    receipt: &PrivateLeafReceiptV1,
+) -> Result<()> {
+    let kind = match receipt.direction {
+        PrivateReceiptDirectionV1::Apply => "publish",
+        PrivateReceiptDirectionV1::Rollback => "restore",
+    };
+    let claim_name = private_claim_name(receipt.operation_index, kind);
+    transaction
+        .private
+        .claims
+        .retire_private_publication_ownership(OsStr::new(&claim_name))
 }
 
 fn load_private_leaf_receipt(
@@ -4692,7 +4729,7 @@ fn verify_apply_private_receipt(
             )?;
         }
     }
-    Ok(())
+    retire_private_publication_ownership_for_receipt(transaction, receipt)
 }
 
 fn is_exact_create_directory_prepublication_receipt(
@@ -4806,7 +4843,7 @@ fn record_transaction_v1_conflict(
         transaction
             .program
             .operation_count()
-            .saturating_mul(4)
+            .saturating_mul(12)
             .saturating_add(1),
     )?;
     let preserved_artifact = match (current.direction(), step) {
@@ -5559,7 +5596,7 @@ fn verify_rollback_private_receipt(
                     },
                     false,
                 )?;
-                return Ok(());
+                return retire_private_publication_ownership_for_receipt(transaction, receipt);
             }
             if filesystem.metadata(target.path)?.is_some() {
                 return Err(FolderbaseError::MigrationVerificationFailed(
@@ -5695,7 +5732,7 @@ fn verify_rollback_private_receipt(
             filesystem.exact_regular_fact(source.path, restored)?;
         }
     }
-    Ok(())
+    retire_private_publication_ownership_for_receipt(transaction, receipt)
 }
 
 fn claim_transaction_v1_exact_rollback_output(
@@ -6338,7 +6375,7 @@ fn abort_transaction_v1_in_flight_apply(
                 validate_retained_authority()?;
 
                 if rollback_claim.is_some() {
-                    transaction.private.claims.remove_exact_regular(
+                    transaction.private.claims.remove_exact_owned_regular(
                         OsStr::new(&rollback_name),
                         ExactRegularLeaf {
                             physical_identity_sha256: source.physical_identity_sha256,
@@ -6360,7 +6397,7 @@ fn abort_transaction_v1_in_flight_apply(
                     source.link_count.checked_add(1).ok_or_else(|| {
                         FolderbaseError::MigrationSourceChanged(filesystem.display(source.path))
                     })?;
-                transaction.private.claims.remove_exact_regular(
+                transaction.private.claims.remove_exact_owned_regular(
                     OsStr::new(&source_name),
                     ExactRegularLeaf {
                         physical_identity_sha256: source.physical_identity_sha256,
@@ -6553,7 +6590,7 @@ fn abort_transaction_v1_in_flight_apply(
                     transaction
                         .private
                         .claims
-                        .remove_exact_regular(OsStr::new(&publish_name), expected)?;
+                        .remove_exact_owned_regular(OsStr::new(&publish_name), expected)?;
                     validate_retained_authority()?;
                     return finish_private_abort_work_receipt(
                         filesystem,
@@ -6681,7 +6718,7 @@ fn abort_transaction_v1_in_flight_apply(
                         ));
                     }
                     validate_retained_authority()?;
-                    transaction.private.claims.remove_exact_regular(
+                    transaction.private.claims.remove_exact_owned_regular(
                         OsStr::new(&publish_name),
                         ExactRegularLeaf {
                             physical_identity_sha256: &publish_fact.physical_identity_sha256,
@@ -6920,7 +6957,7 @@ fn abort_transaction_v1_in_flight_apply(
                     transaction
                         .private
                         .claims
-                        .remove_exact_regular(OsStr::new(&publish_name), expected)?;
+                        .remove_exact_owned_regular(OsStr::new(&publish_name), expected)?;
                     validate_retained_authority()?;
                 }
 
@@ -6946,7 +6983,7 @@ fn abort_transaction_v1_in_flight_apply(
                     validate_retained_authority()?;
                 } else {
                     validate_retained_authority()?;
-                    transaction.private.claims.remove_exact_regular(
+                    transaction.private.claims.remove_exact_owned_regular(
                         OsStr::new(&source_name),
                         ExactRegularLeaf {
                             physical_identity_sha256: target.physical_identity_sha256,
@@ -7410,6 +7447,12 @@ fn validate_private_claim_set(
                 OsString::from(format!(".{}.preparing", name.to_string_lossy())),
                 false,
             );
+            let ownership = OsString::from(format!(".{}.ownership.json", name.to_string_lossy()));
+            allowed.insert(ownership.clone(), false);
+            allowed.insert(
+                OsString::from(format!(".{}.preparing", ownership.to_string_lossy())),
+                false,
+            );
         }
         if must_exist {
             required.insert(name);
@@ -7689,7 +7732,7 @@ fn reopen_transaction_v1(
         let maximum_entries = match directory {
             "claims" => program
                 .operation_count()
-                .saturating_mul(8)
+                .saturating_mul(12)
                 .saturating_add(1),
             "receipts" => program
                 .operation_count()
@@ -7697,6 +7740,11 @@ fn reopen_transaction_v1(
                 .saturating_add(1),
             _ => program.operation_count().saturating_add(1),
         };
+        let allowed = program.allowed_private_file_names(directory);
+        if directory == "claims" {
+            private_directory
+                .repair_orphaned_private_publication_ownership(maximum_entries, &allowed)?;
+        }
         let entries = private_directory.closed_entries(maximum_entries)?;
         if directory == "claims" {
             observed_claim_entries = entries.clone();
@@ -7705,7 +7753,6 @@ fn reopen_transaction_v1(
             .iter()
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>();
-        let allowed = program.allowed_private_file_names(directory);
         if matches!(directory, "stages" | "snapshots") && names != allowed {
             return Err(FolderbaseError::InvalidRecord {
                 path: filesystem.display(&relative),

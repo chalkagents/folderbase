@@ -5441,21 +5441,20 @@ fn apply_phase_rollback_claim_is_rejected_at_its_concrete_path() {
 fn extra_claim_and_receipt_artifacts_fail_closed() {
     for (directory, name) in [
         ("claims", "unexpected.claim"),
+        ("claims", ".unexpected.claim.ownership.json"),
         ("receipts", "unexpected.receipt"),
     ] {
         let fixture = interrupt_closed_leaf(
             approved_closed_leaf(ClosedLeafKind::MoveFile),
             LostAcknowledgement::Intent,
         );
-        fs::write(
-            transaction_v1_root(fixture.root.path(), &fixture.migration_id)
-                .join(directory)
-                .join(name),
-            b"unknown private artifact\n",
-        )
-        .expect("unknown private artifact");
+        let artifact = transaction_v1_root(fixture.root.path(), &fixture.migration_id)
+            .join(directory)
+            .join(name);
+        fs::write(&artifact, b"unknown private artifact\n").expect("unknown private artifact");
 
         assert_private_artifact_error(&fixture, directory, "extra private artifact");
+        assert!(artifact.exists(), "unknown private state must be retained");
     }
 }
 
