@@ -84,13 +84,14 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
 
     let directory = Dir::open_ambient_dir(root, ambient_authority())
         .map_err(|source| FolderbaseError::io(root, source))?;
-    analyze_folder_from_retained(&directory, root, collapse_reconstructable)
+    analyze_folder_from_retained(&directory, root, collapse_reconstructable, false)
 }
 
 pub(crate) fn analyze_folder_from_retained(
     root: &Dir,
     display_root: &Path,
     collapse_reconstructable: bool,
+    reject_windows_reparse: bool,
 ) -> Result<FolderAnalysis> {
     let root_file = root
         .try_clone()
@@ -120,6 +121,7 @@ pub(crate) fn analyze_folder_from_retained(
         display_root,
         Path::new(""),
         collapse_reconstructable,
+        reject_windows_reparse,
         &mut analysis,
     )?;
     sort_analysis(&mut analysis);
@@ -131,6 +133,7 @@ fn walk_retained_directory(
     display_root: &Path,
     relative_directory: &Path,
     collapse_reconstructable: bool,
+    reject_windows_reparse: bool,
     analysis: &mut FolderAnalysis,
 ) -> Result<()> {
     let display_directory = display_root.join(relative_directory);
@@ -154,7 +157,17 @@ fn walk_retained_directory(
         #[cfg(windows)]
         let (entry_metadata, child) = match open_windows_analysis_entry(directory, &name, &display)
         {
-            Ok(opened) => opened,
+            Ok(Some(opened)) => opened,
+            Ok(None) if reject_windows_reparse => {
+                return Err(FolderbaseError::UnsafePath(display));
+            }
+            Ok(None) => {
+                analysis.warnings.push(format!(
+                    "Skipped Windows reparse point without following it: {}",
+                    relative.display()
+                ));
+                continue;
+            }
             Err(_) if reconstructable && collapse_reconstructable => {
                 record_collapsed_reconstructable(analysis, relative);
                 continue;
@@ -180,7 +193,7 @@ fn walk_retained_directory(
         };
 
         if let Some(child) = &child {
-            match nested_folderbase_state_retained(child, &display) {
+            match nested_folderbase_state_retained(child, &display, reject_windows_reparse) {
                 Ok(Some(state)) => {
                     analysis.nested_folderbases.push(NestedFolderbaseBoundary {
                         path: relative,
@@ -189,6 +202,9 @@ fn walk_retained_directory(
                     continue;
                 }
                 Ok(None) => {}
+                Err(error @ FolderbaseError::UnsafePath(_)) if reject_windows_reparse => {
+                    return Err(error);
+                }
                 Err(_) if reconstructable && collapse_reconstructable => {
                     record_collapsed_reconstructable(analysis, relative);
                     continue;
@@ -252,6 +268,7 @@ fn walk_retained_directory(
                 display_root,
                 &relative,
                 collapse_reconstructable,
+                reject_windows_reparse,
                 analysis,
             )?;
             continue;
@@ -297,7 +314,7 @@ fn open_windows_analysis_entry(
     parent: &Dir,
     name: &OsStr,
     display: &Path,
-) -> Result<(fs::Metadata, Option<Dir>)> {
+) -> Result<Option<(fs::Metadata, Option<Dir>)>> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
@@ -318,20 +335,24 @@ fn open_windows_analysis_entry(
         .metadata()
         .map_err(|source| FolderbaseError::io(display, source))?;
     if metadata_is_link_or_reparse(&metadata) {
-        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+        return Ok(None);
     }
     let child = metadata.is_dir().then(|| Dir::from_std_file(file));
-    Ok((metadata, child))
+    Ok(Some((metadata, child)))
 }
 
 fn nested_folderbase_state_retained(
     directory: &Dir,
     display: &Path,
+    reject_unsafe_shapes: bool,
 ) -> Result<Option<NestedFolderbaseState>> {
     Ok(
         match classify_nested_folderbase_boundary(directory, display)? {
-            NestedFolderbaseBoundaryKind::ExactBoundary
-            | NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+            NestedFolderbaseBoundaryKind::ExactBoundary => Some(NestedFolderbaseState::Unchecked),
+            NestedFolderbaseBoundaryKind::UnsafeAliasShape if reject_unsafe_shapes => {
+                return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+            }
+            NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
                 Some(NestedFolderbaseState::Unchecked)
             }
             NestedFolderbaseBoundaryKind::None => None,
@@ -752,15 +773,17 @@ fn classification_rank(classification: Classification) -> u8 {
 mod windows_reparse_tests {
     use std::{fs, process::Command};
 
-    use super::analyze_folder;
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::{analyze_folder, analyze_folder_from_retained};
     use crate::FolderbaseError;
 
     #[test]
-    fn retained_analysis_rejects_a_directory_junction_before_descent() {
+    fn public_analysis_skips_a_directory_junction_without_descent() {
         let root = tempfile::tempdir().expect("analysis root");
         let target = tempfile::tempdir().expect("junction target");
         fs::write(target.path().join("foreign.txt"), b"foreign\n").expect("foreign file");
-        let junction = root.path().join("linked");
+        let junction = root.path().join("node_modules");
         let output = Command::new("cmd.exe")
             .args(["/D", "/C", "mklink", "/J"])
             .arg(&junction)
@@ -774,9 +797,67 @@ mod windows_reparse_tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
+        let analysis = analyze_folder(root.path()).expect("tolerant public analysis");
+        assert_eq!(analysis.inventory.file_count, 0);
+        assert!(analysis.warnings.iter().any(|warning| {
+            warning.contains("Skipped Windows reparse point")
+                && warning.contains(&junction.file_name().unwrap().to_string_lossy())
+        }));
+    }
+
+    #[test]
+    fn retained_transaction_analysis_rejects_a_directory_junction_before_descent() {
+        let root = tempfile::tempdir().expect("analysis root");
+        let target = tempfile::tempdir().expect("junction target");
+        fs::write(target.path().join("foreign.txt"), b"foreign\n").expect("foreign file");
+        let junction = root.path().join("node_modules");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .expect("run mklink");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let retained =
+            Dir::open_ambient_dir(root.path(), ambient_authority()).expect("retained root");
+
         assert!(matches!(
-            analyze_folder(root.path()),
+            analyze_folder_from_retained(&retained, root.path(), true, true),
             Err(FolderbaseError::UnsafePath(path)) if path == junction
+        ));
+    }
+
+    #[test]
+    fn retained_transaction_analysis_rejects_a_nested_folderbase_junction() {
+        let root = tempfile::tempdir().expect("analysis root");
+        let project = root.path().join("project");
+        fs::create_dir(&project).expect("project");
+        let target = tempfile::tempdir().expect("junction target");
+        fs::write(target.path().join("manifest.json"), b"{}\n").expect("foreign manifest");
+        let junction = project.join(".folderbase");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .expect("run mklink");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let retained =
+            Dir::open_ambient_dir(root.path(), ambient_authority()).expect("retained root");
+
+        assert!(matches!(
+            analyze_folder_from_retained(&retained, root.path(), true, true),
+            Err(FolderbaseError::UnsafePath(path)) if path == project
         ));
     }
 }

@@ -278,6 +278,18 @@ manifest, journal, stage, claim, snapshot, and affected leaf are rejected when
 symbolic links, cloud placeholders implemented as reparse points, and unknown
 reparse kinds are unsupported by transaction v1.
 
+Windows portable fidelity maps the read-only file attribute to `read_only`.
+Regular files have no portable executable bit and therefore observe
+`executable: false`; directories are inherently traversable and observe
+`executable: true`. Core never synthesizes Unix mode bits on Windows. When an
+exact retained directory needs a narrower right such as `FILE_WRITE_ATTRIBUTES`
+or the documented `FILE_TRAVERSE | FILE_READ_ATTRIBUTES` destination-directory
+authority for a no-replace rename, Core reopens that same object with
+`ReOpenFile`, revalidates that it is a non-reparse directory, and closes the
+elevated handle after the leaf operation. The rename buffer uses the complete
+`FILE_RENAME_INFO` structure size plus the filename bytes. Core does not recover
+those rights by reopening `.` or an ambient pathname.
+
 ### Claim and publish one leaf at a time
 
 The internal filesystem adapter executes a small set of typed leaf transitions.

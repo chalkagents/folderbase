@@ -30,6 +30,7 @@ pub(crate) struct MigrationRegularFact {
     pub(crate) physical_identity_sha256: String,
     pub(crate) device_sha256: String,
     pub(crate) bytes: u64,
+    pub(crate) read_only: bool,
     pub(crate) unix_mode: Option<u32>,
     pub(crate) link_count: u64,
 }
@@ -38,6 +39,7 @@ pub(crate) struct MigrationRegularFact {
 pub(crate) struct MigrationDirectoryFact {
     pub(crate) physical_identity_sha256: String,
     pub(crate) device_sha256: String,
+    pub(crate) read_only: bool,
     pub(crate) unix_mode: Option<u32>,
 }
 
@@ -422,6 +424,7 @@ impl VerifiedPrivateDirectory {
                 physical_identity_sha256: identity.stable_sha256(),
                 device_sha256: identity.device_sha256(),
                 bytes: metadata.len(),
+                read_only: portable_read_only(&metadata),
                 unix_mode: private_unix_mode(&metadata),
                 link_count,
             },
@@ -592,6 +595,7 @@ impl VerifiedPrivateDirectory {
             || final_metadata.len() != metadata.len()
             || final_identity != identity
             || private_regular_link_count(&file, &final_metadata, &display)? != 1
+            || portable_read_only(&final_metadata) != portable_read_only(&metadata)
             || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
         {
             return Err(FolderbaseError::MigrationVerificationFailed(display));
@@ -600,6 +604,7 @@ impl VerifiedPrivateDirectory {
             physical_identity_sha256: identity.stable_sha256(),
             device_sha256: identity.device_sha256(),
             bytes: metadata.len(),
+            read_only: portable_read_only(&metadata),
             unix_mode: private_unix_mode(&metadata),
             link_count: 1,
         })
@@ -637,6 +642,7 @@ impl VerifiedPrivateDirectory {
             || crate::physical_identity::PhysicalIdentity::from_file(&file)
                 .map_err(|source| FolderbaseError::io(&display, source))?
                 != identity
+            || portable_read_only(&final_metadata) != portable_read_only(&metadata)
             || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
         {
             return Err(FolderbaseError::InvalidRecord {
@@ -688,6 +694,7 @@ impl VerifiedPrivateDirectory {
                 .map_err(|source| FolderbaseError::io(&display, source))?
                 != identity
             || private_regular_link_count(&file, &final_metadata, &display)? != 1
+            || portable_read_only(&final_metadata) != portable_read_only(&metadata)
             || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
         {
             return Err(FolderbaseError::InvalidRecord {
@@ -880,12 +887,12 @@ impl MigrationFilesystem {
     }
 
     pub(crate) fn analyze_retained_root(&self) -> Result<FolderAnalysis> {
-        analyze_folder_from_retained(&self.root, &self.display_root, true)
+        analyze_folder_from_retained(&self.root, &self.display_root, true, true)
     }
 
     pub(crate) fn expand_retained_tree(&self, relative: &Path) -> Result<FolderAnalysis> {
         let directory = self.open_directory(relative)?;
-        analyze_folder_from_retained(&directory, &self.display(relative), false)
+        analyze_folder_from_retained(&directory, &self.display(relative), false, true)
     }
 
     pub(crate) fn metadata(&self, relative: &Path) -> Result<Option<Metadata>> {
@@ -944,6 +951,10 @@ impl MigrationFilesystem {
             }
             Err(source) => return Err(FolderbaseError::io(&display, source)),
         };
+        #[cfg(windows)]
+        if windows_entry_is_reparse(&parent, &name, &display)? {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
         if metadata.is_file() && !metadata.file_type().is_symlink() {
             let options = nofollow_regular_read_options();
             let mut file = parent
@@ -1020,6 +1031,7 @@ impl MigrationFilesystem {
                 || metadata_is_link_or_reparse(&reopened_metadata)
                 || reopened_identity != identity
                 || reopened_metadata.len() != opened_metadata.len()
+                || portable_read_only(&reopened_metadata) != portable_read_only(&opened_metadata)
                 || private_unix_mode(&reopened_metadata) != private_unix_mode(&opened_metadata)
                 || private_regular_link_count(&reopened_std, &reopened_metadata, &display)?
                     != link_count
@@ -1029,11 +1041,12 @@ impl MigrationFilesystem {
                 return Err(FolderbaseError::MigrationSourceChanged(display));
             }
             return Ok(Some(format!(
-                "regular:{}:{}:{}:{:x}:{:?}:{}",
+                "regular:{}:{}:{}:{:x}:{}:{:?}:{}",
                 identity.stable_sha256(),
                 identity.device_sha256(),
                 opened_metadata.len(),
                 digest.finalize(),
+                portable_read_only(&opened_metadata),
                 private_unix_mode(&opened_metadata),
                 link_count
             )));
@@ -1070,14 +1083,16 @@ impl MigrationFilesystem {
                 != initial_metadata_fingerprint
                 || final_fact.physical_identity_sha256 != initial_fact.physical_identity_sha256
                 || final_fact.device_sha256 != initial_fact.device_sha256
+                || final_fact.read_only != initial_fact.read_only
                 || final_fact.unix_mode != initial_fact.unix_mode
             {
                 return Err(FolderbaseError::MigrationSourceChanged(display));
             }
             return Ok(Some(format!(
-                "directory:{}:{}:{:?}:{}",
+                "directory:{}:{}:{}:{:?}:{}",
                 initial_fact.physical_identity_sha256,
                 initial_fact.device_sha256,
+                initial_fact.read_only,
                 initial_fact.unix_mode,
                 initial_metadata_fingerprint
             )));
@@ -1271,6 +1286,7 @@ impl MigrationFilesystem {
             physical_identity_sha256: identity.stable_sha256(),
             device_sha256: identity.device_sha256(),
             bytes: metadata.len(),
+            read_only: portable_read_only(&metadata),
             unix_mode,
             link_count,
         })
@@ -1372,6 +1388,7 @@ impl MigrationFilesystem {
                 physical_identity_sha256: identity.stable_sha256(),
                 device_sha256: identity.device_sha256(),
                 bytes: metadata.len(),
+                read_only: portable_read_only(&metadata),
                 unix_mode,
                 link_count,
             },
@@ -1405,6 +1422,7 @@ impl MigrationFilesystem {
         Ok(MigrationDirectoryFact {
             physical_identity_sha256: identity.stable_sha256(),
             device_sha256: identity.device_sha256(),
+            read_only: portable_read_only(&metadata),
             unix_mode,
         })
     }
@@ -1550,6 +1568,7 @@ impl MigrationFilesystem {
             physical_identity_sha256: source_identity.stable_sha256(),
             device_sha256: source_identity.device_sha256(),
             bytes: source_std_metadata.len(),
+            read_only: portable_read_only(&source_std_metadata),
             unix_mode: source_unix_mode,
             link_count: source_link_count,
         };
@@ -2470,6 +2489,7 @@ fn directory_fact_from_handle(directory: &Dir, display: &Path) -> Result<Migrati
     Ok(MigrationDirectoryFact {
         physical_identity_sha256: identity.stable_sha256(),
         device_sha256: identity.device_sha256(),
+        read_only: portable_read_only(&metadata),
         unix_mode,
     })
 }
@@ -2498,13 +2518,12 @@ fn require_exact_regular_fact(
     display: &Path,
     location: ExactFactLocation,
 ) -> Result<()> {
-    let read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
     let executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
     if fact.physical_identity_sha256 != expected.physical_identity_sha256
         || fact.device_sha256 != expected.device_sha256
         || fact.bytes != expected.bytes
         || observed_sha256 != expected.sha256
-        || read_only != expected.read_only
+        || fact.read_only != expected.read_only
         || executable != expected.executable
         || fact.link_count != expected.link_count
     {
@@ -2519,11 +2538,10 @@ fn require_exact_directory_fact(
     display: &Path,
     location: ExactFactLocation,
 ) -> Result<()> {
-    let read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
-    let executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
+    let executable = fact.unix_mode.is_none_or(|mode| mode & 0o111 != 0);
     if fact.physical_identity_sha256 != expected.physical_identity_sha256
         || fact.device_sha256 != expected.device_sha256
-        || read_only != expected.read_only
+        || fact.read_only != expected.read_only
         || executable != expected.executable
     {
         return Err(exact_fact_mismatch(location, display));
@@ -2627,15 +2645,38 @@ fn nofollow_regular_read_options() -> OpenOptions {
     options
 }
 
+#[cfg(windows)]
+fn windows_entry_is_reparse(parent: &Dir, name: &OsStr, display: &Path) -> Result<bool> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    Ok(metadata_is_link_or_reparse(&metadata))
+}
+
 fn validate_directory_fidelity(
     fact: &MigrationDirectoryFact,
     read_only: bool,
     executable: bool,
     display: &Path,
 ) -> Result<()> {
-    let observed_read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
-    let observed_executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
-    if observed_read_only != read_only || observed_executable != executable {
+    let observed_executable = fact.unix_mode.is_none_or(|mode| mode & 0o111 != 0);
+    if fact.read_only != read_only || observed_executable != executable {
         return Err(FolderbaseError::MigrationVerificationFailed(
             display.to_path_buf(),
         ));
@@ -2710,27 +2751,42 @@ fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::Fil
 
 #[cfg(windows)]
 fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
-    use cap_std::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+
+    reopen_windows_directory_with_access(directory, FILE_WRITE_ATTRIBUTES)
+        .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(windows)]
+fn reopen_windows_directory_with_access(
+    directory: &Dir,
+    desired_access: u32,
+) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::{
+        Foundation::{HANDLE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+        },
     };
 
-    let mut options = OpenOptions::new();
-    options
-        .access_mode(FILE_WRITE_ATTRIBUTES)
-        .follow(FollowSymlinks::No)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
-    let file = directory
-        .open_with(Path::new("."), &options)
-        .map_err(|source| FolderbaseError::io(display, source))?
-        .into_std();
-    let metadata = file
-        .metadata()
-        .map_err(|source| FolderbaseError::io(display, source))?;
+    let original = directory.try_clone()?.into_std_file();
+    let reopened = unsafe {
+        ReOpenFile(
+            original.as_raw_handle() as HANDLE,
+            desired_access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    };
+    if reopened == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file = unsafe { std::fs::File::from_raw_handle(reopened as _) };
+    let metadata = file.metadata()?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     Ok(file)
 }
@@ -2745,6 +2801,17 @@ fn private_unix_mode(metadata: &std::fs::Metadata) -> Option<u32> {
 #[cfg(not(unix))]
 fn private_unix_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
     None
+}
+
+fn portable_read_only(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        private_unix_mode(metadata).is_some_and(|mode| mode & 0o222 == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.permissions().readonly()
+    }
 }
 
 #[cfg(unix)]
@@ -2887,6 +2954,7 @@ fn verify_visible_regular_after_read(
         || metadata_is_link_or_reparse(&final_metadata)
         || final_identity != initial_identity
         || private_regular_link_count(file, &final_metadata, display)? != initial_link_count
+        || portable_read_only(&final_metadata) != portable_read_only(initial_metadata)
         || private_unix_mode(&final_metadata) != private_unix_mode(initial_metadata)
     {
         return Err(FolderbaseError::MigrationSourceChanged(
@@ -2915,6 +2983,7 @@ fn verify_fingerprinted_regular_after_read(
         || metadata_is_link_or_reparse(&final_metadata)
         || final_identity != initial_identity
         || private_regular_link_count(file, &final_metadata, display)? != initial_link_count
+        || portable_read_only(&final_metadata) != portable_read_only(initial_metadata)
         || private_unix_mode(&final_metadata) != private_unix_mode(initial_metadata)
         || regular_content_version(file, &final_metadata, display)? != *initial_content_version
     {
@@ -3051,7 +3120,7 @@ fn rename_noreplace(
 ) -> std::io::Result<()> {
     use cap_std::fs::OpenOptionsExt;
     use std::{
-        mem::{offset_of, size_of},
+        mem::size_of,
         os::windows::{ffi::OsStrExt, io::AsRawHandle},
         ptr,
     };
@@ -3059,8 +3128,8 @@ fn rename_noreplace(
         Foundation::HANDLE,
         Storage::FileSystem::{
             DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
-            SetFileInformationByHandle,
+            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+            FileRenameInfo, SetFileInformationByHandle,
         },
     };
 
@@ -3090,14 +3159,19 @@ fn rename_noreplace(
             "refusing to rename a reparse-point leaf",
         ));
     }
-    let destination_directory = destination_parent.try_clone()?.into_std_file();
+    let destination_directory = reopen_windows_directory_with_access(
+        destination_parent,
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+    )?;
 
     let file_name_bytes = destination_utf16
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    let header_bytes = offset_of!(FILE_RENAME_INFO, FileName);
-    let total_bytes = header_bytes
+    // The Win32 contract requires the complete structure size plus the
+    // filename bytes. The FileName field offset is smaller on 64-bit Windows
+    // because FILE_RENAME_INFO has trailing alignment padding.
+    let total_bytes = size_of::<FILE_RENAME_INFO>()
         .checked_add(file_name_bytes)
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     let words = total_bytes.div_ceil(size_of::<usize>());
@@ -3154,7 +3228,8 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, _display: &Path) -> std::
 fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
     let mut options = OpenOptions::new();
@@ -3162,7 +3237,7 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::i
         .access_mode(0)
         .follow(FollowSymlinks::No)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     let file = parent.open_with(name, &options)?.into_std();
     let metadata = file.metadata()?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
@@ -3247,7 +3322,29 @@ mod windows_directory_fidelity_tests {
 
     use cap_std::{ambient_authority, fs::Dir};
 
-    use super::{open_directory_nofollow, set_directory_fidelity};
+    use super::{VerifiedPrivateDirectory, open_directory_nofollow, set_directory_fidelity};
+
+    #[test]
+    fn full_private_directory_claim_applies_and_validates_windows_fidelity() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let private = VerifiedPrivateDirectory {
+            directory: Dir::open_ambient_dir(root.path(), ambient_authority())
+                .expect("retained private root"),
+            display: root.path().to_path_buf(),
+        };
+
+        let writable = private
+            .prepare_directory_claim("writable.claim", false, true)
+            .expect("writable transaction directory claim");
+        assert!(!writable.read_only);
+        assert!(writable.unix_mode.is_none());
+
+        let readonly = private
+            .prepare_directory_claim("readonly.claim", true, true)
+            .expect("readonly transaction directory claim");
+        assert!(readonly.read_only);
+        assert!(readonly.unix_mode.is_none());
+    }
 
     #[test]
     fn retained_directory_reopens_with_write_attributes_for_fidelity() {
@@ -3362,6 +3459,34 @@ mod rename_noreplace_error_tests {
             Err(FolderbaseError::UnsupportedMigrationFilesystem { path, reason })
                 if path == root.path() && reason.contains("no-replace rename")
         ));
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    ))]
+    #[test]
+    fn native_no_replace_moves_an_unoccupied_leaf() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        fs::write(root.path().join("source.bin"), b"source bytes").expect("source");
+        let directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("retained directory");
+
+        rename_noreplace(
+            &directory,
+            OsStr::new("source.bin"),
+            &directory,
+            OsStr::new("destination.bin"),
+        )
+        .expect("native no-replace move");
+
+        assert!(!root.path().join("source.bin").exists());
+        assert_eq!(
+            fs::read(root.path().join("destination.bin")).expect("destination bytes"),
+            b"source bytes"
+        );
     }
 
     #[cfg(any(

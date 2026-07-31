@@ -1730,14 +1730,18 @@ fn absent_leaf(
 }
 
 fn directory_fidelity(fact: &MigrationDirectoryFact) -> Result<PortableFidelityV1> {
-    fidelity_from_mode(fact.unix_mode)
+    fidelity_from_fact(fact.read_only, true, fact.unix_mode)
 }
 
 fn regular_fidelity(fact: &MigrationRegularFact) -> Result<PortableFidelityV1> {
-    fidelity_from_mode(fact.unix_mode)
+    fidelity_from_fact(fact.read_only, false, fact.unix_mode)
 }
 
-fn fidelity_from_mode(mode: Option<u32>) -> Result<PortableFidelityV1> {
+fn fidelity_from_fact(
+    read_only: bool,
+    executable_without_unix_mode: bool,
+    mode: Option<u32>,
+) -> Result<PortableFidelityV1> {
     if mode.is_some_and(|mode| mode & 0o7000 != 0) {
         return Err(invalid(
             Path::new("<mutation-program-v1>"),
@@ -1745,8 +1749,8 @@ fn fidelity_from_mode(mode: Option<u32>) -> Result<PortableFidelityV1> {
         ));
     }
     Ok(PortableFidelityV1 {
-        read_only: mode.is_some_and(|mode| mode & 0o222 == 0),
-        executable: mode.is_some_and(|mode| mode & 0o111 != 0),
+        read_only,
+        executable: mode.map_or(executable_without_unix_mode, |mode| mode & 0o111 != 0),
     })
 }
 

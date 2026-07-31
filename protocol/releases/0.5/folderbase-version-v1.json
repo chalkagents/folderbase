@@ -12,7 +12,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "455d941377e2b329848b789260d8171f854667189995e99ba881847df54ccf45"
+      "sha256": "85bfdeca36de23c924a414a5211d1ae55f314c9ebbaca85565958ffb3584cfc4"
     },
     {
       "path": "Cargo.lock",
@@ -124,7 +124,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folder_analysis.rs",
-      "sha256": "6947011a00efe2c880334ec296a3c740a857ea69cebb719da1bdcc6bdbfc11d8"
+      "sha256": "ef66f6256c44044456c09c3e83872b0d697bc63153d9363fd652d78e4891c919"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_capture.rs",
@@ -176,7 +176,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration/transaction_v1.rs",
-      "sha256": "70a636e971111237d68f97d9638c202643338ddc2b4b5beef729762aac54b3b7"
+      "sha256": "3c839f1ef843f351c98b144076ef0893ac9d1d1b1ba85a086f2db6a3619bfa79"
     },
     {
       "path": "crates/folderbase-core/src/migration_execution_contract_red_tests.rs",
@@ -184,11 +184,11 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
-      "sha256": "eeea2773f5a1098469340106b5f29873e7f1d7fcb6a33cfb0265c16e69abb947"
+      "sha256": "ad60c32998cba333bbb49163ee15f3d7759eeec2e99951369ddb4a19d9aa2b2d"
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",
-      "sha256": "c1bc93beafff575d5af42d520a2d9ba18b4de7a1cc4bcb9f5f4f2b6f2bea7cdd"
+      "sha256": "4d64be4e1a55bc432cbb3a105b919590499c7da6531d4649f436124811327912"
     },
     {
       "path": "crates/folderbase-core/src/model.rs",
@@ -240,7 +240,7 @@
     },
     {
       "path": "crates/folderbase-core/src/traversal_policy.rs",
-      "sha256": "5388ebe4624edc8b8a6f169a378b2e0851bb3c243f969e2a9e1ace990dc9f638"
+      "sha256": "f5a458b6a73f0eab6f5d060c107016d9ff552327aff45853ce03a0783c94c67a"
     },
     {
       "path": "crates/folderbase-core/src/validation.rs",

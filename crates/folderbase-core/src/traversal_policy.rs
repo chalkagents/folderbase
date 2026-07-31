@@ -2,9 +2,16 @@
 
 use std::{ffi::OsStr, path::Path};
 
+#[cfg(not(windows))]
 use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
+#[cfg(windows)]
+use cap_std::fs::OpenOptions;
 
+#[cfg(windows)]
+use crate::root_attestation::metadata_is_link_or_reparse;
 use crate::{FolderbaseError, Result};
 
 pub(crate) const MAX_NESTED_BOUNDARY_ENTRY_WORK: usize = 16_384;
@@ -79,7 +86,7 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
     mut observe_entry: impl FnMut() -> Result<()>,
 ) -> Result<NestedFolderbaseBoundaryKind> {
     let mut shared_work = 0_usize;
-    let mut exact_state = false;
+    let mut exact_state = None;
     for entry in directory
         .entries()
         .map_err(|source| FolderbaseError::io(display, source))?
@@ -94,22 +101,16 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
             continue;
         }
         let state_display = display.join(&name);
-        let metadata = directory
-            .symlink_metadata(&name)
-            .map_err(|source| FolderbaseError::io(&state_display, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let Some(state) = open_boundary_directory(directory, &name, &state_display)? else {
             return Ok(NestedFolderbaseBoundaryKind::UnsafeAliasShape);
-        }
-        exact_state = true;
+        };
+        exact_state = Some(state);
     }
-    if !exact_state {
+    let Some(state) = exact_state else {
         return Ok(NestedFolderbaseBoundaryKind::None);
-    }
+    };
 
     let state_display = display.join(".folderbase");
-    let state = directory
-        .open_dir_nofollow(".folderbase")
-        .map_err(|source| FolderbaseError::io(&state_display, source))?;
     let mut exact_manifest = false;
     for entry in state
         .entries()
@@ -125,10 +126,7 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
             continue;
         }
         let manifest_display = state_display.join(&name);
-        let metadata = state
-            .symlink_metadata(&name)
-            .map_err(|source| FolderbaseError::io(&manifest_display, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if !boundary_regular_is_safe(&state, &name, &manifest_display)? {
             return Ok(NestedFolderbaseBoundaryKind::UnsafeAliasShape);
         }
         exact_manifest = true;
@@ -139,6 +137,78 @@ pub(crate) fn classify_nested_folderbase_boundary_with_observer(
     } else {
         NestedFolderbaseBoundaryKind::None
     })
+}
+
+#[cfg(not(windows))]
+fn open_boundary_directory(parent: &Dir, name: &OsStr, display: &Path) -> Result<Option<Dir>> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(None);
+    }
+    parent
+        .open_dir_nofollow(name)
+        .map(Some)
+        .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(windows)]
+fn open_boundary_directory(parent: &Dir, name: &OsStr, display: &Path) -> Result<Option<Dir>> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Ok(None);
+    }
+    Ok(Some(Dir::from_std_file(file)))
+}
+
+#[cfg(not(windows))]
+fn boundary_regular_is_safe(parent: &Dir, name: &OsStr, display: &Path) -> Result<bool> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    Ok(!metadata.file_type().is_symlink() && metadata.is_file())
+}
+
+#[cfg(windows)]
+fn boundary_regular_is_safe(parent: &Dir, name: &OsStr, display: &Path) -> Result<bool> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    Ok(!metadata_is_link_or_reparse(&metadata) && metadata.is_file())
 }
 
 fn observe_boundary_entry(

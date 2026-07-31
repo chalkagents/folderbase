@@ -4062,11 +4062,12 @@ fn replace_conflict_fingerprint_uses_one_retained_observation_after_ambient_root
         PhysicalIdentity::from_path(&fixture.target).expect("retained target identity");
     let original_digest = sha256_test_bytes(&original_bytes);
     let expected_regular = format!(
-        "regular:{}:{}:{}:{}:{:?}:{}",
+        "regular:{}:{}:{}:{}:{}:{:?}:{}",
         original_identity.stable_sha256(),
         original_identity.device_sha256(),
         original_bytes.len(),
         original_digest,
+        original_metadata.mode() & 0o222 == 0,
         Some(original_metadata.mode() & 0o7777),
         original_metadata.nlink()
     );
