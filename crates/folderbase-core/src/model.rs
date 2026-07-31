@@ -539,11 +539,13 @@ pub struct BoundaryHint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconstructableTree {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NestedFolderbaseBoundary {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub path: PathBuf,
     pub state: NestedFolderbaseState,
 }

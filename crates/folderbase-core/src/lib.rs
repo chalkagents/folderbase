@@ -25,6 +25,7 @@ mod migration_execution_contract_red_tests;
 mod migration_filesystem;
 mod model;
 mod physical_identity;
+mod portable_wire_path;
 mod protocol_upgrade;
 mod reorganization;
 mod root_attestation;
