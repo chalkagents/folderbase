@@ -383,8 +383,12 @@ Journal generation publication does not expose its recoverable
 `.next-generation.preparing` name until the complete generation bytes have been
 synchronized. Core first writes the bytes under the reserved
 `.next-generation.writing` scratch name, synchronizes that file and its parent,
-and then atomically moves the singleton leaf to the durable staging name with
-no-clobber semantics. The scratch name carries no journal authority: after a
+bounded-observes that scratch through one retained handle, and keeps the handle
+alive while atomically moving the pathname to the durable staging name with
+no-clobber semantics. It then bounded-observes the staging name and requires its
+identity, digest, length, exact bytes, fidelity, and link topology to match the
+retained scratch observation. No publication check reopens either pathname for
+an EOF-unbounded digest. The scratch name carries no journal authority: after a
 process exit, a bounded owner-only singleton scratch is atomically moved with
 no-clobber semantics to the one reserved quarantine name derived from the next
 durable generation index. Core synchronizes the retained journal directory and

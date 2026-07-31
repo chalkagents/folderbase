@@ -8067,6 +8067,75 @@ fn retry_time_oversized_stage_substitution_is_bounded_and_preserved() {
 }
 
 #[test]
+fn fresh_journal_write_swap_is_bounded_after_no_clobber_rename() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"fresh write swap\n")]);
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&migration_id);
+    let transaction =
+        reopen_transaction_v1(&filesystem, &migration_root, None).expect("transaction");
+    let current = transaction.generations.last().expect("prepared generation");
+    let next = current
+        .next_apply_intent(&transaction.program, current.operation_cursor())
+        .expect("next journal generation");
+    let next_name = next.file_name();
+    let next_bytes = next
+        .encode(&PathBuf::from(&next_name))
+        .expect("next generation bytes");
+    let journal_path = root
+        .path()
+        .join(&migration_root)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let writing = journal_path.join(JOURNAL_GENERATION_WRITE_NAME);
+    let staging = journal_path.join(JOURNAL_GENERATION_STAGING_NAME);
+    let final_path = journal_path.join(&next_name);
+    let displaced = tempfile::tempdir().expect("displaced scratch directory");
+    let displaced_path = displaced.path().join("original-scratch");
+
+    let error = transaction
+        .private
+        .journal
+        .publish_recoverable_new_via_uncommitted_write_with_fresh_observation_hook(
+            &next_name,
+            JOURNAL_GENERATION_STAGING_NAME,
+            JOURNAL_GENERATION_WRITE_NAME,
+            &journal_generation_quarantine_name(transaction.generations.len()),
+            &next_bytes,
+            || {
+                fs::rename(&writing, &displaced_path).expect("retain admitted fresh scratch");
+                write_private_journal_artifact(
+                    &writing,
+                    &vec![b'f'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+                );
+            },
+        )
+        .expect_err("a fresh-write pathname swap must fail closed");
+
+    assert!(
+        matches!(
+            error,
+            FolderbaseError::InvalidRecord { ref message, .. }
+                if message == "private migration file exceeds its byte bound"
+        ),
+        "the renamed foreign stage must be rejected from bounded metadata: {error:?}"
+    );
+    assert_eq!(
+        fs::read(&displaced_path).expect("admitted scratch survives displacement"),
+        next_bytes
+    );
+    assert_eq!(
+        fs::metadata(&staging)
+            .expect("oversized foreign stage retained")
+            .len(),
+        MAX_JOURNAL_GENERATION_BYTES + 1
+    );
+    assert!(!writing.exists(), "no second scratch name is introduced");
+    assert!(!final_path.exists(), "no final generation is published");
+}
+
+#[test]
 fn legacy_paired_stage_foreign_swap_is_retained_for_manual_review() {
     let (root, migration_id, _) =
         prepared_additive_v1_fixture_with_digest(&[("README.md", b"paired swap\n")]);

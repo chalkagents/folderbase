@@ -968,6 +968,7 @@ impl VerifiedPrivateDirectory {
             quarantine_name,
             bytes,
             |_| {},
+            || {},
         )
     }
 
@@ -988,9 +989,32 @@ impl VerifiedPrivateDirectory {
             quarantine_name,
             bytes,
             before_retry_probe_content_read,
+            || {},
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn publish_recoverable_new_via_uncommitted_write_with_fresh_observation_hook(
+        &self,
+        name: &str,
+        staging_name: &str,
+        writing_name: &str,
+        quarantine_name: &str,
+        bytes: &[u8],
+        after_fresh_write_observation: impl FnOnce(),
+    ) -> Result<()> {
+        self.publish_recoverable_new_via_uncommitted_write_with_hook(
+            name,
+            staging_name,
+            writing_name,
+            quarantine_name,
+            bytes,
+            |_| {},
+            after_fresh_write_observation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn publish_recoverable_new_via_uncommitted_write_with_hook(
         &self,
         name: &str,
@@ -999,6 +1023,7 @@ impl VerifiedPrivateDirectory {
         quarantine_name: &str,
         bytes: &[u8],
         mut before_retry_probe_content_read: impl FnMut(&OsStr),
+        after_fresh_write_observation: impl FnOnce(),
     ) -> Result<()> {
         validate_private_name(name)?;
         validate_private_name(staging_name)?;
@@ -1062,16 +1087,18 @@ impl VerifiedPrivateDirectory {
             .map_err(|source| FolderbaseError::io(&writing_display, source))?;
         drop(file);
         sync_directory(&self.directory, &self.display)?;
-        let writing_fact = self.relaxed_regular_fact(writing_name_os, &expected_sha256)?;
-        if writing_fact.bytes != expected_bytes || writing_fact.link_count != 1 {
+        let writing_observation =
+            self.observe_relaxed_regular_bounded(writing_name_os, expected_bytes)?;
+        if writing_observation.fact.bytes != expected_bytes
+            || writing_observation.fact.link_count != 1
+            || writing_observation.sha256 != expected_sha256
+            || writing_observation.bytes != bytes
+        {
             return Err(FolderbaseError::MigrationVerificationFailed(
                 writing_display,
             ));
         }
-        self.exact_regular_fact(
-            writing_name_os,
-            exact_regular_leaf(&writing_fact, &expected_sha256, 1),
-        )?;
+        after_fresh_write_observation();
         rename_noreplace(
             &self.directory,
             writing_name_os,
@@ -1080,10 +1107,20 @@ impl VerifiedPrivateDirectory {
         )
         .map_err(|source| map_rename_noreplace_error(self.display.join(staging_name_os), source))?;
         sync_directory(&self.directory, &self.display)?;
-        self.exact_regular_fact(
-            staging_name_os,
-            exact_regular_leaf(&writing_fact, &expected_sha256, 1),
+        let staging_observation =
+            self.observe_relaxed_regular_bounded(staging_name_os, expected_bytes)?;
+        require_exact_regular_fact(
+            &staging_observation.fact,
+            &staging_observation.sha256,
+            exact_regular_leaf(&writing_observation.fact, &writing_observation.sha256, 1),
+            &self.display.join(staging_name_os),
+            ExactFactLocation::Private,
         )?;
+        if staging_observation.bytes != writing_observation.bytes {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                self.display.join(staging_name_os),
+            ));
+        }
         self.publish_recoverable_new(name, staging_name, bytes)
     }
 
