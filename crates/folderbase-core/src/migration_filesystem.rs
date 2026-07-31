@@ -3160,10 +3160,9 @@ fn rename_noreplace(
     use windows_sys::Win32::{
         Foundation::HANDLE,
         Storage::FileSystem::{
-            DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileRenameInfo,
-            SetFileInformationByHandle,
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+            FileRenameInfo, SYNCHRONIZE, SetFileInformationByHandle,
         },
     };
 
@@ -3179,12 +3178,18 @@ fn rename_noreplace(
 
     let mut source_options = OpenOptions::new();
     source_options
-        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .follow(FollowSymlinks::No);
     let source = source_parent
-        .open_with(source_name, &source_options)?
+        .open_with(source_name, &source_options)
+        .map_err(|source| {
+            std::io::Error::new(
+                source.kind(),
+                format!("open source for no-replace rename: {source}"),
+            )
+        })?
         .into_std();
     let source_metadata = source.metadata()?;
     if metadata_is_link_or_reparse(&source_metadata) {
@@ -3195,8 +3200,14 @@ fn rename_noreplace(
     }
     let destination_directory = reopen_windows_directory_with_access(
         destination_parent,
-        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
-    )?;
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+    )
+    .map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("ReOpenFile(destination directory for no-replace rename): {source}"),
+        )
+    })?;
 
     let file_name_bytes = destination_utf16
         .len()
@@ -3229,7 +3240,11 @@ fn rename_noreplace(
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
         ) == 0
         {
-            return Err(std::io::Error::last_os_error());
+            let source = std::io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                source.kind(),
+                format!("SetFileInformationByHandle(FileRenameInfo): {source}"),
+            ));
         }
     }
     Ok(())
@@ -3602,6 +3617,39 @@ mod rename_noreplace_error_tests {
         assert!(!root.path().join("source.bin").exists());
         assert_eq!(
             fs::read(root.path().join("destination.bin")).expect("destination bytes"),
+            b"source bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_moves_across_retained_parent_directories() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        let source_path = root.path().join("source");
+        let destination_path = root.path().join("destination");
+        fs::create_dir(&source_path).expect("source parent");
+        fs::create_dir(&destination_path).expect("destination parent");
+        fs::write(source_path.join("source.bin"), b"source bytes").expect("source");
+        let root_directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("retained root");
+        let source_directory = root_directory
+            .open_dir("source")
+            .expect("source capability");
+        let destination_directory = root_directory
+            .open_dir("destination")
+            .expect("destination capability");
+
+        rename_noreplace(
+            &source_directory,
+            OsStr::new("source.bin"),
+            &destination_directory,
+            OsStr::new("destination.bin"),
+        )
+        .expect("native cross-parent no-replace move");
+
+        assert!(!source_path.join("source.bin").exists());
+        assert_eq!(
+            fs::read(destination_path.join("destination.bin")).expect("destination bytes"),
             b"source bytes"
         );
     }

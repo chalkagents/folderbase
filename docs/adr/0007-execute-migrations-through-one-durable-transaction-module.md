@@ -287,10 +287,10 @@ or destination-entry creation plus traverse/read-attribute authority for a
 no-replace rename, Core reopens that same object with `ReOpenFile`, revalidates
 that it is a non-reparse directory, and closes the elevated handle after the
 leaf operation. File and directory moves request the closed union of the
-`FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, `FILE_TRAVERSE`, and
-`FILE_READ_ATTRIBUTES` rights. The rename buffer uses the complete
-`FILE_RENAME_INFO` structure size plus the filename bytes. Core does not recover
-those rights by reopening `.` or an ambient pathname.
+`FILE_TRAVERSE`, `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE` rights. Source leaves
+request `DELETE`, `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer
+uses the complete `FILE_RENAME_INFO` structure size plus the filename bytes.
+Core does not recover those rights by reopening `.` or an ambient pathname.
 
 ### Claim and publish one leaf at a time
 

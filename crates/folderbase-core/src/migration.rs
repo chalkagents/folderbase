@@ -12456,7 +12456,39 @@ fn canonical_root_with_identity_with_hook(
     {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }
-    Ok((canonical, retained))
+    Ok((caller_visible_canonical_path(canonical), retained))
+}
+
+#[cfg(not(windows))]
+fn caller_visible_canonical_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+#[cfg(windows)]
+fn caller_visible_canonical_path(path: PathBuf) -> PathBuf {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+    };
+
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUESTION_MARK: u16 = b'?' as u16;
+    const VERBATIM_PREFIX: [u16; 4] = [BACKSLASH, BACKSLASH, QUESTION_MARK, BACKSLASH];
+    const UNC_PREFIX: [u16; 4] = [b'U' as u16, b'N' as u16, b'C' as u16, BACKSLASH];
+
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let caller_visible = if encoded.starts_with(&VERBATIM_PREFIX)
+        && encoded[VERBATIM_PREFIX.len()..].starts_with(&UNC_PREFIX)
+    {
+        let mut ordinary = vec![BACKSLASH, BACKSLASH];
+        ordinary.extend_from_slice(&encoded[VERBATIM_PREFIX.len() + UNC_PREFIX.len()..]);
+        ordinary
+    } else if encoded.starts_with(&VERBATIM_PREFIX) {
+        encoded[VERBATIM_PREFIX.len()..].to_vec()
+    } else {
+        return path;
+    };
+    PathBuf::from(OsString::from_wide(&caller_visible))
 }
 
 fn canonical_root_with_identity(path: &Path) -> Result<(PathBuf, RetainedPhysicalIdentity)> {
