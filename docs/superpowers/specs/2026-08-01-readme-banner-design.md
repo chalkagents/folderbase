@@ -6,7 +6,7 @@ Give the `chalkagents/folderbase` repository an immediate, branded explanation o
 
 ## Approved Direction
 
-Use the selected **System Diagram** direction: a bold category statement on the left and a compact product model on the right.
+Use the selected **System Diagram / Direction C** composition: a bold category statement on the left and a compact product model on the right. Preserve that approved hierarchy and flow; the refinement is in execution quality rather than a new layout.
 
 ### Exact copy
 
@@ -19,13 +19,21 @@ The word `database` is the visual emphasis: black editorial italic on an acid-li
 ## Visual Design
 
 - Canvas: 1600 × 640 PNG.
-- Background: near-black technical drafting field with a restrained warm-paper grid and measurement details.
-- Palette: Folderbase near-black, warm paper, and acid lime. No gradients, blue, or purple.
+- Background: light warm-paper field with a restrained near-black drafting grid and measurement details, matching the editorial character of folderbase.ai.
+- Palette: warm paper, Folderbase near-black, and acid lime. No gradients, blue, or purple.
 - Left panel: Folderbase mark, category line, and large two-line statement.
 - Right panel: a concise left-to-right system diagram showing an ordinary mixed-file folder, the additive `.folderbase/` layer, and a bounded agent connection.
-- Diagram style: flat linework and interface-like labels. No emoji, robots, brains, clouds, sparkles, 3D renders, or generic AI imagery.
-- Texture: subtle printed-paper grain is acceptable if it does not reduce small-text legibility.
+- Diagram style: deterministic geometric SVG/CSS linework and interface-like labels. No emoji, robots, brains, clouds, sparkles, 3D renders, generic AI imagery, or image-model artifacts.
+- Texture: no generated texture. Use only subtle CSS color and line variation where it improves depth without reducing small-text legibility.
 - Safe area: all essential copy and diagram labels remain comfortably inside the canvas for GitHub responsive scaling.
+
+## Production Method
+
+- Build the banner as a fixed 1600 × 640 HTML/CSS composition.
+- Use real web typography, SVG/CSS primitives, and exact text rather than generative imagery.
+- Keep the reproducible source under `docs/assets/banner-source/`.
+- Capture the layout at exactly 1600 × 640 through a headless browser and write the final PNG to `docs/assets/folderbase-readme-banner.png`.
+- The capture must be deterministic and must not depend on network-loaded fonts or images.
 
 ## README Integration
 
