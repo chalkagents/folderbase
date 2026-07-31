@@ -287,10 +287,11 @@ or destination-entry creation plus traverse/read-attribute authority for a
 no-replace rename, Core reopens that same object with `ReOpenFile`, revalidates
 that it is a non-reparse directory, and closes the elevated handle after the
 leaf operation. File and directory moves request the closed union of the
-`FILE_TRAVERSE`, `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE` rights. Source leaves
-request `DELETE`, `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer
-uses the complete `FILE_RENAME_INFO` structure size plus the filename bytes.
-Core does not recover those rights by reopening `.` or an ambient pathname.
+`FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` rights documented for the destination
+`RootDirectory`. Source leaves request `DELETE`, `FILE_READ_ATTRIBUTES`, and
+`SYNCHRONIZE`. The rename buffer uses the complete `FILE_RENAME_INFO` structure
+size plus the filename bytes. Core does not recover those rights by reopening
+`.` or an ambient pathname.
 
 ### Claim and publish one leaf at a time
 
@@ -328,6 +329,14 @@ that content and records a conflict instead of restoring over it. Cleanup
 removes only an exact transaction-owned private artifact after its durable
 obligation has ended; an unknown, changed, or aliased artifact is retained and
 reported.
+
+The same rule applies to deterministic private staging names. A fully
+synchronized stage whose exact content, identity, fidelity, and link topology
+still prove the pending transaction publication may resume after a process
+exit. A partial, replaced, malformed, or otherwise unprovable stage is retained
+and reported; recovery never treats the reserved filename alone as proof of
+ownership. Legacy final-plus-stage hard-link checkpoints are retired only after
+both names are proven to reference the same exact two-link publication.
 
 Conflict records include a retained no-follow fingerprint of the affected
 ordinary leaves. Repeating an unchanged conflict returns the existing record

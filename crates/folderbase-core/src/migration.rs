@@ -3414,45 +3414,16 @@ fn repair_recoverable_private_receipt_staging(
         } else {
             16 * 1024
         };
-        let staged_bytes = match transaction
+        let staged_bytes = transaction
             .private
             .receipts
-            .read_relaxed_regular_bounded(&staged_name, maximum_bytes)
-        {
-            Ok(bytes) => bytes,
-            Err(error) if !final_exists => {
-                transaction
-                    .private
-                    .receipts
-                    .retire_recoverable_regular(&staged_name)?;
-                if matches!(error, FolderbaseError::InvalidRecord { .. }) {
-                    continue;
-                }
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
-        if let Err(error) = validate_staged_private_receipt_context(
+            .read_relaxed_regular_bounded(&staged_name, maximum_bytes)?;
+        validate_staged_private_receipt_context(
             filesystem,
             transaction,
             &final_name,
             &staged_bytes,
-        ) {
-            if !final_exists
-                && matches!(
-                    error,
-                    FolderbaseError::Json { .. } | FolderbaseError::InvalidRecord { .. }
-                )
-                && serde_json::from_slice::<serde_json::Value>(&staged_bytes).is_err()
-            {
-                transaction
-                    .private
-                    .receipts
-                    .retire_recoverable_regular(&staged_name)?;
-                continue;
-            }
-            return Err(error);
-        }
+        )?;
         let (staged_fact, staged_sha256) = transaction
             .private
             .receipts
@@ -3477,7 +3448,7 @@ fn repair_recoverable_private_receipt_staging(
             transaction
                 .private
                 .receipts
-                .retire_recoverable_regular(&staged_name)?;
+                .retire_exact_recoverable_regular(&staged_name, &staged_fact, &staged_sha256, 2)?;
         } else {
             if staged_fact.link_count != 1 {
                 return Err(invalid_journal(
@@ -7875,32 +7846,12 @@ fn repair_recoverable_journal_staging(
         });
     }
 
-    let (staged_fact, staged_sha256) = match journal.relaxed_regular_fact_observed(staging_name) {
-        Ok(observed) => observed,
-        Err(_) => {
-            journal.retire_recoverable_regular(staging_name)?;
-            return Ok(());
-        }
-    };
+    let (staged_fact, staged_sha256) = journal.relaxed_regular_fact_observed(staging_name)?;
     let staged_bytes =
-        match journal.read_relaxed_regular_bounded(staging_name, MAX_JOURNAL_GENERATION_BYTES) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                journal.retire_recoverable_regular(staging_name)?;
-                return Ok(());
-            }
-        };
+        journal.read_relaxed_regular_bounded(staging_name, MAX_JOURNAL_GENERATION_BYTES)?;
     let staging_path = journal_root.join(staging_name);
-    let staged = match TransactionJournalGenerationV1::decode(
-        &filesystem.display(&staging_path),
-        &staged_bytes,
-    ) {
-        Ok(staged) => staged,
-        Err(_) => {
-            journal.retire_recoverable_regular(staging_name)?;
-            return Ok(());
-        }
-    };
+    let staged =
+        TransactionJournalGenerationV1::decode(&filesystem.display(&staging_path), &staged_bytes)?;
     let destination_name = staged.file_name();
     let destination_name_os = OsStr::new(&destination_name);
     let final_exists = entries
@@ -7936,8 +7887,10 @@ fn repair_recoverable_journal_staging(
         validate_append(program, program_digest, &generations, &staged).is_ok()
     };
     if !staged_is_valid {
-        journal.retire_recoverable_regular(staging_name)?;
-        return Ok(());
+        return Err(FolderbaseError::InvalidRecord {
+            path: filesystem.display(&staging_path),
+            message: "recoverable journal staging is not the next admitted generation".to_owned(),
+        });
     }
 
     if final_exists {
@@ -7957,7 +7910,7 @@ fn repair_recoverable_journal_staging(
                     .to_owned(),
             });
         }
-        journal.retire_recoverable_regular(staging_name)?;
+        journal.retire_exact_recoverable_regular(staging_name, &staged_fact, &staged_sha256, 2)?;
         journal.verify_regular(destination_name_os)?;
         return Ok(());
     }
@@ -12456,39 +12409,25 @@ fn canonical_root_with_identity_with_hook(
     {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }
-    Ok((caller_visible_canonical_path(canonical), retained))
+    let display_root = caller_visible_canonical_path(path, canonical)
+        .map_err(|source| FolderbaseError::io(path, source))?;
+    Ok((display_root, retained))
 }
 
 #[cfg(not(windows))]
-fn caller_visible_canonical_path(path: PathBuf) -> PathBuf {
-    path
+fn caller_visible_canonical_path(
+    _caller_path: &Path,
+    canonical: PathBuf,
+) -> std::io::Result<PathBuf> {
+    Ok(canonical)
 }
 
 #[cfg(windows)]
-fn caller_visible_canonical_path(path: PathBuf) -> PathBuf {
-    use std::{
-        ffi::OsString,
-        os::windows::ffi::{OsStrExt, OsStringExt},
-    };
-
-    const BACKSLASH: u16 = b'\\' as u16;
-    const QUESTION_MARK: u16 = b'?' as u16;
-    const VERBATIM_PREFIX: [u16; 4] = [BACKSLASH, BACKSLASH, QUESTION_MARK, BACKSLASH];
-    const UNC_PREFIX: [u16; 4] = [b'U' as u16, b'N' as u16, b'C' as u16, BACKSLASH];
-
-    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
-    let caller_visible = if encoded.starts_with(&VERBATIM_PREFIX)
-        && encoded[VERBATIM_PREFIX.len()..].starts_with(&UNC_PREFIX)
-    {
-        let mut ordinary = vec![BACKSLASH, BACKSLASH];
-        ordinary.extend_from_slice(&encoded[VERBATIM_PREFIX.len() + UNC_PREFIX.len()..]);
-        ordinary
-    } else if encoded.starts_with(&VERBATIM_PREFIX) {
-        encoded[VERBATIM_PREFIX.len()..].to_vec()
-    } else {
-        return path;
-    };
-    PathBuf::from(OsString::from_wide(&caller_visible))
+fn caller_visible_canonical_path(
+    caller_path: &Path,
+    _canonical: PathBuf,
+) -> std::io::Result<PathBuf> {
+    std::path::absolute(caller_path)
 }
 
 fn canonical_root_with_identity(path: &Path) -> Result<(PathBuf, RetainedPhysicalIdentity)> {

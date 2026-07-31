@@ -5957,19 +5957,14 @@ fn interrupted_manifest_private_receipt() -> (TempDir, String, PathBuf, PathBuf)
 }
 
 #[test]
-fn private_receipt_staging_recovers_partial_synced_and_final_link_checkpoints() {
-    for checkpoint in ["partial_write", "staged_sync", "final_link"] {
+fn private_receipt_staging_recovers_synced_and_final_link_checkpoints() {
+    for checkpoint in ["staged_sync", "final_link"] {
         let (root, migration_id, manifest, receipt) = interrupted_manifest_private_receipt();
         let staging = receipt.with_file_name(format!(
             ".{}.preparing",
             receipt.file_name().expect("receipt name").to_string_lossy()
         ));
         match checkpoint {
-            "partial_write" => {
-                fs::rename(&receipt, &staging).expect("move receipt to staging");
-                fs::write(&staging, b"{\"partial\":")
-                    .expect("model process exit during receipt write");
-            }
             "staged_sync" => {
                 fs::rename(&receipt, &staging).expect("leave fully synced receipt staging");
             }
@@ -5997,6 +5992,38 @@ fn private_receipt_staging_recovers_partial_synced_and_final_link_checkpoints() 
                 .expect("manifest JSON");
         assert_eq!(manifest["policies"]["cloud_sync"], "enabled");
     }
+}
+
+#[test]
+fn private_receipt_staging_retains_a_partial_or_changed_artifact() {
+    let (root, migration_id, manifest, receipt) = interrupted_manifest_private_receipt();
+    let staging = receipt.with_file_name(format!(
+        ".{}.preparing",
+        receipt.file_name().expect("receipt name").to_string_lossy()
+    ));
+    fs::rename(&receipt, &staging).expect("move receipt to staging");
+    fs::write(&staging, b"{\"partial\":").expect("replace the durable receipt after interruption");
+    let manifest_before = fs::read(&manifest).expect("published manifest before recovery");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("changed receipt staging must fail closed");
+
+    assert_eq!(
+        fs::read(&staging).expect("changed staging is retained"),
+        b"{\"partial\":"
+    );
+    assert!(!receipt.exists(), "changed staging must not be promoted");
+    assert_eq!(
+        fs::read(manifest).expect("published manifest remains untouched"),
+        manifest_before
+    );
 }
 
 #[test]
@@ -7114,8 +7141,6 @@ fn synced_private_publish_staging_recovers_without_exposing_a_partial_final_clai
         1,
         "only the recoverable staging name is visible"
     );
-    fs::write(claims.join(&staged[0]), b"partial")
-        .expect("model a process exit during the streaming copy");
     let final_name = staged[0]
         .to_string_lossy()
         .trim_start_matches('.')
@@ -7149,8 +7174,68 @@ fn synced_private_publish_staging_recovers_without_exposing_a_partial_final_clai
 }
 
 #[test]
-fn deterministic_journal_generation_staging_recovers_after_arbitrary_process_exit() {
-    for checkpoint in ["partial_write", "staged_sync", "final_link"] {
+fn changed_private_publish_staging_is_retained_without_exposing_a_final_claim() {
+    let (root, migration_id, approval_digest) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"restart-safe bytes\n")]);
+    let interrupted = catch_unwind(AssertUnwindSafe(|| {
+        run_transaction_v1_with_hook(
+            root.path(),
+            MigrationCommand::Apply {
+                migration_id: &migration_id,
+                approval_digest: &approval_digest,
+            },
+            |checkpoint| {
+                if matches!(
+                    checkpoint,
+                    TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+                ) {
+                    panic!("simulate process exit after the private staging file is durable");
+                }
+            },
+        )
+    }));
+    assert!(
+        interrupted.is_err(),
+        "fixture must stop after durable staging"
+    );
+
+    let claims = transaction_v1_root(root.path(), &migration_id).join("claims");
+    let staged = fs::read_dir(&claims)
+        .expect("private claims directory")
+        .map(|entry| entry.expect("claim entry").file_name())
+        .find(|name| name.to_string_lossy().ends_with(".preparing"))
+        .expect("one staged private claim");
+    let staged_path = claims.join(&staged);
+    fs::write(&staged_path, b"changed after interruption").expect("replace the exact staged bytes");
+    let final_name = staged
+        .to_string_lossy()
+        .trim_start_matches('.')
+        .trim_end_matches(".preparing")
+        .to_owned();
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("changed private staging must fail closed");
+
+    assert_eq!(
+        fs::read(&staged_path).expect("changed staging remains"),
+        b"changed after interruption"
+    );
+    assert!(
+        !claims.join(final_name).exists(),
+        "changed staging must not be promoted"
+    );
+}
+
+#[test]
+fn deterministic_journal_generation_staging_recovers_synced_and_final_link_checkpoints() {
+    for checkpoint in ["staged_sync", "final_link"] {
         let (root, migration_id, _) =
             prepared_additive_v1_fixture_with_digest(&[("README.md", b"journal restart\n")]);
         let state = FolderbaseState::open_existing(root.path()).expect("state");
@@ -7163,13 +7248,9 @@ fn deterministic_journal_generation_staging_recovers_after_arbitrary_process_exi
         let staged_generation = current
             .next_apply_intent(&transaction.program, current.operation_cursor())
             .expect("next intent");
-        let staged_bytes = if checkpoint == "partial_write" {
-            b"{\"partial\":".to_vec()
-        } else {
-            staged_generation
-                .encode(Path::new("<staged-generation>"))
-                .expect("encoded intent")
-        };
+        let staged_bytes = staged_generation
+            .encode(Path::new("<staged-generation>"))
+            .expect("encoded intent");
         let staging = transaction_v1_root(root.path(), &migration_id)
             .join("journal")
             .join(JOURNAL_GENERATION_STAGING_NAME);
@@ -7210,6 +7291,37 @@ fn deterministic_journal_generation_staging_recovers_after_arbitrary_process_exi
             TransactionPhaseV1::Applied
         );
     }
+}
+
+#[test]
+fn partial_journal_generation_staging_is_retained_and_reported() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"journal restart\n")]);
+    let staging = transaction_v1_root(root.path(), &migration_id)
+        .join("journal")
+        .join(JOURNAL_GENERATION_STAGING_NAME);
+    fs::write(&staging, b"{\"partial\":").expect("leave partial journal staging");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o600))
+            .expect("private staging mode");
+    }
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("partial journal staging must fail closed");
+
+    assert_eq!(
+        fs::read(&staging).expect("partial staging is retained"),
+        b"{\"partial\":"
+    );
 }
 
 #[test]
