@@ -126,7 +126,7 @@ fn transaction_v1_rejects_unknown_entries_and_directory_kinds() {
 fn transaction_v1_rejects_missing_and_inner_wrong_kind_entries() {
     let root = initialized_folderbase();
     let migration_id = applied_move(root.path());
-    fs::remove_dir(transaction_root(root.path(), &migration_id).join("receipts"))
+    fs::remove_dir_all(transaction_root(root.path(), &migration_id).join("receipts"))
         .expect("remove expected directory");
     assert_recovery_fails_closed(root.path(), &migration_id);
 
@@ -143,9 +143,10 @@ fn transaction_v1_journal_bound_is_derived_from_the_operation_count() {
     let migration_id = applied_move(root.path());
     let journal = transaction_root(root.path(), &migration_id).join("journal");
     let bytes = fs::read(journal.join("00000000000000000003.json")).expect("terminal generation");
-    // One operation admits at most 4(1)+6 = 10 generations, far below the
-    // process-wide defensive ceiling.
-    for generation in 4..=10 {
+    // One operation admits at most 4(1)+6 phase generations plus two
+    // generations for each of eight retained conflicts: 26 total, far below
+    // the process-wide defensive ceiling.
+    for generation in 4..=26 {
         fs::write(journal.join(format!("{generation:020}.json")), &bytes)
             .expect("surplus generation");
     }

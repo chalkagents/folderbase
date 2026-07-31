@@ -39,34 +39,50 @@ authorization.
 Core will expose one method on the `MigrationExecution` module:
 
 ```text
-MigrationExecution::run(root, command)
-  -> MigrationExecutionOutcome | MigrationExecutionError
+MigrationExecution::run(
+  RootClaim::Current { display_root },
+  command
+) -> MigrationOutcome | FolderbaseError
 
-MigrationExecutionCommand
-  = Apply { approved_migration }
+MigrationCommand
+  = Apply { migration_id, approval_digest }
   | Recover { migration_id }
   | Rollback { migration_id }
 ```
 
 `root` names the exact Folderbase Root supplied by the caller. `Apply` consumes
-an approval bound to one immutable plan digest. `Recover` resumes the direction
+an identifier and approval digest bound to one immutable plan. The released
+`apply_migration` convenience adapter may carry its already-open
+`ApprovedMigration` through the compatibility-only approval-carrying root-claim
+variant; new callers use `RootClaim::Current`. `Recover` resumes the direction
 already recorded by durable state; it does not silently choose apply or rollback
 from current workspace contents. `Rollback` durably records rollback intent
 before executing an inverse transition.
 
 The outcome distinguishes at least applied, rolled back, recovery required, and
 conflicted states. A conflict is data, not a generic I/O error. It identifies the
-transaction, command, operation index, affected relative paths, expected fact,
-observed fact, durable phase, and any private preserved artifact the user may
-need. Errors remain for unsafe roots, corrupt or unsupported state, invalid
-commands for the durable state, unavailable required filesystem behavior, and
-ordinary I/O failures.
+transaction, durable execution direction, operation index, affected relative
+paths, expected fact, observed fact, durable phase, and any private preserved
+artifact the user may need. The invoked command and durable direction are not
+always the same: `Recover` can resume either an apply or rollback direction.
+Errors remain for unsafe roots, corrupt or unsupported state, invalid commands
+for the durable state, unavailable required filesystem behavior, and ordinary
+I/O failures.
 
 Existing Rust convenience functions, CLI verbs, and the process-JSON bridge
 become adapters at this seam. They may retain released shapes for compatibility,
 but they do not own independent execution implementations. Planning, approval,
 preview, and rejection remain separate because they do not execute an approved
 mutation program.
+
+`Apply` first checks for an existing transaction-v1 execution record. If one
+exists, Core reopens that immutable program, verifies the caller's approval
+digest and retained root identity against it, and resumes it even when the
+mutable plan projection already says `conflicted`. It does not require a
+conflicted projection to become `approved` again. Only when no execution record
+exists may `Apply` reopen an approved plan and compile a new program. This makes
+an unchanged public Apply retry return the same semantic conflict without
+appending a duplicate generation.
 
 This makes `MigrationExecution` a deep module: callers learn one method and
 three commands, while the implementation owns all execution sequencing and
@@ -79,6 +95,9 @@ approved plan under the shared transaction lock, rechecks its declared scope,
 and compiles it into one private, data-only `MutationProgramV1`. The program is
 not a public portable plan, wire contract, permission token, or extension seam.
 It is an immutable execution artifact internal to the migration module.
+Revalidation includes typed ignore-policy syntax and capture-size bounds after
+the durable plan is reopened, so a rewritten approved plan cannot bypass those
+checks before transaction state is born.
 
 The closed and bounded program binds:
 
@@ -118,7 +137,8 @@ immutable, monotonically numbered journal generations instead of repeatedly
 trusting one mutable progress document. Each bounded generation binds the
 transaction and program digests, generation number, previous-generation
 checksum, requested direction, state-machine phase, operation cursor, any
-in-flight leaf transition, completed receipts, and conflict evidence.
+in-flight leaf transition, completed apply and inverse receipts, durable
+apply-abort receipts, and conflict evidence.
 
 Each generation has a domain-separated SHA-256 over its controlled encoding
 with the checksum field excluded. Recovery verifies the complete chain from its
@@ -127,7 +147,11 @@ predecessor, unknown field, unknown phase, out-of-bound record, or disagreement
 with the immutable program fails closed. Checksums detect corruption,
 truncation, and inconsistent local state; they are not signatures and do not
 authenticate against a same-user actor who can rewrite the entire private
-state.
+state. Adding apply-abort receipts is an additive encoding extension: a
+generation with no abort receipt preserves the exact canonical bytes and
+checksum domain of the released transaction-v1 generation. The new field is
+serialized and enters the controlled checksum encoding only when the generation
+contains an abort receipt.
 
 The state machine durably records intent before a leaf transition, then records
 completion only after the visible and private postconditions verify. Its
@@ -149,6 +173,45 @@ Repeating any command is idempotent when the exact durable postcondition already
 exists. An incompatible command returns a typed state mismatch without changing
 ordinary content.
 
+Before rollback can mutate its first ordinary leaf, Core durably records
+rollback direction and preflights the retained parent and nested-boundary facts
+for every remaining inverse step. A conflict in any later-to-execute step
+therefore stops the whole rollback attempt before an earlier inverse step
+removes or restores ordinary content. Restart repeats this read-only preflight
+against the current journal cursor before the next inverse mutation.
+
+Rollback may be requested while a conflicted apply transition remains
+in-flight. Core does not clear that operation from the journal merely because
+an inverse attempt returned. It first normalizes the interrupted leaf to the
+exact step-specific abort postcondition, persists a canonical private
+`folderbase-private-abort-work-v1` receipt that binds the operation, visible
+post-identity, and complete private claim facts, and then reopens and verifies
+that receipt. Only afterward may a new journal generation add an apply-abort
+receipt containing the private receipt's SHA-256 and clear the in-flight
+operation. Recovery accepts a private receipt ahead of its journal generation
+only when all recorded visible and private facts still match; a journaled abort
+requires that exact private receipt and claim set. Missing, additional,
+different-kind, aliased, or changed evidence fails closed before another
+generation is written.
+
+Move abort claims are transient execution authority, not permanent ownership of
+the restored workspace path. After Core exact-restores the source, it retires
+the rollback claim first and the source claim second, verifies the source at
+its immutable program identity, and persists an empty-claim abort receipt.
+Before that receipt is journaled, recovery still proves the live source; after
+journalization, the receipt is immutable history and ordinary user edits or
+replacement of the restored source do not invalidate terminal recovery. The
+immutable Move snapshot remains the independent byte evidence.
+
+The same ownership boundary applies to every terminal rollback receipt:
+`rolled_back` history continues to verify its canonical program, journal,
+private receipts, and immutable blobs, but it no longer requires an ordinary
+pathname to remain absent or unchanged. A user may recreate or edit any
+released path without making terminal recovery invalid. Releasing that
+pathname does not weaken private history: when rollback retained a removed
+directory as a private claim, terminal recovery continues to exact-verify the
+claim's physical identity, device, fidelity, and emptiness.
+
 The shared Folderbase transaction lease covers format dispatch, program and
 journal validation, leaf execution, protocol-record publication, and terminal
 verification. One active migration, capture, restore, or protocol upgrade may
@@ -159,11 +222,15 @@ discarded.
 ### Retain exact root authority
 
 Every command opens the exact caller-supplied root without following a symlink
-or Windows reparse point. It retains the root, `.folderbase`, manifest,
-migration-state, transaction, journal, and lock capabilities and their required
-physical identities for the complete run. It acquires the lock relative to that
-retained state capability and then revalidates the exact root authority before
-creating, repairing, or publishing transaction state.
+or Windows reparse point. It retains one no-follow root capability for the
+complete run. Through that capability it retains or reopens `.folderbase`,
+manifest, migration-state, transaction, journal, and lock entries and verifies
+their required identities. It acquires the lock relative to that retained state
+authority and then revalidates the exact retained-root authority before
+creating, repairing, or publishing transaction state. After that authority is
+bound, the caller-supplied pathname is diagnostic only; a later rename or
+replacement of that ambient pathname never transfers authority to the new
+occupant.
 
 All program, journal, claim, stage, snapshot, protocol, and workspace access is
 relative to retained no-follow capabilities. Existing path ancestors are
@@ -172,13 +239,38 @@ profile and nested-Folderbase rules. The implementation never resumes by
 canonicalizing a journal's stored absolute path, searching an ancestor, or
 opening a replacement `.folderbase` by ambient pathname.
 
-Root attachment, state attachment, manifest bytes, and the selected parent and
-leaf identities are checked before and after each externally visible
-transition. If a pathname is replaced, the retained capability may point only
-to a detached orphan; Core must stop rather than publish through the replacement
-name. A root or state replacement can therefore cause a conflict or an
-unreachable private orphan, but it cannot redirect the current execution into a
-different Folderbase.
+Additive source-topology validation follows the same rule. After acquiring the
+shared lease and before the first mutation, Core enumerates ordinary files,
+nested Folderbase boundaries, and expanded reconstructable trees through the
+retained root capability. It never re-walks the caller's display pathname to
+decide what the approved transaction may publish.
+
+Before and after each externally visible transition Core:
+
+1. verifies the retained root handle against the program's root identity,
+   without requiring the old ambient display pathname to remain attached;
+2. reopens `.folderbase` relative to that retained root and requires the exact
+   recorded state identity;
+3. verifies journal-phase-derived manifest and policy facts;
+4. requires the selected parent chain to remain attached beneath the retained
+   root with exact identities and boundary facts, while mutations use the
+   retained parent capability; and
+5. verifies each affected leaf's expected presence or absence, kind, identity
+   where applicable, content, fidelity, and link topology.
+
+If the ambient root pathname is renamed or replaced, Core does not reopen,
+read, or mutate the replacement. It may continue through the same retained
+physical root while that authority remains internally valid, even if the root
+is now reachable under another name or only through the retained capability.
+If the retained state, selected parent chain, boundary, or leaf facts no longer
+match the durable program and journal phase, Core stops with a recoverable
+conflict. A pathname replacement can therefore make private state harder to
+find from the old display name, but it cannot redirect the current execution
+into a different Folderbase.
+
+This follows ADR-0005's cooperative-namespace model. ADR-0003 attestation binds
+the initial exact root; it does not turn the caller's display pathname into an
+ongoing authority lease.
 
 On Windows, the exact root and every retained state or workspace directory,
 manifest, journal, stage, claim, snapshot, and affected leaf are rejected when
@@ -222,6 +314,14 @@ that content and records a conflict instead of restoring over it. Cleanup
 removes only an exact transaction-owned private artifact after its durable
 obligation has ended; an unknown, changed, or aliased artifact is retained and
 reported.
+
+Conflict records include a retained no-follow fingerprint of the affected
+ordinary leaves. Repeating an unchanged conflict returns the existing record
+without extending the journal; a changed workspace fact may append one new
+record. Apply-direction conflicts identify the exact private claim that
+preserves the displaced original. Rollback conflicts for Replace and Move
+identify the immutable program-bound rollback snapshot rather than a claim
+whose bytes may have changed through a visible hard link.
 
 Original bytes and rollback snapshots remain private while rollback is
 supported. An interrupted or conflicted transition must always leave every
@@ -333,6 +433,16 @@ not crate version or a caller flag. Legacy and transaction-v1 active state for
 the same migration ID, an unknown format, or an ambiguous partial format fails
 closed without ordinary mutation. Terminal legacy results remain reopenable and
 rollback-capable for as long as their released contract requires.
+
+`MigrationResult::reopen`, `MigrationResult::recover`, and the CLI
+`reopen`/`rollback` adapters use that same format classifier. They do not assume
+that a new migration has `result.json`. Transaction-v1 results are projected
+from the exact program and current journal phase; released `result.json` is
+decoded only by the legacy adapter. Terminal plan state is likewise a
+projection of the immutable program and journal. Updating it verifies the
+program-bound approval digest but does not re-traverse newly introduced
+ordinary nested boundaries, because the conflict that introduced the boundary
+must still be durably projectable as `conflicted`.
 
 This compatibility is an internal adapter, not a second external interface.
 All new callers and tests use `MigrationExecution::run`.

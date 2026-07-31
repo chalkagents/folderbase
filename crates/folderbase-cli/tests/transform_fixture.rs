@@ -176,6 +176,18 @@ fn separate_processes_can_analyze_plan_apply_reopen_and_rollback() {
     folderbase()
         .args([
             "transform",
+            "reopen",
+            root.path().to_str().unwrap(),
+            migration_id,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration verified"))
+        .stdout(predicate::str::contains("Migration rolled back").not())
+        .stdout(predicate::str::contains("Migration conflicted").not());
+    folderbase()
+        .args([
+            "transform",
             "recover",
             root.path().to_str().unwrap(),
             migration_id,
@@ -195,10 +207,188 @@ fn separate_processes_can_analyze_plan_apply_reopen_and_rollback() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"state\": \"rolled_back\""));
+    folderbase()
+        .args([
+            "transform",
+            "reopen",
+            root.path().to_str().unwrap(),
+            migration_id,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration rolled back"))
+        .stdout(predicate::str::contains("Migration verified").not());
     assert!(!root.path().join("Organized").exists());
     assert_eq!(
         fs::read(root.path().join("README.md")).unwrap(),
         b"source of truth\n"
+    );
+}
+
+#[test]
+fn apply_reports_a_durable_conflict_and_an_unchanged_retry_is_idempotent() {
+    let fixture = golden_fixture();
+    let root = &fixture.root;
+    let analysis = analyze(root);
+    let plan = golden_plan(root, &analysis);
+    let migration_id = plan["id"].as_str().unwrap();
+    approve(root, migration_id);
+
+    let journal = root
+        .join(".folderbase/migrations")
+        .join(migration_id)
+        .join("transaction-v1/journal");
+    let mut interrupted = std::process::Command::new(assert_cmd::cargo::cargo_bin!("folderbase"))
+        .args([
+            "transform",
+            "apply",
+            root.to_str().unwrap(),
+            migration_id,
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if journal.read_dir().is_ok_and(|entries| entries.count() >= 4) {
+            break;
+        }
+        if let Some(status) = interrupted.try_wait().unwrap() {
+            panic!("apply completed before interruption checkpoint: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for durable transaction generations"
+        );
+        std::thread::yield_now();
+    }
+    interrupted.kill().unwrap();
+    let interrupted = interrupted.wait_with_output().unwrap();
+    assert!(
+        !interrupted.status.success(),
+        "test must interrupt the first apply process"
+    );
+    folderbase()
+        .args(["transform", "reopen", root.to_str().unwrap(), migration_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration applying"))
+        .stdout(predicate::str::contains("Migration verified").not());
+
+    let collision = plan["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|operation| operation["type"] == "copy_file")
+        .filter_map(|operation| operation["destination_path"].as_str())
+        .map(|path| root.join(path))
+        .find(|path| !path.exists())
+        .expect("interrupted transaction retains an unpublished copy target");
+    fs::create_dir_all(collision.parent().unwrap()).unwrap();
+    fs::write(&collision, "foreign CLI collision\n").unwrap();
+
+    let apply = || {
+        folderbase()
+            .args([
+                "transform",
+                "apply",
+                root.to_str().unwrap(),
+                migration_id,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = apply();
+    assert_eq!(
+        first.status.code(),
+        Some(1),
+        "unexpected apply status\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        first.stderr.is_empty(),
+        "semantic conflict must not be rendered as an operational error: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["migration_id"], migration_id);
+    assert_eq!(first_json["state"], "conflicted");
+    assert!(!first_json["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(first_json["conflicts"][0]["direction"], "apply");
+    folderbase()
+        .args(["transform", "reopen", root.to_str().unwrap(), migration_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration conflicted"))
+        .stdout(predicate::str::contains("Migration verified").not());
+
+    let generations_after_first = fs::read_dir(&journal).unwrap().count();
+    let second = apply();
+    assert_eq!(second.status.code(), Some(1));
+    assert_eq!(second.stdout, first.stdout);
+    assert!(
+        second.stderr.is_empty(),
+        "unchanged retry must remain semantic conflict data: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        fs::read_dir(journal).unwrap().count(),
+        generations_after_first,
+        "unchanged CLI conflict retry must not append a journal generation"
+    );
+}
+
+#[test]
+fn apply_reports_recovery_required_before_compiling_a_transaction() {
+    let root = fixture();
+    let analysis = analyze(root.path());
+    let plan = plan_transform(root.path(), &multi_folderbase_answers(&analysis));
+    let migration_id = plan["id"].as_str().unwrap();
+    approve(root.path(), migration_id);
+    let active_capture = root
+        .path()
+        .join(".folderbase/transactions/folderbase-version-captures/active.json");
+    fs::create_dir_all(active_capture.parent().unwrap()).unwrap();
+    fs::write(&active_capture, "{}\n").unwrap();
+
+    let output = folderbase()
+        .args([
+            "transform",
+            "apply",
+            root.path().to_str().unwrap(),
+            migration_id,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stderr.is_empty(),
+        "recovery requirement is a semantic outcome: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["migration_id"], migration_id);
+    assert_eq!(outcome["state"], "recovery_required");
+    assert!(
+        outcome["work"]
+            .as_str()
+            .unwrap()
+            .contains("Folderbase Version capture")
+    );
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/migrations")
+            .join(migration_id)
+            .join("transaction-v1")
+            .exists(),
+        "recovery-required outcome must precede transaction compilation"
     );
 }
 

@@ -1546,6 +1546,10 @@ impl FolderbaseState {
         Ok(())
     }
 
+    pub(crate) fn display_root(&self) -> &Path {
+        &self.display_root
+    }
+
     pub(crate) fn verify_root_identity(&self, expected: &PhysicalIdentity) -> Result<()> {
         if &self.root_identity != expected {
             return Err(FolderbaseError::UnsafePath(self.display_root.clone()));

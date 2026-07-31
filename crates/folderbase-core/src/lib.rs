@@ -61,12 +61,12 @@ pub use local_versions::{
 };
 pub use migration::{
     ApprovedMigration, MigrationAnalysis, MigrationAnswer, MigrationAnswerException,
-    MigrationCommand, MigrationConflict, MigrationContentKind, MigrationCopyPreview,
-    MigrationExclusion, MigrationExecution, MigrationOperation, MigrationOption, MigrationOutcome,
-    MigrationPlan, MigrationPreview, MigrationQuestion, MigrationQuestionKind, MigrationResult,
-    MigrationState, MigrationTarget, MigrationTargetKind, ProposedBoundary, RollbackResult,
-    RootClaim, analyze_migration, apply_migration, approve_migration, plan_migration,
-    preview_migration, rollback_migration,
+    MigrationCommand, MigrationConflict, MigrationConflictDirection, MigrationContentKind,
+    MigrationCopyPreview, MigrationExclusion, MigrationExecution, MigrationOperation,
+    MigrationOption, MigrationOutcome, MigrationPlan, MigrationPreview, MigrationQuestion,
+    MigrationQuestionKind, MigrationResult, MigrationState, MigrationTarget, MigrationTargetKind,
+    ProposedBoundary, RollbackResult, RootClaim, analyze_migration, apply_migration,
+    approve_migration, plan_migration, preview_migration, rollback_migration,
 };
 pub use model::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseKind, InitializationOptions,

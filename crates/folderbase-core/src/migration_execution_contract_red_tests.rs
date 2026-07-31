@@ -54,6 +54,10 @@ fn every_execution_outcome_is_semantic_and_conflicts_are_explicit(outcome: Migra
             assert!(!migration_id.is_empty());
             assert!(!conflicts.is_empty());
         }
+        MigrationOutcome::RecoveryRequired { migration_id, work } => {
+            assert!(!migration_id.is_empty());
+            assert!(!work.is_empty());
+        }
     }
 }
 

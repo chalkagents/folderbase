@@ -14,6 +14,7 @@ use crate::{
     FolderbaseError, FolderbaseVersionStore, LocalVersionStore, MAX_FOLDERBASEIGNORE_BYTES, Result,
     folderbase_restore_authority::{stable_file_identity_sha256, stable_file_link_count},
     folderbase_state::FolderbaseState,
+    migration::durable_migration_execution_is_terminal,
     root_attestation::{
         DEFAULT_V05_CAPTURE_IGNORE_RULES, MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile,
         PROTOCOL_UPGRADE_RECEIPT_FIELD, PROTOCOL_UPGRADE_RECEIPT_FORMAT,
@@ -42,6 +43,43 @@ const MAX_PENDING_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 // fixed record fields need only a small, closed amount of additional space.
 const MAX_PROTOCOL_UPGRADE_INTENT_BYTES: u64 = MAX_FOLDERBASE_MANIFEST_BYTES * 4 + 64 * 1024;
 const MAX_MIGRATION_DIRECTORIES: usize = 16_384;
+const MAX_TRANSACTION_ENTRIES: usize = 16_384;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingWork {
+    Capture,
+    TombstoneRestore,
+    TombstoneRestoreCleanup,
+    Reorganization,
+    LocalVersionIntent(String),
+    Migration(String),
+}
+
+impl PendingWork {
+    pub(crate) fn description(&self) -> String {
+        match self {
+            Self::Capture => "Folderbase Version capture".to_owned(),
+            Self::TombstoneRestore => "Tombstone restore".to_owned(),
+            Self::TombstoneRestoreCleanup => "Tombstone restore cleanup".to_owned(),
+            Self::Reorganization => "Folderbase reorganization".to_owned(),
+            Self::LocalVersionIntent(name) => {
+                format!("local-version transaction `{name}`")
+            }
+            Self::Migration(id) => format!("migration `{id}`"),
+        }
+    }
+
+    fn protocol_upgrade_label(&self) -> &'static str {
+        match self {
+            Self::Capture => "Folderbase Version capture",
+            Self::TombstoneRestore => "Tombstone restore",
+            Self::TombstoneRestoreCleanup => "Tombstone restore cleanup",
+            Self::Reorganization => "Folderbase reorganization",
+            Self::LocalVersionIntent(_) => "Folderbase local-version transaction",
+            Self::Migration(_) => "Folderbase migration",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -516,57 +554,95 @@ impl ProtocolUpgradePlanDigest {
 }
 
 fn ensure_no_pending_transactions(state: &FolderbaseState) -> Result<()> {
-    for (path, label) in [
-        (ACTIVE_CAPTURE_PATH, "Folderbase Version capture"),
-        (ACTIVE_RESTORE_PATH, "Tombstone restore"),
-        (RESTORE_CLEANUP_PATH, "Tombstone restore cleanup"),
-        (ACTIVE_REORGANIZATION_PATH, "Folderbase reorganization"),
+    match scan_pending_work(state, None) {
+        Ok(Some(work)) => Err(FolderbaseError::ProtocolUpgradeBlocked(
+            work.protocol_upgrade_label(),
+        )),
+        Ok(None) => Ok(()),
+        Err(_) => Err(FolderbaseError::ProtocolUpgradeBlocked(
+            "Folderbase transaction recovery",
+        )),
+    }
+}
+
+pub(crate) fn scan_pending_work(
+    state: &FolderbaseState,
+    allowed_migration_id: Option<&str>,
+) -> Result<Option<PendingWork>> {
+    for (path, work) in [
+        (ACTIVE_CAPTURE_PATH, PendingWork::Capture),
+        (ACTIVE_RESTORE_PATH, PendingWork::TombstoneRestore),
+        (RESTORE_CLEANUP_PATH, PendingWork::TombstoneRestoreCleanup),
+        (ACTIVE_REORGANIZATION_PATH, PendingWork::Reorganization),
     ] {
         let state_path = path
             .strip_prefix(".folderbase/")
             .expect("pending path is state-relative");
         match state.read_bounded_if_present(Path::new(state_path), MAX_PENDING_RECORD_BYTES) {
-            Ok(Some(_)) => return Err(FolderbaseError::ProtocolUpgradeBlocked(label)),
+            Ok(Some(_)) => return Ok(Some(work)),
             Ok(None) => {}
-            Err(_) => return Err(FolderbaseError::ProtocolUpgradeBlocked(label)),
+            Err(error) => return Err(error),
         }
     }
-    let migration_names = state
-        .private_directory_names_if_present(
-            Path::new(
-                MIGRATIONS_PATH
-                    .strip_prefix(".folderbase/")
-                    .expect("migration path is state-relative"),
-            ),
-            MAX_MIGRATION_DIRECTORIES,
-        )
-        .map_err(|_| FolderbaseError::ProtocolUpgradeBlocked("Folderbase migration"))?;
+
+    for name in state
+        .private_directory_names_if_present(Path::new("transactions"), MAX_TRANSACTION_ENTRIES)?
+    {
+        let Some(name) = name.to_str() else {
+            return Ok(Some(PendingWork::LocalVersionIntent(
+                "<non-utf8>".to_owned(),
+            )));
+        };
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let path = Path::new("transactions").join(name);
+        match state.read_bounded_if_present(&path, MAX_PENDING_RECORD_BYTES) {
+            Ok(Some(_)) => {
+                return Ok(Some(PendingWork::LocalVersionIntent(name.to_owned())));
+            }
+            Ok(None) => {}
+            Err(_) => return Ok(Some(PendingWork::LocalVersionIntent(name.to_owned()))),
+        }
+    }
+
+    let migration_names = state.private_directory_names_if_present(
+        Path::new(
+            MIGRATIONS_PATH
+                .strip_prefix(".folderbase/")
+                .expect("migration path is state-relative"),
+        ),
+        MAX_MIGRATION_DIRECTORIES,
+    )?;
     for migration_name in migration_names {
+        let migration_id = migration_name.to_string_lossy().into_owned();
+        if allowed_migration_id == Some(migration_id.as_str()) {
+            continue;
+        }
+        match durable_migration_execution_is_terminal(state, &migration_id)? {
+            Some(true) => continue,
+            Some(false) => return Ok(Some(PendingWork::Migration(migration_id))),
+            None if allowed_migration_id.is_some() => continue,
+            None => {}
+        }
         let path = Path::new("migrations")
-            .join(migration_name)
+            .join(&migration_name)
             .join("plan.json");
-        let Some(bytes) = state
-            .read_bounded_if_present(&path, MAX_PENDING_RECORD_BYTES)
-            .map_err(|_| FolderbaseError::ProtocolUpgradeBlocked("Folderbase migration"))?
-        else {
-            return Err(FolderbaseError::ProtocolUpgradeBlocked(
-                "Folderbase migration",
-            ));
+        let Some(bytes) = state.read_bounded_if_present(&path, MAX_PENDING_RECORD_BYTES)? else {
+            return Ok(Some(PendingWork::Migration(migration_id)));
         };
-        let record: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| FolderbaseError::ProtocolUpgradeBlocked("Folderbase migration"))?;
+        let record: Value = match serde_json::from_slice(&bytes) {
+            Ok(record) => record,
+            Err(_) => return Ok(Some(PendingWork::Migration(migration_id))),
+        };
         let Some(migration_state) = record.get("state").and_then(Value::as_str) else {
-            return Err(FolderbaseError::ProtocolUpgradeBlocked(
-                "Folderbase migration",
-            ));
+            return Ok(Some(PendingWork::Migration(migration_id)));
         };
-        if !matches!(migration_state, "verified" | "rejected" | "rolled_back") {
-            return Err(FolderbaseError::ProtocolUpgradeBlocked(
-                "Folderbase migration",
-            ));
+        if migration_state != "rejected" {
+            return Ok(Some(PendingWork::Migration(migration_id)));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn decode_applied_receipt(root: &Path, manifest: &Value) -> Result<ProtocolUpgradeReceipt> {

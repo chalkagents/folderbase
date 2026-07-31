@@ -36,6 +36,10 @@ impl RetainedPhysicalIdentity {
         self.identity
     }
 
+    pub(crate) fn metadata(&self) -> io::Result<fs::Metadata> {
+        self.file.metadata()
+    }
+
     pub(crate) fn as_file_mut(&mut self) -> &mut File {
         &mut self.file
     }
@@ -123,6 +127,25 @@ impl PhysicalIdentity {
                 digest.update([0]);
                 digest.update(volume_serial.to_be_bytes());
                 digest.update(file_id);
+            }
+        }
+        format!("{:x}", digest.finalize())
+    }
+
+    pub(crate) fn device_sha256(self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"folderbase-workspace-device-identity-v1");
+        digest.update([0]);
+        match self {
+            Self::Unix { device, .. } => {
+                digest.update(b"unix");
+                digest.update([0]);
+                digest.update(device.to_be_bytes());
+            }
+            Self::Windows { volume_serial, .. } => {
+                digest.update(b"windows");
+                digest.update([0]);
+                digest.update(volume_serial.to_be_bytes());
             }
         }
         format!("{:x}", digest.finalize())

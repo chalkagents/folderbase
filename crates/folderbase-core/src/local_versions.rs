@@ -1178,7 +1178,19 @@ impl LocalVersionStore {
         &self,
         state: &FolderbaseState,
     ) -> Result<StoreTransactionLock> {
-        let lock = self.acquire_transaction_lock_in_allowing_protocol_upgrade(state)?;
+        Self::acquire_transaction_lock_for_state(&self.root, state)
+    }
+
+    /// Acquire the shared transaction lease through an already-retained
+    /// `.folderbase` state capability.
+    ///
+    /// Migration uses this before an ordinary folder has published a manifest,
+    /// so acquiring the lease cannot depend on opening a `LocalVersionStore`.
+    pub(crate) fn acquire_transaction_lock_for_state(
+        display_root: &Path,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
+        let lock = Self::acquire_transaction_lock_file(display_root, state)?;
         if state
             .read_bounded_if_present(
                 Path::new(".folderbase/transactions/protocol-upgrades/active.json"),
@@ -1197,8 +1209,15 @@ impl LocalVersionStore {
         &self,
         state: &FolderbaseState,
     ) -> Result<StoreTransactionLock> {
+        Self::acquire_transaction_lock_file(&self.root, state)
+    }
+
+    fn acquire_transaction_lock_file(
+        display_root: &Path,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
         state.ensure_private_dir(Path::new(LOCKS_DIRECTORY))?;
-        let lock_path = self.root.join(TRANSACTION_LOCK_PATH);
+        let lock_path = display_root.join(TRANSACTION_LOCK_PATH);
         match state.publish_new(Path::new(TRANSACTION_LOCK_PATH), b"") {
             Ok(()) | Err(FolderbaseError::WouldOverwrite(_)) => {}
             Err(error) => return Err(error),

@@ -18,11 +18,110 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::root_attestation::metadata_is_link_or_reparse;
-use crate::{FolderbaseError, Result, folderbase_state::FolderbaseState};
+use crate::traversal_policy::{NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary};
+use crate::{
+    FolderbaseError, Result,
+    folder_analysis::{FolderAnalysis, analyze_folder_from_retained},
+    folderbase_state::FolderbaseState,
+};
+
+#[derive(Debug, Clone)]
+pub(crate) struct MigrationRegularFact {
+    pub(crate) physical_identity_sha256: String,
+    pub(crate) device_sha256: String,
+    pub(crate) bytes: u64,
+    pub(crate) unix_mode: Option<u32>,
+    pub(crate) link_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MigrationDirectoryFact {
+    pub(crate) physical_identity_sha256: String,
+    pub(crate) device_sha256: String,
+    pub(crate) unix_mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExactRegularLeaf<'a> {
+    pub(crate) physical_identity_sha256: &'a str,
+    pub(crate) device_sha256: &'a str,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: &'a str,
+    pub(crate) read_only: bool,
+    pub(crate) executable: bool,
+    pub(crate) link_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExactDirectoryLeaf<'a> {
+    pub(crate) physical_identity_sha256: &'a str,
+    pub(crate) device_sha256: &'a str,
+    pub(crate) read_only: bool,
+    pub(crate) executable: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ExactLeafClaimExpectation<'a> {
+    Regular(ExactRegularLeaf<'a>),
+    EmptyDirectory(ExactDirectoryLeaf<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ExactExistingClaimSource<'a> {
+    Absent,
+    Regular(ExactRegularLeaf<'a>),
+}
+
+pub(crate) struct ExactLeafClaimRequest<'a> {
+    pub(crate) source_parent: &'a VerifiedVisibleDirectory,
+    pub(crate) source_name: &'a OsStr,
+    pub(crate) destination: &'a VerifiedPrivateDirectory,
+    pub(crate) destination_name: &'a str,
+    pub(crate) expectation: ExactLeafClaimExpectation<'a>,
+    pub(crate) existing_source: ExactExistingClaimSource<'a>,
+}
+
+pub(crate) enum ExactLeafClaimResult {
+    Regular(MigrationRegularFact),
+    Directory(MigrationDirectoryFact),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ExactNestedBoundaryExpectation<'a> {
+    None,
+    StateOnly {
+        state: ExactDirectoryLeaf<'a>,
+    },
+    Exact {
+        state: ExactDirectoryLeaf<'a>,
+        manifest: ExactRegularLeaf<'a>,
+    },
+}
 
 pub(crate) struct MigrationFilesystem {
     root: Dir,
     display_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegularContentVersion {
+    #[cfg(unix)]
+    Unix {
+        modified_seconds: i64,
+        modified_nanoseconds: i64,
+        changed_seconds: i64,
+        changed_nanoseconds: i64,
+    },
+    #[cfg(windows)]
+    Windows {
+        last_write_time: i64,
+        change_time: i64,
+    },
+    #[cfg(not(any(unix, windows)))]
+    Portable {
+        modified: Option<std::time::SystemTime>,
+        bytes: u64,
+    },
 }
 
 pub(crate) struct VerifiedPrivateDirectory {
@@ -30,7 +129,132 @@ pub(crate) struct VerifiedPrivateDirectory {
     display: PathBuf,
 }
 
+pub(crate) struct VerifiedVisibleDirectory {
+    directory: Dir,
+    display: PathBuf,
+    expected_identity_sha256: String,
+    expected_device_sha256: String,
+    read_only: bool,
+    executable: bool,
+}
+
+struct VerifiedVisibleRegular {
+    file: cap_std::fs::File,
+    std_file: std::fs::File,
+    metadata: std::fs::Metadata,
+    identity: crate::physical_identity::PhysicalIdentity,
+    display: PathBuf,
+}
+
+impl VerifiedVisibleDirectory {
+    pub(crate) fn reverify(&self) -> Result<()> {
+        let fact = directory_fact_from_handle(&self.directory, &self.display)?;
+        validate_directory_fidelity(&fact, self.read_only, self.executable, &self.display)?;
+        if fact.physical_identity_sha256 != self.expected_identity_sha256
+            || fact.device_sha256 != self.expected_device_sha256
+        {
+            return Err(FolderbaseError::MigrationSourceChanged(
+                self.display.clone(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn nested_boundary_kind(&self) -> Result<NestedFolderbaseBoundaryKind> {
+        classify_nested_folderbase_boundary(&self.directory, &self.display)
+    }
+
+    pub(crate) fn require_exact_nested_boundary(
+        &self,
+        expectation: ExactNestedBoundaryExpectation<'_>,
+    ) -> Result<()> {
+        self.reverify()?;
+        let observed = self.nested_boundary_kind()?;
+        match expectation {
+            ExactNestedBoundaryExpectation::None => {
+                if observed != NestedFolderbaseBoundaryKind::None {
+                    return Err(FolderbaseError::MigrationSourceChanged(
+                        self.display.clone(),
+                    ));
+                }
+                require_absent_from_retained_parent(self, OsStr::new(".folderbase"))?;
+            }
+            ExactNestedBoundaryExpectation::StateOnly { state } => {
+                if observed != NestedFolderbaseBoundaryKind::None {
+                    return Err(FolderbaseError::MigrationSourceChanged(
+                        self.display.clone(),
+                    ));
+                }
+                let state_display = self.display.join(".folderbase");
+                let state_directory = open_directory_nofollow(
+                    &self.directory,
+                    OsStr::new(".folderbase"),
+                    &state_display,
+                )
+                .map_err(|source| FolderbaseError::io(&state_display, source))?;
+                let state_fact = directory_fact_from_handle(&state_directory, &state_display)?;
+                require_exact_directory_fact(
+                    &state_fact,
+                    state,
+                    &state_display,
+                    ExactFactLocation::Visible,
+                )?;
+                let state_parent = VerifiedVisibleDirectory {
+                    directory: state_directory,
+                    display: state_display,
+                    expected_identity_sha256: state.physical_identity_sha256.to_owned(),
+                    expected_device_sha256: state.device_sha256.to_owned(),
+                    read_only: state.read_only,
+                    executable: state.executable,
+                };
+                require_absent_from_retained_parent(&state_parent, OsStr::new("manifest.json"))?;
+                state_parent.reverify()?;
+            }
+            ExactNestedBoundaryExpectation::Exact { state, manifest } => {
+                if observed != NestedFolderbaseBoundaryKind::ExactBoundary {
+                    return Err(FolderbaseError::MigrationSourceChanged(
+                        self.display.clone(),
+                    ));
+                }
+                let state_display = self.display.join(".folderbase");
+                let state_directory = open_directory_nofollow(
+                    &self.directory,
+                    OsStr::new(".folderbase"),
+                    &state_display,
+                )
+                .map_err(|source| FolderbaseError::io(&state_display, source))?;
+                let state_fact = directory_fact_from_handle(&state_directory, &state_display)?;
+                require_exact_directory_fact(
+                    &state_fact,
+                    state,
+                    &state_display,
+                    ExactFactLocation::Visible,
+                )?;
+                let state_parent = VerifiedVisibleDirectory {
+                    directory: state_directory,
+                    display: state_display,
+                    expected_identity_sha256: state.physical_identity_sha256.to_owned(),
+                    expected_device_sha256: state.device_sha256.to_owned(),
+                    read_only: state.read_only,
+                    executable: state.executable,
+                };
+                require_exact_visible_claim_source(
+                    &state_parent,
+                    OsStr::new("manifest.json"),
+                    ExactLeafClaimExpectation::Regular(manifest),
+                )?;
+                state_parent.reverify()?;
+            }
+        }
+        self.reverify()
+    }
+}
+
 impl VerifiedPrivateDirectory {
+    pub(crate) fn display_path(&self, name: &OsStr) -> PathBuf {
+        self.display.join(name)
+    }
+
     pub(crate) fn open_directory(&self, name: &str) -> Result<Self> {
         validate_private_name(name)?;
         let display = self.display.join(name);
@@ -38,6 +262,52 @@ impl VerifiedPrivateDirectory {
             .map_err(|source| FolderbaseError::io(&display, source))?;
         validate_private_directory_metadata(&directory, &display)?;
         Ok(Self { directory, display })
+    }
+
+    pub(crate) fn open_relaxed_directory(&self, name: &OsStr) -> Result<Self> {
+        let display = self.display.join(name);
+        let directory = open_directory_nofollow(&self.directory, name, &display)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let _ = directory_fact_from_handle(&directory, &display)?;
+        Ok(Self { directory, display })
+    }
+
+    pub(crate) fn relaxed_directory_fact(&self, name: &OsStr) -> Result<MigrationDirectoryFact> {
+        let display = self.display.join(name);
+        let directory = open_directory_nofollow(&self.directory, name, &display)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        directory_fact_from_handle(&directory, &display)
+    }
+
+    pub(crate) fn prepare_directory_claim(
+        &self,
+        name: &str,
+        read_only: bool,
+        executable: bool,
+    ) -> Result<MigrationDirectoryFact> {
+        validate_private_name(name)?;
+        let name = OsStr::new(name);
+        let display = self.display.join(name);
+        match self.relaxed_directory_fact(name) {
+            Ok(fact) => {
+                validate_directory_fidelity(&fact, read_only, executable, &display)?;
+                return Ok(fact);
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.directory
+            .create_dir(name)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let directory = open_directory_nofollow(&self.directory, name, &display)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        set_directory_fidelity(&directory, read_only, executable, &display)?;
+        sync_directory(&directory, &display)?;
+        sync_directory(&self.directory, &display)?;
+        let fact = directory_fact_from_handle(&directory, &display)?;
+        validate_directory_fidelity(&fact, read_only, executable, &display)?;
+        Ok(fact)
     }
 
     pub(crate) fn closed_entries(&self, maximum_entries: usize) -> Result<Vec<(OsString, bool)>> {
@@ -93,8 +363,288 @@ impl VerifiedPrivateDirectory {
         Ok(())
     }
 
+    pub(crate) fn verify_relaxed_regular(&self, name: &OsStr) -> Result<()> {
+        let _ = self.open_regular_relaxed(name)?;
+        Ok(())
+    }
+
+    pub(crate) fn relaxed_regular_fact(
+        &self,
+        name: &OsStr,
+        expected_sha256: &str,
+    ) -> Result<MigrationRegularFact> {
+        let (fact, observed_sha256) = self.relaxed_regular_fact_observed(name)?;
+        if observed_sha256 != expected_sha256 {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                self.display.join(name),
+            ));
+        }
+        Ok(fact)
+    }
+
+    pub(crate) fn relaxed_regular_fact_observed(
+        &self,
+        name: &OsStr,
+    ) -> Result<(MigrationRegularFact, String)> {
+        let (mut file, metadata, display) = self.open_regular_relaxed(name)?;
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let link_count = private_regular_link_count(&file, &metadata, &display)?;
+        let mut digest = Sha256::new();
+        let mut observed = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            observed = observed
+                .checked_add(read as u64)
+                .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
+        }
+        let final_metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let observed_sha256 = format!("{:x}", digest.finalize());
+        if observed != metadata.len()
+            || final_metadata.len() != metadata.len()
+            || crate::physical_identity::PhysicalIdentity::from_file(&file)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                != identity
+        {
+            return Err(FolderbaseError::MigrationVerificationFailed(display));
+        }
+        Ok((
+            MigrationRegularFact {
+                physical_identity_sha256: identity.stable_sha256(),
+                device_sha256: identity.device_sha256(),
+                bytes: metadata.len(),
+                unix_mode: private_unix_mode(&metadata),
+                link_count,
+            },
+            observed_sha256,
+        ))
+    }
+
+    pub(crate) fn exact_regular_fact(
+        &self,
+        name: &OsStr,
+        expected: ExactRegularLeaf<'_>,
+    ) -> Result<MigrationRegularFact> {
+        let (fact, observed_sha256) = self.relaxed_regular_fact_observed(name)?;
+        require_exact_regular_fact(
+            &fact,
+            &observed_sha256,
+            expected,
+            &self.display.join(name),
+            ExactFactLocation::Private,
+        )?;
+        Ok(fact)
+    }
+
+    pub(crate) fn exact_empty_directory_fact(
+        &self,
+        name: &OsStr,
+        expected: ExactDirectoryLeaf<'_>,
+    ) -> Result<MigrationDirectoryFact> {
+        let fact = self.relaxed_directory_fact(name)?;
+        require_exact_directory_fact(
+            &fact,
+            expected,
+            &self.display.join(name),
+            ExactFactLocation::Private,
+        )?;
+        let directory = self.open_relaxed_directory(name)?;
+        if !directory.closed_entries(1)?.is_empty() {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                self.display.join(name),
+            ));
+        }
+        Ok(fact)
+    }
+
+    pub(crate) fn remove_exact_regular(
+        &self,
+        name: &OsStr,
+        expected: ExactRegularLeaf<'_>,
+    ) -> Result<()> {
+        let display = self.display.join(name);
+        self.exact_regular_fact(name, expected)?;
+        self.directory
+            .remove_file(name)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        sync_directory(&self.directory, &display)?;
+        match self.relaxed_regular_fact_observed(name) {
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Ok(_) => Err(FolderbaseError::MigrationVerificationFailed(display)),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn remove_exact_empty_directory(
+        &self,
+        name: &OsStr,
+        expected: ExactDirectoryLeaf<'_>,
+    ) -> Result<()> {
+        let display = self.display.join(name);
+        self.exact_empty_directory_fact(name, expected)?;
+        self.directory
+            .remove_dir(name)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        sync_directory(&self.directory, &display)?;
+        match self.relaxed_directory_fact(name) {
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Ok(_) => Err(FolderbaseError::MigrationVerificationFailed(display)),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn restore_exact_regular_through(
+        &self,
+        source_name: &OsStr,
+        destination_parent: &VerifiedVisibleDirectory,
+        destination_name: &OsStr,
+        expected: ExactRegularLeaf<'_>,
+    ) -> Result<MigrationRegularFact> {
+        self.exact_regular_fact(source_name, expected)?;
+        destination_parent.reverify()?;
+        require_absent_from_retained_parent(destination_parent, destination_name)?;
+        self.exact_regular_fact(source_name, expected)?;
+        rename_noreplace(
+            &self.directory,
+            source_name,
+            &destination_parent.directory,
+            destination_name,
+        )
+        .map_err(|error| {
+            map_rename_noreplace_error(destination_parent.display.join(destination_name), error)
+        })?;
+        sync_directory(&self.directory, &self.display.join(source_name))?;
+        sync_directory(
+            &destination_parent.directory,
+            &destination_parent.display.join(destination_name),
+        )?;
+        destination_parent.reverify()?;
+        match self.relaxed_regular_fact_observed(source_name) {
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(FolderbaseError::MigrationVerificationFailed(
+                    self.display.join(source_name),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+        require_exact_visible_claim_source(
+            destination_parent,
+            destination_name,
+            ExactLeafClaimExpectation::Regular(expected),
+        )?;
+        visible_regular_fact_from_parent(
+            &destination_parent.directory,
+            &destination_parent.display,
+            destination_name,
+            expected.sha256,
+        )
+    }
+
+    pub(crate) fn regular_fact(
+        &self,
+        name: &OsStr,
+        expected_sha256: &str,
+    ) -> Result<MigrationRegularFact> {
+        let (mut file, metadata, display) = self.open_regular(name)?;
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut observed_bytes = 0_u64;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            observed_bytes = observed_bytes
+                .checked_add(read as u64)
+                .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
+        }
+        let final_metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let final_identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if format!("{:x}", digest.finalize()) != expected_sha256
+            || observed_bytes != metadata.len()
+            || final_metadata.len() != metadata.len()
+            || final_identity != identity
+            || private_regular_link_count(&file, &final_metadata, &display)? != 1
+            || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
+        {
+            return Err(FolderbaseError::MigrationVerificationFailed(display));
+        }
+        Ok(MigrationRegularFact {
+            physical_identity_sha256: identity.stable_sha256(),
+            device_sha256: identity.device_sha256(),
+            bytes: metadata.len(),
+            unix_mode: private_unix_mode(&metadata),
+            link_count: 1,
+        })
+    }
+
     pub(crate) fn read_regular_bounded(&self, name: &OsStr, maximum_bytes: u64) -> Result<Vec<u8>> {
         self.read_regular_bounded_with(name, maximum_bytes, || {})
+    }
+
+    pub(crate) fn read_relaxed_regular_bounded(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        let (mut file, metadata, display) = self.open_regular_relaxed(name)?;
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if metadata.len() > maximum_bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file exceeds its byte bound".to_owned(),
+            });
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let final_metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if bytes.len() as u64 > maximum_bytes
+            || bytes.len() as u64 != metadata.len()
+            || final_metadata.len() != metadata.len()
+            || crate::physical_identity::PhysicalIdentity::from_file(&file)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                != identity
+            || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file changed while it was read".to_owned(),
+            });
+        }
+        Ok(bytes)
     }
 
     #[cfg(test)]
@@ -114,6 +664,8 @@ impl VerifiedPrivateDirectory {
         after_verified_open: impl FnOnce(),
     ) -> Result<Vec<u8>> {
         let (mut file, metadata, display) = self.open_regular(name)?;
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
         if metadata.len() > maximum_bytes {
             return Err(FolderbaseError::InvalidRecord {
                 path: display,
@@ -126,61 +678,148 @@ impl VerifiedPrivateDirectory {
             .take(maximum_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        if bytes.len() as u64 > maximum_bytes {
+        let final_metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if bytes.len() as u64 > maximum_bytes
+            || bytes.len() as u64 != metadata.len()
+            || final_metadata.len() != metadata.len()
+            || crate::physical_identity::PhysicalIdentity::from_file(&file)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                != identity
+            || private_regular_link_count(&file, &final_metadata, &display)? != 1
+            || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
+        {
             return Err(FolderbaseError::InvalidRecord {
                 path: display,
-                message: "private migration file exceeds its byte bound".to_owned(),
+                message: "private migration file changed while it was read".to_owned(),
             });
         }
         Ok(bytes)
     }
 
-    pub(crate) fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn publish_recoverable_new(
+        &self,
+        name: &str,
+        staging_name: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
         validate_private_name(name)?;
+        validate_private_name(staging_name)?;
         let name = OsStr::new(name);
-        let display = self.display.join(name);
-        let temporary = OsString::from(format!(".migration-{}.tmp", Uuid::now_v7()));
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            options.mode(0o600);
+        let staging_name = OsStr::new(staging_name);
+        let expected_sha256 = format!("{:x}", Sha256::digest(bytes));
+        let expected_bytes = bytes.len() as u64;
+
+        match self.relaxed_regular_fact(name, &expected_sha256) {
+            Ok(fact) if fact.bytes == expected_bytes => {
+                remove_private_regular_if_present(
+                    self,
+                    staging_name,
+                    &self.display.join(staging_name),
+                )?;
+                return Ok(());
+            }
+            Ok(_) => {
+                return Err(FolderbaseError::MigrationVerificationFailed(
+                    self.display.join(name),
+                ));
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        let result = (|| -> Result<()> {
+
+        let staging_ready = match self.relaxed_regular_fact(staging_name, &expected_sha256) {
+            Ok(fact) if fact.bytes == expected_bytes => true,
+            Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
+                remove_private_regular_if_present(
+                    self,
+                    staging_name,
+                    &self.display.join(staging_name),
+                )?;
+                false
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        if !staging_ready {
+            let staging_display = self.display.join(staging_name);
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
             let mut file = self
                 .directory
-                .open_with(&temporary, &options)
-                .map_err(|source| FolderbaseError::io(&display, source))?;
+                .open_with(staging_name, &options)
+                .map_err(|source| FolderbaseError::io(&staging_display, source))?;
             file.write_all(bytes)
                 .and_then(|()| file.sync_all())
-                .map_err(|source| FolderbaseError::io(&display, source))?;
+                .map_err(|source| FolderbaseError::io(&staging_display, source))?;
             drop(file);
-            self.directory
-                .hard_link(&temporary, &self.directory, name)
-                .map_err(|source| {
-                    if source.kind() == std::io::ErrorKind::AlreadyExists {
-                        FolderbaseError::WouldOverwrite(display.clone())
-                    } else {
-                        FolderbaseError::io(&display, source)
-                    }
-                })?;
-            self.directory
-                .remove_file(&temporary)
-                .map_err(|source| FolderbaseError::io(&display, source))?;
-            sync_directory(&self.directory, &display)?;
-            self.verify_regular(name)
-        })();
-        if result.is_err() {
-            let _ = self.directory.remove_file(&temporary);
+            sync_directory(&self.directory, &self.display)?;
         }
-        result
+        install_prepared_private_claim(self, staging_name, name, &expected_sha256, expected_bytes)
+            .map(|_| ())
+    }
+
+    pub(crate) fn retire_recoverable_regular(&self, name: &OsStr) -> Result<()> {
+        remove_private_regular_if_present(self, name, &self.display.join(name))
+    }
+
+    pub(crate) fn install_recoverable_regular(
+        &self,
+        staging_name: &OsStr,
+        destination_name: &OsStr,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<()> {
+        install_prepared_private_claim(
+            self,
+            staging_name,
+            destination_name,
+            expected_sha256,
+            expected_bytes,
+        )
+        .map(|_| ())
     }
 
     fn open_regular(&self, name: &OsStr) -> Result<(std::fs::File, std::fs::Metadata, PathBuf)> {
+        let (file, metadata, display) = self.open_regular_relaxed(name)?;
+        if private_regular_link_count(&file, &metadata, &display)? != 1 {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file has a hard-link alias".to_owned(),
+            });
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            if metadata.permissions().mode() & 0o777 != 0o600 {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "private migration file is not owner-only".to_owned(),
+                });
+            }
+        }
+        Ok((file, metadata, display))
+    }
+
+    fn open_regular_relaxed(
+        &self,
+        name: &OsStr,
+    ) -> Result<(std::fs::File, std::fs::Metadata, PathBuf)> {
         validate_private_name_os(name)?;
         let display = self.display.join(name);
         let mut options = OpenOptions::new();
@@ -207,28 +846,36 @@ impl VerifiedPrivateDirectory {
         if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
             return Err(FolderbaseError::UnsafePath(display));
         }
-        if private_regular_link_count(&file, &metadata, &display)? != 1 {
-            return Err(FolderbaseError::InvalidRecord {
-                path: display,
-                message: "private migration file has a hard-link alias".to_owned(),
-            });
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            if metadata.permissions().mode() & 0o777 != 0o600 {
-                return Err(FolderbaseError::InvalidRecord {
-                    path: display,
-                    message: "private migration file is not owner-only".to_owned(),
-                });
-            }
-        }
         Ok((file, metadata, display))
     }
 }
 
 impl MigrationFilesystem {
+    pub(crate) fn require_atomic_noreplace(&self) -> Result<()> {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            windows
+        ))]
+        {
+            Ok(())
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            windows
+        )))]
+        {
+            Err(FolderbaseError::UnsupportedMigrationFilesystem {
+                path: self.display_root.clone(),
+                reason: "atomic retained-handle no-replace rename is unavailable on this platform"
+                    .to_owned(),
+            })
+        }
+    }
+
     pub(crate) fn from_state(state: &FolderbaseState, display_root: &Path) -> Result<Self> {
         Ok(Self {
             root: state.clone_root_capability()?,
@@ -242,6 +889,15 @@ impl MigrationFilesystem {
 
     pub(crate) fn display(&self, relative: &Path) -> PathBuf {
         self.display_root.join(relative)
+    }
+
+    pub(crate) fn analyze_retained_root(&self) -> Result<FolderAnalysis> {
+        analyze_folder_from_retained(&self.root, &self.display_root, true)
+    }
+
+    pub(crate) fn expand_retained_tree(&self, relative: &Path) -> Result<FolderAnalysis> {
+        let directory = self.open_directory(relative)?;
+        analyze_folder_from_retained(&directory, &self.display(relative), false)
     }
 
     pub(crate) fn metadata(&self, relative: &Path) -> Result<Option<Metadata>> {
@@ -260,6 +916,246 @@ impl MigrationFilesystem {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(source) => Err(FolderbaseError::io(display, source)),
         }
+    }
+
+    pub(crate) fn retained_nofollow_leaf_fingerprint(
+        &self,
+        relative: &Path,
+    ) -> Result<Option<String>> {
+        self.retained_nofollow_leaf_fingerprint_inner(relative, || {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_nofollow_leaf_fingerprint_with_regular_open_hook(
+        &self,
+        relative: &Path,
+        after_regular_open: impl FnOnce(),
+    ) -> Result<Option<String>> {
+        self.retained_nofollow_leaf_fingerprint_inner(relative, after_regular_open)
+    }
+
+    fn retained_nofollow_leaf_fingerprint_inner(
+        &self,
+        relative: &Path,
+        after_regular_open: impl FnOnce(),
+    ) -> Result<Option<String>> {
+        let (parent, name) = match self.open_parent(relative) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(Some("absent".to_owned()));
+            }
+            Err(error) => return Err(error),
+        };
+        let display = self.display(relative);
+        let metadata = match parent.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Some("absent".to_owned()));
+            }
+            Err(source) => return Err(FolderbaseError::io(&display, source)),
+        };
+        if metadata.is_file() && !metadata.file_type().is_symlink() {
+            let mut options = OpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            #[cfg(windows)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                    FILE_SHARE_WRITE,
+                };
+
+                options
+                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            }
+            let mut file = parent
+                .open_with(&name, &options)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let std_file = file
+                .try_clone()
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                .into_std();
+            let opened_metadata = std_file
+                .metadata()
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if !opened_metadata.is_file() || metadata_is_link_or_reparse(&opened_metadata) {
+                return Err(FolderbaseError::MigrationSourceChanged(display));
+            }
+            let identity = crate::physical_identity::PhysicalIdentity::from_file(&std_file)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let link_count = private_regular_link_count(&std_file, &opened_metadata, &display)?;
+            let content_version = regular_content_version(&std_file, &opened_metadata, &display)?;
+            after_regular_open();
+            let mut digest = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut observed_bytes = 0_u64;
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                observed_bytes = observed_bytes
+                    .checked_add(read as u64)
+                    .ok_or_else(|| FolderbaseError::MigrationSourceChanged(display.clone()))?;
+            }
+            verify_fingerprinted_regular_after_read(
+                &std_file,
+                &opened_metadata,
+                identity,
+                link_count,
+                &content_version,
+                observed_bytes,
+                &display,
+            )?;
+
+            let mut reopened_options = OpenOptions::new();
+            reopened_options.read(true).follow(FollowSymlinks::No);
+            #[cfg(windows)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                    FILE_SHARE_WRITE,
+                };
+
+                reopened_options
+                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            }
+            let reopened = parent
+                .open_with(&name, &reopened_options)
+                .map_err(|_| FolderbaseError::MigrationSourceChanged(display.clone()))?;
+            let reopened_std = reopened
+                .try_clone()
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                .into_std();
+            let reopened_metadata = reopened_std
+                .metadata()
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let reopened_identity =
+                crate::physical_identity::PhysicalIdentity::from_file(&reopened_std)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+            if !reopened_metadata.is_file()
+                || metadata_is_link_or_reparse(&reopened_metadata)
+                || reopened_identity != identity
+                || reopened_metadata.len() != opened_metadata.len()
+                || private_unix_mode(&reopened_metadata) != private_unix_mode(&opened_metadata)
+                || private_regular_link_count(&reopened_std, &reopened_metadata, &display)?
+                    != link_count
+                || regular_content_version(&reopened_std, &reopened_metadata, &display)?
+                    != content_version
+            {
+                return Err(FolderbaseError::MigrationSourceChanged(display));
+            }
+            return Ok(Some(format!(
+                "regular:{}:{}:{}:{:x}:{:?}:{}",
+                identity.stable_sha256(),
+                identity.device_sha256(),
+                opened_metadata.len(),
+                digest.finalize(),
+                private_unix_mode(&opened_metadata),
+                link_count
+            )));
+        }
+        if metadata.file_type().is_symlink() {
+            let link_target = parent
+                .read_link(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let initial = retained_link_fingerprint(&metadata, &link_target);
+            let final_metadata = parent
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let final_target = parent
+                .read_link(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if initial != retained_link_fingerprint(&final_metadata, &final_target) {
+                return Err(FolderbaseError::MigrationSourceChanged(display));
+            }
+            return Ok(Some(initial));
+        }
+        if metadata.is_dir() {
+            let directory = open_directory_nofollow(&parent, &name, &display)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let initial_fact = directory_fact_from_handle(&directory, &display)?;
+            let initial_metadata_fingerprint =
+                retained_nonregular_fingerprint(&metadata, "directory");
+            let final_metadata = parent
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let reopened = open_directory_nofollow(&parent, &name, &display)
+                .map_err(|_| FolderbaseError::MigrationSourceChanged(display.clone()))?;
+            let final_fact = directory_fact_from_handle(&reopened, &display)?;
+            if retained_nonregular_fingerprint(&final_metadata, "directory")
+                != initial_metadata_fingerprint
+                || final_fact.physical_identity_sha256 != initial_fact.physical_identity_sha256
+                || final_fact.device_sha256 != initial_fact.device_sha256
+                || final_fact.unix_mode != initial_fact.unix_mode
+            {
+                return Err(FolderbaseError::MigrationSourceChanged(display));
+            }
+            return Ok(Some(format!(
+                "directory:{}:{}:{:?}:{}",
+                initial_fact.physical_identity_sha256,
+                initial_fact.device_sha256,
+                initial_fact.unix_mode,
+                initial_metadata_fingerprint
+            )));
+        }
+
+        let initial = retained_nonregular_fingerprint(&metadata, "special");
+        let final_metadata = parent
+            .symlink_metadata(&name)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if retained_nonregular_fingerprint(&final_metadata, "special") != initial {
+            return Err(FolderbaseError::MigrationSourceChanged(display));
+        }
+        Ok(Some(initial))
+    }
+
+    fn open_visible_regular(&self, relative: &Path) -> Result<VerifiedVisibleRegular> {
+        let (parent, name) = self.open_parent(relative)?;
+        let display = self.display(relative);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+
+            options
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        let file = parent
+            .open_with(&name, &options)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let std_file = file
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(&display, source))?
+            .into_std();
+        let metadata = std_file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&std_file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        Ok(VerifiedVisibleRegular {
+            file,
+            std_file,
+            metadata,
+            identity,
+            display,
+        })
     }
 
     pub(crate) fn read_regular_bounded(
@@ -358,6 +1254,220 @@ impl MigrationFilesystem {
             .map_err(|source| FolderbaseError::io(self.display(relative), source))
     }
 
+    pub(crate) fn regular_fact_with_sha256(
+        &self,
+        relative: &Path,
+        expected_sha256: Option<&str>,
+    ) -> Result<MigrationRegularFact> {
+        let VerifiedVisibleRegular {
+            mut file,
+            std_file,
+            metadata,
+            identity,
+            display,
+        } = self.open_visible_regular(relative)?;
+        let link_count = private_regular_link_count(&std_file, &metadata, &display)?;
+        if let Some(expected_sha256) = expected_sha256 {
+            let mut digest = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut observed_bytes = 0_u64;
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                observed_bytes = observed_bytes
+                    .checked_add(read as u64)
+                    .ok_or_else(|| FolderbaseError::MigrationSourceChanged(display.clone()))?;
+            }
+            if format!("{:x}", digest.finalize()) != expected_sha256
+                || observed_bytes != metadata.len()
+            {
+                return Err(FolderbaseError::MigrationSourceChanged(display));
+            }
+            verify_visible_regular_after_read(
+                &std_file,
+                &metadata,
+                identity,
+                link_count,
+                observed_bytes,
+                &display,
+            )?;
+        }
+        #[cfg(unix)]
+        let unix_mode = {
+            use std::os::unix::fs::MetadataExt;
+
+            Some(metadata.mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let unix_mode = None;
+        Ok(MigrationRegularFact {
+            physical_identity_sha256: identity.stable_sha256(),
+            device_sha256: identity.device_sha256(),
+            bytes: metadata.len(),
+            unix_mode,
+            link_count,
+        })
+    }
+
+    pub(crate) fn exact_regular_fact(
+        &self,
+        relative: &Path,
+        expected: ExactRegularLeaf<'_>,
+    ) -> Result<MigrationRegularFact> {
+        let fact = self.regular_fact_with_sha256(relative, Some(expected.sha256))?;
+        require_exact_regular_fact(
+            &fact,
+            expected.sha256,
+            expected,
+            &self.display(relative),
+            ExactFactLocation::Visible,
+        )?;
+        Ok(fact)
+    }
+
+    pub(crate) fn exact_directory_fact(
+        &self,
+        relative: &Path,
+        expected: ExactDirectoryLeaf<'_>,
+        require_empty: bool,
+    ) -> Result<MigrationDirectoryFact> {
+        let fact = self.directory_fact(relative)?;
+        require_exact_directory_fact(
+            &fact,
+            expected,
+            &self.display(relative),
+            ExactFactLocation::Visible,
+        )?;
+        if require_empty {
+            let directory = self.open_directory(relative)?;
+            if directory
+                .entries()
+                .map_err(|source| FolderbaseError::io(self.display(relative), source))?
+                .next()
+                .transpose()
+                .map_err(|source| FolderbaseError::io(self.display(relative), source))?
+                .is_some()
+            {
+                return Err(FolderbaseError::MigrationSourceChanged(
+                    self.display(relative),
+                ));
+            }
+        }
+        Ok(fact)
+    }
+
+    pub(crate) fn regular_fact_and_bytes_bounded(
+        &self,
+        relative: &Path,
+        expected_sha256: &str,
+        maximum_bytes: u64,
+    ) -> Result<(MigrationRegularFact, Vec<u8>)> {
+        let VerifiedVisibleRegular {
+            mut file,
+            std_file,
+            metadata,
+            identity,
+            display,
+        } = self.open_visible_regular(relative)?;
+        if metadata.len() > maximum_bytes {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
+        let link_count = private_regular_link_count(&std_file, &metadata, &display)?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if bytes.len() as u64 > maximum_bytes
+            || bytes.len() as u64 != metadata.len()
+            || format!("{:x}", Sha256::digest(&bytes)) != expected_sha256
+        {
+            return Err(FolderbaseError::MigrationSourceChanged(display));
+        }
+        verify_visible_regular_after_read(
+            &std_file,
+            &metadata,
+            identity,
+            link_count,
+            bytes.len() as u64,
+            &display,
+        )?;
+        #[cfg(unix)]
+        let unix_mode = {
+            use std::os::unix::fs::MetadataExt;
+
+            Some(metadata.mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let unix_mode = None;
+        Ok((
+            MigrationRegularFact {
+                physical_identity_sha256: identity.stable_sha256(),
+                device_sha256: identity.device_sha256(),
+                bytes: metadata.len(),
+                unix_mode,
+                link_count,
+            },
+            bytes,
+        ))
+    }
+
+    pub(crate) fn directory_fact(&self, relative: &Path) -> Result<MigrationDirectoryFact> {
+        let directory = self.open_directory(relative)?;
+        let display = self.display(relative);
+        let file = directory
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(&display, source))?
+            .into_std_file();
+        let metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(self.display(relative), source))?;
+        #[cfg(unix)]
+        let unix_mode = {
+            use std::os::unix::fs::MetadataExt;
+
+            Some(metadata.mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let unix_mode = None;
+        Ok(MigrationDirectoryFact {
+            physical_identity_sha256: identity.stable_sha256(),
+            device_sha256: identity.device_sha256(),
+            unix_mode,
+        })
+    }
+
+    pub(crate) fn retain_verified_directory(
+        &self,
+        relative: &Path,
+        expected_identity_sha256: &str,
+        expected_device_sha256: &str,
+        read_only: bool,
+        executable: bool,
+    ) -> Result<VerifiedVisibleDirectory> {
+        let directory = self.open_directory(relative)?;
+        let retained = VerifiedVisibleDirectory {
+            directory,
+            display: self.display(relative),
+            expected_identity_sha256: expected_identity_sha256.to_owned(),
+            expected_device_sha256: expected_device_sha256.to_owned(),
+            read_only,
+            executable,
+        };
+        retained.reverify()?;
+        Ok(retained)
+    }
+
     pub(crate) fn ensure_directory(&self, relative: &Path) -> Result<()> {
         validate_relative(relative, true)?;
         let mut directory = self
@@ -386,19 +1496,6 @@ impl MigrationFilesystem {
             };
         }
         Ok(())
-    }
-
-    pub(crate) fn create_directory(&self, relative: &Path) -> Result<()> {
-        let (parent, name) = self.open_parent(relative)?;
-        let display = self.display(relative);
-        parent.create_dir(&name).map_err(|source| {
-            if source.kind() == std::io::ErrorKind::AlreadyExists {
-                FolderbaseError::WouldOverwrite(display.clone())
-            } else {
-                FolderbaseError::io(&display, source)
-            }
-        })?;
-        sync_directory(&parent, &display)
     }
 
     pub(crate) fn ensure_private_directory(&self, relative: &Path) -> Result<()> {
@@ -443,6 +1540,8 @@ impl MigrationFilesystem {
                 });
             }
         }
+        #[cfg(not(unix))]
+        let _ = directory;
         Ok(())
     }
 
@@ -454,6 +1553,563 @@ impl MigrationFilesystem {
         let display = self.display(relative);
         validate_private_directory_metadata(&directory, &display)?;
         Ok(VerifiedPrivateDirectory { directory, display })
+    }
+
+    pub(crate) fn stage_regular_private(
+        &self,
+        source: &Path,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        expected_sha256: &str,
+    ) -> Result<MigrationRegularFact> {
+        validate_private_name(destination_name)?;
+        let destination_name = OsStr::new(destination_name);
+        let temporary =
+            OsString::from(format!(".{}.preparing", destination_name.to_string_lossy()));
+        validate_private_name_os(&temporary)?;
+        let VerifiedVisibleRegular {
+            file: mut source_file,
+            std_file: source_std,
+            metadata: source_std_metadata,
+            identity: source_identity,
+            display: source_display,
+        } = self.open_visible_regular(source)?;
+        #[cfg(unix)]
+        let source_unix_mode = {
+            use std::os::unix::fs::MetadataExt;
+
+            Some(source_std_metadata.mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let source_unix_mode = None;
+        let source_link_count =
+            private_regular_link_count(&source_std, &source_std_metadata, &source_display)?;
+        let source_fact = MigrationRegularFact {
+            physical_identity_sha256: source_identity.stable_sha256(),
+            device_sha256: source_identity.device_sha256(),
+            bytes: source_std_metadata.len(),
+            unix_mode: source_unix_mode,
+            link_count: source_link_count,
+        };
+        match destination.relaxed_regular_fact(destination_name, expected_sha256) {
+            Ok(destination_fact) if destination_fact.bytes == source_fact.bytes => {
+                match destination.relaxed_regular_fact(&temporary, expected_sha256) {
+                    Ok(staging_fact)
+                        if destination_fact.link_count == 2
+                            && staging_fact.link_count == 2
+                            && destination_fact.physical_identity_sha256
+                                == staging_fact.physical_identity_sha256
+                            && destination_fact.device_sha256 == staging_fact.device_sha256
+                            && destination_fact.bytes == staging_fact.bytes =>
+                    {
+                        remove_private_regular_if_present(
+                            destination,
+                            &temporary,
+                            &destination.display.join(&temporary),
+                        )?;
+                        destination.regular_fact(destination_name, expected_sha256)?;
+                    }
+                    Err(FolderbaseError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound
+                            && destination_fact.link_count == 1 => {}
+                    Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
+                        return Err(FolderbaseError::InvalidRecord {
+                            path: destination.display.join(&temporary),
+                            message: "private blob final and staging are not one exact publication"
+                                .to_owned(),
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
+                let mut digest = Sha256::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                let mut copied_bytes = 0_u64;
+                loop {
+                    let read = source_file
+                        .read(&mut buffer)
+                        .map_err(|error| FolderbaseError::io(&source_display, error))?;
+                    if read == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..read]);
+                    copied_bytes = copied_bytes.checked_add(read as u64).ok_or_else(|| {
+                        FolderbaseError::MigrationSourceChanged(source_display.clone())
+                    })?;
+                }
+                if format!("{:x}", digest.finalize()) != expected_sha256
+                    || copied_bytes != source_fact.bytes
+                {
+                    return Err(FolderbaseError::MigrationSourceChanged(source_display));
+                }
+                verify_visible_regular_after_read(
+                    &source_std,
+                    &source_std_metadata,
+                    source_identity,
+                    source_link_count,
+                    copied_bytes,
+                    &source_display,
+                )?;
+                return Ok(source_fact);
+            }
+            Ok(_) => {
+                return Err(FolderbaseError::MigrationVerificationFailed(
+                    destination.display.join(destination_name),
+                ));
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                remove_private_regular_if_present(
+                    destination,
+                    &temporary,
+                    &destination.display.join(&temporary),
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+
+        let destination_display = destination.display.join(destination_name);
+        let mut destination_options = OpenOptions::new();
+        destination_options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            destination_options.mode(0o600);
+        }
+        let result = (|| -> Result<()> {
+            let mut destination_file = destination
+                .directory
+                .open_with(&temporary, &destination_options)
+                .map_err(|error| FolderbaseError::io(&destination_display, error))?;
+            let mut digest = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut copied_bytes = 0_u64;
+            loop {
+                let read = source_file
+                    .read(&mut buffer)
+                    .map_err(|error| FolderbaseError::io(&source_display, error))?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                copied_bytes = copied_bytes.checked_add(read as u64).ok_or_else(|| {
+                    FolderbaseError::MigrationSourceChanged(source_display.clone())
+                })?;
+                destination_file
+                    .write_all(&buffer[..read])
+                    .map_err(|error| FolderbaseError::io(&destination_display, error))?;
+            }
+            destination_file
+                .sync_all()
+                .map_err(|error| FolderbaseError::io(&destination_display, error))?;
+            let observed_sha256 = format!("{:x}", digest.finalize());
+            if observed_sha256 != expected_sha256 || copied_bytes != source_fact.bytes {
+                return Err(FolderbaseError::MigrationSourceChanged(source_display));
+            }
+            verify_visible_regular_after_read(
+                &source_std,
+                &source_std_metadata,
+                source_identity,
+                source_link_count,
+                copied_bytes,
+                &source_display,
+            )?;
+            drop(destination_file);
+            destination
+                .directory
+                .hard_link(&temporary, &destination.directory, destination_name)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        FolderbaseError::WouldOverwrite(destination_display.clone())
+                    } else {
+                        FolderbaseError::io(&destination_display, error)
+                    }
+                })?;
+            destination
+                .directory
+                .remove_file(&temporary)
+                .map_err(|error| FolderbaseError::io(&destination_display, error))?;
+            sync_directory(&destination.directory, &destination_display)?;
+            destination
+                .regular_fact(destination_name, expected_sha256)
+                .map(|_| ())
+        })();
+        if result.is_err() {
+            let _ = destination.directory.remove_file(&temporary);
+        }
+        result.map(|()| source_fact)
+    }
+
+    // Every argument is an independently verified security fact. Keeping them
+    // explicit avoids hiding which identity, content, and mode constraints are
+    // checked at this mutation boundary.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_private_publish_claim(
+        &self,
+        source: &VerifiedPrivateDirectory,
+        source_name: &OsStr,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
+        read_only: bool,
+        executable: bool,
+        after_staged_sync: impl FnOnce(),
+    ) -> Result<MigrationRegularFact> {
+        validate_private_name(destination_name)?;
+        let destination_name = OsStr::new(destination_name);
+        let preparing_name =
+            OsString::from(format!(".{}.preparing", destination_name.to_string_lossy()));
+        validate_private_name_os(&preparing_name)?;
+        match destination.relaxed_regular_fact(destination_name, expected_sha256) {
+            Ok(fact) if fact.bytes == expected_bytes => {
+                remove_private_regular_if_present(
+                    destination,
+                    &preparing_name,
+                    &destination.display.join(&preparing_name),
+                )?;
+                return Ok(fact);
+            }
+            Ok(_) => {
+                return Err(FolderbaseError::MigrationVerificationFailed(
+                    destination.display.join(destination_name),
+                ));
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let preparing_display = destination.display.join(&preparing_name);
+        let preparing_ready =
+            match destination.relaxed_regular_fact(&preparing_name, expected_sha256) {
+                Ok(fact) if fact.bytes == expected_bytes => true,
+                Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
+                    remove_private_regular_if_present(
+                        destination,
+                        &preparing_name,
+                        &preparing_display,
+                    )?;
+                    false
+                }
+                Err(FolderbaseError::Io { source, .. })
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::InvalidData
+                    ) =>
+                {
+                    remove_private_regular_if_present(
+                        destination,
+                        &preparing_name,
+                        &preparing_display,
+                    )?;
+                    false
+                }
+                Err(error) => return Err(error),
+            };
+        if preparing_ready {
+            after_staged_sync();
+            return install_prepared_private_claim(
+                destination,
+                &preparing_name,
+                destination_name,
+                expected_sha256,
+                expected_bytes,
+            );
+        }
+        let (mut source_file, source_metadata, source_display) =
+            source.open_regular(source_name)?;
+        if source_metadata.len() != expected_bytes {
+            return Err(FolderbaseError::MigrationVerificationFailed(source_display));
+        }
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut destination_file = destination
+            .directory
+            .open_with(&preparing_name, &options)
+            .map_err(|source| FolderbaseError::io(&preparing_display, source))?;
+        let mut digest = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = source_file
+                .read(&mut buffer)
+                .map_err(|source| FolderbaseError::io(&source_display, source))?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            copied = copied.checked_add(read as u64).ok_or_else(|| {
+                FolderbaseError::MigrationVerificationFailed(source_display.clone())
+            })?;
+            destination_file
+                .write_all(&buffer[..read])
+                .map_err(|source| FolderbaseError::io(&preparing_display, source))?;
+        }
+        if copied != expected_bytes || format!("{:x}", digest.finalize()) != expected_sha256 {
+            return Err(FolderbaseError::MigrationVerificationFailed(source_display));
+        }
+        set_visible_fidelity(&destination_file, read_only, executable, &preparing_display)?;
+        destination_file
+            .sync_all()
+            .map_err(|source| FolderbaseError::io(&preparing_display, source))?;
+        drop(destination_file);
+        sync_directory(&destination.directory, &destination.display)?;
+        after_staged_sync();
+        install_prepared_private_claim(
+            destination,
+            &preparing_name,
+            destination_name,
+            expected_sha256,
+            expected_bytes,
+        )
+    }
+
+    pub(crate) fn claim_exact_leaf_through(
+        &self,
+        request: ExactLeafClaimRequest<'_>,
+    ) -> Result<ExactLeafClaimResult> {
+        validate_private_name(request.destination_name)?;
+        let destination_name = OsStr::new(request.destination_name);
+        request.source_parent.reverify()?;
+
+        let existing = match request.expectation {
+            ExactLeafClaimExpectation::Regular(expected) => {
+                match request
+                    .destination
+                    .exact_regular_fact(destination_name, expected)
+                {
+                    Ok(fact) => Some(ExactLeafClaimResult::Regular(fact)),
+                    Err(FolderbaseError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            ExactLeafClaimExpectation::EmptyDirectory(expected) => {
+                match request
+                    .destination
+                    .exact_empty_directory_fact(destination_name, expected)
+                {
+                    Ok(fact) => Some(ExactLeafClaimResult::Directory(fact)),
+                    Err(FolderbaseError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        if let Some(existing) = existing {
+            match request.existing_source {
+                ExactExistingClaimSource::Absent => {
+                    require_absent_from_retained_parent(
+                        request.source_parent,
+                        request.source_name,
+                    )?;
+                }
+                ExactExistingClaimSource::Regular(expected) => {
+                    require_exact_visible_claim_source(
+                        request.source_parent,
+                        request.source_name,
+                        ExactLeafClaimExpectation::Regular(expected),
+                    )?;
+                }
+            }
+            request.source_parent.reverify()?;
+            return Ok(existing);
+        }
+
+        require_exact_visible_claim_source(
+            request.source_parent,
+            request.source_name,
+            request.expectation,
+        )?;
+        request.source_parent.reverify()?;
+        require_exact_visible_claim_source(
+            request.source_parent,
+            request.source_name,
+            request.expectation,
+        )?;
+        rename_noreplace(
+            &request.source_parent.directory,
+            request.source_name,
+            &request.destination.directory,
+            destination_name,
+        )
+        .map_err(|error| {
+            map_rename_noreplace_error(request.destination.display.join(destination_name), error)
+        })?;
+        sync_directory(
+            &request.source_parent.directory,
+            &request.source_parent.display.join(request.source_name),
+        )?;
+        sync_directory(&request.destination.directory, &request.destination.display)?;
+
+        // A post-rename verification failure deliberately leaves the captured
+        // inode or directory in the private claim slot. That is the only exact
+        // evidence available for deterministic recovery or conflict review.
+        request.source_parent.reverify()?;
+        require_absent_from_retained_parent(request.source_parent, request.source_name)?;
+        match request.expectation {
+            ExactLeafClaimExpectation::Regular(expected) => request
+                .destination
+                .exact_regular_fact(destination_name, expected)
+                .map(ExactLeafClaimResult::Regular),
+            ExactLeafClaimExpectation::EmptyDirectory(expected) => request
+                .destination
+                .exact_empty_directory_fact(destination_name, expected)
+                .map(ExactLeafClaimResult::Directory),
+        }
+    }
+
+    // Every argument is an independently verified security fact. Keeping them
+    // explicit avoids weakening the retained-parent publication contract.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish_private_claim_new_through(
+        &self,
+        source: &VerifiedPrivateDirectory,
+        source_name: &OsStr,
+        destination_parent: &VerifiedVisibleDirectory,
+        destination_name: &OsStr,
+        expected_identity: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<MigrationRegularFact> {
+        destination_parent.reverify()?;
+        let claim = source.relaxed_regular_fact(source_name, expected_sha256)?;
+        if claim.physical_identity_sha256 != expected_identity || claim.bytes != expected_bytes {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                source.display.join(source_name),
+            ));
+        }
+        match visible_regular_fact_from_parent(
+            &destination_parent.directory,
+            &destination_parent.display,
+            destination_name,
+            expected_sha256,
+        ) {
+            Ok(current)
+                if current.physical_identity_sha256 == expected_identity
+                    && current.bytes == expected_bytes =>
+            {
+                return Ok(current);
+            }
+            Ok(_) => {
+                return Err(FolderbaseError::WouldOverwrite(
+                    destination_parent.display.join(destination_name),
+                ));
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        source
+            .directory
+            .hard_link(source_name, &destination_parent.directory, destination_name)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    FolderbaseError::WouldOverwrite(
+                        destination_parent.display.join(destination_name),
+                    )
+                } else {
+                    FolderbaseError::io(destination_parent.display.join(destination_name), error)
+                }
+            })?;
+        sync_directory(
+            &destination_parent.directory,
+            &destination_parent.display.join(destination_name),
+        )?;
+        destination_parent.reverify()?;
+        let current = visible_regular_fact_from_parent(
+            &destination_parent.directory,
+            &destination_parent.display,
+            destination_name,
+            expected_sha256,
+        )?;
+        if current.physical_identity_sha256 != expected_identity || current.bytes != expected_bytes
+        {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                destination_parent.display.join(destination_name),
+            ));
+        }
+        Ok(current)
+    }
+
+    pub(crate) fn publish_private_directory_claim_new_through(
+        &self,
+        source: &VerifiedPrivateDirectory,
+        source_name: &OsStr,
+        destination_parent: &VerifiedVisibleDirectory,
+        destination_name: &OsStr,
+        expected_identity: &str,
+    ) -> Result<MigrationDirectoryFact> {
+        destination_parent.reverify()?;
+        match visible_directory_fact_from_parent(
+            &destination_parent.directory,
+            &destination_parent.display,
+            destination_name,
+        ) {
+            Ok(current) if current.physical_identity_sha256 == expected_identity => {
+                return Ok(current);
+            }
+            Ok(_) => {
+                return Err(FolderbaseError::WouldOverwrite(
+                    destination_parent.display.join(destination_name),
+                ));
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let claim = source.relaxed_directory_fact(source_name)?;
+        if claim.physical_identity_sha256 != expected_identity {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                source.display.join(source_name),
+            ));
+        }
+        rename_noreplace(
+            &source.directory,
+            source_name,
+            &destination_parent.directory,
+            destination_name,
+        )
+        .map_err(|error| {
+            map_rename_noreplace_error(destination_parent.display.join(destination_name), error)
+        })?;
+        sync_directory(&source.directory, &source.display)?;
+        sync_directory(
+            &destination_parent.directory,
+            &destination_parent.display.join(destination_name),
+        )?;
+        destination_parent.reverify()?;
+        let current = visible_directory_fact_from_parent(
+            &destination_parent.directory,
+            &destination_parent.display,
+            destination_name,
+        )?;
+        if current.physical_identity_sha256 != expected_identity {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                destination_parent.display.join(destination_name),
+            ));
+        }
+        Ok(current)
     }
 
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
@@ -540,52 +2196,6 @@ impl MigrationFilesystem {
         })();
         if result.is_err() {
             let _ = parent.remove_file(&temporary);
-        }
-        result
-    }
-
-    pub(crate) fn copy_regular_new(&self, source: &Path, destination: &Path) -> Result<()> {
-        let (source_parent, source_name) = self.open_parent(source)?;
-        let source_display = self.display(source);
-        let mut read_options = OpenOptions::new();
-        read_options.read(true).follow(FollowSymlinks::No);
-        let mut source_file = source_parent
-            .open_with(&source_name, &read_options)
-            .map_err(|error| FolderbaseError::io(&source_display, error))?;
-        let source_metadata = source_file
-            .metadata()
-            .map_err(|error| FolderbaseError::io(&source_display, error))?;
-        if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
-            return Err(FolderbaseError::UnsafePath(source_display));
-        }
-
-        let (destination_parent, destination_name) = self.open_parent(destination)?;
-        let destination_display = self.display(destination);
-        let mut write_options = OpenOptions::new();
-        write_options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        let mut destination_file = destination_parent
-            .open_with(&destination_name, &write_options)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    FolderbaseError::WouldOverwrite(destination_display.clone())
-                } else {
-                    FolderbaseError::io(&destination_display, error)
-                }
-            })?;
-        let result = (|| -> Result<()> {
-            destination_file
-                .set_permissions(source_metadata.permissions())
-                .map_err(|error| FolderbaseError::io(&destination_display, error))?;
-            std::io::copy(&mut source_file, &mut destination_file)
-                .and_then(|_| destination_file.sync_all())
-                .map_err(|error| FolderbaseError::io(&destination_display, error))?;
-            sync_directory(&destination_parent, &destination_display)
-        })();
-        if result.is_err() {
-            let _ = destination_parent.remove_file(&destination_name);
         }
         result
     }
@@ -680,6 +2290,31 @@ impl MigrationFilesystem {
         }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(entries)
+    }
+
+    pub(crate) fn directory_entry_names(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        let directory = self.open_directory(relative)?;
+        let display = self.display(relative);
+        let mut names = Vec::new();
+        for entry in directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+            if names.len() == maximum_entries {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "migration parent directory exceeds its entry bound".to_owned(),
+                });
+            }
+            names.push(entry.file_name());
+        }
+        names.sort();
+        Ok(names)
     }
 
     pub(crate) fn closed_regular_file_names(
@@ -791,6 +2426,500 @@ fn validate_private_directory_metadata(directory: &Dir, display: &Path) -> Resul
     Ok(())
 }
 
+fn remove_private_regular_if_present(
+    directory: &VerifiedPrivateDirectory,
+    name: &OsStr,
+    display: &Path,
+) -> Result<()> {
+    match directory.directory.symlink_metadata(name) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+            }
+            directory
+                .directory
+                .remove_file(name)
+                .map_err(|source| FolderbaseError::io(display, source))?;
+            sync_directory(&directory.directory, &directory.display)
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(FolderbaseError::io(display, source)),
+    }
+}
+
+fn install_prepared_private_claim(
+    destination: &VerifiedPrivateDirectory,
+    preparing_name: &OsStr,
+    destination_name: &OsStr,
+    expected_sha256: &str,
+    expected_bytes: u64,
+) -> Result<MigrationRegularFact> {
+    let destination_display = destination.display.join(destination_name);
+    match destination
+        .directory
+        .hard_link(preparing_name, &destination.directory, destination_name)
+    {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            let fact = destination.relaxed_regular_fact(destination_name, expected_sha256)?;
+            if fact.bytes != expected_bytes {
+                return Err(FolderbaseError::MigrationVerificationFailed(
+                    destination_display,
+                ));
+            }
+        }
+        Err(source) => return Err(FolderbaseError::io(&destination_display, source)),
+    }
+    remove_private_regular_if_present(
+        destination,
+        preparing_name,
+        &destination.display.join(preparing_name),
+    )?;
+    let fact = destination.relaxed_regular_fact(destination_name, expected_sha256)?;
+    if fact.bytes != expected_bytes {
+        return Err(FolderbaseError::MigrationVerificationFailed(
+            destination_display,
+        ));
+    }
+    Ok(fact)
+}
+
+fn directory_fact_from_handle(directory: &Dir, display: &Path) -> Result<MigrationDirectoryFact> {
+    let file = directory
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std_file();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    #[cfg(unix)]
+    let unix_mode = {
+        use std::os::unix::fs::MetadataExt;
+
+        Some(metadata.mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let unix_mode = None;
+    Ok(MigrationDirectoryFact {
+        physical_identity_sha256: identity.stable_sha256(),
+        device_sha256: identity.device_sha256(),
+        unix_mode,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExactFactLocation {
+    Visible,
+    Private,
+}
+
+fn exact_fact_mismatch(location: ExactFactLocation, display: &Path) -> FolderbaseError {
+    match location {
+        ExactFactLocation::Visible => {
+            FolderbaseError::MigrationSourceChanged(display.to_path_buf())
+        }
+        ExactFactLocation::Private => {
+            FolderbaseError::MigrationVerificationFailed(display.to_path_buf())
+        }
+    }
+}
+
+fn require_exact_regular_fact(
+    fact: &MigrationRegularFact,
+    observed_sha256: &str,
+    expected: ExactRegularLeaf<'_>,
+    display: &Path,
+    location: ExactFactLocation,
+) -> Result<()> {
+    let read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
+    let executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
+    if fact.physical_identity_sha256 != expected.physical_identity_sha256
+        || fact.device_sha256 != expected.device_sha256
+        || fact.bytes != expected.bytes
+        || observed_sha256 != expected.sha256
+        || read_only != expected.read_only
+        || executable != expected.executable
+        || fact.link_count != expected.link_count
+    {
+        return Err(exact_fact_mismatch(location, display));
+    }
+    Ok(())
+}
+
+fn require_exact_directory_fact(
+    fact: &MigrationDirectoryFact,
+    expected: ExactDirectoryLeaf<'_>,
+    display: &Path,
+    location: ExactFactLocation,
+) -> Result<()> {
+    let read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
+    let executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
+    if fact.physical_identity_sha256 != expected.physical_identity_sha256
+        || fact.device_sha256 != expected.device_sha256
+        || read_only != expected.read_only
+        || executable != expected.executable
+    {
+        return Err(exact_fact_mismatch(location, display));
+    }
+    Ok(())
+}
+
+fn require_absent_from_retained_parent(
+    parent: &VerifiedVisibleDirectory,
+    name: &OsStr,
+) -> Result<()> {
+    match parent.directory.symlink_metadata(name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(FolderbaseError::MigrationSourceChanged(
+            parent.display.join(name),
+        )),
+        Err(error) => Err(FolderbaseError::io(parent.display.join(name), error)),
+    }
+}
+
+fn require_exact_visible_claim_source(
+    parent: &VerifiedVisibleDirectory,
+    name: &OsStr,
+    expectation: ExactLeafClaimExpectation<'_>,
+) -> Result<()> {
+    let display = parent.display.join(name);
+    match expectation {
+        ExactLeafClaimExpectation::Regular(expected) => {
+            let fact = visible_regular_fact_from_parent(
+                &parent.directory,
+                &parent.display,
+                name,
+                expected.sha256,
+            )?;
+            require_exact_regular_fact(
+                &fact,
+                expected.sha256,
+                expected,
+                &display,
+                ExactFactLocation::Visible,
+            )
+        }
+        ExactLeafClaimExpectation::EmptyDirectory(expected) => {
+            let fact =
+                visible_directory_fact_from_parent(&parent.directory, &parent.display, name)?;
+            require_exact_directory_fact(&fact, expected, &display, ExactFactLocation::Visible)?;
+            let directory = open_directory_nofollow(&parent.directory, name, &display)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let private_view = VerifiedPrivateDirectory {
+                directory,
+                display: display.clone(),
+            };
+            if !private_view.closed_entries(1)?.is_empty() {
+                return Err(FolderbaseError::MigrationSourceChanged(display));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn visible_regular_fact_from_parent(
+    parent: &Dir,
+    parent_display: &Path,
+    name: &OsStr,
+    expected_sha256: &str,
+) -> Result<MigrationRegularFact> {
+    let view = VerifiedPrivateDirectory {
+        directory: parent
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(parent_display, source))?,
+        display: parent_display.to_path_buf(),
+    };
+    view.relaxed_regular_fact(name, expected_sha256)
+}
+
+fn visible_directory_fact_from_parent(
+    parent: &Dir,
+    parent_display: &Path,
+    name: &OsStr,
+) -> Result<MigrationDirectoryFact> {
+    let display = parent_display.join(name);
+    let directory = open_directory_nofollow(parent, name, &display)
+        .map_err(|source| FolderbaseError::io(&display, source))?;
+    directory_fact_from_handle(&directory, &display)
+}
+
+fn validate_directory_fidelity(
+    fact: &MigrationDirectoryFact,
+    read_only: bool,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
+    let observed_read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
+    let observed_executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
+    if observed_read_only != read_only || observed_executable != executable {
+        return Err(FolderbaseError::MigrationVerificationFailed(
+            display.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn set_directory_fidelity(
+    directory: &Dir,
+    read_only: bool,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
+    let file = directory
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std_file();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut mode = if read_only { 0o555 } else { 0o755 };
+        if !executable {
+            mode &= !0o111;
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|source| FolderbaseError::io(display, source))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(display, source))?
+            .permissions();
+        permissions.set_readonly(read_only);
+        file.set_permissions(permissions)
+            .map_err(|source| FolderbaseError::io(display, source))?;
+        let _ = executable;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn private_unix_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(metadata.mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn private_unix_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn regular_content_version(
+    _file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+    _display: &Path,
+) -> Result<RegularContentVersion> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(RegularContentVersion::Unix {
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(windows)]
+fn regular_content_version(
+    file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+    display: &Path,
+) -> Result<RegularContentVersion> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx},
+    };
+
+    let mut information = FILE_BASIC_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            (&raw mut information).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(FolderbaseError::io(
+            display,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(RegularContentVersion::Windows {
+        last_write_time: information.LastWriteTime,
+        change_time: information.ChangeTime,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn regular_content_version(
+    _file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+    _display: &Path,
+) -> Result<RegularContentVersion> {
+    Ok(RegularContentVersion::Portable {
+        modified: metadata.modified().ok(),
+        bytes: metadata.len(),
+    })
+}
+
+#[cfg(unix)]
+fn retained_link_fingerprint(metadata: &Metadata, target: &Path) -> String {
+    use cap_fs_ext::OsMetadataExt;
+
+    format!(
+        "other:{}:{}:{}:{}:{}:{}:{:?}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mode(),
+        metadata.nlink(),
+        metadata.len(),
+        metadata.mtime_nsec(),
+        Some(target)
+    )
+}
+
+#[cfg(not(unix))]
+fn retained_link_fingerprint(metadata: &Metadata, target: &Path) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| (value.as_secs(), value.subsec_nanos()));
+    format!(
+        "other:{}:{}:{modified:?}:{:?}",
+        metadata.len(),
+        metadata.permissions().readonly(),
+        Some(target)
+    )
+}
+
+#[cfg(unix)]
+fn retained_nonregular_fingerprint(metadata: &Metadata, kind: &str) -> String {
+    use cap_fs_ext::OsMetadataExt;
+
+    format!(
+        "{kind}:{}:{}:{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mode(),
+        metadata.nlink(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec()
+    )
+}
+
+#[cfg(not(unix))]
+fn retained_nonregular_fingerprint(metadata: &Metadata, kind: &str) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| (value.as_secs(), value.subsec_nanos()));
+    format!(
+        "{kind}:{}:{}:{modified:?}",
+        metadata.len(),
+        metadata.permissions().readonly()
+    )
+}
+
+fn verify_visible_regular_after_read(
+    file: &std::fs::File,
+    initial_metadata: &std::fs::Metadata,
+    initial_identity: crate::physical_identity::PhysicalIdentity,
+    initial_link_count: u64,
+    observed_bytes: u64,
+    display: &Path,
+) -> Result<()> {
+    let final_metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    let final_identity = crate::physical_identity::PhysicalIdentity::from_file(file)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if observed_bytes != initial_metadata.len()
+        || final_metadata.len() != initial_metadata.len()
+        || metadata_is_link_or_reparse(&final_metadata)
+        || final_identity != initial_identity
+        || private_regular_link_count(file, &final_metadata, display)? != initial_link_count
+        || private_unix_mode(&final_metadata) != private_unix_mode(initial_metadata)
+    {
+        return Err(FolderbaseError::MigrationSourceChanged(
+            display.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_fingerprinted_regular_after_read(
+    file: &std::fs::File,
+    initial_metadata: &std::fs::Metadata,
+    initial_identity: crate::physical_identity::PhysicalIdentity,
+    initial_link_count: u64,
+    initial_content_version: &RegularContentVersion,
+    observed_bytes: u64,
+    display: &Path,
+) -> Result<()> {
+    let final_metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    let final_identity = crate::physical_identity::PhysicalIdentity::from_file(file)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if observed_bytes != initial_metadata.len()
+        || final_metadata.len() != initial_metadata.len()
+        || metadata_is_link_or_reparse(&final_metadata)
+        || final_identity != initial_identity
+        || private_regular_link_count(file, &final_metadata, display)? != initial_link_count
+        || private_unix_mode(&final_metadata) != private_unix_mode(initial_metadata)
+        || regular_content_version(file, &final_metadata, display)? != *initial_content_version
+    {
+        return Err(FolderbaseError::MigrationSourceChanged(
+            display.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn set_visible_fidelity(
+    file: &cap_std::fs::File,
+    read_only: bool,
+    executable: bool,
+    display: &Path,
+) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt;
+
+        let mut mode = if read_only { 0o444 } else { 0o644 };
+        if executable {
+            mode |= 0o111;
+        }
+        file.set_permissions(cap_std::fs::Permissions::from_mode(mode))
+            .map_err(|source| FolderbaseError::io(display, source))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(display, source))?
+            .permissions();
+        permissions.set_readonly(read_only);
+        file.set_permissions(permissions)
+            .map_err(|source| FolderbaseError::io(display, source))?;
+        let _ = executable;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn private_regular_link_count(
     _file: &std::fs::File,
@@ -820,6 +2949,164 @@ fn private_regular_link_count(
     _display: &Path,
 ) -> Result<u64> {
     Ok(1)
+}
+
+fn map_rename_noreplace_error(path: impl Into<PathBuf>, error: std::io::Error) -> FolderbaseError {
+    let path = path.into();
+    match error.kind() {
+        std::io::ErrorKind::AlreadyExists => FolderbaseError::WouldOverwrite(path),
+        std::io::ErrorKind::Unsupported => FolderbaseError::UnsupportedMigrationFilesystem {
+            path,
+            reason: error.to_string(),
+        },
+        _ => FolderbaseError::io(path, error),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn rename_noreplace(
+    source_parent: &Dir,
+    source_name: &OsStr,
+    destination_parent: &Dir,
+    destination_name: &OsStr,
+) -> std::io::Result<()> {
+    use std::{
+        ffi::CString,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    };
+
+    let source_name = CString::new(source_name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination_name = CString::new(destination_name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    #[cfg(target_vendor = "apple")]
+    let result = unsafe {
+        libc::renameatx_np(
+            source_parent.as_raw_fd(),
+            source_name.as_ptr(),
+            destination_parent.as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let result = unsafe {
+        libc::renameat2(
+            source_parent.as_raw_fd(),
+            source_name.as_ptr(),
+            destination_parent.as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_noreplace(
+    source_parent: &Dir,
+    source_name: &OsStr,
+    destination_parent: &Dir,
+    destination_name: &OsStr,
+) -> std::io::Result<()> {
+    use cap_std::fs::OpenOptionsExt;
+    use std::{
+        mem::{offset_of, size_of},
+        os::windows::{ffi::OsStrExt, io::AsRawHandle},
+        ptr,
+    };
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
+            SetFileInformationByHandle,
+        },
+    };
+
+    const MAX_RENAME_UTF16_UNITS: usize = 32_767;
+
+    let destination_utf16 = destination_name.encode_wide().collect::<Vec<_>>();
+    if destination_utf16.is_empty()
+        || destination_utf16.len() > MAX_RENAME_UTF16_UNITS
+        || destination_utf16.contains(&0)
+    {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+
+    let mut source_options = OpenOptions::new();
+    source_options
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .follow(FollowSymlinks::No);
+    let source = source_parent
+        .open_with(source_name, &source_options)?
+        .into_std();
+    let source_metadata = source.metadata()?;
+    if metadata_is_link_or_reparse(&source_metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to rename a reparse-point leaf",
+        ));
+    }
+    let destination_directory = destination_parent.try_clone()?.into_std_file();
+
+    let file_name_bytes = destination_utf16
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let header_bytes = offset_of!(FILE_RENAME_INFO, FileName);
+    let total_bytes = header_bytes
+        .checked_add(file_name_bytes)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let words = total_bytes.div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; words];
+    let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*information).Anonymous.ReplaceIfExists = false;
+        (*information).RootDirectory = destination_directory.as_raw_handle() as HANDLE;
+        (*information).FileNameLength = u32::try_from(file_name_bytes)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        ptr::copy_nonoverlapping(
+            destination_utf16.as_ptr(),
+            (*information).FileName.as_mut_ptr(),
+            destination_utf16.len(),
+        );
+        if SetFileInformationByHandle(
+            source.as_raw_handle() as HANDLE,
+            FileRenameInfo,
+            information.cast(),
+            u32::try_from(total_bytes)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn rename_noreplace(
+    _source_parent: &Dir,
+    _source_name: &OsStr,
+    _destination_parent: &Dir,
+    _destination_name: &OsStr,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable on this platform",
+    ))
 }
 
 #[cfg(not(windows))]
@@ -865,6 +3152,131 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
 #[cfg(windows)]
 fn sync_directory(_directory: &Dir, _display: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod rename_noreplace_error_tests {
+    use std::{
+        ffi::OsStr,
+        fs,
+        io::{Error, ErrorKind},
+        path::Path,
+    };
+
+    use cap_std::fs::Dir;
+
+    use super::{map_rename_noreplace_error, rename_noreplace};
+    use crate::FolderbaseError;
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    use super::MigrationFilesystem;
+
+    #[test]
+    fn unsupported_no_replace_is_a_typed_migration_filesystem_error() {
+        let path = Path::new("Folderbase/target.bin");
+        let error = map_rename_noreplace_error(
+            path,
+            Error::new(ErrorKind::Unsupported, "native no-replace is unavailable"),
+        );
+
+        assert!(matches!(
+            error,
+            FolderbaseError::UnsupportedMigrationFilesystem {
+                path: observed_path,
+                reason,
+            } if observed_path == path
+                && reason == "native no-replace is unavailable"
+        ));
+    }
+
+    #[test]
+    fn no_replace_collision_remains_would_overwrite() {
+        let path = Path::new("Folderbase/target.bin");
+        let error = map_rename_noreplace_error(path, Error::from(ErrorKind::AlreadyExists));
+
+        assert!(
+            matches!(error, FolderbaseError::WouldOverwrite(observed_path) if observed_path == path)
+        );
+    }
+
+    #[test]
+    fn ordinary_no_replace_failure_remains_io_with_its_kind() {
+        let path = Path::new("Folderbase/target.bin");
+        let error = map_rename_noreplace_error(path, Error::from(ErrorKind::PermissionDenied));
+
+        assert!(matches!(
+            error,
+            FolderbaseError::Io {
+                path: observed_path,
+                source,
+            } if observed_path == path && source.kind() == ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    #[test]
+    fn unsupported_platform_preflight_is_typed_before_transaction_work() {
+        let root = tempfile::tempdir().expect("unsupported-platform fixture");
+        let filesystem = MigrationFilesystem {
+            root: Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+                .expect("retained root"),
+            display_root: root.path().to_path_buf(),
+        };
+
+        assert!(matches!(
+            filesystem.require_atomic_noreplace(),
+            Err(FolderbaseError::UnsupportedMigrationFilesystem { path, reason })
+                if path == root.path() && reason.contains("no-replace rename")
+        ));
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    ))]
+    #[test]
+    fn native_no_replace_collision_preserves_both_files_and_maps_to_would_overwrite() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        fs::write(root.path().join("source.bin"), b"source bytes").expect("source");
+        fs::write(root.path().join("destination.bin"), b"destination bytes").expect("destination");
+        let directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("retained directory");
+
+        let error = rename_noreplace(
+            &directory,
+            OsStr::new("source.bin"),
+            &directory,
+            OsStr::new("destination.bin"),
+        )
+        .expect_err("native no-replace must refuse the occupied destination");
+        let error = map_rename_noreplace_error(root.path().join("destination.bin"), error);
+
+        assert!(matches!(
+            error,
+            FolderbaseError::WouldOverwrite(path)
+                if path == root.path().join("destination.bin")
+        ));
+        assert_eq!(
+            fs::read(root.path().join("source.bin")).expect("preserved source"),
+            b"source bytes"
+        );
+        assert_eq!(
+            fs::read(root.path().join("destination.bin")).expect("preserved destination"),
+            b"destination bytes"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
