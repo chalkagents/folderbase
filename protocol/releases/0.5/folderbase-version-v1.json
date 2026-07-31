@@ -12,7 +12,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "def4431e3c094699007d3fe85059216ee0271f9fc13e5b412804c79defeda84d"
+      "sha256": "5ac4f3d07b53f7327251029d5487d5bffacad5ca2da8521548a1ae3e3c4efcaf"
     },
     {
       "path": "Cargo.lock",
