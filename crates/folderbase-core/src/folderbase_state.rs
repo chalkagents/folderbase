@@ -2441,7 +2441,7 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
         .map_err(|source| FolderbaseError::io(display, source))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(windows)))]
 fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
     directory
         .try_clone()
@@ -2449,6 +2449,15 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
         .into_std_file()
         .sync_all()
         .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(windows)]
+fn sync_directory(_directory: &Dir, _display: &Path) -> Result<()> {
+    // Windows does not provide the POSIX directory-fsync contract, and
+    // FlushFileBuffers rejects directory handles with ERROR_ACCESS_DENIED.
+    // File publication still flushes each staged regular file before its
+    // no-clobber namespace transition.
+    Ok(())
 }
 
 #[cfg(test)]

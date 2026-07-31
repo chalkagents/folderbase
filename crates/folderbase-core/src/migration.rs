@@ -13712,11 +13712,21 @@ fn sync_parent(path: &Path) -> Result<()> {
     }
 }
 
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> Result<()> {
     let directory = fs::File::open(path).map_err(|source| FolderbaseError::io(path, source))?;
     directory
         .sync_all()
         .map_err(|source| FolderbaseError::io(path, source))
+}
+
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Windows does not provide the POSIX directory-fsync contract, and
+    // FlushFileBuffers rejects directory handles with ERROR_ACCESS_DENIED.
+    // Migration publication still flushes each staged regular file before
+    // its namespace transition.
+    Ok(())
 }
 
 #[cfg(test)]

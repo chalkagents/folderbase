@@ -140,7 +140,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folderbase_state.rs",
-      "sha256": "4b1c3d53f7a5a5f56e8c5ce5c71f5e5bfb4be8f433fcde52a40a76b369850619"
+      "sha256": "4633e3966d5a4524a4fa76fb2e7f9c02637dce96adbed8d21e00d74c5a8936b9"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_version.rs",
@@ -172,7 +172,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration.rs",
-      "sha256": "e5aebb9856781629e9dbe4cb0c16723b45b4d45ebf8f1e97c10a3fedcaf46bd2"
+      "sha256": "fd8c70fd4089f7ee4362e6d9a3f53e9f61d8df0226ac004426e50bffc077187f"
     },
     {
       "path": "crates/folderbase-core/src/migration/transaction_v1.rs",
