@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fs,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
@@ -7923,6 +7923,16 @@ fn partial_journal_generation_staging_is_retained_and_reported() {
     );
 }
 
+fn write_private_journal_artifact(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("private journal artifact");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("private journal artifact mode");
+    }
+}
+
 #[test]
 fn zero_byte_uncommitted_journal_write_is_discarded_before_recovery() {
     let (root, migration_id, _) =
@@ -7930,13 +7940,7 @@ fn zero_byte_uncommitted_journal_write_is_discarded_before_recovery() {
     let writing = transaction_v1_root(root.path(), &migration_id)
         .join("journal")
         .join(JOURNAL_GENERATION_WRITE_NAME);
-    fs::write(&writing, []).expect("interrupt after creating the journal write scratch");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&writing, fs::Permissions::from_mode(0o600))
-            .expect("private write scratch mode");
-    }
+    write_private_journal_artifact(&writing, &[]);
 
     let recovered = MigrationExecution::run(
         RootClaim::Current {
@@ -7952,6 +7956,282 @@ fn zero_byte_uncommitted_journal_write_is_discarded_before_recovery() {
     assert!(
         !writing.exists(),
         "recovery retires the uncommitted scratch"
+    );
+}
+
+#[test]
+fn oversized_uncommitted_journal_write_is_rejected_before_content_read() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"journal restart\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let writing = root
+        .path()
+        .join(&journal_relative)
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    write_private_journal_artifact(
+        &writing,
+        &vec![b'x'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+    );
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+    let content_read = Cell::new(false);
+
+    journal
+        .retire_uncommitted_regular_write_with_read_hook(
+            OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            MAX_JOURNAL_GENERATION_BYTES,
+            || content_read.set(true),
+        )
+        .expect_err("oversized scratch must fail closed");
+
+    assert!(
+        !content_read.get(),
+        "size must be rejected before content I/O"
+    );
+    assert_eq!(
+        fs::metadata(&writing)
+            .expect("oversized scratch retained")
+            .len(),
+        MAX_JOURNAL_GENERATION_BYTES + 1
+    );
+}
+
+#[test]
+fn generation_zero_scratch_only_is_rebuilt_by_public_apply() {
+    let (root, migration_id, approval_digest) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"generation zero\n")]);
+    let journal = transaction_v1_root(root.path(), &migration_id).join("journal");
+    fs::remove_file(journal.join("00000000000000000000.json"))
+        .expect("remove published generation zero");
+    let writing = journal.join(JOURNAL_GENERATION_WRITE_NAME);
+    write_private_journal_artifact(&writing, &[]);
+
+    let applied = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Apply {
+            migration_id: &migration_id,
+            approval_digest: &approval_digest,
+        },
+    )
+    .expect("public Apply rebuilds an interrupted generation-zero write");
+
+    assert!(matches!(applied, MigrationOutcome::Applied(_)));
+    assert!(!writing.exists());
+    assert!(journal.join("00000000000000000000.json").is_file());
+}
+
+#[test]
+fn nonzero_partial_journal_write_is_discarded_before_recovery() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"partial write\n")]);
+    let writing = transaction_v1_root(root.path(), &migration_id)
+        .join("journal")
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    write_private_journal_artifact(&writing, b"{\"partial\":");
+
+    let recovered = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect("nonzero uncommitted bytes carry no journal authority");
+
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(!writing.exists());
+}
+
+#[test]
+fn uncommitted_journal_write_directory_is_retained_and_rejected() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"wrong type\n")]);
+    let writing = transaction_v1_root(root.path(), &migration_id)
+        .join("journal")
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    fs::create_dir(&writing).expect("directory at the reserved write name");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("a non-regular scratch must fail closed");
+
+    assert!(writing.is_dir(), "foreign directory is retained");
+}
+
+#[cfg(unix)]
+#[test]
+fn uncommitted_journal_write_with_wrong_mode_is_retained_and_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"wrong mode\n")]);
+    let writing = transaction_v1_root(root.path(), &migration_id)
+        .join("journal")
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    fs::write(&writing, b"partial").expect("write scratch");
+    fs::set_permissions(&writing, fs::Permissions::from_mode(0o640))
+        .expect("non-private scratch mode");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("a non-owner-only scratch must fail closed");
+
+    assert_eq!(
+        fs::read(&writing).expect("wrong-mode scratch retained"),
+        b"partial"
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn uncommitted_journal_write_symlink_is_retained_and_rejected() {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file;
+
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"symlink scratch\n")]);
+    let journal = transaction_v1_root(root.path(), &migration_id).join("journal");
+    let writing = journal.join(JOURNAL_GENERATION_WRITE_NAME);
+    #[cfg(unix)]
+    symlink("00000000000000000000.json", &writing).expect("symlink at reserved write name");
+    #[cfg(windows)]
+    symlink_file(journal.join("00000000000000000000.json"), &writing)
+        .expect("GitHub Windows runners permit file symlinks");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("a linked scratch must fail closed");
+
+    assert!(
+        fs::symlink_metadata(&writing)
+            .expect("symlink retained")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn aliased_uncommitted_journal_write_is_retained_and_rejected() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"aliased scratch\n")]);
+    let writing = transaction_v1_root(root.path(), &migration_id)
+        .join("journal")
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    write_private_journal_artifact(&writing, b"partial");
+    let external = tempfile::tempdir().expect("external alias directory");
+    let alias = external.path().join("journal-write-alias");
+    fs::hard_link(&writing, &alias).expect("hard-link alias");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("an aliased scratch must fail closed");
+
+    assert!(writing.is_file());
+    assert!(alias.is_file());
+}
+
+#[test]
+fn scratch_with_valid_durable_journal_state_retires_and_converges() {
+    for checkpoint in ["stage", "final"] {
+        let (root, migration_id, _) =
+            prepared_additive_v1_fixture_with_digest(&[("README.md", b"valid durable state\n")]);
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+        let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&migration_id);
+        let transaction =
+            reopen_transaction_v1(&filesystem, &migration_root, None).expect("transaction");
+        let current = transaction.generations.last().expect("prepared generation");
+        let next = current
+            .next_apply_intent(&transaction.program, current.operation_cursor())
+            .expect("next journal generation");
+        let journal = transaction_v1_root(root.path(), &migration_id).join("journal");
+        let writing = journal.join(JOURNAL_GENERATION_WRITE_NAME);
+        write_private_journal_artifact(&writing, b"partial");
+        let durable = match checkpoint {
+            "stage" => journal.join(JOURNAL_GENERATION_STAGING_NAME),
+            "final" => journal.join(next.file_name()),
+            _ => unreachable!("bounded checkpoint table"),
+        };
+        write_private_journal_artifact(
+            &durable,
+            &next.encode(&durable).expect("journal generation bytes"),
+        );
+        drop(transaction);
+
+        let recovered = MigrationExecution::run(
+            RootClaim::Current {
+                display_root: root.path(),
+            },
+            MigrationCommand::Recover {
+                migration_id: &migration_id,
+            },
+        )
+        .unwrap_or_else(|error| panic!("{checkpoint} must recover: {error:?}"));
+
+        assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+        assert!(!writing.exists());
+    }
+}
+
+#[test]
+fn scratch_does_not_weaken_a_malformed_durable_stage() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"malformed stage\n")]);
+    let journal = transaction_v1_root(root.path(), &migration_id).join("journal");
+    let writing = journal.join(JOURNAL_GENERATION_WRITE_NAME);
+    let staging = journal.join(JOURNAL_GENERATION_STAGING_NAME);
+    write_private_journal_artifact(&writing, b"uncommitted");
+    write_private_journal_artifact(&staging, b"{\"partial\":");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("malformed durable staging remains fail-closed");
+
+    assert!(!writing.exists(), "non-authoritative scratch is retired");
+    assert_eq!(
+        fs::read(&staging).expect("malformed durable stage retained"),
+        b"{\"partial\":"
     );
 }
 

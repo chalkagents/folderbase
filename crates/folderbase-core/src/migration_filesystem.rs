@@ -957,8 +957,17 @@ impl VerifiedPrivateDirectory {
         name: &OsStr,
         maximum_bytes: u64,
     ) -> Result<()> {
-        let (fact, observed_sha256) = match self.relaxed_regular_fact_observed(name) {
-            Ok(observed) => observed,
+        self.retire_uncommitted_regular_write_with_hook(name, maximum_bytes, || {})
+    }
+
+    fn retire_uncommitted_regular_write_with_hook(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        before_content_read: impl FnOnce(),
+    ) -> Result<()> {
+        let (mut file, metadata, display) = match self.open_regular_relaxed(name) {
+            Ok(opened) => opened,
             Err(FolderbaseError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -966,21 +975,81 @@ impl VerifiedPrivateDirectory {
             }
             Err(error) => return Err(error),
         };
-        if fact.bytes > maximum_bytes || fact.link_count != 1 {
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let link_count = private_regular_link_count(&file, &metadata, &display)?;
+        if metadata.len() > maximum_bytes || link_count != 1 {
             return Err(FolderbaseError::InvalidRecord {
-                path: self.display.join(name),
+                path: display,
                 message: "uncommitted private write has an unexpected alias topology or size"
                     .to_owned(),
             });
         }
         #[cfg(unix)]
-        if fact.unix_mode != Some(0o600) {
+        if private_unix_mode(&metadata) != Some(0o600) {
             return Err(FolderbaseError::InvalidRecord {
-                path: self.display.join(name),
+                path: display,
                 message: "uncommitted private write is not owner-only".to_owned(),
             });
         }
+        before_content_read();
+        let (observed_bytes, digest) = {
+            let mut digest = Sha256::new();
+            let mut observed_bytes = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut bounded = Read::by_ref(&mut file).take(maximum_bytes.saturating_add(1));
+            loop {
+                let read = bounded
+                    .read(&mut buffer)
+                    .map_err(|source| FolderbaseError::io(&display, source))?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                observed_bytes = observed_bytes
+                    .checked_add(read as u64)
+                    .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
+            }
+            (observed_bytes, digest)
+        };
+        let final_metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if observed_bytes > maximum_bytes
+            || observed_bytes != metadata.len()
+            || final_metadata.len() != metadata.len()
+            || crate::physical_identity::PhysicalIdentity::from_file(&file)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                != identity
+            || private_regular_link_count(&file, &final_metadata, &display)? != link_count
+            || portable_read_only(&final_metadata) != portable_read_only(&metadata)
+            || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "uncommitted private write changed while it was read".to_owned(),
+            });
+        }
+        let observed_sha256 = format!("{:x}", digest.finalize());
+        let fact = MigrationRegularFact {
+            physical_identity_sha256: identity.stable_sha256(),
+            device_sha256: identity.device_sha256(),
+            bytes: metadata.len(),
+            read_only: portable_read_only(&metadata),
+            unix_mode: private_unix_mode(&metadata),
+            link_count,
+        };
         self.remove_exact_regular(name, exact_regular_leaf(&fact, &observed_sha256, 1))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_uncommitted_regular_write_with_read_hook(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        before_content_read: impl FnOnce(),
+    ) -> Result<()> {
+        self.retire_uncommitted_regular_write_with_hook(name, maximum_bytes, before_content_read)
     }
 
     fn verify_private_publication_ownership(
