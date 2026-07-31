@@ -25,7 +25,7 @@ pub(super) const TRANSACTION_DIRECTORY: &str = "transaction-v1";
 pub(super) const MAX_PROGRAM_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_JOURNAL_GENERATION_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const MAX_JOURNAL_GENERATIONS: usize = 65_536;
-const JOURNAL_GENERATIONS_PER_OPERATION: usize = 6;
+const JOURNAL_GENERATIONS_PER_OPERATION: usize = 8;
 const JOURNAL_GENERATION_OVERHEAD: usize = 6;
 pub(super) const MAX_RETAINED_CONFLICTS: usize = 8;
 const JOURNAL_GENERATIONS_PER_RETAINED_CONFLICT: usize = 2;
@@ -2363,6 +2363,25 @@ impl PrivatePublicationBindingV1 {
         &self.ownership_record
     }
 
+    fn has_matching_durable_receipt(&self, journal: &TransactionJournalGenerationV1) -> bool {
+        match self.direction {
+            TransactionDirectionV1::Apply => {
+                journal
+                    .receipts
+                    .get(self.operation_index)
+                    .is_some_and(|receipt| receipt.operation_index == self.operation_index)
+                    || journal
+                        .abort_receipts
+                        .iter()
+                        .any(|receipt| receipt.operation_index == self.operation_index)
+            }
+            TransactionDirectionV1::Rollback => journal
+                .inverse_receipts
+                .iter()
+                .any(|receipt| receipt.operation_index == self.operation_index),
+        }
+    }
+
     fn validate(
         &self,
         program: &MutationProgramV1,
@@ -2572,6 +2591,7 @@ impl TransactionJournalGenerationV1 {
     ) -> Result<Self> {
         if self.active_publication.is_some()
             || self.in_flight_operation != Some(binding.operation_index)
+            || binding.direction != self.direction
         {
             return Err(invalid(
                 Path::new("<migration-journal-v1>"),
@@ -2591,10 +2611,16 @@ impl TransactionJournalGenerationV1 {
         &self,
         program: &MutationProgramV1,
     ) -> Result<Self> {
-        if self.active_publication.is_none() {
+        let Some(binding) = self.active_publication.as_ref() else {
             return Err(invalid(
                 Path::new("<migration-journal-v1>"),
                 "private publication cleanup has no durable binding",
+            ));
+        };
+        if !binding.has_matching_durable_receipt(self) {
+            return Err(invalid(
+                Path::new("<migration-journal-v1>"),
+                "private publication cleanup has no matching durable receipt",
             ));
         }
         let mut next = self.clone();
@@ -2603,6 +2629,35 @@ impl TransactionJournalGenerationV1 {
         next.active_publication = None;
         next.checksum = next.calculate_checksum()?;
         next.validate(program)?;
+        Ok(next)
+    }
+
+    #[cfg(test)]
+    pub(super) fn checksum_valid_forged_publication_clear(&self) -> Result<Self> {
+        let mut next = self.clone();
+        next.generation += 1;
+        next.previous_checksum = Some(self.checksum.clone());
+        next.active_publication = None;
+        next.checksum = next.calculate_checksum()?;
+        Ok(next)
+    }
+
+    #[cfg(test)]
+    pub(super) fn checksum_valid_forged_publication_bind(
+        &self,
+        binding_source: &Self,
+    ) -> Result<Self> {
+        let binding = binding_source.active_publication.clone().ok_or_else(|| {
+            invalid(
+                Path::new("<migration-journal-v1-test>"),
+                "test binding source has no active publication",
+            )
+        })?;
+        let mut next = self.clone();
+        next.generation += 1;
+        next.previous_checksum = Some(self.checksum.clone());
+        next.active_publication = Some(binding);
+        next.checksum = next.calculate_checksum()?;
         Ok(next)
     }
 
@@ -3439,7 +3494,11 @@ fn validate_transition(
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == previous.in_flight_operation
         && previous.active_publication.is_none()
-        && next.active_publication.is_some()
+        && next.active_publication.as_ref().is_some_and(|binding| {
+            previous.in_flight_operation == Some(binding.operation_index)
+                && binding.direction == previous.direction
+                && binding.direction == next.direction
+        })
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts
         && next.abort_receipts == previous.abort_receipts
@@ -3448,7 +3507,10 @@ fn validate_transition(
         && next.phase == previous.phase
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == previous.in_flight_operation
-        && previous.active_publication.is_some()
+        && previous
+            .active_publication
+            .as_ref()
+            .is_some_and(|binding| binding.has_matching_durable_receipt(previous))
         && next.active_publication.is_none()
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts

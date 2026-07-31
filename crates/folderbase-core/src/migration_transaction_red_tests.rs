@@ -736,11 +736,11 @@ fn transaction_v1_rejects_generation_count_above_the_operation_derived_bound() {
         serde_json::from_slice(&fs::read(program_path(&fixture)).expect("immutable program"))
             .expect("program JSON");
     let operation_count = value["steps"].as_array().expect("program steps").len();
-    // Six phase records bracket intent/completion plus the journal-bound
-    // publication and cleanup pair for each compiled leaf operation. Each
-    // retained conflict reserves both its retry intent and exact evidence.
+    // Eight phase records cover apply and rollback intent/completion plus each
+    // direction's journal-bound publication and cleanup pair. Each retained
+    // conflict reserves both its retry intent and exact evidence.
     let maximum_generation_count =
-        6 + operation_count * 6 + transaction_v1::MAX_RETAINED_CONFLICTS * 2;
+        6 + operation_count * 8 + transaction_v1::MAX_RETAINED_CONFLICTS * 2;
     let journal = journal_root(&fixture);
     let first = journal.join("00000000000000000000.json");
     for generation in 1..=maximum_generation_count {
@@ -2612,7 +2612,48 @@ fn latest_journal_generation(root: &Path, migration_id: &str) -> (PathBuf, serde
 
 #[allow(dead_code)]
 fn journal_generation_checksum(value: &serde_json::Value) -> String {
-    let controlled = if value.get("inverse_receipts").is_some() {
+    let inverse_receipts = value
+        .get("inverse_receipts")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let abort_receipts = value
+        .get("abort_receipts")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let controlled = if value.get("active_publication").is_some() {
+        serde_json::json!([
+            value["format"],
+            value["transaction_id"],
+            value["program_digest"],
+            value["generation"],
+            value["previous_checksum"],
+            value["direction"],
+            value["phase"],
+            value["operation_cursor"],
+            value["in_flight_operation"],
+            value["active_publication"],
+            value["receipts"],
+            inverse_receipts,
+            abort_receipts,
+            value["conflicts"],
+        ])
+    } else if value.get("abort_receipts").is_some() {
+        serde_json::json!([
+            value["format"],
+            value["transaction_id"],
+            value["program_digest"],
+            value["generation"],
+            value["previous_checksum"],
+            value["direction"],
+            value["phase"],
+            value["operation_cursor"],
+            value["in_flight_operation"],
+            value["receipts"],
+            inverse_receipts,
+            abort_receipts,
+            value["conflicts"],
+        ])
+    } else if value.get("inverse_receipts").is_some() {
         serde_json::json!([
             value["format"],
             value["transaction_id"],
@@ -2647,6 +2688,61 @@ fn journal_generation_checksum(value: &serde_json::Value) -> String {
     digest.update([0]);
     digest.update(serde_json::to_vec(&controlled).expect("controlled journal encoding"));
     format!("{:x}", digest.finalize())
+}
+
+fn append_checksum_valid_forged_generation(
+    root: &Path,
+    migration_id: &str,
+    next: &transaction_v1::TransactionJournalGenerationV1,
+) -> PathBuf {
+    let journal = transaction_v1_root(root, migration_id).join("journal");
+    let path = journal.join(next.file_name());
+    fs::write(
+        &path,
+        next.encode(&path).expect("canonical forged journal bytes"),
+    )
+    .expect("append checksum-valid forged generation");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("private journal mode");
+    }
+    path
+}
+
+fn journal_generation_records(
+    root: &Path,
+    migration_id: &str,
+) -> Vec<transaction_v1::TransactionJournalGenerationV1> {
+    let journal = transaction_v1_root(root, migration_id).join("journal");
+    let mut names = fs::read_dir(&journal)
+        .expect("transaction journal")
+        .map(|entry| entry.expect("journal entry").file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let path = journal.join(name);
+            transaction_v1::TransactionJournalGenerationV1::decode(
+                &path,
+                &fs::read(&path).expect("journal generation bytes"),
+            )
+            .expect("canonical journal generation")
+        })
+        .collect()
+}
+
+fn journal_active_publication_generation(
+    root: &Path,
+    migration_id: &str,
+) -> transaction_v1::TransactionJournalGenerationV1 {
+    journal_generation_records(root, migration_id)
+        .into_iter()
+        .find(|generation| generation.active_publication().is_some())
+        .expect("one journal-bound publication generation")
 }
 
 #[allow(dead_code)]
@@ -6170,6 +6266,49 @@ fn bounded_conflict_evidence_reserves_terminal_apply_and_complete_rollback_capac
 }
 
 #[test]
+fn twelve_replace_operations_complete_the_full_apply_and_rollback_journal_lifecycle() {
+    const REPLACEMENTS: usize = 12;
+    let root = initialized_root();
+    let mut paths = Vec::new();
+    let mut operations = Vec::new();
+    for index in 0..REPLACEMENTS {
+        let relative = PathBuf::from(format!("workspace-{index:02}/AGENTS.md"));
+        let path = root.path().join(&relative);
+        fs::create_dir(path.parent().expect("adapter parent")).expect("adapter parent directory");
+        fs::write(&path, format!("original adapter {index}\n")).expect("original adapter");
+        paths.push((path, format!("original adapter {index}\n").into_bytes()));
+        operations.push(MigrationOperation::update_adapter(
+            relative,
+            format!("journal-bound replacement {index}"),
+        ));
+    }
+    let plan = MigrationPlan::propose_structural(root.path(), operations)
+        .expect("multi-replace structural proposal");
+    let migration_id = plan.id.clone();
+
+    let applied = apply_migration(approve_migration(plan).expect("approve multi-replace"))
+        .expect("all replacements must fit the apply journal budget");
+    assert_eq!(applied.state, MigrationState::Verified);
+
+    let rolled_back = run_transaction_v1_with_hook(
+        root.path(),
+        MigrationCommand::Rollback {
+            migration_id: &migration_id,
+        },
+        |_| {},
+    )
+    .expect("all replacement restores must fit the rollback journal budget");
+    assert!(matches!(rolled_back, MigrationOutcome::RolledBack(_)));
+    for (path, original) in paths {
+        assert_eq!(
+            fs::read(path).expect("restored adapter"),
+            original,
+            "rollback restores every original adapter"
+        );
+    }
+}
+
+#[test]
 fn approved_manifest_transition_rolls_back_to_the_exact_initial_fact() {
     let root = initialized_root();
     let manifest = root.path().join(".folderbase/manifest.json");
@@ -7504,6 +7643,132 @@ fn crash_after_publication_cleanup_before_binding_clear_converges() {
             .1
             .get("active_publication")
             .is_none()
+    );
+}
+
+#[test]
+fn checksum_valid_unreceipted_publication_clear_is_rejected_by_the_journal_grammar() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+        )
+    });
+    let state = FolderbaseState::open_existing(fixture.root.path()).expect("state capability");
+    let filesystem =
+        MigrationFilesystem::from_state(&state, fixture.root.path()).expect("migration filesystem");
+    let transaction = reopen_transaction_v1(
+        &filesystem,
+        &PathBuf::from(MIGRATIONS_DIR).join(&fixture.migration_id),
+        None,
+    )
+    .expect("unreceipted bound transaction");
+    let constructor_error = transaction
+        .generations
+        .last()
+        .expect("journal head")
+        .next_private_publication_cleared(&transaction.program)
+        .expect_err("the transition constructor also requires a durable receipt");
+    assert!(
+        constructor_error
+            .to_string()
+            .contains("matching durable receipt")
+    );
+    let head = journal_generation_records(fixture.root.path(), &fixture.migration_id)
+        .pop()
+        .expect("journal head");
+    let forged = head
+        .checksum_valid_forged_publication_clear()
+        .expect("checksum-valid forged clear");
+    append_checksum_valid_forged_generation(fixture.root.path(), &fixture.migration_id, &forged);
+
+    let error = fixture
+        .recover()
+        .expect_err("an unreceipted binding cannot be cleared");
+
+    assert!(
+        error.to_string().contains("illegal state transition"),
+        "the durable grammar rejects the forged clear before artifact reconciliation: {error}"
+    );
+}
+
+#[test]
+fn checksum_valid_postreceipt_publication_bind_is_rejected_by_the_journal_grammar() {
+    let fixture = apply_closed_leaf(ClosedLeafKind::ReplaceFile);
+    let binding = journal_active_publication_generation(fixture.root.path(), &fixture.migration_id);
+    let (_, head) = latest_journal_generation(fixture.root.path(), &fixture.migration_id);
+    assert!(head["in_flight_operation"].is_null());
+    assert!(
+        head["receipts"]
+            .as_array()
+            .is_some_and(|receipts| !receipts.is_empty())
+    );
+    let head_record = journal_generation_records(fixture.root.path(), &fixture.migration_id)
+        .pop()
+        .expect("journal head");
+    let forged = head_record
+        .checksum_valid_forged_publication_bind(&binding)
+        .expect("checksum-valid post-receipt bind");
+    append_checksum_valid_forged_generation(fixture.root.path(), &fixture.migration_id, &forged);
+
+    let error = public_recover(&fixture)
+        .expect_err("a publication cannot be newly bound after its durable receipt");
+
+    assert!(
+        error.to_string().contains("illegal state transition"),
+        "the durable grammar rejects post-receipt binding: {error}"
+    );
+}
+
+#[test]
+fn checksum_valid_cross_direction_publication_bind_is_rejected_by_the_journal_grammar() {
+    let fixture = apply_closed_leaf(ClosedLeafKind::ReplaceFile);
+    let binding = journal_active_publication_generation(fixture.root.path(), &fixture.migration_id);
+    let binding_operation = binding
+        .active_publication()
+        .expect("active publication")
+        .operation_index();
+    request_test_rollback(&fixture);
+    begin_test_rollback(&fixture);
+    let (_, head) = latest_journal_generation(fixture.root.path(), &fixture.migration_id);
+    assert_eq!(head["direction"], "rollback");
+    assert_eq!(head["in_flight_operation"], binding_operation);
+    assert_eq!(
+        binding.active_publication().expect("binding").direction(),
+        TransactionDirectionV1::Apply
+    );
+    let state = FolderbaseState::open_existing(fixture.root.path()).expect("state capability");
+    let filesystem =
+        MigrationFilesystem::from_state(&state, fixture.root.path()).expect("migration filesystem");
+    let transaction = reopen_transaction_v1(
+        &filesystem,
+        &PathBuf::from(MIGRATIONS_DIR).join(&fixture.migration_id),
+        None,
+    )
+    .expect("rollback-intent transaction");
+    transaction
+        .generations
+        .last()
+        .expect("journal head")
+        .next_private_publication_bound(
+            &transaction.program,
+            binding.active_publication().expect("binding").clone(),
+        )
+        .expect_err("the transition constructor rejects a cross-direction bind");
+    let head_record = journal_generation_records(fixture.root.path(), &fixture.migration_id)
+        .pop()
+        .expect("journal head");
+    let forged = head_record
+        .checksum_valid_forged_publication_bind(&binding)
+        .expect("checksum-valid cross-direction bind");
+    append_checksum_valid_forged_generation(fixture.root.path(), &fixture.migration_id, &forged);
+
+    let error =
+        public_recover(&fixture).expect_err("an apply publication cannot be bound during rollback");
+
+    assert!(
+        error.to_string().contains("illegal state transition"),
+        "the durable grammar rejects cross-direction binding: {error}"
     );
 }
 
