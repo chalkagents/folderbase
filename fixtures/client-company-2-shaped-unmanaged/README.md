@@ -1,9 +1,9 @@
-# Safe Okada-shaped unmanaged fixture
+# Safe Project 2 unmanaged fixture
 
 This is a deliberately small, invented folder tree for deterministic
 `folderbase inspect`, transform-planning, and migration tests. It approximates
-the approved ChalkAgents → Prosperna engagement → Okada account shape without
-including any live Okada, Prosperna, ChalkAgents, or personal data.
+the approved ChalkAgents → Prosperna engagement → Project 2 account shape without
+including any live Project 2, Prosperna, ChalkAgents, or personal data.
 
 Every payload is invented. Files with document, database, archive, image, or
 video extensions are tiny labeled placeholders rather than real customer
@@ -21,8 +21,8 @@ shareable folderbase.
 The fixture should eventually produce a reviewable proposal shaped like:
 
 ```text
-Okada Account Workspace
-├── Okada Account Folderbase
+Project 2 Account Workspace
+├── Project 2 Account Folderbase
 ├── ChalkAgents–Prosperna Engagement Folderbase
 ├── Security Remediation Project Folderbase
 ├── Loyalty Revamp Project Folderbase
@@ -79,7 +79,7 @@ expectation artifact is not itself part of the inspected source tree.
 ## Golden-journey normalization
 
 The CLI golden test accepts only this exact committed fixture. It copies the
-tree to an isolated temporary `Okada-Account` folder, then gives three existing
+tree to an isolated temporary `Project-2-Account` folder, then gives three existing
 semantic scopes analyzer-visible boundary names:
 
 - `Engagement-Provenance` becomes
@@ -91,5 +91,5 @@ semantic scopes analyzer-visible boundary names:
 This normalization changes no source bytes and does not touch this committed
 fixture. It makes the intended account, engagement, project, commercial,
 security, and client-shared decisions explicit through the current public CLI
-heuristic. The test harness rejects the live Okada path before any filesystem
-operation.
+heuristic. The test harness lexically rejects every external fixture path before
+canonicalizing or reading it.

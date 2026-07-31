@@ -23,12 +23,12 @@
   "provenance_labels": [
     "ChalkAgents",
     "Prosperna",
-    "Okada"
+    "Project 2"
   ],
   "expected_topology": {
-    "workspace": "Okada Account Workspace",
+    "workspace": "Project 2 Account Workspace",
     "folderbases": [
-      "Okada Account Folderbase",
+      "Project 2 Account Folderbase",
       "ChalkAgents-Prosperna Engagement Folderbase",
       "Security Remediation Project Folderbase",
       "Loyalty Revamp Project Folderbase",
