@@ -36,7 +36,8 @@ use crate::{
     folderbase_version::{
         DeletedKind, Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion,
         FolderbaseVersionEntries, FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding,
-        PathBindingKind, RootManifest, Tombstone, validate_capture_version_id,
+        PathBindingKind, RootManifest, Tombstone, validate_capture_path,
+        validate_capture_version_id,
     },
     local_versions::{
         ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
@@ -471,11 +472,9 @@ impl FolderbaseVersionStore {
         mut checkpoint: impl FnMut(&RestoreCheckpoint),
         maximum_restore_authorities: usize,
     ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+        validate_capture_path(portable_path)?;
         let path = safe_content_path(Path::new(portable_path))?;
-        let path_string = path
-            .to_str()
-            .expect("safe content paths are UTF-8")
-            .to_owned();
+        let path_string = portable_path.to_owned();
         verify_restore_root_instance(self)?;
         let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
         let state = FolderbaseState::open_existing(&self.root_attestation.root)?;
@@ -4315,7 +4314,12 @@ fn validate_restore_transaction(
     store: &FolderbaseVersionStore,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
-    let safe_path = safe_content_path(Path::new(&transaction.path)).map_err(|_| {
+    validate_capture_path(&transaction.path).map_err(|_| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore path is not an ordinary portable content path".to_owned(),
+        )
+    })?;
+    safe_content_path(Path::new(&transaction.path)).map_err(|_| {
         FolderbaseCaptureError::InvalidRestoreTransaction(
             "restore path is not an ordinary portable content path".to_owned(),
         )
@@ -4326,7 +4330,6 @@ fn validate_restore_transaction(
             .root_instance_authority
             .admit(&transaction.root_instance_sha256)
             .is_none()
-        || transaction.path != safe_path.to_string_lossy()
         || !transaction.transaction_id.starts_with("fbrestore_")
         || Uuid::parse_str(
             transaction
