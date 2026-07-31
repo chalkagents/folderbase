@@ -91,9 +91,46 @@ fn approved_structural_leaf(
 }
 
 fn substitute_regular(path: &Path, bytes: &[u8]) -> PhysicalIdentity {
-    fs::remove_file(path).expect("remove transaction-observed leaf");
+    // Keep the displaced object alive under a test-only sibling name until
+    // the replacement has been opened. Linux filesystems may immediately
+    // recycle an unlinked inode, which can make a genuinely new object appear
+    // to have the same (device, inode) identity and turn this adversarial
+    // fixture into a no-op. A retained pathname works on Windows as well.
+    let retained = path.with_file_name(format!(
+        ".folderbase-substitution-retained-{}",
+        Uuid::now_v7()
+    ));
+    fs::rename(path, &retained).expect("retain displaced physical leaf");
     fs::write(path, bytes).expect("publish foreign leaf");
-    PhysicalIdentity::from_path(path).expect("foreign identity")
+    let identity = PhysicalIdentity::from_path(path).expect("foreign identity");
+    fs::remove_file(retained).expect("retire displaced test leaf");
+    identity
+}
+
+#[test]
+fn substitution_fixture_forces_a_distinct_identity_without_retained_artifacts() {
+    let root = tempfile::tempdir().expect("substitution fixture");
+    let path = root.path().join("active.bin");
+    fs::write(&path, b"generation 0").expect("initial leaf");
+    let mut previous = PhysicalIdentity::from_path(&path).expect("initial identity");
+
+    for generation in 1..=16 {
+        let bytes = format!("generation {generation}");
+        let current = substitute_regular(&path, bytes.as_bytes());
+        assert_ne!(current, previous, "replacement must be a new object");
+        assert_eq!(
+            fs::read(&path).expect("replacement bytes"),
+            bytes.as_bytes()
+        );
+        assert_eq!(
+            fs::read_dir(root.path())
+                .expect("fixture directory")
+                .count(),
+            1,
+            "the displaced test object must be retired"
+        );
+        previous = current;
+    }
 }
 
 fn bytes_for(case: ForeignBytes, same: &[u8]) -> Vec<u8> {
@@ -4464,12 +4501,9 @@ fn terminal_replace_abort_allows_user_owned_path_replacement_and_edits() {
                 matches!(lost_acknowledgement, LostAcknowledgement::Publish)
             );
 
-            fs::remove_file(&fixture.leaf.target).expect("remove restored pathname");
             let replacement =
                 format!("user-owned post-abort replacement for {label}\n").into_bytes();
-            fs::write(&fixture.leaf.target, &replacement).expect("new user-owned inode");
-            let replacement_identity = PhysicalIdentity::from_path(&fixture.leaf.target)
-                .expect("user-owned replacement identity");
+            let replacement_identity = substitute_regular(&fixture.leaf.target, &replacement);
             assert_ne!(replacement_identity, fixture.original_identity);
             let edited =
                 format!("edited user-owned post-abort replacement for {label}\n").into_bytes();

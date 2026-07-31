@@ -654,15 +654,13 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
         });
     }
 
-    let root_file = fs::File::open(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    let current_identity = PhysicalIdentity::from_file(&root_file)
-        .map_err(|source| FolderbaseError::io(&root, source))?;
-    if current_identity != plan.root_identity.identity() {
+    let opened_root = open_root_capability(&root)?;
+    if opened_root.identity.identity() != plan.root_identity.identity() {
         return Err(FolderbaseError::PlanRootIdentityChanged(root));
     }
     let mut preflight_budget = InitializationInventoryBudget::default();
     refuse_nested_target(&root, &mut preflight_budget)?;
-    let root_dir = Dir::from_std_file(root_file);
+    let root_dir = opened_root.directory;
 
     verify_template_preconditions(&root_dir, plan, &mut preflight_budget)?;
     validate_planned_paths_against_existing(&plan.root, &plan.directories, &plan.writes)?;
