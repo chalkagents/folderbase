@@ -282,13 +282,16 @@ Windows portable fidelity maps the read-only file attribute to `read_only`.
 Regular files have no portable executable bit and therefore observe
 `executable: false`; directories are inherently traversable and observe
 `executable: true`. Core never synthesizes Unix mode bits on Windows. When an
-exact retained directory needs `FILE_WRITE_ATTRIBUTES`, Core reopens that same
-object with `ReOpenFile`, revalidates that it is a non-reparse directory, and
-closes the elevated handle after the leaf operation. No-replace rename is
-different: child directory capabilities are initially opened with the closed
-union of `FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` documented for the
-destination `RootDirectory`, with delete sharing enabled. For a cross-directory
-rename, that retained destination capability is passed directly to
+new private claim directory needs fidelity applied, Core opens that just-created
+child directly through the retained private parent with the closed union of
+`FILE_TRAVERSE`, `FILE_READ_ATTRIBUTES`, and `FILE_WRITE_ATTRIBUTES`. It
+revalidates that the child is a non-reparse directory and clones only that exact
+handle for the attribute operation. Ordinary retained directory capabilities
+remain limited to `FILE_TRAVERSE | FILE_READ_ATTRIBUTES`; Core does not widen
+them with `ReOpenFile`. No-replace rename is different: the retained destination
+capability is opened with the closed union of `FILE_TRAVERSE` and
+`FILE_READ_ATTRIBUTES` documented for `RootDirectory`, with delete sharing
+enabled. For a cross-directory rename, Core passes that capability directly to
 `NtSetInformationFile`. For a same-directory rename, Core compares the
 physical identities of the retained source and destination parents and passes
 `RootDirectory = NULL` with the simple destination name, as required by the

@@ -84,6 +84,10 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      - name: Test native Windows retained-directory fidelity
+        if: runner.os == 'Windows'
+        run: "cargo test --package folderbase-core --lib --locked migration_filesystem::windows_directory_fidelity_tests::"
+
       - name: Test the public Folderbase Version contract
         run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
 
@@ -117,10 +121,6 @@ jobs:
 
       - name: Test transaction-v1 crash, restart, conflict, and rollback matrices
         run: "cargo test --package folderbase-core --lib --locked migration::migration_transaction_red_tests::"
-
-      - name: Test native Windows retained-directory fidelity
-        if: runner.os == 'Windows'
-        run: "cargo test --package folderbase-core --lib --locked migration_filesystem::windows_directory_fidelity_tests::"
 
       - name: Test native Windows reparse rejection
         if: runner.os == 'Windows'
