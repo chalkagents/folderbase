@@ -7924,6 +7924,38 @@ fn partial_journal_generation_staging_is_retained_and_reported() {
 }
 
 #[test]
+fn zero_byte_uncommitted_journal_write_is_discarded_before_recovery() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"journal restart\n")]);
+    let writing = transaction_v1_root(root.path(), &migration_id)
+        .join("journal")
+        .join(JOURNAL_GENERATION_WRITE_NAME);
+    fs::write(&writing, []).expect("interrupt after creating the journal write scratch");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&writing, fs::Permissions::from_mode(0o600))
+            .expect("private write scratch mode");
+    }
+
+    let recovered = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect("an uncommitted journal write is not a durable malformed stage");
+
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(
+        !writing.exists(),
+        "recovery retires the uncommitted scratch"
+    );
+}
+
+#[test]
 fn generation_zero_singleton_staging_recovers_after_final_install_is_interrupted() {
     let (root, migration_id, _) =
         prepared_additive_v1_fixture_with_digest(&[("README.md", b"generation zero\n")]);

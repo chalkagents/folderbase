@@ -357,6 +357,18 @@ The final claim retains the same ownership record until its transaction
 obligation ends. Legacy final-plus-stage hard-link checkpoints are retired only
 after both names are proven to reference the same exact two-link publication.
 
+Journal generation publication does not expose its recoverable
+`.next-generation.preparing` name until the complete generation bytes have been
+synchronized. Core first writes the bytes under the reserved
+`.next-generation.writing` scratch name, synchronizes that file and its parent,
+and then atomically moves the singleton leaf to the durable staging name with
+no-clobber semantics. The scratch name carries no journal authority: after a
+process exit, a bounded owner-only singleton scratch is exactly retired and the
+next generation is recomputed from the last valid chain state. An oversized,
+aliased, non-regular, or non-owner-only scratch fails closed. Once the durable
+staging name is visible, the ordinary staging rule above applies, so malformed
+or partial durable stages remain retained and reported rather than discarded.
+
 Conflict records include a retained no-follow fingerprint of the affected
 ordinary leaves. Repeating an unchanged conflict returns the existing record
 without extending the journal; a changed workspace fact may append one new

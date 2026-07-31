@@ -871,6 +871,118 @@ impl VerifiedPrivateDirectory {
             .map(|_| ())
     }
 
+    pub(crate) fn publish_recoverable_new_via_uncommitted_write(
+        &self,
+        name: &str,
+        staging_name: &str,
+        writing_name: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        validate_private_name(name)?;
+        validate_private_name(staging_name)?;
+        validate_private_name(writing_name)?;
+        if name == staging_name || name == writing_name || staging_name == writing_name {
+            return Err(FolderbaseError::UnsafePath(self.display.join(writing_name)));
+        }
+        let name_os = OsStr::new(name);
+        let staging_name_os = OsStr::new(staging_name);
+        let writing_name_os = OsStr::new(writing_name);
+        let expected_sha256 = format!("{:x}", Sha256::digest(bytes));
+        let expected_bytes = bytes.len() as u64;
+
+        self.retire_uncommitted_regular_write_if_present(writing_name_os, expected_bytes)?;
+        let publication_already_started = [name_os, staging_name_os].into_iter().try_fold(
+            false,
+            |present, candidate| match self.relaxed_regular_fact_observed(candidate) {
+                Ok(_) => Ok(true),
+                Err(FolderbaseError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    Ok(present)
+                }
+                Err(error) => Err(error),
+            },
+        )?;
+        if publication_already_started {
+            return self.publish_recoverable_new(name, staging_name, bytes);
+        }
+
+        let writing_display = self.display.join(writing_name_os);
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = self
+            .directory
+            .open_with(writing_name_os, &options)
+            .map_err(|source| FolderbaseError::io(&writing_display, source))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|source| FolderbaseError::io(&writing_display, source))?;
+        drop(file);
+        sync_directory(&self.directory, &self.display)?;
+        let writing_fact = self.relaxed_regular_fact(writing_name_os, &expected_sha256)?;
+        if writing_fact.bytes != expected_bytes || writing_fact.link_count != 1 {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                writing_display,
+            ));
+        }
+        self.exact_regular_fact(
+            writing_name_os,
+            exact_regular_leaf(&writing_fact, &expected_sha256, 1),
+        )?;
+        rename_noreplace(
+            &self.directory,
+            writing_name_os,
+            &self.directory,
+            staging_name_os,
+        )
+        .map_err(|source| map_rename_noreplace_error(self.display.join(staging_name_os), source))?;
+        sync_directory(&self.directory, &self.display)?;
+        self.exact_regular_fact(
+            staging_name_os,
+            exact_regular_leaf(&writing_fact, &expected_sha256, 1),
+        )?;
+        self.publish_recoverable_new(name, staging_name, bytes)
+    }
+
+    pub(crate) fn retire_uncommitted_regular_write_if_present(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+    ) -> Result<()> {
+        let (fact, observed_sha256) = match self.relaxed_regular_fact_observed(name) {
+            Ok(observed) => observed,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if fact.bytes > maximum_bytes || fact.link_count != 1 {
+            return Err(FolderbaseError::InvalidRecord {
+                path: self.display.join(name),
+                message: "uncommitted private write has an unexpected alias topology or size"
+                    .to_owned(),
+            });
+        }
+        #[cfg(unix)]
+        if fact.unix_mode != Some(0o600) {
+            return Err(FolderbaseError::InvalidRecord {
+                path: self.display.join(name),
+                message: "uncommitted private write is not owner-only".to_owned(),
+            });
+        }
+        self.remove_exact_regular(name, exact_regular_leaf(&fact, &observed_sha256, 1))
+    }
+
     fn verify_private_publication_ownership(
         &self,
         name: &OsStr,

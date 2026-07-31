@@ -65,6 +65,7 @@ const SOURCE_TOPOLOGY_EXTENSION: &str = "x-folderbase-source-topology-v1";
 const MANAGED_BLOCK_BEGIN: &str = "<!-- folderbase:begin -->";
 const MANAGED_BLOCK_END: &str = "<!-- folderbase:end -->";
 const JOURNAL_GENERATION_STAGING_NAME: &str = ".next-generation.preparing";
+const JOURNAL_GENERATION_WRITE_NAME: &str = ".next-generation.writing";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationAnalysis {
@@ -3778,11 +3779,14 @@ fn append_transaction_v1_generation_parts(
     let generation_name = generation.file_name();
     let path = journal_root.join(&generation_name);
     let bytes = generation.encode(&filesystem.display(&path))?;
-    private.journal.publish_recoverable_new(
-        &generation_name,
-        JOURNAL_GENERATION_STAGING_NAME,
-        &bytes,
-    )?;
+    private
+        .journal
+        .publish_recoverable_new_via_uncommitted_write(
+            &generation_name,
+            JOURNAL_GENERATION_STAGING_NAME,
+            JOURNAL_GENERATION_WRITE_NAME,
+            &bytes,
+        )?;
     let reopened_bytes = private
         .journal
         .read_regular_bounded(OsStr::new(&generation_name), MAX_JOURNAL_GENERATION_BYTES)?;
@@ -7394,9 +7398,13 @@ fn is_provable_prepared_transaction_v1_prefix(
         .any(|(name, _)| name == OsStr::new("journal"))
     {
         let journal = transaction.open_directory("journal")?;
-        let journal_entries = journal.closed_entries(MAX_JOURNAL_GENERATIONS.saturating_add(1))?;
+        let journal_entries = journal.closed_entries(MAX_JOURNAL_GENERATIONS.saturating_add(2))?;
         for (name, is_directory) in &journal_entries {
-            if name == OsStr::new(JOURNAL_GENERATION_STAGING_NAME) && !*is_directory {
+            if matches!(
+                name.to_str(),
+                Some(JOURNAL_GENERATION_STAGING_NAME | JOURNAL_GENERATION_WRITE_NAME)
+            ) && !*is_directory
+            {
                 continue;
             }
             if !*is_directory
@@ -7519,9 +7527,10 @@ fn prepare_transaction_v1(
     let initial = TransactionJournalGenerationV1::prepared(&reopened, program_digest.clone())?;
     let initial_path = journal_root.join(initial.file_name());
     let initial_bytes = initial.encode(&filesystem.display(&initial_path))?;
-    private_journal.publish_recoverable_new(
+    private_journal.publish_recoverable_new_via_uncommitted_write(
         &initial.file_name(),
         JOURNAL_GENERATION_STAGING_NAME,
+        JOURNAL_GENERATION_WRITE_NAME,
         &initial_bytes,
     )?;
     let prepared = reopen_transaction_v1(filesystem, &migration_root, Some(&reopened))?;
@@ -8154,8 +8163,23 @@ fn repair_recoverable_journal_staging(
     program_digest: &str,
 ) -> Result<()> {
     let staging_name = OsStr::new(JOURNAL_GENERATION_STAGING_NAME);
-    let entries =
-        journal.closed_entries(program.maximum_journal_generations().saturating_add(1))?;
+    let mut entries =
+        journal.closed_entries(program.maximum_journal_generations().saturating_add(2))?;
+    let writing_name = OsStr::new(JOURNAL_GENERATION_WRITE_NAME);
+    if let Some((_, writing_is_directory)) = entries.iter().find(|(name, _)| name == writing_name) {
+        if *writing_is_directory {
+            return Err(FolderbaseError::InvalidRecord {
+                path: filesystem.display(&journal_root.join(writing_name)),
+                message: "uncommitted journal write is not a regular file".to_owned(),
+            });
+        }
+        journal.retire_uncommitted_regular_write_if_present(
+            writing_name,
+            MAX_JOURNAL_GENERATION_BYTES,
+        )?;
+        entries =
+            journal.closed_entries(program.maximum_journal_generations().saturating_add(1))?;
+    }
     let Some((_, staging_is_directory)) = entries.iter().find(|(name, _)| name == staging_name)
     else {
         return Ok(());
