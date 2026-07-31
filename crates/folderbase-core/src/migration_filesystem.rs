@@ -471,16 +471,41 @@ impl VerifiedPrivateDirectory {
         name: &OsStr,
     ) -> Result<(MigrationRegularFact, String)> {
         let (mut file, metadata, display) = self.open_regular_relaxed(name)?;
-        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
-        let link_count = private_regular_link_count(&file, &metadata, &display)?;
+        let identity =
+            crate::physical_identity::PhysicalIdentity::from_file(&file).map_err(|source| {
+                FolderbaseError::io(
+                    &display,
+                    std::io::Error::new(
+                        source.kind(),
+                        format!("read private regular identity: {source}"),
+                    ),
+                )
+            })?;
+        let link_count = private_regular_link_count(&file, &metadata, &display).map_err(
+            |error| match error {
+                FolderbaseError::Io { path, source } => FolderbaseError::io(
+                    path,
+                    std::io::Error::new(
+                        source.kind(),
+                        format!("read private regular link count: {source}"),
+                    ),
+                ),
+                error => error,
+            },
+        )?;
         let mut digest = Sha256::new();
         let mut observed = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
         loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|source| FolderbaseError::io(&display, source))?;
+            let read = file.read(&mut buffer).map_err(|source| {
+                FolderbaseError::io(
+                    &display,
+                    std::io::Error::new(
+                        source.kind(),
+                        format!("read private regular content: {source}"),
+                    ),
+                )
+            })?;
             if read == 0 {
                 break;
             }
@@ -489,15 +514,27 @@ impl VerifiedPrivateDirectory {
                 .checked_add(read as u64)
                 .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
         }
-        let final_metadata = file
-            .metadata()
-            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let final_metadata = file.metadata().map_err(|source| {
+            FolderbaseError::io(
+                &display,
+                std::io::Error::new(
+                    source.kind(),
+                    format!("reread private regular metadata: {source}"),
+                ),
+            )
+        })?;
         let observed_sha256 = format!("{:x}", digest.finalize());
         if observed != metadata.len()
             || final_metadata.len() != metadata.len()
-            || crate::physical_identity::PhysicalIdentity::from_file(&file)
-                .map_err(|source| FolderbaseError::io(&display, source))?
-                != identity
+            || crate::physical_identity::PhysicalIdentity::from_file(&file).map_err(|source| {
+                FolderbaseError::io(
+                    &display,
+                    std::io::Error::new(
+                        source.kind(),
+                        format!("reread private regular identity: {source}"),
+                    ),
+                )
+            })? != identity
         {
             return Err(FolderbaseError::MigrationVerificationFailed(display));
         }
@@ -559,9 +596,15 @@ impl VerifiedPrivateDirectory {
         let display = self.display.join(name);
         self.exact_regular_fact(name, expected)?;
         reject_windows_reparse(&self.directory, name, &display)?;
-        self.directory
-            .remove_file(name)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
+        self.directory.remove_file(name).map_err(|source| {
+            FolderbaseError::io(
+                &display,
+                std::io::Error::new(
+                    source.kind(),
+                    format!("remove exact private regular: {source}"),
+                ),
+            )
+        })?;
         sync_directory(&self.directory, &display)?;
         match self.relaxed_regular_fact_observed(name) {
             Err(FolderbaseError::Io { source, .. })
@@ -1078,11 +1121,25 @@ impl VerifiedPrivateDirectory {
         let file = self
             .directory
             .open_with(name, &options)
-            .map_err(|source| FolderbaseError::io(&display, source))?
+            .map_err(|source| {
+                FolderbaseError::io(
+                    &display,
+                    std::io::Error::new(
+                        source.kind(),
+                        format!("open private regular for reading: {source}"),
+                    ),
+                )
+            })?
             .into_std();
-        let metadata = file
-            .metadata()
-            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let metadata = file.metadata().map_err(|source| {
+            FolderbaseError::io(
+                &display,
+                std::io::Error::new(
+                    source.kind(),
+                    format!("read private regular metadata: {source}"),
+                ),
+            )
+        })?;
         if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
             return Err(FolderbaseError::UnsafePath(display));
         }

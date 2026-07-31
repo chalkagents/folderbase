@@ -112,6 +112,10 @@ jobs:
         if: runner.os == 'Windows'
         run: "cargo test --package folderbase-core --lib --locked migration_filesystem::rename_noreplace_error_tests::"
 
+      - name: Diagnose the first Windows migration claim lifecycle
+        if: runner.os == 'Windows'
+        run: "cargo test --package folderbase-core --test migration --locked approved_plan_creates_multiple_valid_folderbase_roots -- --exact --nocapture"
+
       - name: Test migration compatibility and lifecycle behavior
         run: cargo test --package folderbase-core --test migration --locked
 
