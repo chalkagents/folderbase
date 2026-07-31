@@ -3247,11 +3247,26 @@ fn set_directory_fidelity(
     {
         let mut permissions = file
             .metadata()
-            .map_err(|source| FolderbaseError::io(display, source))?
+            .map_err(|source| {
+                FolderbaseError::io(
+                    display,
+                    std::io::Error::new(
+                        source.kind(),
+                        format!("read reopened directory fidelity: {source}"),
+                    ),
+                )
+            })?
             .permissions();
         permissions.set_readonly(read_only);
-        file.set_permissions(permissions)
-            .map_err(|source| FolderbaseError::io(display, source))?;
+        file.set_permissions(permissions).map_err(|source| {
+            FolderbaseError::io(
+                display,
+                std::io::Error::new(
+                    source.kind(),
+                    format!("write reopened directory fidelity: {source}"),
+                ),
+            )
+        })?;
         let _ = executable;
     }
     Ok(())
@@ -3312,7 +3327,15 @@ fn reopen_windows_directory_with_access(
         },
     };
 
-    let original = directory.try_clone()?.into_std_file();
+    let original = directory
+        .try_clone()
+        .map_err(|source| {
+            std::io::Error::new(
+                source.kind(),
+                format!("clone retained directory for fidelity: {source}"),
+            )
+        })?
+        .into_std_file();
     let reopened = unsafe {
         ReOpenFile(
             original.as_raw_handle() as HANDLE,
@@ -3322,10 +3345,19 @@ fn reopen_windows_directory_with_access(
         )
     };
     if reopened == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
+        let source = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(
+            source.kind(),
+            format!("ReOpenFile for directory fidelity: {source}"),
+        ));
     }
     let file = unsafe { std::fs::File::from_raw_handle(reopened as _) };
-    let metadata = file.metadata()?;
+    let metadata = file.metadata().map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read ReOpenFile directory metadata: {source}"),
+        )
+    })?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
