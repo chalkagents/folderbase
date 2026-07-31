@@ -12,7 +12,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "85bfdeca36de23c924a414a5211d1ae55f314c9ebbaca85565958ffb3584cfc4"
+      "sha256": "a1c3b22a8bb366010d4e9bf143feede6465fde81b98e05bad671193b18321596"
     },
     {
       "path": "Cargo.lock",
@@ -184,7 +184,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
-      "sha256": "7254d8fd937401d84c757a7956065df590b49a64a42ce25036eeb52a16ff15f3"
+      "sha256": "924c4874a62a0ea69e54c11fa98030b8c7546f7a209f538ec9df58e5d6762c39"
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",

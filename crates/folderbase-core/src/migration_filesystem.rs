@@ -3724,7 +3724,12 @@ fn rename_noreplace_with_hook(
             )
         })?
         .into_std();
-    let source_metadata = source.metadata()?;
+    let source_metadata = source.metadata().map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read source metadata for no-replace rename: {source}"),
+        )
+    })?;
     if metadata_is_link_or_reparse(&source_metadata) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -3750,8 +3755,25 @@ fn rename_noreplace_with_hook(
         )
     })?;
     let destination_directory = destination_directory.into_std_file();
-    let same_parent = crate::physical_identity::PhysicalIdentity::from_file(&source_directory)?
-        == crate::physical_identity::PhysicalIdentity::from_file(&destination_directory)?;
+    let source_parent_identity = crate::physical_identity::PhysicalIdentity::from_file(
+        &source_directory,
+    )
+    .map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read source parent identity for no-replace rename: {source}"),
+        )
+    })?;
+    let destination_parent_identity = crate::physical_identity::PhysicalIdentity::from_file(
+        &destination_directory,
+    )
+    .map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read destination parent identity for no-replace rename: {source}"),
+        )
+    })?;
+    let same_parent = source_parent_identity == destination_parent_identity;
 
     let file_name_bytes = destination_utf16
         .len()
@@ -4075,11 +4097,16 @@ mod rename_noreplace_error_tests {
     };
 
     use cap_std::fs::Dir;
+    #[cfg(windows)]
+    use sha2::{Digest, Sha256};
 
     #[cfg(windows)]
     use super::rename_noreplace_with_hook;
     use super::{map_rename_noreplace_error, rename_noreplace};
     use crate::FolderbaseError;
+
+    #[cfg(windows)]
+    use super::MigrationFilesystem;
 
     #[cfg(not(any(
         target_os = "linux",
@@ -4204,6 +4231,54 @@ mod rename_noreplace_error_tests {
         assert_eq!(
             fs::read(root.path().join("destination.bin")).expect("destination bytes"),
             b"source bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_installs_a_prepared_private_publish_claim() {
+        let root = tempfile::tempdir().expect("retained private publication fixture");
+        fs::create_dir(root.path().join("source-private")).expect("source private");
+        fs::create_dir(root.path().join("destination-private")).expect("destination private");
+        let approved = b"approved private bytes\n";
+        fs::write(root.path().join("source-private/source.bin"), approved).expect("source");
+        let filesystem = MigrationFilesystem {
+            root: Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+                .expect("retained publication root"),
+            display_root: root.path().to_path_buf(),
+        };
+        let source = filesystem
+            .open_private_directory(Path::new("source-private"))
+            .expect("source private capability");
+        let destination = filesystem
+            .open_private_directory(Path::new("destination-private"))
+            .expect("destination private capability");
+        let expected_sha256 = format!("{:x}", Sha256::digest(approved));
+
+        filesystem
+            .prepare_private_publish_claim(
+                &source,
+                OsStr::new("source.bin"),
+                &destination,
+                "claim.bin",
+                &expected_sha256,
+                approved.len() as u64,
+                false,
+                false,
+                || {},
+            )
+            .expect("prepared claim must install through the retained private directory");
+
+        assert!(
+            !root
+                .path()
+                .join("destination-private/.claim.bin.preparing")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(root.path().join("destination-private/claim.bin"))
+                .expect("durable claim bytes"),
+            approved
         );
     }
 
