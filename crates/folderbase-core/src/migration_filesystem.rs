@@ -386,10 +386,29 @@ impl VerifiedPrivateDirectory {
         &self,
         name: &OsStr,
     ) -> Result<(MigrationRegularFact, String)> {
+        #[cfg(target_os = "linux")]
+        let trace_claim =
+            self.display.ends_with("claims") && name == OsStr::new("00000000.publish.claim");
+        #[cfg(target_os = "linux")]
+        if trace_claim {
+            eprintln!("[DEBUG-fb41h-fact] before open");
+        }
         let (mut file, metadata, display) = self.open_regular_relaxed(name)?;
+        #[cfg(target_os = "linux")]
+        if trace_claim {
+            eprintln!("[DEBUG-fb41h-fact] after open");
+        }
         let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
             .map_err(|source| FolderbaseError::io(&display, source))?;
+        #[cfg(target_os = "linux")]
+        if trace_claim {
+            eprintln!("[DEBUG-fb41h-fact] after identity");
+        }
         let link_count = private_regular_link_count(&file, &metadata, &display)?;
+        #[cfg(target_os = "linux")]
+        if trace_claim {
+            eprintln!("[DEBUG-fb41h-fact] after link count");
+        }
         let mut digest = Sha256::new();
         let mut observed = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
@@ -405,9 +424,17 @@ impl VerifiedPrivateDirectory {
                 .checked_add(read as u64)
                 .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
         }
+        #[cfg(target_os = "linux")]
+        if trace_claim {
+            eprintln!("[DEBUG-fb41h-fact] after read");
+        }
         let final_metadata = file
             .metadata()
             .map_err(|source| FolderbaseError::io(&display, source))?;
+        #[cfg(target_os = "linux")]
+        if trace_claim {
+            eprintln!("[DEBUG-fb41h-fact] after final metadata");
+        }
         let observed_sha256 = format!("{:x}", digest.finalize());
         if observed != metadata.len()
             || final_metadata.len() != metadata.len()
