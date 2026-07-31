@@ -71,12 +71,12 @@ fn each_kind_renders_distinct_useful_folderbase_entry() {
             "0.2.0",
             "customer",
             [
-                ("folderbase_name", "Okada Customer Context"),
-                ("purpose", "Understand and serve the Okada account."),
+                ("folderbase_name", "Project 2 Customer Context"),
+                ("purpose", "Understand and serve the Project 2 account."),
                 ("current_state", "Several projects share account context."),
                 ("next_action", "Consolidate the approved account record."),
             ],
-            ["# Okada Customer Context", "Account/", "customer"],
+            ["# Project 2 Customer Context", "Account/", "customer"],
         ),
         (
             "folderbase.temporary",
@@ -758,7 +758,7 @@ fn project_adoption_records_kind_template_version_and_history() {
         &fs::read(root.path().join(".folderbase/manifest.json")).expect("manifest"),
     )
     .expect("valid manifest JSON");
-    assert_eq!(manifest["protocol_version"], "0.2.0");
+    assert_eq!(manifest["protocol_version"], "0.5.0");
     assert_eq!(manifest["folderbase"]["kind"], "project");
     assert_eq!(
         manifest["folderbase"]["template_provenance"]["id"],
@@ -815,38 +815,51 @@ fn custom_adoption_package(extra_target: &str, extra_kind: &str) -> TemplatePack
 }
 
 #[test]
-fn template_adoption_rejects_collisions_with_core_protocol_paths() {
-    for (target, kind) in [
-        (".folderbase/manifest.json", "text"),
-        (".folderbaseignore", "text"),
-        ("AGENTS.md", "text"),
-        ("agents.md", "text"),
-        ("AGENTS.md/notes.md", "text"),
-        (".folderbaseignore/notes.md", "text"),
-    ] {
-        let root = tempfile::tempdir().expect("ordinary project");
-        let package = custom_adoption_package(target, kind);
+fn template_adoption_rejects_a_collision_with_the_core_manifest_path() {
+    let root = tempfile::tempdir().expect("ordinary project");
+    let package = custom_adoption_package(".folderbase/manifest.json", "text");
 
-        let error = plan_template_initialization(
+    let error = plan_template_initialization(
+        root.path(),
+        InitializationOptions::default(),
+        &package,
+        &BTreeMap::new(),
+    )
+    .expect_err("template/core collision must be refused");
+
+    assert!(
+        error.to_string().contains("collision"),
+        "core manifest should report a collision: {error}"
+    );
+    assert!(
+        fs::read_dir(root.path())
+            .expect("unchanged project")
+            .next()
+            .is_none(),
+        "planning must remain read-only"
+    );
+    assert!(!root.path().join(".folderbase/manifest.json").exists());
+}
+
+#[test]
+fn template_adoption_can_explicitly_add_optional_root_guidance() {
+    for target in [".folderbaseignore", "AGENTS.md"] {
+        let root = tempfile::tempdir().expect("ordinary project");
+        let package = custom_adoption_package(target, "text");
+
+        let plan = plan_template_initialization(
             root.path(),
             InitializationOptions::default(),
             &package,
             &BTreeMap::new(),
         )
-        .expect_err("template/core collision must be refused");
+        .expect("optional root guidance is an explicit template artifact");
 
         assert!(
-            error.to_string().contains("collision"),
-            "{target} should report a collision: {error}"
+            plan.writes()
+                .iter()
+                .any(|write| write.path() == Path::new(target))
         );
-        assert!(
-            fs::read_dir(root.path())
-                .expect("unchanged project")
-                .next()
-                .is_none(),
-            "{target} planning must remain read-only"
-        );
-        assert!(!root.path().join(".folderbase/manifest.json").exists());
     }
 }
 
@@ -1192,6 +1205,98 @@ fn existing_folderbase_entry_and_agent_adapters_are_never_overwritten() {
     assert_eq!(
         fs::read(root.path().join("CLAUDE.md")).expect("Claude adapter after"),
         b"user Claude rules\n"
+    );
+}
+
+#[test]
+fn template_agent_adapters_are_planned_once_and_preserve_existing_user_adapters() {
+    const TEMPLATE_AGENTS: &str = "# Template Codex\nUse these exact template bytes.\n";
+    const TEMPLATE_CLAUDE: &str = "# Template Claude\nUse these exact template bytes.\n";
+    const USER_AGENTS: &[u8] = b"# User Codex\nKeep these rules.\n";
+    const USER_CLAUDE: &[u8] = b"# User Claude\nKeep these rules.\n";
+
+    let package: TemplatePackage = serde_json::from_value(serde_json::json!({
+        "protocol_version": "0.2.0",
+        "id": "example.agent-adapters",
+        "version": "1.0.0",
+        "name": "Agent adapters",
+        "suggested_folderbase_kind": "project",
+        "artifacts": [
+            {
+                "target": "AGENTS.md",
+                "kind": "text",
+                "content": TEMPLATE_AGENTS,
+                "install": "create_if_missing"
+            },
+            {
+                "target": "CLAUDE.md",
+                "kind": "text",
+                "content": TEMPLATE_CLAUDE,
+                "install": "create_if_missing"
+            }
+        ]
+    }))
+    .expect("public template package with both agent adapters");
+    let options = InitializationOptions {
+        create_agent_adapters: true,
+        ..InitializationOptions::default()
+    };
+
+    let root = tempfile::tempdir().expect("ordinary project");
+    let plan =
+        plan_template_initialization(root.path(), options.clone(), &package, &BTreeMap::new())
+            .expect("template and opt-in adapters share one planned write");
+    for adapter in ["AGENTS.md", "CLAUDE.md"] {
+        assert_eq!(
+            plan.writes()
+                .iter()
+                .filter(|write| write.path() == Path::new(adapter))
+                .count(),
+            1,
+            "{adapter} must have exactly one planned write"
+        );
+    }
+    initialize(&plan).expect("initialize template-owned adapters");
+    assert_eq!(
+        fs::read(root.path().join("AGENTS.md")).expect("installed Codex adapter"),
+        TEMPLATE_AGENTS.as_bytes()
+    );
+    assert_eq!(
+        fs::read(root.path().join("CLAUDE.md")).expect("installed Claude adapter"),
+        TEMPLATE_CLAUDE.as_bytes()
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.path().join(".folderbase/manifest.json")).expect("installed manifest"),
+    )
+    .expect("manifest JSON");
+    assert_eq!(
+        manifest["adapters"],
+        serde_json::json!([
+            { "agent": "codex", "path": "AGENTS.md" },
+            { "agent": "claude", "path": "CLAUDE.md" }
+        ])
+    );
+
+    let existing = tempfile::tempdir().expect("project with user adapters");
+    fs::write(existing.path().join("AGENTS.md"), USER_AGENTS).expect("user Codex adapter");
+    fs::write(existing.path().join("CLAUDE.md"), USER_CLAUDE).expect("user Claude adapter");
+    let preserving_plan =
+        plan_template_initialization(existing.path(), options, &package, &BTreeMap::new())
+            .expect("existing user adapters remain preserved paths");
+    assert!(
+        preserving_plan.writes().iter().all(|write| {
+            write.path() != Path::new("AGENTS.md") && write.path() != Path::new("CLAUDE.md")
+        }),
+        "preserved user adapters must not receive planned writes"
+    );
+    initialize(&preserving_plan).expect("initialize around existing user adapters");
+    assert_eq!(
+        fs::read(existing.path().join("AGENTS.md")).expect("preserved Codex adapter"),
+        USER_AGENTS
+    );
+    assert_eq!(
+        fs::read(existing.path().join("CLAUDE.md")).expect("preserved Claude adapter"),
+        USER_CLAUDE
     );
 }
 

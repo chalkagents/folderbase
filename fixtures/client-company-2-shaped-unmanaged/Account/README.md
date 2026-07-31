@@ -1,4 +1,4 @@
-# Synthetic Okada account context
+# Synthetic Project 2 account context
 
 This invented account summary says the work is active and spans security,
 loyalty, support, commercial, and client-facing delivery concerns.

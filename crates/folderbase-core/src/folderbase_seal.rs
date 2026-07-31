@@ -12,7 +12,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(not(windows))]
+use cap_fs_ext::DirExt;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -36,7 +38,8 @@ use crate::{
     folderbase_version::{
         DeletedKind, Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion,
         FolderbaseVersionEntries, FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding,
-        PathBindingKind, RootManifest, Tombstone, validate_capture_version_id,
+        PathBindingKind, RootManifest, Tombstone, validate_capture_path,
+        validate_capture_version_id,
     },
     local_versions::{
         ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
@@ -471,11 +474,9 @@ impl FolderbaseVersionStore {
         mut checkpoint: impl FnMut(&RestoreCheckpoint),
         maximum_restore_authorities: usize,
     ) -> Result<RestoredTombstone, FolderbaseCaptureError> {
+        validate_capture_path(portable_path)?;
         let path = safe_content_path(Path::new(portable_path))?;
-        let path_string = path
-            .to_str()
-            .expect("safe content paths are UTF-8")
-            .to_owned();
+        let path_string = portable_path.to_owned();
         verify_restore_root_instance(self)?;
         let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
         let state = FolderbaseState::open_existing(&self.root_attestation.root)?;
@@ -982,6 +983,12 @@ fn restored_version(
             "restore parent belongs to a different Folderbase".to_owned(),
         ));
     }
+    if current.protocol_version() != store.protocol_profile.folderbase_version_protocol() {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "capture a Folderbase Version for the active live-root protocol before restoring"
+                .to_owned(),
+        ));
+    }
     let mut bindings = current.bindings().to_vec();
     bindings.push(binding.clone());
     bindings.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
@@ -997,7 +1004,8 @@ fn restored_version(
         current.exclusions().to_vec(),
     );
     Ok(FolderbaseVersion::from_verified_parts(
-        FolderbaseVersionParts::portable_v1_from_verified_producer(
+        FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+            current.protocol_version(),
             store.root_attestation.folderbase_id.clone(),
             target_version_id.to_owned(),
             vec![current.version_id().to_owned()],
@@ -2956,7 +2964,8 @@ fn preflight_capture_envelopes(
         })
         .collect();
     let tombstones = transaction.target_tombstones.clone();
-    let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
+    let parts = FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+        plan.folderbase_version_protocol(),
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
         plan.current_local_head()
@@ -3201,7 +3210,8 @@ fn build_and_install_capture(
         })
         .collect();
     let tombstones = transaction.target_tombstones.clone();
-    let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
+    let parts = FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+        plan.folderbase_version_protocol(),
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
         plan.current_local_head()
@@ -4306,7 +4316,12 @@ fn validate_restore_transaction(
     store: &FolderbaseVersionStore,
     transaction: &RestoreTransaction,
 ) -> Result<(), FolderbaseCaptureError> {
-    let safe_path = safe_content_path(Path::new(&transaction.path)).map_err(|_| {
+    validate_capture_path(&transaction.path).map_err(|_| {
+        FolderbaseCaptureError::InvalidRestoreTransaction(
+            "restore path is not an ordinary portable content path".to_owned(),
+        )
+    })?;
+    safe_content_path(Path::new(&transaction.path)).map_err(|_| {
         FolderbaseCaptureError::InvalidRestoreTransaction(
             "restore path is not an ordinary portable content path".to_owned(),
         )
@@ -4317,7 +4332,6 @@ fn validate_restore_transaction(
             .root_instance_authority
             .admit(&transaction.root_instance_sha256)
             .is_none()
-        || transaction.path != safe_path.to_string_lossy()
         || !transaction.transaction_id.starts_with("fbrestore_")
         || Uuid::parse_str(
             transaction
@@ -4758,13 +4772,14 @@ fn open_root_capability(root: &Path) -> Result<Dir, FolderbaseCaptureError> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
 
         options
+            .access_mode(0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
     let file = options
         .open(root)
@@ -4780,6 +4795,43 @@ fn open_root_capability(root: &Path) -> Result<Dir, FolderbaseCaptureError> {
         })?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseCaptureError::PlanStoreMismatch);
+    }
+    Ok(Dir::from_std_file(file))
+}
+
+#[cfg(not(windows))]
+fn open_child_directory_capability(
+    parent: &Dir,
+    name: &std::ffi::OsStr,
+    _display: &Path,
+) -> std::io::Result<Dir> {
+    parent.open_dir_nofollow(name)
+}
+
+#[cfg(windows)]
+fn open_child_directory_capability(
+    parent: &Dir,
+    name: &std::ffi::OsStr,
+    display: &Path,
+) -> std::io::Result<Dir> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let file = parent.open_with(name, &options)?.into_std();
+    let metadata = file.metadata()?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "unsafe Folderbase directory capability: {}",
+            display.display()
+        )));
     }
     Ok(Dir::from_std_file(file))
 }
@@ -4801,13 +4853,14 @@ fn open_parent_beneath(
             return Ok((directory, name.to_os_string()));
         }
         traversed.push(name);
+        let display = root.join(&traversed);
         directory =
-            directory
-                .open_dir_nofollow(name)
-                .map_err(|source| FolderbaseCaptureError::Io {
-                    path: root.join(&traversed),
+            open_child_directory_capability(&directory, name, &display).map_err(|source| {
+                FolderbaseCaptureError::Io {
+                    path: display,
                     source,
-                })?;
+                }
+            })?;
     }
     Err(FolderbaseCaptureError::CaptureStateChanged(
         relative.to_path_buf(),
@@ -4818,24 +4871,36 @@ fn open_regular_beneath(root: &Path, relative: &Path) -> Result<File, Folderbase
     let (parent, name) = open_parent_beneath(root, relative)?;
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
     let file = parent
         .open_with(&name, &options)
         .map_err(|source| FolderbaseCaptureError::Io {
             path: root.join(relative),
             source,
-        })?;
+        })?
+        .into_std();
     let metadata = file
         .metadata()
         .map_err(|source| FolderbaseCaptureError::Io {
             path: root.join(relative),
             source,
         })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
         return Err(FolderbaseCaptureError::CaptureStateChanged(
             relative.to_path_buf(),
         ));
     }
-    Ok(file.into_std())
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -4908,7 +4973,7 @@ mod tests {
     use super::*;
 
     const MANIFEST: &[u8] = br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
   }
@@ -8055,7 +8120,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn restore_parent_capability_blocks_windows_directory_detach() {
+    fn restore_parent_detach_is_detected_before_windows_publication() {
         let root = folderbase();
         fs::create_dir(root.path().join("docs")).expect("docs");
         fs::rename(
@@ -8068,31 +8133,48 @@ mod tests {
             .seal_capture(store.plan_capture().expect("genesis"))
             .expect("genesis");
         fs::remove_file(root.path().join("docs/active.bin")).expect("delete");
-        store
+        let deletion = store
             .seal_capture(store.plan_capture().expect("deletion"))
             .expect("deletion");
         let outside =
             tempfile::tempdir_in(root.path().parent().expect("fixture parent")).expect("outside");
         let detached = outside.path().join("detached-docs");
-        let mut rename_was_blocked = false;
 
-        store
+        let error = store
             .restore_tombstone_with_hook("docs/active.bin", |checkpoint| {
                 if checkpoint == &RestoreCheckpoint::WorkspaceParentOpened {
-                    rename_was_blocked = fs::rename(root.path().join("docs"), &detached).is_err();
-                    assert!(
-                        rename_was_blocked,
-                        "the retained Windows directory capability must deny delete-sharing"
-                    );
+                    fs::rename(root.path().join("docs"), &detached)
+                        .expect("detach opened workspace parent");
+                    fs::create_dir(root.path().join("docs"))
+                        .expect("install replacement workspace parent");
+                    fs::write(root.path().join("docs/sentinel"), b"replacement\n")
+                        .expect("replacement sentinel");
                 }
             })
-            .expect("restore remains attached on Windows");
-        assert!(rename_was_blocked);
+            .expect_err("detached Windows parent must fail before publication");
+        assert!(matches!(error, FolderbaseCaptureError::LocalStore(_)));
+        assert!(!detached.join("active.bin").exists());
+        assert!(!root.path().join("docs/active.bin").exists());
+        assert_eq!(
+            fs::read(root.path().join("docs/sentinel")).expect("replacement sentinel"),
+            b"replacement\n"
+        );
+        assert_eq!(
+            local_head(root.path())
+                .expect("deletion Head remains")
+                .version_id,
+            deletion.version_id()
+        );
+
+        fs::remove_dir_all(root.path().join("docs")).expect("remove replacement");
+        fs::rename(&detached, root.path().join("docs")).expect("repair original parent");
+        store
+            .restore_tombstone("docs/active.bin")
+            .expect("retry after explicit parent repair");
         assert_eq!(
             fs::read(root.path().join("docs/active.bin")).expect("restored bytes"),
             b"first opaque bytes"
         );
-        assert!(!detached.exists());
     }
 
     #[test]
@@ -8116,7 +8198,7 @@ mod tests {
         fs::write(
             root.path().join("client/.folderbase/manifest.json"),
             br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }
@@ -8159,7 +8241,7 @@ mod tests {
         fs::write(
             root.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
             br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }
@@ -9140,7 +9222,7 @@ mod tests {
         fs::write(
             root.path().join("client/.folderbase/manifest.json"),
             br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }

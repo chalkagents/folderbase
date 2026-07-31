@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use folderbase_core::{
     FolderbaseError, FolderbaseKind, InitializationOptions, TemplatePackage,
     TemplateStructuralChangeKind, apply_template_expansion, initialize, load_template,
-    plan_template_expansion, plan_template_initialization, template_application_history,
+    plan_initialization, plan_template_expansion, plan_template_initialization,
+    template_application_history,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -134,6 +135,145 @@ fn paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+fn rewrite_root_as_legacy_v01(root: &Path) {
+    let manifest_path = root.join(".folderbase/manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
+        .expect("manifest JSON");
+    manifest["$schema"] = json!("https://folderbase.ai/protocol/0.1/folderbase.schema.json");
+    manifest["protocol_version"] = json!("0.1.0");
+    manifest["folderbase"]["entry"] = json!("FOLDERBASE.md");
+    manifest["policies"]
+        .as_object_mut()
+        .expect("policies")
+        .remove("capture_ignore");
+    fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("legacy manifest");
+    fs::write(root.join("FOLDERBASE.md"), b"# Legacy narrative\n").expect("legacy entry");
+    fs::write(root.join(".folderbaseignore"), b"node_modules/\n").expect("legacy ignore");
+}
+
+#[test]
+fn default_v05_root_can_expand_a_template_without_a_root_narrative_prerequisite() {
+    let folderbase = tempfile::tempdir().expect("ordinary Folderbase");
+    let plan = plan_initialization(folderbase.path(), InitializationOptions::default())
+        .expect("default initialization");
+    initialize(&plan).expect("initialize ordinary root");
+    assert!(!folderbase.path().join("FOLDERBASE.md").exists());
+
+    let registry = tempfile::tempdir().expect("template registry");
+    let target = write_package(
+        registry.path(),
+        "example-1.0.0",
+        "1.0.0",
+        "project",
+        base_artifacts(),
+        None,
+    );
+    let expansion = plan_template_expansion(folderbase.path(), &target, &BTreeMap::new())
+        .expect("manifest-only 0.5 root can expand");
+    let result = apply_template_expansion(&expansion).expect("apply expansion");
+
+    assert_eq!(
+        fs::read(folderbase.path().join("FOLDERBASE.md")).expect("template narrative"),
+        b"# Example folderbase\n"
+    );
+    let record_path = folderbase
+        .path()
+        .join(result.application_record().expect("application record"));
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("record JSON");
+    assert_eq!(record["comparison"]["source"], "unmanaged");
+    assert_eq!(record["comparison"]["version"], "0.0.0");
+    assert!(record["comparison"]["application_id"].is_null());
+
+    record["comparison"]["source"] = json!("origin");
+    rewrite_record_digest(&mut record);
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&record).expect("forged origin"),
+    )
+    .expect("write forged record");
+    let error = template_application_history(folderbase.path()).expect_err("forged origin");
+    assert!(
+        error.to_string().contains("missing manifest origin"),
+        "only explicit unmanaged may root an untemplated lineage: {error}"
+    );
+}
+
+#[test]
+fn legacy_roots_require_existing_provenance_instead_of_starting_unmanaged_lineage() {
+    let registry = tempfile::tempdir().expect("template registry");
+    let target = write_package(
+        registry.path(),
+        "example-1.0.0",
+        "1.0.0",
+        "project",
+        base_artifacts(),
+        None,
+    );
+
+    let untemplated = tempfile::tempdir().expect("untemplated legacy Folderbase");
+    initialize(
+        &plan_initialization(untemplated.path(), InitializationOptions::default())
+            .expect("initialization"),
+    )
+    .expect("initialize");
+    rewrite_root_as_legacy_v01(untemplated.path());
+    let error = plan_template_expansion(untemplated.path(), &target, &BTreeMap::new())
+        .expect_err("legacy roots cannot invent unmanaged lineage");
+    assert!(
+        error.to_string().contains("native protocol 0.5.0"),
+        "legacy refusal should name the exact adoption boundary: {error}"
+    );
+
+    let originated = tempfile::tempdir().expect("templated legacy Folderbase");
+    initialize_from_template(originated.path(), &target);
+    rewrite_root_as_legacy_v01(originated.path());
+    let next = write_package(
+        registry.path(),
+        "example-2.0.0",
+        "2.0.0",
+        "project",
+        additive_artifacts(),
+        Some("1.0.0"),
+    );
+    plan_template_expansion(originated.path(), &next, &BTreeMap::new())
+        .expect("legacy roots retain explicit provenance-based expansion");
+}
+
+#[test]
+fn legacy_roots_reject_an_existing_unmanaged_application_chain() {
+    let folderbase = tempfile::tempdir().expect("ordinary Folderbase");
+    initialize(
+        &plan_initialization(folderbase.path(), InitializationOptions::default())
+            .expect("initialization"),
+    )
+    .expect("initialize");
+    let registry = tempfile::tempdir().expect("template registry");
+    let target = write_package(
+        registry.path(),
+        "example-1.0.0",
+        "1.0.0",
+        "project",
+        base_artifacts(),
+        None,
+    );
+    let expansion = plan_template_expansion(folderbase.path(), &target, &BTreeMap::new())
+        .expect("native unmanaged expansion");
+    apply_template_expansion(&expansion).expect("native unmanaged application");
+
+    rewrite_root_as_legacy_v01(folderbase.path());
+    let error = template_application_history(folderbase.path())
+        .expect_err("legacy profile cannot validate unmanaged-rooted history");
+    assert!(
+        error.to_string().contains("native protocol 0.5.0"),
+        "legacy history refusal should name the exact adoption boundary: {error}"
+    );
 }
 
 fn rewrite_record_digest(document: &mut Value) {
@@ -497,6 +637,11 @@ fn policy_ignore_adapter_and_canonical_changes_are_structural() {
         Some("1.0.0"),
     );
     initialize_from_template(folderbase.path(), &origin);
+    fs::write(
+        folderbase.path().join(".folderbaseignore"),
+        "node_modules/\n",
+    )
+    .expect("optional ignore policy");
     let folderbase_before =
         fs::read(folderbase.path().join("FOLDERBASE.md")).expect("folderbase entry");
     let adapter_before = fs::read(folderbase.path().join("AGENTS.md")).expect("adapter");

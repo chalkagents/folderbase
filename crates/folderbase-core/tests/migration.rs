@@ -1,15 +1,18 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use folderbase_core::{
     FolderbaseError, FolderbaseKind, InitializationOptions, LocalVersionStore, MigrationAnswer,
-    MigrationContentKind, MigrationOperation, MigrationOption, MigrationPlan,
-    MigrationQuestionKind, MigrationResult, MigrationState, MigrationTargetKind,
-    NestedFolderbaseState, ValidationLevel, analyze_migration, apply_migration, approve_migration,
-    initialize, plan_initialization, plan_migration, preview_migration, rollback_migration,
-    validate,
+    MigrationCommand, MigrationContentKind, MigrationExecution, MigrationOperation,
+    MigrationOption, MigrationOutcome, MigrationPlan, MigrationQuestionKind, MigrationResult,
+    MigrationState, MigrationTargetKind, NestedFolderbaseState, RootClaim, ValidationLevel,
+    analyze_migration, apply_migration, approve_migration, initialize, plan_initialization,
+    plan_migration, preview_migration, rollback_migration, validate,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -258,12 +261,14 @@ fn partial_apply_recovers_without_active_invalid_folderbase() {
 
     let error = apply_migration(approve_migration(plan).unwrap()).unwrap_err();
     assert!(matches!(error, FolderbaseError::InvalidRecord { .. }));
-    assert_eq!(
-        MigrationResult::recover(root.path(), &migration_id)
-            .unwrap()
-            .state,
-        MigrationState::RolledBack
-    );
+    let recovery = MigrationResult::recover(root.path(), &migration_id).unwrap_err();
+    assert!(matches!(
+        recovery,
+        FolderbaseError::InvalidMigrationState {
+            expected: "approved",
+            ref actual,
+        } if actual == "missing_execution_state"
+    ));
     assert!(
         !tree(root.path()).iter().any(|path| {
             path.starts_with("Organized/") && path.ends_with(".folderbase/manifest.json")
@@ -287,6 +292,10 @@ fn proposal_round_trips_through_v02_schema() {
     assert_eq!(decoded, plan);
     assert_eq!(encoded["protocol_version"], "0.2.0");
     assert_eq!(encoded["state"], "proposed");
+    assert!(
+        !encoded["root"].as_str().unwrap().contains('\\'),
+        "display roots use portable wire separators without changing native PathBuf values"
+    );
     assert_eq!(encoded["source_inventory"]["algorithm"], "sha256");
     assert!(
         encoded["source_inventory"]["files"]
@@ -305,6 +314,68 @@ fn proposal_round_trips_through_v02_schema() {
     assert!(
         validator.is_valid(&encoded),
         "serialized proposal must conform to Migration Protocol 0.2"
+    );
+}
+
+#[test]
+fn migration_operation_uses_portable_wire_paths_and_round_trips() {
+    let operation = MigrationOperation::move_object(
+        PathBuf::from("Drafts").join("proposal.md"),
+        PathBuf::from("Approved").join("proposal.md"),
+    );
+
+    let encoded = serde_json::to_value(&operation).unwrap();
+    assert_eq!(encoded["source_path"], "Drafts/proposal.md");
+    assert_eq!(encoded["destination_path"], "Approved/proposal.md");
+
+    let decoded: MigrationOperation = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, operation);
+}
+
+#[test]
+fn migration_operation_rejects_backslash_wire_path_tampering() {
+    let error = serde_json::from_value::<MigrationOperation>(serde_json::json!({
+        "type": "move_object",
+        "source_path": "Drafts\\proposal.md",
+        "destination_path": "Approved/proposal.md"
+    }))
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("backslash"),
+        "wire-path rejection should identify the forbidden character: {error}"
+    );
+}
+
+#[test]
+fn migration_operation_rejects_noncanonical_relative_wire_paths() {
+    for source_path in ["../proposal.md", "Drafts//proposal.md", "", "Drafts/\0.md"] {
+        let error = serde_json::from_value::<MigrationOperation>(serde_json::json!({
+            "type": "move_object",
+            "source_path": source_path,
+            "destination_path": "Approved/proposal.md"
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("migration") && error.to_string().contains("path"),
+            "noncanonical relative path should be rejected: {source_path:?}: {error}"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn migration_operation_rejects_a_native_component_containing_a_backslash() {
+    let operation = MigrationOperation::move_object(
+        PathBuf::from("Drafts\\proposal.md"),
+        PathBuf::from("Approved/proposal.md"),
+    );
+
+    let error = serde_json::to_value(operation).unwrap_err();
+    assert!(
+        error.to_string().contains("backslash"),
+        "native component rejection should identify the forbidden character: {error}"
     );
 }
 
@@ -631,6 +702,44 @@ fn case_folded_nested_markers_still_fail_closed() {
 }
 
 #[test]
+fn migration_analysis_treats_markerless_context_as_inert() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("child");
+    fs::create_dir_all(nested.join(".folderbase/questions")).unwrap();
+    fs::write(nested.join(".folderbase/summary.md"), "ordinary context\n").unwrap();
+    fs::write(nested.join("ordinary.txt"), "visible ordinary bytes\n").unwrap();
+
+    let analysis = analyze_migration(root.path()).unwrap();
+
+    assert!(analysis.nested_folderbases.is_empty());
+    assert_eq!(analysis.file_count, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_analysis_fails_closed_on_a_symlink_shaped_marker_without_attesting_it() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("child");
+    fs::create_dir(&nested).unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("missing-state"),
+        nested.join(".folderbase"),
+    )
+    .unwrap();
+    fs::write(nested.join("never-expose.txt"), "nested secret bytes\n").unwrap();
+
+    let analysis = analyze_migration(root.path()).unwrap();
+
+    assert_eq!(analysis.file_count, 0);
+    assert_eq!(analysis.nested_folderbases.len(), 1);
+    assert_eq!(analysis.nested_folderbases[0].path, Path::new("child"));
+    assert_eq!(
+        analysis.nested_folderbases[0].state,
+        NestedFolderbaseState::Unchecked
+    );
+}
+
+#[test]
 fn ambiguous_case_folded_state_aliases_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     let nested = root.path().join("child");
@@ -837,7 +946,7 @@ fn additive_apply_refuses_unplanned_canonical_source_without_writes() {
 }
 
 #[test]
-fn collision_rolls_back_every_created_path() {
+fn pre_execution_collision_creates_no_output_or_transaction_state() {
     let root = fixture();
     fs::create_dir_all(root.path().join("Organized/Client-Shared")).unwrap();
     fs::write(
@@ -858,7 +967,11 @@ fn collision_rolls_back_every_created_path() {
     .unwrap();
 
     let error = apply_migration(approved).unwrap_err();
-    assert!(matches!(error, FolderbaseError::WouldOverwrite(_)));
+    assert!(matches!(
+        error,
+        FolderbaseError::InvalidRecord { ref message, .. }
+            if message.contains("materialization target collides")
+    ));
     assert!(!root.path().join("Migrated/README.md").exists());
     assert_eq!(
         fs::read(root.path().join("Migrated/Client-Shared/Overview.md")).unwrap(),
@@ -868,20 +981,15 @@ fn collision_rolls_back_every_created_path() {
         folderbase_core::MigrationPlan::reopen(root.path(), &migration_id)
             .unwrap()
             .state,
-        MigrationState::Conflicted
+        MigrationState::Approved
     );
-    assert_eq!(
-        MigrationResult::recover(root.path(), &migration_id)
-            .unwrap()
-            .state,
-        MigrationState::RolledBack
-    );
-    assert_eq!(
-        folderbase_core::MigrationPlan::reopen(root.path(), &migration_id)
-            .unwrap()
-            .state,
-        MigrationState::Conflicted
-    );
+    assert!(matches!(
+        MigrationResult::reopen(root.path(), &migration_id),
+        Err(FolderbaseError::InvalidMigrationState {
+            expected: "applying",
+            ref actual,
+        }) if actual == "missing_execution_state"
+    ));
 }
 
 #[test]
@@ -914,11 +1022,19 @@ fn additive_rollback_refuses_nested_folderbase_created_after_apply_without_delet
     )
     .unwrap();
 
-    let error = rollback_migration(&result).unwrap_err();
-
-    assert!(
-        matches!(error, FolderbaseError::UnsafePath(path) if path == Path::new("Organized/Client-Shared"))
-    );
+    let outcome = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Rollback {
+            migration_id: &result.migration_id,
+        },
+    )
+    .unwrap();
+    let MigrationOutcome::Conflicted { conflicts, .. } = outcome else {
+        panic!("new nested boundary must return durable conflict data");
+    };
+    assert!(!conflicts.is_empty());
     assert_eq!(
         fs::read(root.path().join("Organized/README.md")).unwrap(),
         b"source of truth\n"
@@ -934,7 +1050,7 @@ fn additive_rollback_refuses_nested_folderbase_created_after_apply_without_delet
         MigrationResult::reopen(root.path(), &migration_id)
             .unwrap()
             .state,
-        MigrationState::Verified
+        MigrationState::Conflicted
     );
 }
 
@@ -978,11 +1094,19 @@ fn rollback_refuses_to_delete_outputs_changed_after_migration() {
     apply_migration(approve_migration(plan).unwrap()).unwrap();
     fs::write(root.path().join("Organized/README.md"), "new user work\n").unwrap();
 
-    let error = MigrationResult::rollback_by_id(root.path(), &migration_id).unwrap_err();
-    assert!(matches!(
-        error,
-        FolderbaseError::MigrationVerificationFailed(_)
-    ));
+    let outcome = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Rollback {
+            migration_id: &migration_id,
+        },
+    )
+    .unwrap();
+    let MigrationOutcome::Conflicted { conflicts, .. } = outcome else {
+        panic!("edited additive output must return durable conflict data");
+    };
+    assert!(!conflicts.is_empty());
     assert_eq!(
         fs::read(root.path().join("Organized/README.md")).unwrap(),
         b"new user work\n"
@@ -991,44 +1115,6 @@ fn rollback_refuses_to_delete_outputs_changed_after_migration() {
         root.path()
             .join("Organized/Client-Shared/Overview.md")
             .exists()
-    );
-}
-
-#[test]
-fn rollback_rejects_unapproved_materialization_paths_in_a_tampered_journal() {
-    let root = fixture();
-    let analysis = analyze_migration(root.path()).unwrap();
-    let plan = plan_migration(analysis, answer_all_for(root.path()), "Organized").unwrap();
-    let migration_id = plan.id.clone();
-    apply_migration(approve_migration(plan).unwrap()).unwrap();
-
-    let unapproved_path = root.path().join("Organized/private.txt");
-    fs::write(
-        &unapproved_path,
-        "user work outside the approved template\n",
-    )
-    .unwrap();
-    let unapproved_digest = format!("{:x}", Sha256::digest(fs::read(&unapproved_path).unwrap()));
-    let journal_path = root
-        .path()
-        .join(".folderbase/migrations")
-        .join(&migration_id)
-        .join("result.json");
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-    journal["materialized_folderbases"][0]["created_files"]["Organized/private.txt"] =
-        serde_json::json!(unapproved_digest);
-    journal["created_paths"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!("Organized/private.txt"));
-    fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
-
-    let error = MigrationResult::rollback_by_id(root.path(), &migration_id).unwrap_err();
-    assert!(matches!(error, FolderbaseError::InvalidRecord { .. }));
-    assert_eq!(
-        fs::read(&unapproved_path).unwrap(),
-        b"user work outside the approved template\n"
     );
 }
 
@@ -2089,129 +2175,24 @@ fn rollback_preserves_edited_destination_and_restores_source() {
     )
     .unwrap();
 
-    let rollback = rollback_migration(&result).unwrap();
-
-    assert_eq!(rollback.state, MigrationState::RolledBack);
-    assert_eq!(
-        fs::read(root.path().join("notes.md")).unwrap(),
-        b"approved source\n"
-    );
+    let outcome = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Rollback {
+            migration_id: &result.migration_id,
+        },
+    )
+    .unwrap();
+    let MigrationOutcome::Conflicted { conflicts, .. } = outcome else {
+        panic!("edited Move destination must return durable conflict data");
+    };
+    assert!(!conflicts.is_empty());
+    assert!(!root.path().join("notes.md").exists());
     assert_eq!(
         fs::read(root.path().join("Archive/notes.md")).unwrap(),
         b"user edit after move\n"
     );
-}
-
-#[test]
-fn tampered_structural_journal_fails_closed() {
-    let root = initialized_folderbase_fixture();
-    fs::create_dir(root.path().join("Archive")).unwrap();
-    fs::write(root.path().join("notes.md"), "approved source\n").unwrap();
-    let plan = MigrationPlan::propose_structural(
-        root.path(),
-        vec![MigrationOperation::move_object(
-            "notes.md",
-            "Archive/notes.md",
-        )],
-    )
-    .unwrap();
-    let migration_id = plan.id.clone();
-    apply_migration(approve_migration(plan).unwrap()).unwrap();
-    let journal_path = root
-        .path()
-        .join(".folderbase/migrations")
-        .join(&migration_id)
-        .join("result.json");
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-    journal["operations"][0]["source_path"] = serde_json::json!("other.md");
-    fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
-
-    let error = MigrationResult::rollback_by_id(root.path(), &migration_id).unwrap_err();
-
-    assert!(matches!(error, FolderbaseError::MigrationApprovalMismatch));
-    assert!(!root.path().join("notes.md").exists());
-    assert_eq!(
-        fs::read(root.path().join("Archive/notes.md")).unwrap(),
-        b"approved source\n"
-    );
-}
-
-#[test]
-fn tampered_structural_progress_fails_closed() {
-    let root = initialized_folderbase_fixture();
-    fs::create_dir(root.path().join("Archive")).unwrap();
-    fs::write(root.path().join("notes.md"), "approved source\n").unwrap();
-    let plan = MigrationPlan::propose_structural(
-        root.path(),
-        vec![MigrationOperation::move_object(
-            "notes.md",
-            "Archive/notes.md",
-        )],
-    )
-    .unwrap();
-    let migration_id = plan.id.clone();
-    apply_migration(approve_migration(plan).unwrap()).unwrap();
-    let journal_path = root
-        .path()
-        .join(".folderbase/migrations")
-        .join(&migration_id)
-        .join("result.json");
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-    journal["completed_operations"] = serde_json::json!(0);
-    fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
-
-    let error = MigrationResult::rollback_by_id(root.path(), &migration_id).unwrap_err();
-
-    assert!(matches!(error, FolderbaseError::InvalidRecord { .. }));
-    assert!(!root.path().join("notes.md").exists());
-    assert_eq!(
-        fs::read(root.path().join("Archive/notes.md")).unwrap(),
-        b"approved source\n"
-    );
-}
-
-#[test]
-fn coordinated_structural_state_and_progress_downgrade_fails_closed() {
-    for (state, completed_operations) in [("applying", 0), ("rolled_back", 0)] {
-        let root = initialized_folderbase_fixture();
-        fs::create_dir(root.path().join("Archive")).unwrap();
-        fs::write(root.path().join("notes.md"), "approved source\n").unwrap();
-        let plan = MigrationPlan::propose_structural(
-            root.path(),
-            vec![MigrationOperation::move_object(
-                "notes.md",
-                "Archive/notes.md",
-            )],
-        )
-        .unwrap();
-        let migration_id = plan.id.clone();
-        apply_migration(approve_migration(plan).unwrap()).unwrap();
-        let journal_path = root
-            .path()
-            .join(".folderbase/migrations")
-            .join(&migration_id)
-            .join("result.json");
-        let mut journal: serde_json::Value =
-            serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-        journal["state"] = serde_json::json!(state);
-        journal["completed_operations"] = serde_json::json!(completed_operations);
-        journal["in_flight_operation"] = serde_json::Value::Null;
-        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
-
-        let error = MigrationResult::recover(root.path(), &migration_id).unwrap_err();
-
-        assert!(matches!(
-            error,
-            FolderbaseError::InvalidRecord { .. } | FolderbaseError::MigrationApprovalMismatch
-        ));
-        assert!(!root.path().join("notes.md").exists());
-        assert_eq!(
-            fs::read(root.path().join("Archive/notes.md")).unwrap(),
-            b"approved source\n"
-        );
-    }
 }
 
 #[cfg(unix)]
@@ -2232,16 +2213,31 @@ fn snapshot_restore_is_inode_isolated_from_user_content() {
     .unwrap();
     let migration_id = plan.id.clone();
     let result = apply_migration(approve_migration(plan).unwrap()).unwrap();
-    fs::write(root.path().join("Archive/notes.md"), "edited destination\n").unwrap();
-
     rollback_migration(&result).unwrap();
 
     let source = root.path().join("notes.md");
-    let snapshot = root
+    let program_path = root
         .path()
         .join(".folderbase/migrations")
-        .join(migration_id)
-        .join("snapshots/0.bin");
+        .join(&migration_id)
+        .join("transaction-v1/program.json");
+    let program: serde_json::Value =
+        serde_json::from_slice(&fs::read(program_path).unwrap()).unwrap();
+    let snapshot_id = program["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["kind"] == "move_file")
+        .and_then(|step| step["rollback_snapshot"].as_str())
+        .unwrap();
+    let snapshot = program["blobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|blob| blob["id"] == snapshot_id)
+        .and_then(|blob| blob["path"].as_str())
+        .map(|path| root.path().join(path))
+        .unwrap();
     let source_metadata = fs::metadata(&source).unwrap();
     let snapshot_metadata = fs::metadata(&snapshot).unwrap();
     assert_ne!(
@@ -2250,10 +2246,7 @@ fn snapshot_restore_is_inode_isolated_from_user_content() {
     );
     fs::write(&source, "later source edit\n").unwrap();
     assert_eq!(fs::read(snapshot).unwrap(), b"approved source\n");
-    assert_eq!(
-        fs::read(root.path().join("Archive/notes.md")).unwrap(),
-        b"edited destination\n"
-    );
+    assert!(!root.path().join("Archive/notes.md").exists());
 }
 
 #[cfg(unix)]
@@ -2272,86 +2265,44 @@ fn rollback_recovers_reverse_move_hard_link_interruption() {
     .unwrap();
     let migration_id = plan.id.clone();
     apply_migration(approve_migration(plan).unwrap()).unwrap();
-    let journal_path = root
-        .path()
-        .join(".folderbase/migrations")
-        .join(&migration_id)
-        .join("result.json");
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-    journal["state"] = serde_json::json!("rolling_back");
-    journal["completed_operations"] = serde_json::json!(1);
-    journal["in_flight_operation"] = serde_json::json!(0);
-    fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
     fs::hard_link(
         root.path().join("Archive/notes.md"),
         root.path().join("notes.md"),
     )
     .unwrap();
+    let source_identity = fs::metadata(root.path().join("notes.md")).unwrap();
+    let destination_identity = fs::metadata(root.path().join("Archive/notes.md")).unwrap();
 
-    let recovered = MigrationResult::recover(root.path(), &migration_id).unwrap();
-
-    assert_eq!(recovered.state, MigrationState::RolledBack);
-    assert_eq!(
-        fs::read(root.path().join("notes.md")).unwrap(),
-        b"approved source\n"
-    );
-    assert!(!root.path().join("Archive/notes.md").exists());
-    assert_eq!(
-        MigrationResult::recover(root.path(), &migration_id)
-            .unwrap()
-            .state,
-        MigrationState::RolledBack
-    );
-}
-
-#[test]
-fn rollback_rebuilds_partial_snapshot_restore_temporary() {
-    let root = initialized_folderbase_fixture();
-    fs::create_dir(root.path().join("Archive")).unwrap();
-    fs::write(root.path().join("notes.md"), "approved source\n").unwrap();
-    let plan = MigrationPlan::propose_structural(
-        root.path(),
-        vec![MigrationOperation::move_object(
-            "notes.md",
-            "Archive/notes.md",
-        )],
+    let outcome = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Rollback {
+            migration_id: &migration_id,
+        },
     )
     .unwrap();
-    let migration_id = plan.id.clone();
-    apply_migration(approve_migration(plan).unwrap()).unwrap();
-    fs::write(root.path().join("Archive/notes.md"), "edited destination\n").unwrap();
-    let migration_directory = root
-        .path()
-        .join(".folderbase/migrations")
-        .join(&migration_id);
-    let journal_path = migration_directory.join("result.json");
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-    journal["state"] = serde_json::json!("rolling_back");
-    journal["completed_operations"] = serde_json::json!(1);
-    journal["in_flight_operation"] = serde_json::json!(0);
-    fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
-    fs::create_dir(migration_directory.join("staging")).unwrap();
-    fs::write(migration_directory.join("staging/restore-0.tmp"), "partial").unwrap();
-
-    let recovered = MigrationResult::recover(root.path(), &migration_id).unwrap();
-
-    assert_eq!(recovered.state, MigrationState::RolledBack);
+    let MigrationOutcome::Conflicted { conflicts, .. } = outcome else {
+        panic!("unexpected Move hard-link alias must return durable conflict data");
+    };
+    assert!(!conflicts.is_empty());
     assert_eq!(
         fs::read(root.path().join("notes.md")).unwrap(),
         b"approved source\n"
     );
     assert_eq!(
         fs::read(root.path().join("Archive/notes.md")).unwrap(),
-        b"edited destination\n"
+        b"approved source\n"
     );
-    assert!(!migration_directory.join("staging/restore-0.tmp").exists());
     assert_eq!(
-        MigrationResult::recover(root.path(), &migration_id)
+        fs::metadata(root.path().join("notes.md")).unwrap().ino(),
+        source_identity.ino()
+    );
+    assert_eq!(
+        fs::metadata(root.path().join("Archive/notes.md"))
             .unwrap()
-            .state,
-        MigrationState::RolledBack
+            .ino(),
+        destination_identity.ino()
     );
 }
 
@@ -2479,6 +2430,7 @@ fn migration_adapter_body_retains_its_legacy_utf8_byte_limit() {
 #[test]
 fn changing_ignore_policy_is_structural() {
     let root = initialized_folderbase_fixture();
+    fs::write(root.path().join(".folderbaseignore"), "").unwrap();
     let policy = "node_modules/\n.next/\nDerived/\n";
     let plan = MigrationPlan::propose_structural(
         root.path(),
@@ -2758,11 +2710,6 @@ fn structural_plan_refuses_implicit_nested_folderbase_transfer() {
     .unwrap();
     fs::create_dir_all(nested.join(".folderbase")).unwrap();
     fs::copy(
-        nested_fixture.path().join("FOLDERBASE.md"),
-        nested.join("FOLDERBASE.md"),
-    )
-    .unwrap();
-    fs::copy(
         nested_fixture.path().join(".folderbase/manifest.json"),
         nested.join(".folderbase/manifest.json"),
     )
@@ -2832,9 +2779,19 @@ fn rollback_refuses_to_restore_parent_history_into_a_new_nested_folderbase() {
     )
     .unwrap();
 
-    let error = rollback_migration(&result).unwrap_err();
-
-    assert!(matches!(error, FolderbaseError::UnsafePath(path) if path == Path::new("Client")));
+    let outcome = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Rollback {
+            migration_id: &result.migration_id,
+        },
+    )
+    .unwrap();
+    let MigrationOutcome::Conflicted { conflicts, .. } = outcome else {
+        panic!("new nested boundary must return durable conflict data");
+    };
+    assert!(!conflicts.is_empty());
     assert!(!root.path().join("Client/notes.md").exists());
     assert_eq!(
         fs::read(root.path().join("Archive/notes.md")).unwrap(),
@@ -2843,7 +2800,7 @@ fn rollback_refuses_to_restore_parent_history_into_a_new_nested_folderbase() {
 }
 
 #[test]
-fn rollback_refuses_case_folded_nested_folderbase_created_after_apply() {
+fn rollback_fails_closed_on_case_folded_aliases_without_granting_them_authority() {
     let root = initialized_folderbase_fixture();
     fs::create_dir_all(root.path().join("Client")).unwrap();
     fs::create_dir_all(root.path().join("Archive")).unwrap();
@@ -2865,9 +2822,19 @@ fn rollback_refuses_case_folded_nested_folderbase_created_after_apply() {
     )
     .unwrap();
 
-    let error = rollback_migration(&result).unwrap_err();
-
-    assert!(matches!(error, FolderbaseError::UnsafePath(path) if path == Path::new("Client")));
+    let outcome = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Rollback {
+            migration_id: &result.migration_id,
+        },
+    )
+    .unwrap();
+    let MigrationOutcome::Conflicted { conflicts, .. } = outcome else {
+        panic!("case-folded nested-boundary aliases must return durable conflict data");
+    };
+    assert!(!conflicts.is_empty());
     assert!(!root.path().join("Client/notes.md").exists());
     assert_eq!(
         fs::read(root.path().join("Archive/notes.md")).unwrap(),
@@ -2904,6 +2871,30 @@ fn ordinary_moves_refuse_protocol_and_repository_control_paths() {
     .unwrap_err();
     assert!(matches!(destination_error, FolderbaseError::UnsafePath(_)));
     assert!(destination_root.path().join("notes.md").exists());
+}
+
+#[test]
+fn ordinary_move_can_reorganize_an_optional_v05_folderbase_md() {
+    let root = initialized_folderbase_fixture();
+    fs::create_dir(root.path().join("Archive")).unwrap();
+    fs::write(root.path().join("FOLDERBASE.md"), "# Optional narrative\n").unwrap();
+    let plan = MigrationPlan::propose_structural(
+        root.path(),
+        vec![MigrationOperation::move_object(
+            "FOLDERBASE.md",
+            "Archive/FOLDERBASE.md",
+        )],
+    )
+    .expect("ordinary narrative move plan");
+
+    apply_migration(approve_migration(plan).expect("approve"))
+        .expect("apply ordinary narrative move");
+
+    assert!(!root.path().join("FOLDERBASE.md").exists());
+    assert_eq!(
+        fs::read(root.path().join("Archive/FOLDERBASE.md")).unwrap(),
+        b"# Optional narrative\n"
+    );
 }
 
 #[test]
@@ -3100,6 +3091,11 @@ fn assignment_question_id(
     analysis: &folderbase_core::MigrationAnalysis,
     source_path: &Path,
 ) -> String {
+    let portable_source_path = source_path
+        .components()
+        .map(|component| component.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("/");
     serde_json::to_value(&analysis.questions)
         .unwrap()
         .as_array()
@@ -3107,14 +3103,12 @@ fn assignment_question_id(
         .iter()
         .find(|question| {
             (question["kind"]["type"] == "assignment"
-                && question["kind"]["source_path"] == source_path.to_string_lossy().as_ref())
+                && question["kind"]["source_path"] == portable_source_path)
                 || (question["kind"]["type"] == "assignment_group"
                     && question["kind"]["source_paths"]
                         .as_array()
                         .is_some_and(|paths| {
-                            paths
-                                .iter()
-                                .any(|path| path == source_path.to_string_lossy().as_ref())
+                            paths.iter().any(|path| path == &portable_source_path)
                         }))
         })
         .and_then(|question| question["id"].as_str())

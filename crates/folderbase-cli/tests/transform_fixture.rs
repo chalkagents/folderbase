@@ -176,6 +176,18 @@ fn separate_processes_can_analyze_plan_apply_reopen_and_rollback() {
     folderbase()
         .args([
             "transform",
+            "reopen",
+            root.path().to_str().unwrap(),
+            migration_id,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration verified"))
+        .stdout(predicate::str::contains("Migration rolled back").not())
+        .stdout(predicate::str::contains("Migration conflicted").not());
+    folderbase()
+        .args([
+            "transform",
             "recover",
             root.path().to_str().unwrap(),
             migration_id,
@@ -195,10 +207,188 @@ fn separate_processes_can_analyze_plan_apply_reopen_and_rollback() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"state\": \"rolled_back\""));
+    folderbase()
+        .args([
+            "transform",
+            "reopen",
+            root.path().to_str().unwrap(),
+            migration_id,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration rolled back"))
+        .stdout(predicate::str::contains("Migration verified").not());
     assert!(!root.path().join("Organized").exists());
     assert_eq!(
         fs::read(root.path().join("README.md")).unwrap(),
         b"source of truth\n"
+    );
+}
+
+#[test]
+fn apply_reports_a_durable_conflict_and_an_unchanged_retry_is_idempotent() {
+    let fixture = golden_fixture();
+    let root = &fixture.root;
+    let analysis = analyze(root);
+    let plan = golden_plan(root, &analysis);
+    let migration_id = plan["id"].as_str().unwrap();
+    approve(root, migration_id);
+
+    let journal = root
+        .join(".folderbase/migrations")
+        .join(migration_id)
+        .join("transaction-v1/journal");
+    let mut interrupted = std::process::Command::new(assert_cmd::cargo::cargo_bin!("folderbase"))
+        .args([
+            "transform",
+            "apply",
+            root.to_str().unwrap(),
+            migration_id,
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if journal.read_dir().is_ok_and(|entries| entries.count() >= 4) {
+            break;
+        }
+        if let Some(status) = interrupted.try_wait().unwrap() {
+            panic!("apply completed before interruption checkpoint: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for durable transaction generations"
+        );
+        std::thread::yield_now();
+    }
+    interrupted.kill().unwrap();
+    let interrupted = interrupted.wait_with_output().unwrap();
+    assert!(
+        !interrupted.status.success(),
+        "test must interrupt the first apply process"
+    );
+    folderbase()
+        .args(["transform", "reopen", root.to_str().unwrap(), migration_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration applying"))
+        .stdout(predicate::str::contains("Migration verified").not());
+
+    let collision = plan["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|operation| operation["type"] == "copy_file")
+        .filter_map(|operation| operation["destination_path"].as_str())
+        .map(|path| root.join(path))
+        .find(|path| !path.exists())
+        .expect("interrupted transaction retains an unpublished copy target");
+    fs::create_dir_all(collision.parent().unwrap()).unwrap();
+    fs::write(&collision, "foreign CLI collision\n").unwrap();
+
+    let apply = || {
+        folderbase()
+            .args([
+                "transform",
+                "apply",
+                root.to_str().unwrap(),
+                migration_id,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = apply();
+    assert_eq!(
+        first.status.code(),
+        Some(1),
+        "unexpected apply status\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        first.stderr.is_empty(),
+        "semantic conflict must not be rendered as an operational error: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["migration_id"], migration_id);
+    assert_eq!(first_json["state"], "conflicted");
+    assert!(!first_json["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(first_json["conflicts"][0]["direction"], "apply");
+    folderbase()
+        .args(["transform", "reopen", root.to_str().unwrap(), migration_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migration conflicted"))
+        .stdout(predicate::str::contains("Migration verified").not());
+
+    let generations_after_first = fs::read_dir(&journal).unwrap().count();
+    let second = apply();
+    assert_eq!(second.status.code(), Some(1));
+    assert_eq!(second.stdout, first.stdout);
+    assert!(
+        second.stderr.is_empty(),
+        "unchanged retry must remain semantic conflict data: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        fs::read_dir(journal).unwrap().count(),
+        generations_after_first,
+        "unchanged CLI conflict retry must not append a journal generation"
+    );
+}
+
+#[test]
+fn apply_reports_recovery_required_before_compiling_a_transaction() {
+    let root = fixture();
+    let analysis = analyze(root.path());
+    let plan = plan_transform(root.path(), &multi_folderbase_answers(&analysis));
+    let migration_id = plan["id"].as_str().unwrap();
+    approve(root.path(), migration_id);
+    let active_capture = root
+        .path()
+        .join(".folderbase/transactions/folderbase-version-captures/active.json");
+    fs::create_dir_all(active_capture.parent().unwrap()).unwrap();
+    fs::write(&active_capture, "{}\n").unwrap();
+
+    let output = folderbase()
+        .args([
+            "transform",
+            "apply",
+            root.path().to_str().unwrap(),
+            migration_id,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stderr.is_empty(),
+        "recovery requirement is a semantic outcome: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["migration_id"], migration_id);
+    assert_eq!(outcome["state"], "recovery_required");
+    assert!(
+        outcome["work"]
+            .as_str()
+            .unwrap()
+            .contains("Folderbase Version capture")
+    );
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/migrations")
+            .join(migration_id)
+            .join("transaction-v1")
+            .exists(),
+        "recovery-required outcome must precede transaction compilation"
     );
 }
 
@@ -365,7 +555,6 @@ fn rollback_is_idempotent_after_restart() {
     assert!(root.path().join("README.md").exists());
 }
 
-const LIVE_OKADA_PATH: &str = "/Users/jerel/Work/Chalk/Okada";
 const GOLDEN_BOUNDARIES: &[&str] = &[
     "ChalkAgents-Prosperna-Client-Engagement",
     "Client-Shared",
@@ -403,14 +592,14 @@ fn committed_golden_expectations() -> serde_json::Value {
 }
 
 fn guarded_fixture_source(source: &Path) -> Result<PathBuf, String> {
-    let live = Path::new(LIVE_OKADA_PATH);
-    if source == live || source.starts_with(live) {
-        return Err("live Okada path is forbidden in the golden test harness".to_owned());
+    let allowed = committed_golden_fixture();
+    if source != allowed {
+        return Err("golden tests accept only the committed synthetic fixture".to_owned());
     }
     let canonical = source
         .canonicalize()
         .map_err(|error| format!("fixture source is unavailable: {error}"))?;
-    if canonical != committed_golden_fixture() {
+    if canonical != allowed {
         return Err(format!(
             "golden tests accept only the committed synthetic fixture: {}",
             canonical.display()
@@ -446,7 +635,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 fn golden_fixture() -> GoldenFixture {
     let source = guarded_fixture_source(&committed_golden_fixture()).unwrap();
     let temp = tempfile::tempdir().expect("temporary golden fixture");
-    let root = temp.path().join("Okada-Account");
+    let root = temp.path().join("Project-2-Account");
     copy_tree(&source, &root);
     for (source, boundary) in [
         (
@@ -598,7 +787,7 @@ fn source_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn okada_shaped_fixture_produces_expected_questions_without_writes() {
+fn project_2_fixture_produces_expected_questions_without_writes() {
     let fixture = golden_fixture();
     let before = source_snapshot(&fixture.root);
     let analysis = analyze(&fixture.root);
@@ -633,7 +822,29 @@ fn okada_shaped_fixture_produces_expected_questions_without_writes() {
 }
 
 #[test]
-fn okada_shaped_fixture_groups_every_assignment_into_twenty_bounded_questions() {
+fn project_2_expectations_preserve_account_topology_and_provenance() {
+    let expected = committed_golden_expectations();
+
+    assert_eq!(
+        expected["provenance_labels"],
+        serde_json::json!(["ChalkAgents", "Prosperna", "Project 2"])
+    );
+    assert_eq!(
+        expected["expected_topology"]["workspace"],
+        "Project 2 Account Workspace"
+    );
+    assert_eq!(
+        expected["expected_topology"]["folderbases"][0],
+        "Project 2 Account Folderbase"
+    );
+    assert_eq!(
+        expected["expected_topology"]["permission_inheritance"],
+        false
+    );
+}
+
+#[test]
+fn project_2_fixture_groups_every_assignment_into_twenty_bounded_questions() {
     let fixture = golden_fixture();
     let analysis = analyze(&fixture.root);
     let questions = analysis["questions"].as_array().unwrap();
@@ -1022,7 +1233,7 @@ fn commercial_content_is_absent_from_client_shared_scope() {
 }
 
 #[test]
-fn each_codex_adapter_points_to_its_own_folderbase_entry() {
+fn generated_adapters_use_the_exact_manifest_and_existing_adapter_is_preserved() {
     let fixture = golden_fixture();
     let analysis = analyze(&fixture.root);
     golden_apply(&fixture.root, &analysis);
@@ -1030,8 +1241,15 @@ fn each_codex_adapter_points_to_its_own_folderbase_entry() {
     for folderbase in GOLDEN_FOLDERBASES {
         let folderbase = fixture.root.join("Organized").join(folderbase);
         let adapter = fs::read_to_string(folderbase.join("AGENTS.md")).unwrap();
-        assert!(adapter.contains("`FOLDERBASE.md`"));
+        if adapter.contains("<!-- folderbase:begin -->") {
+            assert!(adapter.contains("`.folderbase/manifest.json`"));
+            assert!(adapter.contains("ordinary files"));
+        } else {
+            assert!(adapter.contains("# Existing project instructions"));
+            assert!(adapter.contains("read `FOLDERBASE.md`"));
+        }
         assert!(!adapter.contains("../"));
+        // The selected migration template may still add this ordinary guide.
         assert!(folderbase.join("FOLDERBASE.md").exists());
     }
 }
@@ -1085,14 +1303,17 @@ fn full_rollback_restores_original_fixture_tree() {
 }
 
 #[test]
-fn test_harness_rejects_live_okada_path() {
-    let live = Path::new(LIVE_OKADA_PATH);
-    let error = guarded_fixture_source(live).unwrap_err();
-    assert!(error.contains("live Okada path is forbidden"));
+fn test_harness_rejects_every_external_path_before_canonicalizing_it() {
+    let external = Path::new("/private/external/project-2-account");
+    let error = guarded_fixture_source(external).unwrap_err();
+    assert_eq!(
+        error,
+        "golden tests accept only the committed synthetic fixture"
+    );
 }
 
 #[test]
-fn okada_shaped_folder_to_folderbase_journey_preserves_restart_and_agent_entry_contract() {
+fn project_2_folder_to_folderbase_journey_preserves_restart_and_agent_entry_contract() {
     let fixture = golden_fixture();
     let source_before = source_snapshot(&fixture.root);
     let started = Instant::now();
@@ -1222,13 +1443,15 @@ fn okada_shaped_folder_to_folderbase_journey_preserves_restart_and_agent_entry_c
     let saved: serde_json::Value = serde_json::from_slice(&saved.stdout).unwrap();
     let version_id = saved["version_id"].as_str().unwrap();
 
-    // Prove the ordinary-file entry contract that a fresh Codex/Claude session
-    // can consume without an MCP or manual context export.
+    // Prove that a fresh Codex/Claude session gets the exact root boundary and
+    // ordinary-file contract without an MCP or manual context export.
     let adapter = fs::read_to_string(folderbase_path.join("AGENTS.md")).unwrap();
-    assert!(adapter.contains("`FOLDERBASE.md`"));
+    assert!(adapter.contains("`.folderbase/manifest.json`"));
+    assert!(adapter.contains("ordinary files"));
     assert!(!adapter.contains("../"));
     let claude_adapter = fs::read_to_string(folderbase_path.join("CLAUDE.md")).unwrap();
-    assert!(claude_adapter.contains("`FOLDERBASE.md`"));
+    assert!(claude_adapter.contains("`.folderbase/manifest.json`"));
+    assert!(claude_adapter.contains("ordinary files"));
     assert!(!claude_adapter.contains("../"));
     assert!(
         !fs::read_to_string(folderbase_path.join("FOLDERBASE.md"))

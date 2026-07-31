@@ -1325,11 +1325,6 @@ fn history_transfer_requires_explicit_folderbase_ids() {
     .unwrap();
     fs::create_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
     fs::copy(
-        child_fixture.path().join("FOLDERBASE.md"),
-        fixture.path().join("Client/FOLDERBASE.md"),
-    )
-    .unwrap();
-    fs::copy(
         child_fixture.path().join(".folderbase/manifest.json"),
         fixture.path().join("Client/.folderbase/manifest.json"),
     )
@@ -1829,11 +1824,6 @@ fn nested_history_transfer_fixture() -> (
     )
     .unwrap();
     fs::create_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
-    fs::copy(
-        child_fixture.path().join("FOLDERBASE.md"),
-        fixture.path().join("Client/FOLDERBASE.md"),
-    )
-    .unwrap();
     fs::copy(
         child_fixture.path().join(".folderbase/manifest.json"),
         fixture.path().join("Client/.folderbase/manifest.json"),

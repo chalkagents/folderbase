@@ -49,15 +49,18 @@ Rendering fails when a placeholder is undeclared, an answer is missing or has
 the wrong type, or a target is unsafe. Template packages cannot read other
 files while rendering.
 
-Starter packages may declare the conventional optional `folderbase_name` question
-and use `${folderbase_name}` in `FOLDERBASE.md`. The reference initializer supplies its
-resolved manifest display name automatically and rejects a caller-provided
-answer that differs, so the human/agent entry and manifest cannot silently
-diverge. A caller using the lower-level renderer directly must provide that
-answer when rendering an absent artifact that references it. New folderbase display
-names are trimmed and must be nonblank, single-line text of at most 120
-characters; control characters and Unicode line or paragraph separators are
-refused before either manifest or Markdown rendering.
+An explicitly selected starter package may declare the conventional optional
+`folderbase_name` question and use `${folderbase_name}` in an ordinary optional
+`FOLDERBASE.md` artifact. Native protocol 0.5 initialization selects no such
+artifact by default and creates only the root manifest. When that package is
+selected, the reference initializer supplies its resolved manifest display name
+automatically and rejects a caller-provided answer that differs. A caller using
+the lower-level renderer directly must provide that answer when rendering an
+absent artifact that references it. New Folderbase display names are trimmed
+and must be nonblank, single-line text of at most 120 characters; control
+characters and Unicode line or paragraph separators are refused before either
+manifest or Markdown rendering. The optional Markdown remains context, not
+root authority.
 
 ## Provenance, not conformance
 
@@ -102,16 +105,22 @@ require an explicit provenance migration before template expansion.
 
 An expansion planner derives its comparison point from the latest verified
 Template Application for the target template ID, falling back to immutable
-Template Origin. Callers provide only the destination folderbase, target package,
-and typed answers; they cannot select an earlier comparison package.
+Template Origin. A native 0.5 Folderbase with neither record may adopt its first
+additive template through the explicit comparison source `unmanaged`, version
+`0.0.0`, with no prior application ID. The resulting immutable Template
+Application becomes the lineage for later expansions; Core does not rewrite the
+root manifest to invent an origin. Callers provide only the destination
+Folderbase, target package, and typed answers; they cannot select an earlier
+comparison package.
 
 Protocol 0.2 templates express only `create_if_missing` guidance. Existing
-targets—including `FOLDERBASE.md`, adapters, and `.folderbaseignore`—are preserved
-regardless of whether the target package suggests different bytes. A template
-cannot express a policy update, canonical replacement, adapter rewrite,
-authorization change, or current folderbase-kind change. A downgrade, different
-lineage, or undeclared transition is previewed as structural and cannot use the
-additive applier. `suggested_folderbase_kind` remains initialization guidance only.
+targets—including ordinary `FOLDERBASE.md`, opt-in adapters, and the
+policy-controlling `.folderbaseignore`—are preserved regardless of whether the
+target package suggests different bytes. A template cannot express a policy
+update, canonical replacement, adapter rewrite, authorization change, or
+current Folderbase-kind change. A downgrade, different lineage, or undeclared
+transition is previewed as structural and cannot use the additive applier.
+`suggested_folderbase_kind` remains initialization guidance only.
 
 After every absent target is installed with no-clobber semantics and verified,
 the reference applier appends a `state: verified` record under

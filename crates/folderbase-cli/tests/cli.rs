@@ -57,6 +57,47 @@ fn init_dry_run_is_read_only() {
 }
 
 #[test]
+fn init_defaults_to_engine_state_only_and_adapters_are_explicit() {
+    let root = tempfile::tempdir().expect("ordinary folder");
+    folderbase()
+        .args(["init", root.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    assert!(root.path().join(".folderbase/manifest.json").is_file());
+    for path in [
+        "FOLDERBASE.md",
+        ".folderbaseignore",
+        "AGENTS.md",
+        "CLAUDE.md",
+    ] {
+        assert!(!root.path().join(path).exists(), "{path} is not implicit");
+    }
+
+    let adapted = tempfile::tempdir().expect("adapted folder");
+    folderbase()
+        .args([
+            "init",
+            adapted.path().to_str().unwrap(),
+            "--agent-adapters",
+            "--json",
+        ])
+        .assert()
+        .success();
+    for path in ["AGENTS.md", "CLAUDE.md"] {
+        let instructions =
+            std::fs::read_to_string(adapted.path().join(path)).expect("opt-in adapter");
+        assert!(
+            !instructions.contains("FOLDERBASE.md"),
+            "{path} cannot require an optional narrative"
+        );
+        assert!(
+            instructions.contains(".folderbase/manifest.json"),
+            "{path} starts from the engine-owned root record"
+        );
+    }
+}
+
+#[test]
 fn init_dry_run_json_exposes_a_stable_core_plan_digest() {
     let root = tempfile::tempdir().expect("ordinary folder");
     std::fs::write(root.path().join("notes.md"), "existing\n").expect("existing file");
@@ -105,6 +146,143 @@ fn init_digest_refuses_a_same_path_same_shape_root_replacement_across_processes(
 
     assert_no_protocol_writes(&root);
     assert_no_protocol_writes(&reviewed);
+}
+
+#[test]
+fn legacy_root_upgrade_is_reviewed_stale_safe_and_forms_a_v05_child() {
+    const MANIFEST: &[u8] = br#"{
+  "$schema": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "protocol_version": "0.1.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475",
+    "name": "Legacy Folderbase",
+    "kind": "project",
+    "status": "active",
+    "created_at": "2026-07-26T00:00:00Z",
+    "entry": "FOLDERBASE.md"
+  },
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "approve",
+    "cloud_sync": "disabled"
+  }
+}
+"#;
+    let root = tempfile::tempdir().expect("legacy root");
+    std::fs::create_dir(root.path().join(".folderbase")).expect("state");
+    std::fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+    std::fs::write(root.path().join("FOLDERBASE.md"), b"# User narrative\n").expect("entry");
+    std::fs::write(root.path().join(".folderbaseignore"), b"node_modules/\n").expect("ignore");
+    std::fs::write(root.path().join("proposal.docx"), b"ordinary bytes").expect("content");
+    let store = folderbase_core::FolderbaseVersionStore::open(root.path()).expect("legacy opens");
+    let parent = store
+        .seal_capture(store.plan_capture().expect("legacy plan"))
+        .expect("v0.4 parent");
+
+    let dry = folderbase()
+        .args([
+            "upgrade",
+            root.path().to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("upgrade dry run");
+    assert!(dry.status.success(), "{dry:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&dry.stdout).expect("upgrade plan");
+    assert_eq!(plan["from_protocol_version"], "0.1.0");
+    assert_eq!(plan["to_protocol_version"], "0.5.0");
+    assert_eq!(
+        plan["changed_paths"],
+        serde_json::json!([".folderbase/manifest.json"])
+    );
+    let digest = plan["plan_digest"]["digest"]
+        .as_str()
+        .expect("approved digest");
+
+    let user_entry_before = std::fs::read(root.path().join("FOLDERBASE.md")).unwrap();
+    let ignore_before = std::fs::read(root.path().join(".folderbaseignore")).unwrap();
+    let stale_bytes = [MANIFEST, b" "].concat();
+    std::fs::write(root.path().join(".folderbase/manifest.json"), &stale_bytes)
+        .expect("foreign manifest change");
+    folderbase()
+        .args([
+            "upgrade",
+            root.path().to_str().unwrap(),
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("protocol_upgrade_plan_changed"));
+    assert_eq!(
+        std::fs::read(root.path().join(".folderbase/manifest.json")).unwrap(),
+        stale_bytes,
+        "stale apply never overwrites the foreign manifest"
+    );
+
+    std::fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST)
+        .expect("restore reviewed legacy manifest");
+    let reviewed = folderbase()
+        .args([
+            "upgrade",
+            root.path().to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("fresh upgrade plan");
+    assert!(reviewed.status.success());
+    let reviewed: serde_json::Value = serde_json::from_slice(&reviewed.stdout).expect("fresh plan");
+    let digest = reviewed["plan_digest"]["digest"].as_str().unwrap();
+    folderbase()
+        .args([
+            "upgrade",
+            root.path().to_str().unwrap(),
+            "--expected-plan-digest",
+            digest,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read(root.path().join("FOLDERBASE.md")).unwrap(),
+        user_entry_before
+    );
+    assert_eq!(
+        std::fs::read(root.path().join(".folderbaseignore")).unwrap(),
+        ignore_before
+    );
+    assert_eq!(
+        folderbase_core::attest_folderbase_root(root.path())
+            .expect("upgraded root")
+            .protocol_version,
+        "0.5.0"
+    );
+
+    let upgraded = folderbase_core::FolderbaseVersionStore::open(root.path())
+        .expect("upgraded opens")
+        .seal_capture(
+            folderbase_core::FolderbaseVersionStore::open(root.path())
+                .expect("upgraded opens")
+                .plan_capture()
+                .expect("v0.5 child plan"),
+        )
+        .expect("v0.5 child");
+    let wire: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join(".folderbase/versions/folderbase")
+                .join(format!("{}.json", upgraded.version_id())),
+        )
+        .expect("child version"),
+    )
+    .expect("child JSON");
+    assert_eq!(wire["protocol_version"], "0.5");
+    assert_eq!(wire["parents"], serde_json::json!([parent.version_id()]));
 }
 
 #[test]

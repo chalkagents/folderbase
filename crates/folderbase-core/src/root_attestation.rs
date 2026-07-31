@@ -6,6 +6,7 @@ use std::{
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
+use chrono::DateTime;
 use semver::Version;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
@@ -30,6 +31,57 @@ const STATE_DIRECTORY: &str = ".folderbase";
 const MANIFEST_FILE: &str = "manifest.json";
 const ENTRY_FILE: &str = "FOLDERBASE.md";
 const DUPLICATE_KEY_SENTINEL: &str = "folderbase_duplicate_json_object_key";
+const MAX_CAPTURE_IGNORE_RULES: usize = 1_024;
+const MAX_CAPTURE_IGNORE_RULE_BYTES: usize = 4_096;
+pub(crate) const PROTOCOL_UPGRADE_RECEIPT_FIELD: &str = "folderbase_protocol_upgrade";
+pub(crate) const PROTOCOL_UPGRADE_RECEIPT_FORMAT: &str = "folderbase-protocol-upgrade-receipt-v1";
+
+/// Portable defaults for native 0.5 roots.
+///
+/// This intentionally differs from the broader legacy reconstructable-directory
+/// classifier: 0.5 roots declare their exact portable policy in the manifest.
+pub(crate) const DEFAULT_V05_CAPTURE_IGNORE_RULES: &[&str] = &[
+    "node_modules/",
+    ".next/",
+    "dist/",
+    "build/",
+    "coverage/",
+    ".venv/",
+    "__pycache__/",
+    ".dart_tool/",
+    "Pods/",
+    ".DS_Store",
+    "*.tmp",
+    "~$*",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManifestProtocolProfile {
+    LegacyV01V02,
+    OrdinaryV05 { capture_ignore_rules: Vec<String> },
+}
+
+impl ManifestProtocolProfile {
+    pub(crate) fn requires_legacy_root_files(&self) -> bool {
+        matches!(self, Self::LegacyV01V02)
+    }
+
+    pub(crate) fn folderbase_version_protocol(&self) -> &'static str {
+        match self {
+            Self::LegacyV01V02 => crate::folderbase_version::VERSION_PROTOCOL_V04,
+            Self::OrdinaryV05 { .. } => crate::folderbase_version::VERSION_PROTOCOL_V05,
+        }
+    }
+
+    pub(crate) fn capture_ignore_rules(&self) -> Option<&[String]> {
+        match self {
+            Self::LegacyV01V02 => None,
+            Self::OrdinaryV05 {
+                capture_ignore_rules,
+            } => Some(capture_ignore_rules),
+        }
+    }
+}
 
 /// A closed identifier for every marker required by root attestation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +178,21 @@ pub enum RootAttestationError {
     #[error("Folderbase manifest protocol_version is not valid semantic versioning")]
     InvalidProtocolVersion,
 
+    #[error("Folderbase manifest protocol_version is unsupported")]
+    UnsupportedProtocolVersion,
+
+    #[error("Folderbase manifest capture-ignore policy is invalid")]
+    InvalidCaptureIgnorePolicy,
+
+    #[error("Folderbase manifest does not match the required live 0.5 shape")]
+    InvalidManifestShape,
+
+    #[error("Folderbase manifest protocol-upgrade receipt is invalid or stale")]
+    InvalidProtocolUpgradeReceipt,
+
+    #[error("Folderbase protocol-upgrade recovery must complete before this operation")]
+    ProtocolUpgradeRecoveryRequired,
+
     #[error("Folderbase root identity changed during attestation")]
     RootChangedDuringAttestation,
 
@@ -157,6 +224,11 @@ impl RootAttestationError {
             Self::ManifestFieldWrongType { .. } => "manifest_field_wrong_type",
             Self::InvalidFolderbaseId => "invalid_folderbase_id",
             Self::InvalidProtocolVersion => "invalid_protocol_version",
+            Self::UnsupportedProtocolVersion => "unsupported_protocol_version",
+            Self::InvalidCaptureIgnorePolicy => "invalid_capture_ignore_policy",
+            Self::InvalidManifestShape => "invalid_manifest_shape",
+            Self::InvalidProtocolUpgradeReceipt => "invalid_protocol_upgrade_receipt",
+            Self::ProtocolUpgradeRecoveryRequired => "protocol_upgrade_recovery_required",
             Self::RootChangedDuringAttestation => "root_changed_during_attestation",
             Self::PhysicalIdentityUnavailable => "physical_identity_unavailable",
             Self::Io { .. } => "attestation_io",
@@ -243,24 +315,52 @@ pub fn attest_folderbase_root(
     attest_folderbase_root_inner(root.as_ref(), || {})
 }
 
-pub(crate) fn attest_folderbase_root_with_authority(
+pub(crate) fn attest_folderbase_root_with_profile(
     root: &Path,
-) -> Result<(FolderbaseRootAttestation, RootInstanceAuthority), RootAttestationError> {
-    attest_folderbase_root_with_authority_inner(root, || {})
+) -> Result<
+    (
+        FolderbaseRootAttestation,
+        RootInstanceAuthority,
+        ManifestProtocolProfile,
+    ),
+    RootAttestationError,
+> {
+    attest_folderbase_root_with_authority_inner(root, || {}, false)
+}
+
+pub(crate) fn attest_folderbase_root_with_profile_allowing_upgrade_recovery(
+    root: &Path,
+) -> Result<
+    (
+        FolderbaseRootAttestation,
+        RootInstanceAuthority,
+        ManifestProtocolProfile,
+    ),
+    RootAttestationError,
+> {
+    attest_folderbase_root_with_authority_inner(root, || {}, true)
 }
 
 fn attest_folderbase_root_inner(
     root: &Path,
     before_final_validation: impl FnOnce(),
 ) -> Result<FolderbaseRootAttestation, RootAttestationError> {
-    attest_folderbase_root_with_authority_inner(root, before_final_validation)
-        .map(|(attestation, _)| attestation)
+    attest_folderbase_root_with_authority_inner(root, before_final_validation, false)
+        .map(|(attestation, _, _)| attestation)
 }
 
 fn attest_folderbase_root_with_authority_inner(
     root: &Path,
     before_final_validation: impl FnOnce(),
-) -> Result<(FolderbaseRootAttestation, RootInstanceAuthority), RootAttestationError> {
+    allow_upgrade_recovery: bool,
+) -> Result<
+    (
+        FolderbaseRootAttestation,
+        RootInstanceAuthority,
+        ManifestProtocolProfile,
+    ),
+    RootAttestationError,
+> {
     classify_root(root)?;
     let root_file = open_root_nofollow(root).map_err(|source| RootAttestationError::Io {
         path: root.to_path_buf(),
@@ -346,8 +446,6 @@ fn attest_folderbase_root_with_authority_inner(
         FolderbaseRootMarker::Manifest,
         root,
     )?;
-    let entry = open_regular_marker(&root_dir, ENTRY_FILE, FolderbaseRootMarker::Entry, root)?;
-
     if manifest.snapshot.bytes > MAX_FOLDERBASE_MANIFEST_BYTES {
         return Err(RootAttestationError::ManifestTooLarge {
             maximum_bytes: MAX_FOLDERBASE_MANIFEST_BYTES,
@@ -362,10 +460,18 @@ fn attest_folderbase_root_with_authority_inner(
         return Err(RootAttestationError::RootChangedDuringAttestation);
     }
 
-    let parsed = decode_unique_json(&manifest_bytes)?;
-    let (folderbase_id, protocol_version) = required_manifest_fields(&parsed)?;
-    validate_folderbase_id(&folderbase_id)?;
-    Version::parse(&protocol_version).map_err(|_| RootAttestationError::InvalidProtocolVersion)?;
+    let (_, folderbase_id, protocol_version, protocol_profile) =
+        decode_manifest_protocol_profile(&manifest_bytes)?;
+    let entry = if !protocol_profile.requires_legacy_root_files() {
+        None
+    } else {
+        Some(open_regular_marker(
+            &root_dir,
+            ENTRY_FILE,
+            FolderbaseRootMarker::Entry,
+            root,
+        )?)
+    };
     let manifest_sha256 = hex_sha256(&manifest_bytes);
 
     before_final_validation();
@@ -385,14 +491,19 @@ fn attest_folderbase_root_with_authority_inner(
         &manifest_sha256,
         root,
     )?;
-    revalidate_file(
-        &reopened_root,
-        ENTRY_FILE,
-        FolderbaseRootMarker::Entry,
-        &entry.identity,
-        Some(&entry.snapshot),
-        root,
-    )?;
+    if let Some(entry) = entry {
+        revalidate_file(
+            &reopened_root,
+            ENTRY_FILE,
+            FolderbaseRootMarker::Entry,
+            &entry.identity,
+            Some(&entry.snapshot),
+            root,
+        )?;
+    }
+    if !allow_upgrade_recovery && has_pending_protocol_upgrade(&reopened_state) {
+        return Err(RootAttestationError::ProtocolUpgradeRecoveryRequired);
+    }
 
     Ok((
         FolderbaseRootAttestation {
@@ -403,7 +514,262 @@ fn attest_folderbase_root_with_authority_inner(
             root_instance_sha256,
         },
         root_instance_authority,
+        protocol_profile,
     ))
+}
+
+pub(crate) fn decode_manifest_protocol_profile(
+    encoded: &[u8],
+) -> Result<(Value, String, String, ManifestProtocolProfile), RootAttestationError> {
+    let manifest = decode_unique_json(encoded)?;
+    let (folderbase_id, protocol_version) = required_manifest_fields(&manifest)?;
+    validate_folderbase_id(&folderbase_id)?;
+    let version = Version::parse(&protocol_version)
+        .map_err(|_| RootAttestationError::InvalidProtocolVersion)?;
+    let profile = manifest_protocol_profile(&manifest, &version)?;
+    Ok((manifest, folderbase_id, protocol_version, profile))
+}
+
+fn manifest_protocol_profile(
+    manifest: &Value,
+    version: &Version,
+) -> Result<ManifestProtocolProfile, RootAttestationError> {
+    if version.major == 0 && matches!(version.minor, 1 | 2) {
+        return Ok(ManifestProtocolProfile::LegacyV01V02);
+    }
+    if version != &Version::new(0, 5, 0) {
+        return Err(RootAttestationError::UnsupportedProtocolVersion);
+    }
+    validate_ordinary_manifest_shape(manifest)?;
+    let policy = manifest
+        .pointer("/policies/capture_ignore")
+        .and_then(Value::as_object)
+        .ok_or(RootAttestationError::InvalidCaptureIgnorePolicy)?;
+    if policy.len() != 2 || !policy.contains_key("format") || !policy.contains_key("rules") {
+        return Err(RootAttestationError::InvalidCaptureIgnorePolicy);
+    }
+    if policy.get("format").and_then(Value::as_str) != Some("folderbase-capture-ignore-v1") {
+        return Err(RootAttestationError::InvalidCaptureIgnorePolicy);
+    }
+    let rules = policy
+        .get("rules")
+        .and_then(Value::as_array)
+        .ok_or(RootAttestationError::InvalidCaptureIgnorePolicy)?;
+    if rules.len() > MAX_CAPTURE_IGNORE_RULES {
+        return Err(RootAttestationError::InvalidCaptureIgnorePolicy);
+    }
+    let capture_ignore_rules = rules
+        .iter()
+        .map(|rule| {
+            let rule = rule
+                .as_str()
+                .ok_or(RootAttestationError::InvalidCaptureIgnorePolicy)?;
+            if rule.is_empty()
+                || rule.len() > MAX_CAPTURE_IGNORE_RULE_BYTES
+                || rule.as_bytes().contains(&0)
+            {
+                return Err(RootAttestationError::InvalidCaptureIgnorePolicy);
+            }
+            Ok(rule.to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ManifestProtocolProfile::OrdinaryV05 {
+        capture_ignore_rules,
+    })
+}
+
+fn validate_ordinary_manifest_shape(manifest: &Value) -> Result<(), RootAttestationError> {
+    let record = manifest
+        .as_object()
+        .ok_or(RootAttestationError::InvalidManifestShape)?;
+    if record.get("$schema").is_some_and(|schema| {
+        schema.as_str() != Some("https://folderbase.ai/protocol/0.5/folderbase.schema.json")
+    }) {
+        return Err(RootAttestationError::InvalidManifestShape);
+    }
+    let folderbase = record
+        .get("folderbase")
+        .and_then(Value::as_object)
+        .ok_or(RootAttestationError::InvalidManifestShape)?;
+    let valid_nonempty = |key: &str| {
+        folderbase
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    if !valid_nonempty("name")
+        || !matches!(
+            folderbase.get("kind").and_then(Value::as_str),
+            Some(
+                "person"
+                    | "organization"
+                    | "engagement"
+                    | "project"
+                    | "customer"
+                    | "temporary"
+                    | "custom"
+            )
+        )
+        || !matches!(
+            folderbase.get("status").and_then(Value::as_str),
+            Some("active" | "paused" | "archived")
+        )
+        || folderbase
+            .get("created_at")
+            .and_then(Value::as_str)
+            .is_none_or(|created_at| DateTime::parse_from_rfc3339(created_at).is_err())
+        || folderbase
+            .get("template_provenance")
+            .is_some_and(|value| !value.is_object())
+    {
+        return Err(RootAttestationError::InvalidManifestShape);
+    }
+
+    let policies = record
+        .get("policies")
+        .and_then(Value::as_object)
+        .ok_or(RootAttestationError::InvalidManifestShape)?;
+    if !matches!(
+        policies.get("availability").and_then(Value::as_str),
+        Some("keep_local" | "managed" | "cloud_only")
+    ) || !matches!(
+        policies.get("structural_changes").and_then(Value::as_str),
+        Some("suggest" | "approve" | "autonomous")
+    ) || !matches!(
+        policies.get("archive").and_then(Value::as_str),
+        Some("manual" | "approve" | "automatic")
+    ) || !matches!(
+        policies.get("cloud_sync").and_then(Value::as_str),
+        Some("disabled" | "enabled")
+    ) {
+        return Err(RootAttestationError::InvalidManifestShape);
+    }
+
+    if let Some(adapters) = record.get("adapters") {
+        let adapters = adapters
+            .as_array()
+            .ok_or(RootAttestationError::InvalidManifestShape)?;
+        for adapter in adapters {
+            let adapter = adapter
+                .as_object()
+                .ok_or(RootAttestationError::InvalidManifestShape)?;
+            let agent = adapter
+                .get("agent")
+                .and_then(Value::as_str)
+                .ok_or(RootAttestationError::InvalidManifestShape)?;
+            let mut agent_bytes = agent.bytes();
+            if !agent_bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                || !agent_bytes.all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+            {
+                return Err(RootAttestationError::InvalidManifestShape);
+            }
+            let path = adapter
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(RootAttestationError::InvalidManifestShape)?;
+            if crate::folderbase_version::validate_capture_path(path).is_err()
+                || Path::new(path)
+                    .components()
+                    .filter_map(|component| match component {
+                        std::path::Component::Normal(name) => Some(name),
+                        _ => None,
+                    })
+                    .any(crate::traversal_policy::is_reserved_workspace_component)
+            {
+                return Err(RootAttestationError::InvalidManifestShape);
+            }
+        }
+    }
+    if let Some(receipt) = record.get(PROTOCOL_UPGRADE_RECEIPT_FIELD)
+        && (!valid_protocol_upgrade_receipt(receipt)
+            || !protocol_upgrade_receipt_binds_target(manifest, receipt))
+    {
+        return Err(RootAttestationError::InvalidProtocolUpgradeReceipt);
+    }
+    Ok(())
+}
+
+fn protocol_upgrade_receipt_binds_target(manifest: &Value, receipt: &Value) -> bool {
+    let Some(expected) = receipt
+        .get("target_manifest_without_receipt_sha256")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let mut target = manifest.clone();
+    let Some(record) = target.as_object_mut() else {
+        return false;
+    };
+    record.remove(PROTOCOL_UPGRADE_RECEIPT_FIELD);
+    let Ok(encoded) = serde_json::to_string_pretty(&target) else {
+        return false;
+    };
+    let encoded = format!("{encoded}\n");
+    hex_sha256(encoded.as_bytes()) == expected
+}
+
+fn has_pending_protocol_upgrade(state: &Dir) -> bool {
+    let transactions = match state.open_dir_nofollow("transactions") {
+        Ok(directory) => directory,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let upgrades = match transactions.open_dir_nofollow("protocol-upgrades") {
+        Ok(directory) => directory,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    match upgrades.symlink_metadata("active.json") {
+        Ok(_) => true,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+fn valid_protocol_upgrade_receipt(receipt: &Value) -> bool {
+    let Some(receipt) = receipt.as_object() else {
+        return false;
+    };
+    if receipt.len() != 4
+        || receipt.get("format").and_then(Value::as_str) != Some(PROTOCOL_UPGRADE_RECEIPT_FORMAT)
+        || !receipt
+            .get("from_protocol_version")
+            .and_then(Value::as_str)
+            .is_some_and(|version| {
+                matches!(
+                    Version::parse(version),
+                    Ok(version) if version.major == 0 && matches!(version.minor, 1 | 2)
+                )
+            })
+        || !receipt
+            .get("target_manifest_without_receipt_sha256")
+            .and_then(Value::as_str)
+            .is_some_and(valid_sha256)
+    {
+        return false;
+    }
+    let Some(plan_digest) = receipt.get("plan_digest").and_then(Value::as_object) else {
+        return false;
+    };
+    plan_digest.len() == 2
+        && plan_digest.get("algorithm").and_then(Value::as_str) == Some("sha256")
+        && plan_digest
+            .get("digest")
+            .and_then(Value::as_str)
+            .is_some_and(valid_sha256)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn classify_root(root: &Path) -> Result<(), RootAttestationError> {

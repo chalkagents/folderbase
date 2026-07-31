@@ -22,6 +22,8 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 pub const VERSION_FORMAT_V1: &str = "folderbase-version-v1";
+pub const VERSION_PROTOCOL_V04: &str = "0.4";
+pub const VERSION_PROTOCOL_V05: &str = "0.5";
 pub const PATH_POLICY_FORMAT_V1: &str = "folderbase-portable-path-v1";
 pub const MAX_ENCODED_VERSION_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_VERSION_ENTRIES: usize = 16_384;
@@ -255,9 +257,29 @@ impl FolderbaseVersionParts {
         root_manifest: RootManifest,
         entries: FolderbaseVersionEntries,
     ) -> Self {
+        Self::portable_v1_for_protocol_from_verified_producer(
+            VERSION_PROTOCOL_V04,
+            folderbase_id,
+            version_id,
+            parents,
+            created_at,
+            root_manifest,
+            entries,
+        )
+    }
+
+    pub(crate) fn portable_v1_for_protocol_from_verified_producer(
+        protocol_version: impl Into<String>,
+        folderbase_id: impl Into<String>,
+        version_id: impl Into<String>,
+        parents: Vec<String>,
+        created_at: impl Into<String>,
+        root_manifest: RootManifest,
+        entries: FolderbaseVersionEntries,
+    ) -> Self {
         Self {
             format: VERSION_FORMAT_V1.to_owned(),
-            protocol_version: "0.4".to_owned(),
+            protocol_version: protocol_version.into(),
             folderbase_id: folderbase_id.into(),
             version_id: version_id.into(),
             parents,
@@ -554,7 +576,12 @@ impl FolderbaseVersion {
     }
 
     pub fn validate(&self) -> Result<(), FolderbaseVersionError> {
-        if self.format != VERSION_FORMAT_V1 || self.protocol_version != "0.4" {
+        if self.format != VERSION_FORMAT_V1
+            || !matches!(
+                self.protocol_version.as_str(),
+                VERSION_PROTOCOL_V04 | VERSION_PROTOCOL_V05
+            )
+        {
             return invalid("unsupported Folderbase Version format or protocol");
         }
         validate_prefixed_uuid(&self.folderbase_id, "folderbase_")?;
@@ -667,13 +694,16 @@ impl FolderbaseVersion {
                 }
             }
         }
-        for required_path in [".folderbaseignore", "FOLDERBASE.md"] {
-            if !self.bindings.iter().any(|binding| {
-                binding.path() == required_path && matches!(binding, PathBinding::RegularFile(_))
-            }) {
-                return invalid(format!(
-                    "{required_path} must be a live regular-file Path Binding"
-                ));
+        if self.protocol_version == VERSION_PROTOCOL_V04 {
+            for required_path in [".folderbaseignore", "FOLDERBASE.md"] {
+                if !self.bindings.iter().any(|binding| {
+                    binding.path() == required_path
+                        && matches!(binding, PathBinding::RegularFile(_))
+                }) {
+                    return invalid(format!(
+                        "{required_path} must be a live regular-file Path Binding"
+                    ));
+                }
             }
         }
 
@@ -770,6 +800,10 @@ impl FolderbaseVersion {
 
     pub fn folderbase_id(&self) -> &str {
         &self.folderbase_id
+    }
+
+    pub fn protocol_version(&self) -> &str {
+        &self.protocol_version
     }
 
     pub fn parents(&self) -> &[String] {

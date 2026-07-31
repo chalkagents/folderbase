@@ -273,14 +273,9 @@ fn nested_folderbase_boundary_overrides_a_reconstructable_directory_name() {
 }
 
 #[test]
-fn nested_folderbase_discovery_case_folds_markers_without_following_state_symlinks() {
+fn workspace_refuses_alias_shaped_markers_without_granting_them_boundary_authority() {
     let fixture = tempdir().unwrap();
     fs::create_dir_all(fixture.path().join("casefolded/.FOLDERBASE")).unwrap();
-    fs::write(
-        fixture.path().join("casefolded/FOLDERBASE.MD"),
-        "case-folded folderbase\n",
-    )
-    .unwrap();
     fs::write(
         fixture.path().join("casefolded/.FOLDERBASE/MANIFEST.JSON"),
         "malformed\n",
@@ -288,75 +283,65 @@ fn nested_folderbase_discovery_case_folds_markers_without_following_state_symlin
     .unwrap();
     fs::write(
         fixture.path().join("casefolded/private.md"),
-        "must stay behind the boundary\n",
+        "must fail closed\n",
     )
     .unwrap();
-
-    fs::create_dir(fixture.path().join("ordinary")).unwrap();
-    fs::write(
-        fixture.path().join("ordinary/FOLDERBASE.MD"),
-        "entry without manifest\n",
-    )
-    .unwrap();
-    fs::write(fixture.path().join("ordinary/private.md"), "ordinary\n").unwrap();
-
-    #[cfg(unix)]
-    {
-        fs::create_dir(fixture.path().join("symlink-marker")).unwrap();
-        fs::write(
-            fixture.path().join("symlink-marker/FOLDERBASE.md"),
-            "invalid nested folderbase\n",
-        )
-        .unwrap();
-        symlink(
-            fixture.path().join("missing-state-directory"),
-            fixture.path().join("symlink-marker/.FOLDERBASE"),
-        )
-        .unwrap();
-        fs::write(
-            fixture.path().join("symlink-marker/private.md"),
-            "must fail closed\n",
-        )
-        .unwrap();
-    }
-
-    let listing = list_workspace(fixture.path()).unwrap();
-    let observed = listing
-        .entries
-        .iter()
-        .map(|entry| (entry.path.as_str(), entry.kind))
-        .collect::<Vec<_>>();
-    #[cfg(unix)]
-    assert_eq!(
-        observed,
-        vec![
-            ("casefolded", WorkspaceEntryKind::Folderbase),
-            ("ordinary", WorkspaceEntryKind::Directory),
-            ("ordinary/FOLDERBASE.MD", WorkspaceEntryKind::File),
-            ("ordinary/private.md", WorkspaceEntryKind::File),
-            ("symlink-marker", WorkspaceEntryKind::Folderbase),
-        ]
-    );
-    #[cfg(not(unix))]
-    assert_eq!(
-        observed,
-        vec![
-            ("casefolded", WorkspaceEntryKind::Folderbase),
-            ("ordinary", WorkspaceEntryKind::Directory),
-            ("ordinary/FOLDERBASE.MD", WorkspaceEntryKind::File),
-            ("ordinary/private.md", WorkspaceEntryKind::File),
-        ]
-    );
-
+    assert!(matches!(
+        list_workspace(fixture.path()),
+        Err(folderbase_core::FolderbaseError::UnsafePath(_))
+    ));
     assert!(matches!(
         read_workspace_text(fixture.path(), "casefolded/private.md"),
         Err(folderbase_core::FolderbaseError::UnsafePath(_))
     ));
-    #[cfg(unix)]
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_refuses_a_symlink_shaped_marker_without_following_it() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("symlink-marker")).unwrap();
+    fs::write(
+        fixture.path().join("symlink-marker/private.md"),
+        "must fail closed\n",
+    )
+    .unwrap();
+    symlink(
+        fixture.path().join("missing-state-directory"),
+        fixture.path().join("symlink-marker/.folderbase"),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        list_workspace(fixture.path()),
+        Err(folderbase_core::FolderbaseError::UnsafePath(_))
+    ));
     assert!(matches!(
         read_workspace_text(fixture.path(), "symlink-marker/private.md"),
         Err(folderbase_core::FolderbaseError::UnsafePath(_))
     ));
+}
+
+#[test]
+fn workspace_treats_markerless_context_as_inert_ordinary_folder_content() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir_all(fixture.path().join("ordinary/.folderbase/questions")).unwrap();
+    fs::write(
+        fixture.path().join("ordinary/.folderbase/summary.md"),
+        "inert summary\n",
+    )
+    .unwrap();
+    fs::write(fixture.path().join("ordinary/private.md"), "ordinary\n").unwrap();
+
+    let listing = list_workspace(fixture.path()).expect("inert context is not a boundary");
+    assert!(
+        listing.entries.iter().any(|entry| {
+            entry.path == "ordinary" && entry.kind == WorkspaceEntryKind::Directory
+        })
+    );
+    assert!(listing.entries.iter().any(|entry| {
+        entry.path == "ordinary/private.md" && entry.kind == WorkspaceEntryKind::File
+    }));
 }
 
 #[test]
@@ -416,6 +401,149 @@ fn workspace_read_returns_utf8_content_with_a_known_digest() {
         "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
     );
     assert_eq!(document.bytes, 6);
+}
+
+#[test]
+fn exact_root_ignore_policy_is_readable_but_only_typed_flows_may_edit_it() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("docs")).unwrap();
+    fs::write(fixture.path().join(".folderbaseignore"), "node_modules/\n").unwrap();
+    fs::write(
+        fixture.path().join("docs/.folderbaseignore"),
+        "nested policy\n",
+    )
+    .unwrap();
+    fs::write(fixture.path().join("note.md"), "first\n").unwrap();
+
+    let policy = read_workspace_text(fixture.path(), ".folderbaseignore").unwrap();
+    assert_eq!(policy.content, "node_modules/\n");
+    let policy_entry = list_workspace(fixture.path())
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == ".folderbaseignore")
+        .expect("root ignore policy remains visible");
+    assert!(!policy_entry.editable);
+
+    let error = save_workspace_text(
+        fixture.path(),
+        ".folderbaseignore",
+        "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97",
+        "target/\n",
+    )
+    .expect_err("generic workspace save cannot change capture policy");
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::UnsafePath(path)
+            if path == std::path::Path::new(".folderbaseignore")
+    ));
+    assert_eq!(
+        fs::read(fixture.path().join(".folderbaseignore")).unwrap(),
+        b"node_modules/\n"
+    );
+
+    let nested = save_workspace_text(
+        fixture.path(),
+        "docs/.folderbaseignore",
+        "cdf013df0dddf8a58713d56628c6d51e60088b1fbd1472de9a1c4bb1b89571d7",
+        "nested replacement\n",
+    )
+    .expect("the reserved policy name applies only at the root");
+    assert_eq!(nested.path, "docs/.folderbaseignore");
+
+    let ordinary = save_workspace_text(
+        fixture.path(),
+        "note.md",
+        "b640e840b19d378660b32fb51ae18d67dccb4a8596a29e7bd72c1b2ae5928f41",
+        "second\n",
+    )
+    .expect("ordinary files remain editable");
+    assert_eq!(ordinary.path, "note.md");
+}
+
+#[test]
+fn root_ignore_policy_case_variant_is_visible_read_only_and_not_generically_mutable() {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("docs")).unwrap();
+    fs::write(fixture.path().join(".FOLDERBASEIGNORE"), "node_modules/\n").unwrap();
+    fs::write(
+        fixture.path().join("docs/.folderbaseignore"),
+        "nested policy\n",
+    )
+    .unwrap();
+
+    let root_policy = read_workspace_text(fixture.path(), ".FOLDERBASEIGNORE").unwrap();
+    assert_eq!(root_policy.content, "node_modules/\n");
+    let listing = list_workspace(fixture.path()).unwrap();
+    assert!(
+        !listing
+            .entries
+            .iter()
+            .find(|entry| entry.path == ".FOLDERBASEIGNORE")
+            .expect("case-variant root policy remains visible")
+            .editable
+    );
+    assert!(
+        listing
+            .entries
+            .iter()
+            .find(|entry| entry.path == "docs/.folderbaseignore")
+            .expect("nested same-name file remains visible")
+            .editable
+    );
+
+    let error = save_workspace_text(
+        fixture.path(),
+        ".FOLDERBASEIGNORE",
+        "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97",
+        "target/\n",
+    )
+    .expect_err("generic save cannot change a case-variant root capture policy");
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::UnsafePath(path)
+            if path == std::path::Path::new(".FOLDERBASEIGNORE")
+    ));
+    assert_eq!(
+        fs::read(fixture.path().join(".FOLDERBASEIGNORE")).unwrap(),
+        b"node_modules/\n"
+    );
+
+    save_workspace_text(
+        fixture.path(),
+        "docs/.folderbaseignore",
+        "cdf013df0dddf8a58713d56628c6d51e60088b1fbd1472de9a1c4bb1b89571d7",
+        "nested replacement\n",
+    )
+    .expect("nested same-name files remain ordinary and editable");
+}
+
+#[test]
+fn public_save_refuses_a_case_variant_alias_when_the_host_resolves_it() {
+    let fixture = tempdir().unwrap();
+    fs::write(fixture.path().join(".folderbaseignore"), "node_modules/\n").unwrap();
+    if !fixture.path().join(".FOLDERBASEIGNORE").exists() {
+        return;
+    }
+
+    let error = save_workspace_text(
+        fixture.path(),
+        ".FOLDERBASEIGNORE",
+        "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97",
+        "target/\n",
+    )
+    .expect_err("a filesystem alias cannot bypass the reviewed policy flow");
+
+    assert!(matches!(
+        error,
+        folderbase_core::FolderbaseError::UnsafePath(path)
+            if path == std::path::Path::new(".FOLDERBASEIGNORE")
+                || path == std::path::Path::new(".folderbaseignore")
+    ));
+    assert_eq!(
+        fs::read(fixture.path().join(".folderbaseignore")).unwrap(),
+        b"node_modules/\n"
+    );
 }
 
 #[test]

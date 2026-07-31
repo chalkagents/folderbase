@@ -7,6 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -15,6 +16,7 @@ use crate::{
     ContentDigest, FolderbaseError, LocalVersionStore, ObjectId, Result, VersionId,
     root_attestation::metadata_is_link_or_reparse,
     traversal_policy::{
+        NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary,
         is_reconstructable_directory, is_reserved_workspace_component as is_reserved_component,
     },
 };
@@ -22,6 +24,7 @@ use crate::{
 pub const MAX_WORKSPACE_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES: usize = 50_000;
 const MAX_WORKSPACE_DEPTH: usize = 64;
+const ROOT_IGNORE_POLICY_PATH: &str = ".folderbaseignore";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -150,7 +153,8 @@ pub fn list_workspace(root: impl AsRef<Path>) -> Result<WorkspaceListing> {
             (
                 WorkspaceEntryKind::File,
                 bytes,
-                file_is_editable(entry.path(), bytes)?,
+                refuse_generic_workspace_mutation_path(relative).is_ok()
+                    && file_is_editable(entry.path(), bytes)?,
             )
         } else {
             continue;
@@ -215,6 +219,7 @@ pub fn save_workspace_text(
 ) -> Result<WorkspaceSaveResult> {
     let root = canonical_folderbase_root(root.as_ref())?;
     let relative_path = safe_workspace_path(relative_path.as_ref())?;
+    refuse_generic_workspace_mutation_path(&relative_path)?;
     validate_sha256(expected_sha256, &relative_path)?;
     if content.len() as u64 > MAX_WORKSPACE_TEXT_BYTES {
         return Err(workspace_text_too_large(&relative_path));
@@ -230,6 +235,7 @@ pub fn save_workspace_text(
     // version store checks the same precondition again immediately before
     // accepting its durable transaction.
     let (_, relative_path) = resolve_existing_workspace_file(&root, &relative_path)?;
+    refuse_generic_workspace_mutation_path(&relative_path)?;
     let current = read_workspace_text(&root, &relative_path)?;
     if current.sha256 != expected_sha256 {
         return Err(FolderbaseError::WorkspaceContentChanged(relative_path));
@@ -334,56 +340,31 @@ pub(crate) fn is_reserved_workspace_component(name: &OsStr) -> bool {
     is_reserved_component(name)
 }
 
-pub(crate) fn has_nested_folderbase_marker(path: &Path) -> Result<bool> {
-    let mut has_folderbase_entry = false;
-    let mut state_entries = Vec::new();
-    let entries = fs::read_dir(path).map_err(|source| FolderbaseError::io(path, source))?;
-    for entry in entries {
-        let entry = entry.map_err(|source| FolderbaseError::io(path, source))?;
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case("FOLDERBASE.md"))
-        {
-            has_folderbase_entry = true;
-        } else if name
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(".folderbase"))
-        {
-            state_entries.push(entry);
-        }
-    }
-    if !has_folderbase_entry {
-        return Ok(false);
-    }
-
-    for state_entry in state_entries {
-        let state_path = state_entry.path();
-        let file_type = state_entry
-            .file_type()
-            .map_err(|source| FolderbaseError::io(&state_path, source))?;
-        if file_type.is_symlink() {
-            return Ok(true);
-        }
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let entries =
-            fs::read_dir(&state_path).map_err(|source| FolderbaseError::io(&state_path, source))?;
-        for entry in entries {
-            let entry = entry.map_err(|source| FolderbaseError::io(&state_path, source))?;
-            if entry
-                .file_name()
+pub(crate) fn refuse_generic_workspace_mutation_path(path: &Path) -> Result<()> {
+    let mut components = path.components();
+    let is_root_ignore_policy = matches!(
+        components.next(),
+        Some(Component::Normal(name))
+            if name
                 .to_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
-            {
-                return Ok(true);
-            }
+                .is_some_and(|name| name.eq_ignore_ascii_case(ROOT_IGNORE_POLICY_PATH))
+    ) && components.next().is_none();
+    if is_root_ignore_policy {
+        return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+pub(crate) fn has_nested_folderbase_marker(path: &Path) -> Result<bool> {
+    let directory = Dir::open_ambient_dir(path, ambient_authority())
+        .map_err(|source| FolderbaseError::io(path, source))?;
+    match classify_nested_folderbase_boundary(&directory, path)? {
+        NestedFolderbaseBoundaryKind::ExactBoundary => Ok(true),
+        NestedFolderbaseBoundaryKind::None => Ok(false),
+        NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+            Err(FolderbaseError::UnsafePath(path.to_path_buf()))
         }
     }
-
-    Ok(false)
 }
 
 fn displayable_path(path: &Path) -> Result<String> {
@@ -450,5 +431,35 @@ fn invalid_workspace_record(
     FolderbaseError::InvalidRecord {
         path: path.into(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_mutation_classifier_reserves_ascii_case_variants_only_at_the_root() {
+        for root_policy in [
+            ".folderbaseignore",
+            ".FOLDERBASEIGNORE",
+            ".FolderBaseIgnore",
+        ] {
+            assert!(matches!(
+                refuse_generic_workspace_mutation_path(Path::new(root_policy)),
+                Err(FolderbaseError::UnsafePath(path)) if path == Path::new(root_policy)
+            ));
+        }
+
+        for ordinary_path in [
+            "docs/.folderbaseignore",
+            "docs/.FOLDERBASEIGNORE",
+            ".folderbaseignore.txt",
+        ] {
+            assert!(
+                refuse_generic_workspace_mutation_path(Path::new(ordinary_path)).is_ok(),
+                "{ordinary_path} is not the root capture policy"
+            );
+        }
     }
 }

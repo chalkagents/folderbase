@@ -387,6 +387,7 @@ pub enum TemplateApplicationState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateComparisonSource {
+    Unmanaged,
     Origin,
     Application,
 }
@@ -538,11 +539,13 @@ pub struct BoundaryHint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconstructableTree {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NestedFolderbaseBoundary {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub path: PathBuf,
     pub state: NestedFolderbaseState,
 }
@@ -578,7 +581,7 @@ impl Default for InitializationOptions {
         Self {
             name: None,
             kind: FolderbaseKind::Project,
-            create_agent_adapters: true,
+            create_agent_adapters: false,
         }
     }
 }

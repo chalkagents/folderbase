@@ -57,6 +57,22 @@ pub enum FolderbaseError {
     )]
     InitializationPlanChanged { expected: String, actual: String },
 
+    #[error(
+        "protocol upgrade plan digest must be exactly 64 lowercase hexadecimal SHA-256 characters"
+    )]
+    InvalidProtocolUpgradePlanDigest,
+
+    #[error(
+        "protocol upgrade plan changed after approval: expected {expected}, current plan is {actual}"
+    )]
+    ProtocolUpgradePlanChanged { expected: String, actual: String },
+
+    #[error("protocol upgrade is blocked by pending work: {0}")]
+    ProtocolUpgradeBlocked(&'static str),
+
+    #[error("Folderbase recovery is required before this migration can continue: {work}")]
+    RecoveryRequired { work: String },
+
     #[error("initialization destination changed after approval: {0}")]
     InitializationDestinationChanged(PathBuf),
 
@@ -65,6 +81,11 @@ pub enum FolderbaseError {
         limit: InitializationInventoryLimitKind,
         maximum: u64,
     },
+
+    #[error(
+        "nested Folderbase boundary inspection exceeded the shared entry-work limit of {maximum} at: {path}"
+    )]
+    NestedBoundaryWorkLimitExceeded { path: PathBuf, maximum: u64 },
 
     #[error("migration is not in the required state: expected {expected}, found {actual}")]
     InvalidMigrationState {
@@ -86,6 +107,9 @@ pub enum FolderbaseError {
 
     #[error("restore namespace repair is required before retrying at: {0}")]
     RestoreNamespaceRepairRequired(PathBuf),
+
+    #[error("migration filesystem is unsupported at {path}: {reason}")]
+    UnsupportedMigrationFilesystem { path: PathBuf, reason: String },
 
     #[error("template expansion contains structural changes that require an approved migration")]
     StructuralTemplateChangeRequiresApproval,

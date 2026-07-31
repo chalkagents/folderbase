@@ -78,21 +78,41 @@ readable only through metadata. Symlinks are never followed and retain only a
 portable, lexically contained UTF-8 target. Hard links and special nodes become
 typed v1 exclusions instead of disappearing.
 
-The effective ignore policy applies Core's generated-tree defaults first, then
-the root `.folderbaseignore` as Git-style ordered rules. Later matches win,
-negation works when its parent directory is not definitively excluded, and
-definitively excluded directories are not descended. The two required visible
-markers, `.folderbaseignore` and `FOLDERBASE.md`, override ignore matches.
-`.folderbase/**` is always excluded from ordinary bindings; the root manifest is
-already represented through its reserved reference. A discovered nested
-Folderbase becomes one typed boundary exclusion and none of its descendants are
-entered.
+The effective ignore policy is protocol-profile-specific. Protocol 0.4 applies
+Core's generated-tree defaults first, then its required root
+`.folderbaseignore` as Git-style ordered rules; both required visible 0.4
+markers override ignore matches. Protocol 0.5 instead applies the ordered
+manifest `policies.capture_ignore.rules` first, then root
+`.folderbaseignore` rules only when that optional regular file exists.
+Presence and absence are distinct policy inputs. In 0.5, a present
+`.folderbaseignore` is bounded, force-included, and changed only through typed
+policy-aware flows, while `FOLDERBASE.md` is fully ordinary content and may be
+ignored. Under both profiles, later matches win, negation works when its parent
+directory is not definitively excluded, and definitively excluded directories
+are not descended. `.folderbase/**` is always excluded from ordinary bindings;
+the root manifest is already represented through its reserved reference. This
+also keeps the named optional `.folderbase/summary.md` and
+`.folderbase/questions.jsonl` hints non-authoritative and outside portable
+history. Other `.folderbase/**` content is private and inert without becoming a
+named hint format. A discovered nested Folderbase becomes one typed boundary
+exclusion and none of its descendants are entered.
 
 Planning walks through root-relative, no-follow directory capabilities. It
-classifies ignore policy before opening a child directory, probes nested markers
-without enumerating their descendants, rechecks opened directory identities, and
-streams directory entries directly into the aggregate record bound. It does not
-sort or retain an unbounded directory listing before enforcing that bound.
+classifies ignore policy before opening a child directory, probes the exact
+nested manifest marker without enumerating descendants, and treats any exact
+regular no-follow marker as an opaque boundary without reading or decoding its
+bytes through the parent. Only an operation explicitly opened on that nested
+root attests its profile and fails closed if invalid. Planning rechecks opened
+directory identities and streams directory entries directly into the aggregate
+record bound. It does not sort or retain an unbounded directory listing before
+enforcing that bound.
+
+Markerless state and context remain inert. Case aliases, symlink or
+non-directory state markers, and symlink or non-regular manifest markers are
+unsafe shapes, not nested authority. Read-only analysis may represent them as
+an `Unchecked` quarantine (`unchecked` on the wire) and omit descendants;
+capture and every other materializing, mutating, transfer, or restore seam
+rejects them.
 
 In-scope paths use the exact Folderbase Version v1 portability, Unicode
 collision, depth, count, and per-object-size bounds. Non-UTF-8 in-scope paths
@@ -261,15 +281,17 @@ A replacement ancestor can neither redirect an operation into another
 directory nor be mistaken for the intended publication. Core moves no Head and
 returns no `Restored` result after that proof fails.
 
-This is a cooperative namespace invariant, not a claim that POSIX pathnames
-cannot be renamed by an uncoordinated same-user process. On Unix, a process may
-move the exact opened parent after the final attachment proof and before or
-after the hard link. The held capability still confines mutation to that exact
-directory, so the only possible orphan is the exact transaction-owned link in
-the moved directory; Core never follows the replacement path and never attempts
-a racy pathname rollback that could delete unrelated content. Windows directory
-capabilities deny delete sharing while held, so the equivalent parent detach is
-blocked by the operating system.
+This is a cooperative namespace invariant, not a claim that pathnames cannot be
+renamed by an uncoordinated same-user process. On every supported platform,
+including Windows, a process may move the exact opened parent after an
+attachment proof. The held capability still confines mutation to that exact
+directory, while the required pre- and post-publication reopen checks reject a
+missing or replacement ambient parent before Core can report success. The only
+possible orphan is therefore the exact transaction-owned link in the moved
+directory; Core never follows the replacement path and never attempts a racy
+pathname rollback that could delete unrelated content. Windows share modes may
+reduce the race surface, but pathname attachment never depends on them as a
+protocol invariant.
 
 Retry also preserves exact link topology. An absent destination may be
 published only while the retained stage has exactly one link. An already
