@@ -112,15 +112,15 @@ jobs:
         if: runner.os == 'Windows'
         run: "cargo test --package folderbase-core --lib --locked migration_filesystem::rename_noreplace_error_tests::"
 
+      - name: Test native Windows retained-directory fidelity
+        if: runner.os == 'Windows'
+        run: "cargo test --package folderbase-core --lib --locked migration_filesystem::windows_directory_fidelity_tests::"
+
       - name: Test migration compatibility and lifecycle behavior
         run: cargo test --package folderbase-core --test migration --locked
 
       - name: Test transaction-v1 crash, restart, conflict, and rollback matrices
         run: "cargo test --package folderbase-core --lib --locked migration::migration_transaction_red_tests::"
-
-      - name: Test native Windows retained-directory fidelity
-        if: runner.os == 'Windows'
-        run: "cargo test --package folderbase-core --lib --locked migration_filesystem::windows_directory_fidelity_tests::"
 
       - name: Test native Windows reparse rejection
         if: runner.os == 'Windows'

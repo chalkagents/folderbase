@@ -3292,9 +3292,9 @@ fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::Fil
 
 #[cfg(windows)]
 fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
-    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES};
 
-    reopen_windows_directory_with_access(directory, FILE_WRITE_ATTRIBUTES)
+    reopen_windows_directory_with_access(directory, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
         .map_err(|source| FolderbaseError::io(display, source))
 }
 
@@ -3945,8 +3945,8 @@ mod windows_directory_fidelity_tests {
     use cap_std::{ambient_authority, fs::Dir};
 
     use super::{
-        ExactRegularLeaf, MigrationFilesystem, VerifiedPrivateDirectory, open_directory_nofollow,
-        set_directory_fidelity,
+        ExactDirectoryLeaf, ExactRegularLeaf, MigrationFilesystem, VerifiedPrivateDirectory,
+        open_directory_nofollow, set_directory_fidelity,
     };
     use crate::FolderbaseError;
 
@@ -4084,6 +4084,36 @@ mod windows_directory_fidelity_tests {
                 .permissions()
                 .readonly()
         );
+    }
+
+    #[test]
+    fn private_directory_claim_sets_fidelity_through_a_narrow_retained_parent() {
+        let root = tempfile::tempdir().expect("temporary migration root");
+        fs::create_dir(root.path().join("claims")).expect("private claims directory");
+        let filesystem = MigrationFilesystem {
+            root: Dir::open_ambient_dir(root.path(), ambient_authority())
+                .expect("retained migration root"),
+            display_root: root.path().to_path_buf(),
+        };
+        let claims = filesystem
+            .open_private_directory(Path::new("claims"))
+            .expect("narrow retained claims directory");
+
+        let claim = claims
+            .prepare_directory_claim("00000000.publish.claim", false, true)
+            .expect("directory claim fidelity retains read and write attribute access");
+
+        claims
+            .exact_empty_directory_fact(
+                OsStr::new("00000000.publish.claim"),
+                ExactDirectoryLeaf {
+                    physical_identity_sha256: &claim.physical_identity_sha256,
+                    device_sha256: &claim.device_sha256,
+                    read_only: false,
+                    executable: true,
+                },
+            )
+            .expect("prepared private directory claim remains exact");
     }
 }
 
