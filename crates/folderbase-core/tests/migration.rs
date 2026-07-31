@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -289,6 +292,10 @@ fn proposal_round_trips_through_v02_schema() {
     assert_eq!(decoded, plan);
     assert_eq!(encoded["protocol_version"], "0.2.0");
     assert_eq!(encoded["state"], "proposed");
+    assert!(
+        !encoded["root"].as_str().unwrap().contains('\\'),
+        "display roots use portable wire separators without changing native PathBuf values"
+    );
     assert_eq!(encoded["source_inventory"]["algorithm"], "sha256");
     assert!(
         encoded["source_inventory"]["files"]
@@ -307,6 +314,68 @@ fn proposal_round_trips_through_v02_schema() {
     assert!(
         validator.is_valid(&encoded),
         "serialized proposal must conform to Migration Protocol 0.2"
+    );
+}
+
+#[test]
+fn migration_operation_uses_portable_wire_paths_and_round_trips() {
+    let operation = MigrationOperation::move_object(
+        PathBuf::from("Drafts").join("proposal.md"),
+        PathBuf::from("Approved").join("proposal.md"),
+    );
+
+    let encoded = serde_json::to_value(&operation).unwrap();
+    assert_eq!(encoded["source_path"], "Drafts/proposal.md");
+    assert_eq!(encoded["destination_path"], "Approved/proposal.md");
+
+    let decoded: MigrationOperation = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, operation);
+}
+
+#[test]
+fn migration_operation_rejects_backslash_wire_path_tampering() {
+    let error = serde_json::from_value::<MigrationOperation>(serde_json::json!({
+        "type": "move_object",
+        "source_path": "Drafts\\proposal.md",
+        "destination_path": "Approved/proposal.md"
+    }))
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("backslash"),
+        "wire-path rejection should identify the forbidden character: {error}"
+    );
+}
+
+#[test]
+fn migration_operation_rejects_noncanonical_relative_wire_paths() {
+    for source_path in ["../proposal.md", "Drafts//proposal.md", "", "Drafts/\0.md"] {
+        let error = serde_json::from_value::<MigrationOperation>(serde_json::json!({
+            "type": "move_object",
+            "source_path": source_path,
+            "destination_path": "Approved/proposal.md"
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("migration") && error.to_string().contains("path"),
+            "noncanonical relative path should be rejected: {source_path:?}: {error}"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn migration_operation_rejects_a_native_component_containing_a_backslash() {
+    let operation = MigrationOperation::move_object(
+        PathBuf::from("Drafts\\proposal.md"),
+        PathBuf::from("Approved/proposal.md"),
+    );
+
+    let error = serde_json::to_value(operation).unwrap_err();
+    assert!(
+        error.to_string().contains("backslash"),
+        "native component rejection should identify the forbidden character: {error}"
     );
 }
 
@@ -3022,6 +3091,11 @@ fn assignment_question_id(
     analysis: &folderbase_core::MigrationAnalysis,
     source_path: &Path,
 ) -> String {
+    let portable_source_path = source_path
+        .components()
+        .map(|component| component.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("/");
     serde_json::to_value(&analysis.questions)
         .unwrap()
         .as_array()
@@ -3029,14 +3103,12 @@ fn assignment_question_id(
         .iter()
         .find(|question| {
             (question["kind"]["type"] == "assignment"
-                && question["kind"]["source_path"] == source_path.to_string_lossy().as_ref())
+                && question["kind"]["source_path"] == portable_source_path)
                 || (question["kind"]["type"] == "assignment_group"
                     && question["kind"]["source_paths"]
                         .as_array()
                         .is_some_and(|paths| {
-                            paths
-                                .iter()
-                                .any(|path| path == source_path.to_string_lossy().as_ref())
+                            paths.iter().any(|path| path == &portable_source_path)
                         }))
         })
         .and_then(|question| question["id"].as_str())

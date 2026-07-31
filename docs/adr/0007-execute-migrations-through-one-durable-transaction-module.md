@@ -278,10 +278,25 @@ manifest, journal, stage, claim, snapshot, and affected leaf are rejected when
 symbolic links, cloud placeholders implemented as reparse points, and unknown
 reparse kinds are unsupported by transaction v1.
 
+Migration plans, analyses, previews, results, private mutation programs,
+journal generations, and migration extension records encode every path with
+`/` separators. Native `PathBuf` values and native separators remain an
+in-memory and filesystem concern; serialization never rewrites the native
+workspace path. Relative wire paths are canonical component sequences and
+reject absolute paths, drive prefixes, empty or dot components, repeated or
+trailing separators, parent traversal, and NUL. The exact `"."` current-root
+sentinel is admitted only in the migration target and grouped-source-root fields
+whose schema assigns it that meaning. A raw wire backslash is rejected as a
+nonportable separator. On filesystems where a backslash can be an ordinary
+filename character, a native component containing one is rejected distinctly
+rather than being silently reinterpreted as hierarchy. Display-only absolute
+root paths use the same `/` wire separator without becoming filesystem
+authority.
+
 Windows portable fidelity maps the read-only file attribute to `read_only`.
 Regular files have no portable executable bit and therefore observe
 `executable: false`; directories are inherently traversable and observe
-`executable: true`. Core never synthesizes Unix mode bits on Windows. When an
+`executable: true`. Core never synthesizes Unix mode bits on Windows. When a
 new private claim directory needs fidelity applied, Core opens that just-created
 child directly through the retained private parent with the closed union of
 `FILE_TRAVERSE`, `FILE_READ_ATTRIBUTES`, and `FILE_WRITE_ATTRIBUTES`. It

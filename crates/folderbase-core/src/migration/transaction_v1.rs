@@ -100,6 +100,7 @@ enum CaptureIgnoreFactV1 {
 #[serde(deny_unknown_fields)]
 struct DirectoryAuthorityV1 {
     id: String,
+    #[serde(with = "crate::portable_wire_path::relative_or_empty")]
     path: PathBuf,
     parent: Option<String>,
     expectation: DirectoryExpectationV1,
@@ -139,6 +140,7 @@ struct PortableFidelityV1 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BoundRegularV1 {
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
     parent: String,
     physical_identity_sha256: String,
@@ -151,6 +153,7 @@ struct BoundRegularV1 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct AbsentLeafV1 {
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
     parent: String,
     case_key: String,
@@ -160,6 +163,7 @@ struct AbsentLeafV1 {
 #[serde(deny_unknown_fields)]
 struct PrivateBlobV1 {
     id: String,
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
     physical_identity_sha256: String,
     bytes: u64,
@@ -2283,9 +2287,11 @@ struct ApplyAbortReceiptV1 {
 #[serde(deny_unknown_fields)]
 struct MutationConflictEvidenceV1 {
     operation_index: Option<usize>,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     affected_paths: Vec<PathBuf>,
     expected: String,
     observed: String,
+    #[serde(with = "crate::portable_wire_path::relative::option")]
     preserved_artifact: Option<PathBuf>,
 }
 

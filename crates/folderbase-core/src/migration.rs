@@ -68,6 +68,7 @@ const JOURNAL_GENERATION_STAGING_NAME: &str = ".next-generation.preparing";
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationAnalysis {
     pub id: String,
+    #[serde(with = "crate::portable_wire_path::display")]
     pub root: PathBuf,
     pub captured_at: DateTime<Utc>,
     pub inventory_digest: String,
@@ -111,12 +112,15 @@ pub struct MigrationOption {
 pub enum MigrationQuestionKind {
     Decision,
     Assignment {
+        #[serde(with = "crate::portable_wire_path::relative")]
         source_path: PathBuf,
         content_kind: MigrationContentKind,
     },
     AssignmentGroup {
         rule_version: String,
+        #[serde(with = "crate::portable_wire_path::relative_or_current")]
         source_root: PathBuf,
+        #[serde(with = "crate::portable_wire_path::relative::vec")]
         source_paths: Vec<PathBuf>,
         content_kind: MigrationContentKind,
         coverage_digest: String,
@@ -134,6 +138,7 @@ pub enum MigrationContentKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProposedBoundary {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub path: PathBuf,
     pub suggested_name: String,
     pub reason: String,
@@ -143,6 +148,7 @@ pub struct ProposedBoundary {
 pub struct MigrationTarget {
     pub id: String,
     pub kind: MigrationTargetKind,
+    #[serde(with = "crate::portable_wire_path::relative_or_current")]
     pub path: PathBuf,
     pub suggested_name: String,
     pub reason: String,
@@ -168,6 +174,7 @@ pub struct MigrationAnswer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationAnswerException {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub source_path: PathBuf,
     pub target_id: String,
 }
@@ -176,6 +183,7 @@ pub struct MigrationAnswerException {
 pub struct MigrationPlan {
     pub protocol_version: String,
     pub id: String,
+    #[serde(with = "crate::portable_wire_path::display")]
     pub root: PathBuf,
     pub state: MigrationState,
     source_inventory: SourceInventory,
@@ -332,7 +340,7 @@ impl MigrationPlan {
             });
         }
         source_files.sort_by(|left, right| left.path.cmp(&right.path));
-        let source_digest = inventory_digest(&source_files);
+        let source_digest = inventory_digest(&source_files)?;
         let topology_analysis = analyze_folder(&root)?;
         let source_topology = source_topology_snapshot(
             &topology_analysis.files,
@@ -439,48 +447,56 @@ impl MigrationState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MigrationOperation {
     CreateFolder {
+        #[serde(with = "crate::portable_wire_path::relative")]
         path: PathBuf,
     },
     CopyFile {
+        #[serde(with = "crate::portable_wire_path::relative")]
         source_path: PathBuf,
+        #[serde(with = "crate::portable_wire_path::relative")]
         destination_path: PathBuf,
         expected_sha256: String,
     },
     MoveObject {
+        #[serde(with = "crate::portable_wire_path::relative")]
         source_path: PathBuf,
+        #[serde(with = "crate::portable_wire_path::relative")]
         destination_path: PathBuf,
         #[serde(default)]
         expected_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     UpdateAdapter {
+        #[serde(with = "crate::portable_wire_path::relative")]
         path: PathBuf,
         managed_block: String,
         #[serde(default)]
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     UpdateIgnorePolicy {
+        #[serde(with = "crate::portable_wire_path::relative")]
         path: PathBuf,
         content: String,
         #[serde(default)]
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     UpdatePolicy {
+        #[serde(with = "crate::portable_wire_path::relative")]
         manifest_path: PathBuf,
         policy: String,
         value: serde_json::Value,
@@ -488,58 +504,63 @@ pub enum MigrationOperation {
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     ChangeKind {
+        #[serde(with = "crate::portable_wire_path::relative")]
         manifest_path: PathBuf,
         new_kind: FolderbaseKind,
         #[serde(default)]
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     MarkCanonical {
+        #[serde(with = "crate::portable_wire_path::relative")]
         object_record_path: PathBuf,
         #[serde(default)]
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     MarkSuperseded {
+        #[serde(with = "crate::portable_wire_path::relative")]
         object_record_path: PathBuf,
         superseded_by: String,
         #[serde(default)]
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     ArchiveObject {
+        #[serde(with = "crate::portable_wire_path::relative")]
         object_record_path: PathBuf,
         #[serde(default)]
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
     },
     AddRelationship {
+        #[serde(with = "crate::portable_wire_path::relative")]
         object_record_path: PathBuf,
         relationship_type: String,
         target_object_id: String,
@@ -547,7 +568,7 @@ pub enum MigrationOperation {
         expected_sha256: String,
         #[serde(default)]
         expected_result_sha256: String,
-        #[serde(default)]
+        #[serde(default, with = "crate::portable_wire_path::relative::option")]
         snapshot_path: Option<PathBuf>,
         #[serde(default)]
         snapshot_sha256: Option<String>,
@@ -1400,6 +1421,7 @@ fn validate_typed_ignore_policy_updates(plan: &MigrationPlan) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationExclusion {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub path: PathBuf,
     pub reason: String,
 }
@@ -1408,6 +1430,7 @@ pub struct MigrationExclusion {
 pub struct MigrationPreview {
     pub migration_id: String,
     pub targets: Vec<MigrationTarget>,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     pub creates_directories: Vec<PathBuf>,
     pub copies: Vec<MigrationCopyPreview>,
     pub source_bytes: u64,
@@ -1419,7 +1442,9 @@ pub struct MigrationPreview {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationCopyPreview {
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub source_path: PathBuf,
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub destination_path: PathBuf,
     pub bytes: u64,
 }
@@ -1458,15 +1483,19 @@ impl ApprovedMigration {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationResult {
     pub migration_id: String,
+    #[serde(with = "crate::portable_wire_path::display")]
     pub root: PathBuf,
     pub state: MigrationState,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     pub created_paths: Vec<PathBuf>,
+    #[serde(with = "crate::portable_wire_path::relative")]
     pub journal_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RollbackResult {
     pub migration_id: String,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     pub removed_paths: Vec<PathBuf>,
     pub state: MigrationState,
 }
@@ -1518,11 +1547,13 @@ pub enum MigrationConflictDirection {
 #[non_exhaustive]
 pub struct MigrationConflict {
     pub operation_index: Option<usize>,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     pub affected_paths: Vec<PathBuf>,
     pub expected: String,
     pub observed: String,
     pub phase: String,
     pub direction: MigrationConflictDirection,
+    #[serde(with = "crate::portable_wire_path::relative::option")]
     pub preserved_artifact: Option<PathBuf>,
 }
 
@@ -1622,6 +1653,7 @@ impl MigrationExecution {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SourceFile {
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
     bytes: u64,
     sha256: String,
@@ -1631,6 +1663,7 @@ struct SourceFile {
 struct MigrationJournal {
     protocol_version: String,
     id: String,
+    #[serde(with = "crate::portable_wire_path::display")]
     root: PathBuf,
     state: MigrationState,
     approval_digest: String,
@@ -1650,6 +1683,7 @@ struct MigrationJournal {
     materialized_folderbases: Vec<MaterializedFolderbase>,
     #[serde(default)]
     materialized_workspace: Option<MaterializedWorkspace>,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     created_paths: Vec<PathBuf>,
     completed_operations: usize,
     in_flight_operation: Option<usize>,
@@ -1672,7 +1706,9 @@ struct SourceInventory {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SourceTopologySnapshot {
     version: String,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     files: Vec<PathBuf>,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     reconstructable_trees: Vec<PathBuf>,
     nested_folderbases: Vec<NestedFolderbaseBoundary>,
 }
@@ -1680,12 +1716,15 @@ struct SourceTopologySnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct MaterializedFolderbase {
     target_id: String,
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
     folderbase_id: String,
     name: String,
     template_reference: String,
     state: MaterializationState,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     created_directories: Vec<PathBuf>,
+    #[serde(with = "crate::portable_wire_path::relative::map")]
     created_files: BTreeMap<PathBuf, String>,
 }
 
@@ -1698,11 +1737,13 @@ enum MaterializationState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct MaterializedWorkspace {
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
     workspace_id: String,
     name: String,
     state: MaterializationState,
     folderbases: Vec<WorkspaceFolderbaseLink>,
+    #[serde(with = "crate::portable_wire_path::relative::map")]
     created_files: BTreeMap<PathBuf, String>,
 }
 
@@ -1710,6 +1751,7 @@ struct MaterializedWorkspace {
 struct WorkspaceFolderbaseLink {
     folderbase_id: String,
     label: String,
+    #[serde(with = "crate::portable_wire_path::relative")]
     path: PathBuf,
 }
 
@@ -1764,6 +1806,7 @@ struct AssignmentGroupMember {
 struct GroupedAssignmentContract {
     question_id: String,
     rule_version: String,
+    #[serde(with = "crate::portable_wire_path::relative_or_current")]
     source_root: PathBuf,
     members: Vec<GroupedAssignmentMemberContract>,
     content_kind: MigrationContentKind,
@@ -1774,6 +1817,7 @@ struct GroupedAssignmentContract {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct GroupedAssignmentMemberContract {
+    #[serde(with = "crate::portable_wire_path::relative")]
     source_path: PathBuf,
     source_kind: AssignmentSourceKind,
 }
@@ -1792,7 +1836,9 @@ struct ExpandedReconstructableTreesExtension {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ExpandedReconstructableTreeMembership {
+    #[serde(with = "crate::portable_wire_path::relative")]
     source_root: PathBuf,
+    #[serde(with = "crate::portable_wire_path::relative::vec")]
     source_paths: Vec<PathBuf>,
 }
 
@@ -1863,7 +1909,7 @@ pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
             MigrationTargetKind::RetainedFolder | MigrationTargetKind::Exclusion => unreachable!(),
         };
         proposed_targets.push(MigrationTarget {
-            id: stable_path_id(suggested_prefix, &boundary.path),
+            id: stable_path_id(suggested_prefix, &boundary.path)?,
             kind: suggested_kind,
             path: boundary.path.clone(),
             suggested_name: boundary.suggested_name.clone(),
@@ -1871,7 +1917,7 @@ pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
         });
         if suggested_kind != MigrationTargetKind::Folderbase {
             proposed_targets.push(MigrationTarget {
-                id: stable_path_id("target_folderbase", &boundary.path),
+                id: stable_path_id("target_folderbase", &boundary.path)?,
                 kind: MigrationTargetKind::Folderbase,
                 path: boundary.path.clone(),
                 suggested_name: boundary.suggested_name.clone(),
@@ -1903,7 +1949,7 @@ pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
         &files,
         &folder.reconstructable_trees,
         &folder.nested_folderbases,
-    );
+    )?;
     let total_bytes = folder.inventory.total_bytes;
     let captured_at = fs::metadata(&root)
         .and_then(|metadata| metadata.modified())
@@ -1974,7 +2020,7 @@ pub fn analyze_migration(root: impl AsRef<Path>) -> Result<MigrationAnalysis> {
         &files,
         &folder.reconstructable_trees,
         &proposed_targets,
-    ));
+    )?);
 
     Ok(MigrationAnalysis {
         id: format!("analysis_{inventory_digest}"),
@@ -2017,7 +2063,7 @@ pub fn plan_migration(
         &refreshed.files,
         &refreshed.reconstructable_trees,
         &refreshed.nested_folderbases,
-    );
+    )?;
     if refreshed_digest != analysis.inventory_digest {
         return Err(FolderbaseError::MigrationSourceChanged(
             analysis.root.clone(),
@@ -2305,7 +2351,7 @@ pub fn plan_migration(
             .map_err(|source| FolderbaseError::json(&analysis.root, source))?,
         );
     }
-    let source_inventory_digest = inventory_digest(&source_files);
+    let source_inventory_digest = inventory_digest(&source_files)?;
     let plan = MigrationPlan {
         protocol_version: "0.2.0".to_owned(),
         id: format!("migration_{}", Uuid::now_v7()),
@@ -11382,8 +11428,8 @@ fn refuse_tracked_move_path_in(filesystem: &MigrationFilesystem, path: &Path) ->
                 "tracked object record is missing its path",
             ));
         };
-        if Path::new(stored) == path || stored.eq_ignore_ascii_case(path.to_string_lossy().as_ref())
-        {
+        let portable_path = portable_migration_wire_path(path)?;
+        if stored.eq_ignore_ascii_case(&portable_path) {
             return Err(FolderbaseError::InvalidRecord {
                 path: path.to_path_buf(),
                 message: "ordinary moves cannot relocate a version-tracked object".to_owned(),
@@ -11885,7 +11931,7 @@ fn validate_plan(
         || plan.id != migration_id
         || plan.root != root
         || plan.source_inventory.algorithm != "sha256"
-        || inventory_digest(&plan.source_inventory.files) != plan.source_inventory.digest
+        || inventory_digest(&plan.source_inventory.files)? != plan.source_inventory.digest
         || !matches!(
             plan.state,
             MigrationState::Proposed
@@ -12146,7 +12192,7 @@ fn validate_grouped_assignments_extension(plan_path: &Path, plan: &MigrationPlan
             });
         }
         let digest =
-            assignment_group_coverage_digest(&group.source_root, group.content_kind, &members);
+            assignment_group_coverage_digest(&group.source_root, group.content_kind, &members)?;
         if group.coverage_digest != digest
             || group.question_id != format!("question_assignment_group_{digest}")
         {
@@ -12399,7 +12445,7 @@ fn required_expanded_reconstructable_roots(
     }
 
     for source_root in &source_topology.reconstructable_trees {
-        let question_id = stable_path_id("question_assignment", source_root);
+        let question_id = stable_path_id("question_assignment", source_root)?;
         let answer = plan
             .answers
             .iter()
@@ -12561,9 +12607,27 @@ fn humanize_name(name: &str) -> String {
         .join(" ")
 }
 
-fn stable_path_id(prefix: &str, path: &Path) -> String {
-    let digest = Sha256::digest(path.to_string_lossy().as_bytes());
-    format!("{prefix}_{digest:x}")
+fn portable_migration_wire_path(path: &Path) -> Result<String> {
+    crate::portable_wire_path::relative_to_wire(path).map_err(|message| {
+        FolderbaseError::InvalidRecord {
+            path: path.to_path_buf(),
+            message: message.to_owned(),
+        }
+    })
+}
+
+fn portable_migration_wire_scope(path: &Path) -> Result<String> {
+    if path == Path::new(".") {
+        Ok(".".to_owned())
+    } else {
+        portable_migration_wire_path(path)
+    }
+}
+
+fn stable_path_id(prefix: &str, path: &Path) -> Result<String> {
+    let portable = portable_migration_wire_path(path)?;
+    let digest = Sha256::digest(portable.as_bytes());
+    Ok(format!("{prefix}_{digest:x}"))
 }
 
 fn portable_path_key(path: &Path) -> PathBuf {
@@ -12604,7 +12668,7 @@ fn assignment_questions(
     files: &[AnalyzedFile],
     reconstructable_trees: &[ReconstructableTree],
     targets: &[MigrationTarget],
-) -> Vec<MigrationQuestion> {
+) -> Result<Vec<MigrationQuestion>> {
     let mut assignments = files
         .iter()
         .map(|file| {
@@ -12675,13 +12739,13 @@ fn assignment_group_question(
     members: Vec<AssignmentGroupMember>,
     content_kind: MigrationContentKind,
     targets: &[MigrationTarget],
-) -> MigrationQuestion {
-    let coverage_digest = assignment_group_coverage_digest(source_root, content_kind, &members);
+) -> Result<MigrationQuestion> {
+    let coverage_digest = assignment_group_coverage_digest(source_root, content_kind, &members)?;
     let source_paths = members
         .into_iter()
         .map(|member| member.path)
         .collect::<Vec<_>>();
-    let mut question = assignment_question(&source_paths[0], content_kind, targets);
+    let mut question = assignment_question(&source_paths[0], content_kind, targets)?;
     question.id = format!("question_assignment_group_{coverage_digest}");
     question.prompt = format!(
         "Choose an explicit destination for {} grouped items under `{}`.",
@@ -12697,14 +12761,14 @@ fn assignment_group_question(
         content_kind,
         coverage_digest,
     };
-    question
+    Ok(question)
 }
 
 fn assignment_group_coverage_digest(
     source_root: &Path,
     content_kind: MigrationContentKind,
     members: &[AssignmentGroupMember],
-) -> String {
+) -> Result<String> {
     fn update_field(hasher: &mut Sha256, value: &[u8]) {
         hasher.update((value.len() as u64).to_le_bytes());
         hasher.update(value);
@@ -12712,7 +12776,10 @@ fn assignment_group_coverage_digest(
 
     let mut hasher = Sha256::new();
     update_field(&mut hasher, ASSIGNMENT_GROUP_RULE_VERSION.as_bytes());
-    update_field(&mut hasher, source_root.as_os_str().as_encoded_bytes());
+    update_field(
+        &mut hasher,
+        portable_migration_wire_scope(source_root)?.as_bytes(),
+    );
     update_field(
         &mut hasher,
         match content_kind {
@@ -12730,16 +12797,19 @@ fn assignment_group_coverage_digest(
                 AssignmentSourceKind::ReconstructableTree => b"reconstructable_tree",
             },
         );
-        update_field(&mut hasher, member.path.as_os_str().as_encoded_bytes());
+        update_field(
+            &mut hasher,
+            portable_migration_wire_path(&member.path)?.as_bytes(),
+        );
     }
-    format!("{:x}", hasher.finalize())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn assignment_question(
     source_path: &Path,
     content_kind: MigrationContentKind,
     targets: &[MigrationTarget],
-) -> MigrationQuestion {
+) -> Result<MigrationQuestion> {
     let accepted_kinds: &[MigrationTargetKind] = match content_kind {
         MigrationContentKind::Canonical => &[
             MigrationTargetKind::Folderbase,
@@ -12782,8 +12852,8 @@ fn assignment_question(
     }
     .to_owned();
 
-    MigrationQuestion {
-        id: stable_path_id("question_assignment", source_path),
+    Ok(MigrationQuestion {
+        id: stable_path_id("question_assignment", source_path)?,
         prompt: format!(
             "Choose an explicit destination for `{}`.",
             source_path.display()
@@ -12796,7 +12866,7 @@ fn assignment_question(
         },
         options,
         recommended_option_id,
-    }
+    })
 }
 
 fn safe_boundary_name(name: &str) -> String {
@@ -12826,7 +12896,7 @@ fn validate_answers(
         &analysis.files,
         &analysis.reconstructable_trees,
         &analysis.proposed_targets,
-    );
+    )?;
     let actual_assignment_questions = analysis
         .questions
         .iter()
@@ -12969,7 +13039,7 @@ fn validate_answers(
                         },
                     })
                     .collect::<Vec<_>>();
-                if assignment_group_coverage_digest(source_root, *content_kind, &members)
+                if assignment_group_coverage_digest(source_root, *content_kind, &members)?
                     != *coverage_digest
                 {
                     return Err(FolderbaseError::InvalidRecord {
@@ -13147,27 +13217,29 @@ fn validate_answers(
     })
 }
 
-fn inventory_digest(files: &[SourceFile]) -> String {
+fn inventory_digest(files: &[SourceFile]) -> Result<String> {
     let mut hasher = Sha256::new();
     for file in files {
-        hasher.update(file.path.to_string_lossy().as_bytes());
+        let portable = portable_migration_wire_path(&file.path)?;
+        hasher.update(portable.as_bytes());
         hasher.update([0]);
         hasher.update(file.bytes.to_le_bytes());
         hasher.update([0]);
         hasher.update(file.sha256.as_bytes());
         hasher.update([b'\n']);
     }
-    format!("{:x}", hasher.finalize())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn metadata_inventory_digest(
     files: &[AnalyzedFile],
     reconstructable_trees: &[ReconstructableTree],
     nested_folderbases: &[NestedFolderbaseBoundary],
-) -> String {
+) -> Result<String> {
     let mut hasher = Sha256::new();
     for file in files {
-        hasher.update(file.path.to_string_lossy().as_bytes());
+        let portable = portable_migration_wire_path(&file.path)?;
+        hasher.update(portable.as_bytes());
         hasher.update([0]);
         hasher.update(file.bytes.to_le_bytes());
         hasher.update([0]);
@@ -13176,15 +13248,17 @@ fn metadata_inventory_digest(
     }
     for tree in reconstructable_trees {
         hasher.update(b"reconstructable:");
-        hasher.update(tree.path.to_string_lossy().as_bytes());
+        let portable = portable_migration_wire_path(&tree.path)?;
+        hasher.update(portable.as_bytes());
         hasher.update([b'\n']);
     }
     for boundary in nested_folderbases {
         hasher.update(b"nested:");
-        hasher.update(boundary.path.to_string_lossy().as_bytes());
+        let portable = portable_migration_wire_path(&boundary.path)?;
+        hasher.update(portable.as_bytes());
         hasher.update([boundary.state as u8, b'\n']);
     }
-    format!("{:x}", hasher.finalize())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn additive_destination_roots(operations: &[MigrationOperation]) -> Vec<PathBuf> {
@@ -13355,7 +13429,7 @@ fn verify_source_files(plan: &MigrationPlan) -> Result<()> {
         }
         current.push(file.clone());
     }
-    if inventory_digest(&current) != plan.source_inventory.digest {
+    if inventory_digest(&current)? != plan.source_inventory.digest {
         return Err(FolderbaseError::MigrationSourceChanged(plan.root.clone()));
     }
     Ok(())
@@ -13377,7 +13451,7 @@ fn verify_source_files_in(filesystem: &MigrationFilesystem, plan: &MigrationPlan
         }
         current.push(file.clone());
     }
-    if inventory_digest(&current) != plan.source_inventory.digest {
+    if inventory_digest(&current)? != plan.source_inventory.digest {
         return Err(FolderbaseError::MigrationSourceChanged(
             filesystem.display_root().to_path_buf(),
         ));
