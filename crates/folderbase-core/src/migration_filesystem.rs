@@ -386,32 +386,10 @@ impl VerifiedPrivateDirectory {
         &self,
         name: &OsStr,
     ) -> Result<(MigrationRegularFact, String)> {
-        #[cfg(target_os = "linux")]
-        let trace_claim = self
-            .display
-            .to_string_lossy()
-            .contains("transaction-v1/claims")
-            && name.to_string_lossy().contains("00000000.publish.claim");
-        #[cfg(target_os = "linux")]
-        if trace_claim {
-            eprintln!("[DEBUG-fb41h-fact] before open");
-        }
         let (mut file, metadata, display) = self.open_regular_relaxed(name)?;
-        #[cfg(target_os = "linux")]
-        if trace_claim {
-            eprintln!("[DEBUG-fb41h-fact] after open");
-        }
         let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        #[cfg(target_os = "linux")]
-        if trace_claim {
-            eprintln!("[DEBUG-fb41h-fact] after identity");
-        }
         let link_count = private_regular_link_count(&file, &metadata, &display)?;
-        #[cfg(target_os = "linux")]
-        if trace_claim {
-            eprintln!("[DEBUG-fb41h-fact] after link count");
-        }
         let mut digest = Sha256::new();
         let mut observed = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
@@ -427,17 +405,9 @@ impl VerifiedPrivateDirectory {
                 .checked_add(read as u64)
                 .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
         }
-        #[cfg(target_os = "linux")]
-        if trace_claim {
-            eprintln!("[DEBUG-fb41h-fact] after read");
-        }
         let final_metadata = file
             .metadata()
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        #[cfg(target_os = "linux")]
-        if trace_claim {
-            eprintln!("[DEBUG-fb41h-fact] after final metadata");
-        }
         let observed_sha256 = format!("{:x}", digest.finalize());
         if observed != metadata.len()
             || final_metadata.len() != metadata.len()
@@ -2022,21 +1992,13 @@ impl MigrationFilesystem {
         expected_sha256: &str,
         expected_bytes: u64,
     ) -> Result<MigrationRegularFact> {
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] before destination reverify");
         destination_parent.reverify()?;
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] before source fact");
         let claim = source.relaxed_regular_fact(source_name, expected_sha256)?;
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] after source fact");
         if claim.physical_identity_sha256 != expected_identity || claim.bytes != expected_bytes {
             return Err(FolderbaseError::MigrationVerificationFailed(
                 source.display.join(source_name),
             ));
         }
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] before visible precheck");
         match visible_regular_fact_from_parent(
             &destination_parent.directory,
             &destination_parent.display,
@@ -2058,8 +2020,6 @@ impl MigrationFilesystem {
                 if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] before visible hard_link");
         source
             .directory
             .hard_link(source_name, &destination_parent.directory, destination_name)
@@ -2072,17 +2032,11 @@ impl MigrationFilesystem {
                     FolderbaseError::io(destination_parent.display.join(destination_name), error)
                 }
             })?;
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] after visible hard_link");
         sync_directory(
             &destination_parent.directory,
             &destination_parent.display.join(destination_name),
         )?;
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] after visible sync");
         destination_parent.reverify()?;
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] before visible postcheck");
         let current = visible_regular_fact_from_parent(
             &destination_parent.directory,
             &destination_parent.display,
@@ -2095,8 +2049,6 @@ impl MigrationFilesystem {
                 destination_parent.display.join(destination_name),
             ));
         }
-        #[cfg(target_os = "linux")]
-        eprintln!("[DEBUG-fb41h-publish] after visible postcheck");
         Ok(current)
     }
 
@@ -2503,8 +2455,6 @@ fn install_prepared_private_claim(
     expected_bytes: u64,
 ) -> Result<MigrationRegularFact> {
     let destination_display = destination.display.join(destination_name);
-    #[cfg(target_os = "linux")]
-    eprintln!("[DEBUG-fb41h-claim] before hard_link");
     match destination
         .directory
         .hard_link(preparing_name, &destination.directory, destination_name)
@@ -2520,18 +2470,12 @@ fn install_prepared_private_claim(
         }
         Err(source) => return Err(FolderbaseError::io(&destination_display, source)),
     }
-    #[cfg(target_os = "linux")]
-    eprintln!("[DEBUG-fb41h-claim] after hard_link");
     remove_private_regular_if_present(
         destination,
         preparing_name,
         &destination.display.join(preparing_name),
     )?;
-    #[cfg(target_os = "linux")]
-    eprintln!("[DEBUG-fb41h-claim] after preparing removal");
     let fact = destination.relaxed_regular_fact(destination_name, expected_sha256)?;
-    #[cfg(target_os = "linux")]
-    eprintln!("[DEBUG-fb41h-claim] after final verification");
     if fact.bytes != expected_bytes {
         return Err(FolderbaseError::MigrationVerificationFailed(
             destination_display,
