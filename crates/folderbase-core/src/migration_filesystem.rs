@@ -1992,13 +1992,21 @@ impl MigrationFilesystem {
         expected_sha256: &str,
         expected_bytes: u64,
     ) -> Result<MigrationRegularFact> {
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] before destination reverify");
         destination_parent.reverify()?;
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] before source fact");
         let claim = source.relaxed_regular_fact(source_name, expected_sha256)?;
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] after source fact");
         if claim.physical_identity_sha256 != expected_identity || claim.bytes != expected_bytes {
             return Err(FolderbaseError::MigrationVerificationFailed(
                 source.display.join(source_name),
             ));
         }
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] before visible precheck");
         match visible_regular_fact_from_parent(
             &destination_parent.directory,
             &destination_parent.display,
@@ -2020,6 +2028,8 @@ impl MigrationFilesystem {
                 if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] before visible hard_link");
         source
             .directory
             .hard_link(source_name, &destination_parent.directory, destination_name)
@@ -2032,11 +2042,17 @@ impl MigrationFilesystem {
                     FolderbaseError::io(destination_parent.display.join(destination_name), error)
                 }
             })?;
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] after visible hard_link");
         sync_directory(
             &destination_parent.directory,
             &destination_parent.display.join(destination_name),
         )?;
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] after visible sync");
         destination_parent.reverify()?;
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] before visible postcheck");
         let current = visible_regular_fact_from_parent(
             &destination_parent.directory,
             &destination_parent.display,
@@ -2049,6 +2065,8 @@ impl MigrationFilesystem {
                 destination_parent.display.join(destination_name),
             ));
         }
+        #[cfg(target_os = "linux")]
+        eprintln!("[DEBUG-fb41h-publish] after visible postcheck");
         Ok(current)
     }
 
