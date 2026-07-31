@@ -1,4 +1,4 @@
-# ADR-0006: Distribute native Core through thin installers
+# ADR-0008: Distribute native Core through thin installers
 
 ## Status
 
