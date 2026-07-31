@@ -283,10 +283,12 @@ Regular files have no portable executable bit and therefore observe
 `executable: false`; directories are inherently traversable and observe
 `executable: true`. Core never synthesizes Unix mode bits on Windows. When an
 exact retained directory needs a narrower right such as `FILE_WRITE_ATTRIBUTES`
-or the documented `FILE_TRAVERSE | FILE_READ_ATTRIBUTES` destination-directory
-authority for a no-replace rename, Core reopens that same object with
-`ReOpenFile`, revalidates that it is a non-reparse directory, and closes the
-elevated handle after the leaf operation. The rename buffer uses the complete
+or destination-entry creation plus traverse/read-attribute authority for a
+no-replace rename, Core reopens that same object with `ReOpenFile`, revalidates
+that it is a non-reparse directory, and closes the elevated handle after the
+leaf operation. File and directory moves request the closed union of the
+`FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, `FILE_TRAVERSE`, and
+`FILE_READ_ATTRIBUTES` rights. The rename buffer uses the complete
 `FILE_RENAME_INFO` structure size plus the filename bytes. Core does not recover
 those rights by reopening `.` or an ambient pathname.
 

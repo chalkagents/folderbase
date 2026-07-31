@@ -476,6 +476,7 @@ impl VerifiedPrivateDirectory {
     ) -> Result<()> {
         let display = self.display.join(name);
         self.exact_regular_fact(name, expected)?;
+        reject_windows_reparse(&self.directory, name, &display)?;
         self.directory
             .remove_file(name)
             .map_err(|source| FolderbaseError::io(&display, source))?;
@@ -907,7 +908,10 @@ impl MigrationFilesystem {
         };
         let display = self.display(relative);
         match parent.symlink_metadata(&name) {
-            Ok(metadata) => Ok(Some(metadata)),
+            Ok(metadata) => {
+                reject_windows_reparse(&parent, &name, &display)?;
+                Ok(Some(metadata))
+            }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(source) => Err(FolderbaseError::io(display, source)),
         }
@@ -1709,6 +1713,7 @@ impl MigrationFilesystem {
                         FolderbaseError::io(&destination_display, error)
                     }
                 })?;
+            reject_windows_reparse(&destination.directory, &temporary, &destination_display)?;
             destination
                 .directory
                 .remove_file(&temporary)
@@ -1718,7 +1723,10 @@ impl MigrationFilesystem {
                 .regular_fact(destination_name, expected_sha256)
                 .map(|_| ())
         })();
-        if result.is_err() {
+        if result.is_err()
+            && reject_windows_reparse(&destination.directory, &temporary, &destination_display)
+                .is_ok()
+        {
             let _ = destination.directory.remove_file(&temporary);
         }
         result.map(|()| source_fact)
@@ -2134,12 +2142,13 @@ impl MigrationFilesystem {
                         FolderbaseError::io(&display, source)
                     }
                 })?;
+            reject_windows_reparse(&parent, &temporary, &display)?;
             parent
                 .remove_file(&temporary)
                 .map_err(|source| FolderbaseError::io(&display, source))?;
             sync_directory(&parent, &display)
         })();
-        if result.is_err() {
+        if result.is_err() && reject_windows_reparse(&parent, &temporary, &display).is_ok() {
             let _ = parent.remove_file(&temporary);
         }
         result
@@ -2151,6 +2160,7 @@ impl MigrationFilesystem {
         let metadata = parent
             .symlink_metadata(&name)
             .map_err(|source| FolderbaseError::io(&display, source))?;
+        reject_windows_reparse(&parent, &name, &display)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(FolderbaseError::UnsafePath(display));
         }
@@ -2175,7 +2185,7 @@ impl MigrationFilesystem {
                 .map_err(|source| FolderbaseError::io(&display, source))?;
             sync_directory(&parent, &display)
         })();
-        if result.is_err() {
+        if result.is_err() && reject_windows_reparse(&parent, &temporary, &display).is_ok() {
             let _ = parent.remove_file(&temporary);
         }
         result
@@ -2200,6 +2210,7 @@ impl MigrationFilesystem {
     pub(crate) fn remove_file(&self, relative: &Path) -> Result<()> {
         let (parent, name) = self.open_parent(relative)?;
         let display = self.display(relative);
+        reject_windows_reparse(&parent, &name, &display)?;
         parent
             .remove_file(&name)
             .map_err(|source| FolderbaseError::io(&display, source))?;
@@ -2209,6 +2220,15 @@ impl MigrationFilesystem {
     pub(crate) fn remove_file_if_present(&self, relative: &Path) -> Result<()> {
         let (parent, name) = self.open_parent(relative)?;
         let display = self.display(relative);
+        match reject_windows_reparse(&parent, &name, &display) {
+            Ok(()) => {}
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
         match parent.remove_file(&name) {
             Ok(()) => sync_directory(&parent, &display),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -2414,6 +2434,7 @@ fn remove_private_regular_if_present(
 ) -> Result<()> {
     match directory.directory.symlink_metadata(name) {
         Ok(metadata) => {
+            reject_windows_reparse(&directory.directory, name, display)?;
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
             }
@@ -2643,6 +2664,18 @@ fn nofollow_regular_read_options() -> OpenOptions {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
     options
+}
+
+fn reject_windows_reparse(parent: &Dir, name: &OsStr, display: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if windows_entry_is_reparse(parent, name, display)? {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (parent, name, display);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -3127,9 +3160,10 @@ fn rename_noreplace(
     use windows_sys::Win32::{
         Foundation::HANDLE,
         Storage::FileSystem::{
-            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-            FileRenameInfo, SetFileInformationByHandle,
+            DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileRenameInfo,
+            SetFileInformationByHandle,
         },
     };
 
@@ -3161,7 +3195,7 @@ fn rename_noreplace(
     }
     let destination_directory = reopen_windows_directory_with_access(
         destination_parent,
-        FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
     )?;
 
     let file_name_bytes = destination_utf16
@@ -3318,11 +3352,15 @@ fn sync_directory(_directory: &Dir, _display: &Path) -> Result<()> {
 
 #[cfg(all(test, windows))]
 mod windows_directory_fidelity_tests {
-    use std::{ffi::OsStr, fs};
+    use std::{ffi::OsStr, fs, path::Path};
 
     use cap_std::{ambient_authority, fs::Dir};
 
-    use super::{VerifiedPrivateDirectory, open_directory_nofollow, set_directory_fidelity};
+    use super::{
+        MigrationFilesystem, VerifiedPrivateDirectory, open_directory_nofollow,
+        remove_private_regular_if_present, set_directory_fidelity,
+    };
+    use crate::FolderbaseError;
 
     #[test]
     fn full_private_directory_claim_applies_and_validates_windows_fidelity() {
@@ -3344,6 +3382,85 @@ mod windows_directory_fidelity_tests {
             .expect("readonly transaction directory claim");
         assert!(readonly.read_only);
         assert!(readonly.unix_mode.is_none());
+    }
+
+    #[test]
+    fn private_cleanup_rejects_a_reparse_leaf_without_removing_it() {
+        use std::os::windows::fs::symlink_file;
+
+        let root = tempfile::tempdir().expect("temporary private root");
+        let foreign = tempfile::NamedTempFile::new().expect("foreign regular file");
+        fs::write(foreign.path(), b"foreign bytes\n").expect("foreign bytes");
+        let link = root.path().join("staged.claim");
+        symlink_file(foreign.path(), &link).expect("GitHub Windows runners permit file symlinks");
+        let private = VerifiedPrivateDirectory {
+            directory: Dir::open_ambient_dir(root.path(), ambient_authority())
+                .expect("retained private root"),
+            display: root.path().to_path_buf(),
+        };
+
+        assert!(matches!(
+            remove_private_regular_if_present(
+                &private,
+                OsStr::new("staged.claim"),
+                &link,
+            ),
+            Err(FolderbaseError::UnsafePath(path)) if path == link
+        ));
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("reparse leaf remains")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(foreign.path()).expect("foreign target remains"),
+            b"foreign bytes\n"
+        );
+    }
+
+    #[test]
+    fn raw_state_replace_and_remove_helpers_reject_reparse_leaves() {
+        use std::os::windows::fs::symlink_file;
+
+        let root = tempfile::tempdir().expect("temporary retained root");
+        let foreign = tempfile::NamedTempFile::new().expect("foreign regular file");
+        fs::write(foreign.path(), b"foreign bytes\n").expect("foreign bytes");
+        let filesystem = MigrationFilesystem {
+            root: Dir::open_ambient_dir(root.path(), ambient_authority())
+                .expect("retained migration root"),
+            display_root: root.path().to_path_buf(),
+        };
+
+        for (name, operation) in [
+            ("replace.link", 0_u8),
+            ("remove.link", 1_u8),
+            ("remove-if-present.link", 2_u8),
+        ] {
+            let link = root.path().join(name);
+            symlink_file(foreign.path(), &link)
+                .expect("GitHub Windows runners permit file symlinks");
+            let result = match operation {
+                0 => filesystem.replace(Path::new(name), b"replacement\n"),
+                1 => filesystem.remove_file(Path::new(name)),
+                2 => filesystem.remove_file_if_present(Path::new(name)),
+                _ => unreachable!("closed operation fixture"),
+            };
+            assert!(matches!(
+                result,
+                Err(FolderbaseError::UnsafePath(path)) if path == link
+            ));
+            assert!(
+                fs::symlink_metadata(&link)
+                    .expect("reparse leaf remains")
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        assert_eq!(
+            fs::read(foreign.path()).expect("foreign target remains"),
+            b"foreign bytes\n"
+        );
     }
 
     #[test]

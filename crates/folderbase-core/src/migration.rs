@@ -3851,8 +3851,8 @@ fn regular_fact_matches_program(
         Err(error) => return Err(error),
     };
     let fidelity = transaction_v1::ProgramFidelityV1 {
-        read_only: fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0),
-        executable: fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0),
+        read_only: fact.read_only,
+        executable: regular_fact_executable(&fact),
     };
     if fact.bytes == expected_bytes
         && expected_identity.is_none_or(|identity| identity == fact.physical_identity_sha256)
@@ -4344,8 +4344,8 @@ fn apply_transaction_v1_step(
         ));
         validate_parents()?;
         let fact = filesystem.directory_fact(target.path)?;
-        let read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
-        let executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
+        let read_only = fact.read_only;
+        let executable = directory_fact_executable(&fact);
         if fact.physical_identity_sha256 != expected_identity
             || read_only != fidelity.read_only
             || executable != fidelity.executable
@@ -5789,12 +5789,12 @@ fn private_directory_fact_if_present(
     }
 }
 
-fn fact_read_only(unix_mode: Option<u32>) -> bool {
-    unix_mode.is_some_and(|mode| mode & 0o222 == 0)
+fn regular_fact_executable(fact: &MigrationRegularFact) -> bool {
+    fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0)
 }
 
-fn fact_executable(unix_mode: Option<u32>) -> bool {
-    unix_mode.is_some_and(|mode| mode & 0o111 != 0)
+fn directory_fact_executable(fact: &crate::migration_filesystem::MigrationDirectoryFact) -> bool {
+    fact.unix_mode.is_none_or(|mode| mode & 0o111 != 0)
 }
 
 fn require_move_abort_fact_shape(
@@ -5804,8 +5804,8 @@ fn require_move_abort_fact_shape(
     fact: &MigrationRegularFact,
     source: transaction_v1::ProgramBoundRegularV1<'_>,
 ) -> Result<()> {
-    let read_only = fact.unix_mode.is_some_and(|mode| mode & 0o222 == 0);
-    let executable = fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0);
+    let read_only = fact.read_only;
+    let executable = regular_fact_executable(fact);
     if fact.physical_identity_sha256 != source.physical_identity_sha256
         || fact.device_sha256 != source.device_sha256
         || fact.bytes != source.bytes
@@ -6434,8 +6434,8 @@ fn abort_transaction_v1_in_flight_apply(
                 let exact = ExactDirectoryLeaf {
                     physical_identity_sha256: &claim.physical_identity_sha256,
                     device_sha256: &claim.device_sha256,
-                    read_only: fact_read_only(claim.unix_mode),
-                    executable: fact_executable(claim.unix_mode),
+                    read_only: claim.read_only,
+                    executable: directory_fact_executable(&claim),
                 };
                 if exact.device_sha256 != target.device_sha256
                     || exact.read_only != fidelity.read_only
@@ -6498,8 +6498,8 @@ fn abort_transaction_v1_in_flight_apply(
             let require_publish_shape = |fact: &MigrationRegularFact, link_count: u64| {
                 if fact.device_sha256 != target.device_sha256
                     || fact.bytes != image.bytes
-                    || fact_read_only(fact.unix_mode) != image.fidelity.read_only
-                    || fact_executable(fact.unix_mode) != image.fidelity.executable
+                    || fact.read_only != image.fidelity.read_only
+                    || regular_fact_executable(fact) != image.fidelity.executable
                     || fact.link_count != link_count
                 {
                     return Err(FolderbaseError::MigrationVerificationFailed(
