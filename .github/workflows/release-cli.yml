@@ -49,7 +49,8 @@ jobs:
       - name: Check out the exact native Core tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
           path: native-source
 
       - name: Install Rust toolchain
@@ -57,7 +58,7 @@ jobs:
         with:
           toolchain: 1.96.0
 
-      - name: Require tag and package versions to agree
+      - name: Verify the canonical remote tag and package versions
         shell: bash
         run: |
           release_version="${RELEASE_TAG#v}"
@@ -65,9 +66,22 @@ jobs:
             cargo metadata --manifest-path native-source/Cargo.toml --format-version 1 --no-deps |
               jq -r '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace package versions differ") end'
           )"
-          npm_version="$(node -p "require('./packages/npm-cli/package.json').version")"
+          npm_version="$(jq -r '.version' packages/npm-cli/package.json)"
+          canonical_tag="v${package_version}"
+          test "$RELEASE_TAG" = "$canonical_tag"
           test "$release_version" = "$package_version"
           test "$release_version" = "$npm_version"
+          remote_tag_object="$(
+            git -C native-source ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          remote_tag_commit="$(
+            git -C native-source ls-remote --tags origin "refs/tags/${RELEASE_TAG}^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          remote_tag_commit="${remote_tag_commit:-$remote_tag_object}"
+          checked_out_commit="$(git -C native-source rev-parse HEAD)"
+          test "$checked_out_commit" = "$remote_tag_commit"
 
       - name: Build the native CLI
         run: |
@@ -84,6 +98,13 @@ jobs:
           release_version="${RELEASE_TAG#v}"
           binary="native-source/target/${{ matrix.target }}/release/folderbase"
           test "$("$binary" --version)" = "folderbase $release_version"
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          printf 'release smoke\n' > "$smoke_root/ordinary-file.txt"
+          "$binary" inspect "$smoke_root" --json
+          "$binary" init "$smoke_root" --name "Release Smoke" --json
+          "$binary" validate "$smoke_root" --json
+          test -f "$smoke_root/.folderbase/manifest.json"
           mkdir -p dist
           install -m 0755 \
             "$binary" \
@@ -118,6 +139,28 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      - name: Verify the canonical package tag
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./packages/npm-cli/package.json').version")"
+          canonical_tag="v${package_version}"
+          test "$RELEASE_TAG" = "$canonical_tag"
+
+      - name: Select stable or prerelease publication channels
+        id: release-metadata
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./packages/npm-cli/package.json').version")"
+          if [[ "$package_version" == *-* ]]; then
+            github_prerelease=true
+            npm_dist_tag=next
+          else
+            github_prerelease=false
+            npm_dist_tag=latest
+          fi
+          echo "github_prerelease=$github_prerelease" >> "$GITHUB_OUTPUT"
+          echo "npm_dist_tag=$npm_dist_tag" >> "$GITHUB_OUTPUT"
+
       - name: Download native CLIs
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -151,9 +194,14 @@ jobs:
       - name: Publish GitHub release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_PRERELEASE: ${{ steps.release-metadata.outputs.github_prerelease }}
         shell: bash
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            existing_prerelease="$(
+              gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease'
+            )"
+            test "$existing_prerelease" = "$GITHUB_PRERELEASE"
             remote_assets="$(mktemp -d)"
             trap 'rm -rf "$remote_assets"' EXIT
             for asset in dist/*; do
@@ -172,18 +220,86 @@ jobs:
               fi
             done
           else
+            github_release_flags=()
+            if [[ "$GITHUB_PRERELEASE" == true ]]; then
+              github_release_flags+=(--prerelease --latest=false)
+            fi
             gh release create "$RELEASE_TAG" \
               dist/* \
               --generate-notes \
               --title "Folderbase Core $RELEASE_TAG" \
-              --verify-tag
+              --verify-tag \
+              "${github_release_flags[@]}"
           fi
 
       - name: Use an OIDC-capable npm client
         if: github.event_name == 'push' || inputs.publish_npm
         run: npm install --global npm@11.5.1
 
-      - name: Publish the public npm launcher
+      - name: Check immutable npm publication state
+        id: npm-publication
         if: github.event_name == 'push' || inputs.publish_npm
+        env:
+          NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
+        shell: bash
         working-directory: packages/npm-cli
-        run: npm publish --access public
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          package_spec="${package_name}@${package_version}"
+          local_integrity="$(
+            npm pack --dry-run --json |
+              node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input)[0].integrity));'
+          )"
+          view_error="$(mktemp)"
+          trap 'rm -f "$view_error"' EXIT
+          if published_metadata="$(
+            npm view "$package_spec" version dist.integrity --json 2>"$view_error"
+          )"; then
+            published_version="$(
+              printf '%s' "$published_metadata" |
+                node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).version || ""));'
+            )"
+            published_integrity="$(
+              printf '%s' "$published_metadata" |
+                node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input)["dist.integrity"] || ""));'
+            )"
+            if [[ "$published_version" != "$package_version" \
+              || -z "$published_integrity" \
+              || "$published_integrity" != "$local_integrity" ]]
+            then
+              echo "Published $package_spec does not match the exact release npm package." >&2
+              exit 1
+            fi
+
+            dist_tags="$(npm view "$package_name" dist-tags --json)"
+            selected_dist_tag_version="$(
+              printf '%s' "$dist_tags" |
+                NPM_DIST_TAG="$NPM_DIST_TAG" node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input)[process.env.NPM_DIST_TAG] || ""));'
+            )"
+            latest_version="$(
+              printf '%s' "$dist_tags" |
+                node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).latest || ""));'
+            )"
+            if [[ "$selected_dist_tag_version" != "$package_version" \
+              || ( "$NPM_DIST_TAG" != latest && "$latest_version" == "$package_version" ) ]]
+            then
+              echo "Published $package_spec does not have the required $NPM_DIST_TAG channel state." >&2
+              exit 1
+            fi
+            echo "skip_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            if grep -Eq 'E404|404 Not Found' "$view_error"; then
+              echo "skip_publish=false" >> "$GITHUB_OUTPUT"
+            else
+              cat "$view_error" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Publish the public npm launcher
+        if: (github.event_name == 'push' || inputs.publish_npm) && steps.npm-publication.outputs.skip_publish != 'true'
+        env:
+          NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
+        working-directory: packages/npm-cli
+        run: npm publish --access public --tag "$NPM_DIST_TAG"
