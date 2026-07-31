@@ -1080,13 +1080,20 @@ fn open_root_capability(root: &Path) -> Result<OpenedRootCapability> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
 
         options
+            // Root initialization needs a stable namespace capability, not a
+            // readable stream. Requesting GENERIC_READ for a directory is
+            // rejected by valid Windows ACLs that still permit traversal and
+            // child creation. Attribute and identity queries work with zero
+            // desired access, while omitting delete sharing prevents the root
+            // from being detached beneath the retained capability.
+            .access_mode(0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
     let file = options
         .open(root)
