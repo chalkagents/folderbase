@@ -1,5 +1,3 @@
-#![cfg_attr(test, allow(dead_code))]
-
 mod transaction_v1;
 
 use std::{
@@ -1573,21 +1571,14 @@ impl MigrationExecution {
                     migration_id,
                     approval_digest,
                 },
-            ) => {
-                if let Some(outcome) = run_existing_transaction_v1_apply(
-                    display_root,
-                    migration_id,
-                    approval_digest,
-                    |_| {},
-                )? {
-                    return Ok(outcome);
-                }
-                let approved = ApprovedMigration::reopen(display_root, migration_id)?;
-                if approved.approval_digest != approval_digest {
-                    return Err(FolderbaseError::MigrationApprovalMismatch);
-                }
-                apply_transaction_v1_migration_outcome_with_hook(approved, |_| {})
-            }
+            ) => run_current_transaction_v1_apply_with_hooks(
+                display_root,
+                migration_id,
+                approval_digest,
+                || {},
+                |_| {},
+                |_| {},
+            ),
             (
                 RootClaim::Approved { approved_migration },
                 MigrationCommand::Apply {
@@ -2584,6 +2575,7 @@ enum TransactionV1Checkpoint {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StructuralRollbackCheckpoint {
     Started,
@@ -2649,21 +2641,14 @@ impl MigrationExecution {
                     migration_id,
                     approval_digest,
                 },
-            ) => {
-                if let Some(outcome) = run_existing_transaction_v1_apply(
-                    display_root,
-                    migration_id,
-                    approval_digest,
-                    |_| {},
-                )? {
-                    return Ok(outcome);
-                }
-                let approved = ApprovedMigration::reopen(display_root, migration_id)?;
-                if approved.approval_digest != approval_digest {
-                    return Err(FolderbaseError::MigrationApprovalMismatch);
-                }
-                apply_transaction_v1_migration_outcome_with_hook(approved, checkpoint)
-            }
+            ) => run_current_transaction_v1_apply_with_hooks(
+                display_root,
+                migration_id,
+                approval_digest,
+                || {},
+                checkpoint,
+                |_| {},
+            ),
             (_, _) => Err(FolderbaseError::InvalidMigrationState {
                 expected: MigrationState::Approved.as_str(),
                 actual: "non_apply_command".to_owned(),
@@ -2705,6 +2690,26 @@ fn apply_transaction_v1_migration_outcome_with_hooks(
     let migration_filesystem =
         transaction_coordinator.migration_filesystem(&in_memory_plan.root)?;
     let execution_format = classify_execution_format(&migration_filesystem, &in_memory_plan.id)?;
+    apply_transaction_v1_migration_in_with_hooks(
+        &migration_filesystem,
+        &in_memory_plan.id,
+        &approved.approval_digest,
+        approved_root_identity.stable_sha256(),
+        execution_format,
+        checkpoint,
+        transaction_checkpoint,
+    )
+}
+
+fn apply_transaction_v1_migration_in_with_hooks(
+    migration_filesystem: &MigrationFilesystem,
+    migration_id: &str,
+    approval_digest: &str,
+    root_identity_sha256: String,
+    execution_format: ExecutionFormat,
+    mut checkpoint: impl FnMut(ApplyCheckpoint),
+    transaction_checkpoint: impl FnMut(TransactionV1Checkpoint),
+) -> Result<MigrationOutcome> {
     match execution_format {
         ExecutionFormat::None
         | ExecutionFormat::PrePreparedTransactionV1
@@ -2716,11 +2721,10 @@ fn apply_transaction_v1_migration_outcome_with_hooks(
             });
         }
     }
-    let mut plan = load_plan_from(&migration_filesystem, &in_memory_plan.id)?;
-    plan.root_identity = in_memory_plan.root_identity;
+    let plan = load_plan_from(migration_filesystem, migration_id)?;
     require_state(plan.state, MigrationState::Approved)?;
-    if plan.approval_digest.as_deref() != Some(approved.approval_digest.as_str())
-        || plan_digest(&plan)? != approved.approval_digest
+    if plan.approval_digest.as_deref() != Some(approval_digest)
+        || plan_digest(&plan)? != approval_digest
     {
         return Err(FolderbaseError::MigrationApprovalMismatch);
     }
@@ -2729,18 +2733,18 @@ fn apply_transaction_v1_migration_outcome_with_hooks(
         execution_format,
         ExecutionFormat::None | ExecutionFormat::PrePreparedTransactionV1
     ) {
-        verify_source_files_in(&migration_filesystem, &plan)?;
+        verify_source_files_in(migration_filesystem, &plan)?;
         if !is_structural_plan(&plan) {
-            verify_additive_source_topology_in(&migration_filesystem, &plan)?;
-            verify_expanded_reconstructable_trees_in(&migration_filesystem, &plan)?;
+            verify_additive_source_topology_in(migration_filesystem, &plan)?;
+            verify_expanded_reconstructable_trees_in(migration_filesystem, &plan)?;
         }
     }
     checkpoint(ApplyCheckpoint::MutationAuthorityBound);
     let mut transaction = prepare_transaction_v1(
-        &migration_filesystem,
+        migration_filesystem,
         &plan,
-        &approved.approval_digest,
-        approved_root_identity.stable_sha256(),
+        approval_digest,
+        root_identity_sha256,
     )?;
     checkpoint(ApplyCheckpoint::JournalPrepared);
     let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&plan.id);
@@ -2753,13 +2757,13 @@ fn apply_transaction_v1_migration_outcome_with_hooks(
         transaction_checkpoint(checkpoint);
     };
     let result = execute_transaction_v1_apply_with_hook(
-        &migration_filesystem,
+        migration_filesystem,
         &mut transaction,
         &mut tracked_checkpoint,
     )
     .map(MigrationOutcome::Applied);
     map_durable_transaction_v1_conflict(
-        &migration_filesystem,
+        migration_filesystem,
         &migration_root,
         &plan.id,
         result,
@@ -4798,10 +4802,11 @@ fn record_transaction_v1_conflict(
         | FolderbaseError::Json { path, .. } => Some(path),
         _ => None,
     };
-    if let Some(path) = observed_path
-        && !affected_paths.iter().any(|affected| affected == path)
+    if let Some(path) =
+        observed_path.and_then(|path| program_relative_conflict_path(filesystem, path))
+        && !affected_paths.iter().any(|affected| affected == &path)
     {
-        affected_paths.push(path.clone());
+        affected_paths.push(path);
     }
     let step = transaction.program.step(operation_index)?;
     let ordinary_paths = match step {
@@ -4928,6 +4933,19 @@ fn record_transaction_v1_conflict(
     append_transaction_v1_generation(filesystem, transaction, conflicted)?;
     reconcile_plan_terminal(filesystem, &transaction.program, MigrationState::Conflicted);
     Ok(())
+}
+
+fn program_relative_conflict_path(
+    filesystem: &MigrationFilesystem,
+    observed: &Path,
+) -> Option<PathBuf> {
+    let relative = if observed.is_absolute() {
+        observed.strip_prefix(filesystem.display_root()).ok()?
+    } else {
+        observed
+    };
+    ensure_safe_relative(relative).ok()?;
+    Some(relative.to_path_buf())
 }
 
 fn is_private_transaction_integrity_error(error: &FolderbaseError) -> bool {
@@ -8109,21 +8127,52 @@ fn run_transaction_v1_in(
     )
 }
 
-fn run_existing_transaction_v1_apply(
+fn run_current_transaction_v1_apply_with_hooks(
     display_root: &Path,
     migration_id: &str,
     approval_digest: &str,
+    after_transaction_coordinator: impl FnOnce(),
+    mut checkpoint: impl FnMut(ApplyCheckpoint),
     transaction_checkpoint: impl FnMut(TransactionV1Checkpoint),
-) -> Result<Option<MigrationOutcome>> {
-    run_existing_transaction_v1_apply_with_root_hook(
-        display_root,
-        migration_id,
-        approval_digest,
-        || {},
-        transaction_checkpoint,
-    )
+) -> Result<MigrationOutcome> {
+    let (root, root_identity) = canonical_root_with_identity(display_root)?;
+    let coordinator = acquire_existing_folderbase_transaction_lock_with_hook(
+        &root,
+        root_identity.identity(),
+        || checkpoint(ApplyCheckpoint::ExistingFolderbaseDetected),
+    )?;
+    require_no_pending_work_except(&coordinator.state, migration_id)?;
+    let filesystem = coordinator.migration_filesystem(&root)?;
+    let execution_format = classify_execution_format(&filesystem, migration_id)?;
+    after_transaction_coordinator();
+    match execution_format {
+        ExecutionFormat::TransactionV1 => run_transaction_v1_in(
+            &filesystem,
+            MigrationCommand::Apply {
+                migration_id,
+                approval_digest,
+            },
+            transaction_checkpoint,
+        ),
+        ExecutionFormat::None | ExecutionFormat::PrePreparedTransactionV1 => {
+            apply_transaction_v1_migration_in_with_hooks(
+                &filesystem,
+                migration_id,
+                approval_digest,
+                root_identity.identity().stable_sha256(),
+                execution_format,
+                checkpoint,
+                transaction_checkpoint,
+            )
+        }
+        ExecutionFormat::LegacyResult => Err(FolderbaseError::InvalidMigrationState {
+            expected: MigrationState::Approved.as_str(),
+            actual: "legacy_result".to_owned(),
+        }),
+    }
 }
 
+#[cfg(test)]
 fn run_existing_transaction_v1_apply_with_root_hook(
     display_root: &Path,
     migration_id: &str,
@@ -8465,6 +8514,7 @@ fn replace_file_atomically_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn replace_file_atomically(path: &Path, expected_sha256: &str, content: &[u8]) -> Result<()> {
     if sha256_path(path)? != expected_sha256 {
         return Err(FolderbaseError::MigrationSourceChanged(path.to_path_buf()));
@@ -8502,6 +8552,7 @@ fn replace_file_atomically(path: &Path, expected_sha256: &str, content: &[u8]) -
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn move_file_no_replace(source: &Path, destination: &Path, expected_sha256: &str) -> Result<()> {
     if destination.exists() {
         return Err(FolderbaseError::WouldOverwrite(destination.to_path_buf()));
@@ -9355,31 +9406,6 @@ fn reopen_migration_result_with_format_and_root_hook(
     }
 }
 
-#[cfg(test)]
-fn recover_migration_with_hook(
-    root: impl AsRef<Path>,
-    migration_id: &str,
-    after_transaction_coordinator: impl FnOnce(),
-) -> Result<MigrationResult> {
-    legacy_recover_migration_with_hook(root, migration_id, after_transaction_coordinator)
-}
-
-#[cfg(test)]
-fn legacy_recover_migration_with_hook(
-    root: impl AsRef<Path>,
-    migration_id: &str,
-    after_transaction_coordinator: impl FnOnce(),
-) -> Result<MigrationResult> {
-    let root = canonical_root(root.as_ref())?;
-    let root_identity = RetainedPhysicalIdentity::from_path(&root)
-        .map_err(|source| FolderbaseError::io(&root, source))?;
-    let transaction_coordinator =
-        acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
-    let migration_filesystem = transaction_coordinator.migration_filesystem(&root)?;
-    after_transaction_coordinator();
-    legacy_recover_migration_in(&root, &migration_filesystem, migration_id)
-}
-
 fn legacy_recover_migration_in(
     root: &Path,
     migration_filesystem: &MigrationFilesystem,
@@ -9437,31 +9463,6 @@ fn legacy_recover_migration_in(
     ))
 }
 
-#[cfg(test)]
-fn rollback_migration_by_id_with_hook(
-    root: impl AsRef<Path>,
-    migration_id: &str,
-    after_transaction_coordinator: impl FnOnce(),
-) -> Result<RollbackResult> {
-    legacy_rollback_migration_by_id_with_hook(root, migration_id, after_transaction_coordinator)
-}
-
-#[cfg(test)]
-fn legacy_rollback_migration_by_id_with_hook(
-    root: impl AsRef<Path>,
-    migration_id: &str,
-    after_transaction_coordinator: impl FnOnce(),
-) -> Result<RollbackResult> {
-    let root = canonical_root(root.as_ref())?;
-    let root_identity = RetainedPhysicalIdentity::from_path(&root)
-        .map_err(|source| FolderbaseError::io(&root, source))?;
-    let transaction_coordinator =
-        acquire_existing_folderbase_transaction_lock(&root, root_identity.identity())?;
-    let migration_filesystem = transaction_coordinator.migration_filesystem(&root)?;
-    after_transaction_coordinator();
-    legacy_rollback_migration_by_id_in(&migration_filesystem, migration_id)
-}
-
 fn legacy_rollback_migration_by_id_in(
     migration_filesystem: &MigrationFilesystem,
     migration_id: &str,
@@ -9496,6 +9497,7 @@ pub fn rollback_migration(result: &MigrationResult) -> Result<RollbackResult> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn create_directory_if_missing(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
@@ -9560,6 +9562,7 @@ fn validate_private_directory_mode(path: &Path, metadata: &fs::Metadata) -> Resu
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn load_journal(root: &Path, migration_id: &str) -> Result<(PathBuf, MigrationJournal)> {
     validate_migration_id(root, migration_id)?;
     let journal_relative = PathBuf::from(MIGRATIONS_DIR)
@@ -9690,6 +9693,7 @@ enum StructuralDiskState {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn validate_structural_recovery_invariants(
     root: &Path,
     journal_path: &Path,
@@ -9823,6 +9827,7 @@ fn validate_structural_recovery_invariants_with(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn observe_structural_disk_state(
     root: &Path,
     operation: &MigrationOperation,
@@ -10207,6 +10212,7 @@ fn journal_path_is_authorized(journal: &MigrationJournal, path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn reconcile_in_flight(
     root: &Path,
     journal_path: &Path,
@@ -10316,6 +10322,7 @@ fn reconcile_in_flight_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn reconcile_structural_in_flight(
     root: &Path,
     journal_path: &Path,
@@ -10484,6 +10491,7 @@ fn reconcile_structural_in_flight_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn reconcile_structural_in_flight_with_hook(
     root: &Path,
     journal_path: &Path,
@@ -10621,6 +10629,7 @@ struct MigrationLeafCapability {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn open_migration_leaf_pair(
     root: &Path,
     source: &Path,
@@ -10674,6 +10683,7 @@ fn open_migration_leaf_from_root(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn open_migration_root_nofollow(root: &Path) -> Result<Dir> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -10911,6 +10921,7 @@ fn sync_migration_directory(directory: &Dir, display: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn rollback_structural_journal(
     root: &Path,
     journal_path: &Path,
@@ -11053,6 +11064,7 @@ fn rollback_structural_journal_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn rollback_structural_journal_with_hook(
     root: &Path,
     journal_path: &Path,
@@ -11189,6 +11201,7 @@ fn rollback_structural_journal_with_hook(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn verify_structural_rollback_precondition(
     root: &Path,
     operation: &MigrationOperation,
@@ -11296,6 +11309,7 @@ fn verify_structural_rollback_precondition_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn refuse_structural_operation_boundaries(
     root: &Path,
     operation: &MigrationOperation,
@@ -11419,6 +11433,7 @@ fn ensure_move_content_path(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn regular_file_digest_if_present(path: &Path) -> Result<Option<String>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
@@ -11431,6 +11446,7 @@ fn regular_file_digest_if_present(path: &Path) -> Result<Option<String>> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn rollback_journal(
     root: &Path,
     journal_path: &Path,
@@ -11549,6 +11565,7 @@ fn rollback_journal_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn verify_rollback_paths(root: &Path, journal: &MigrationJournal) -> Result<()> {
     let approved_boundaries = journal
         .materialized_folderbases
@@ -11630,6 +11647,7 @@ fn refuse_unapproved_nested_folderbase_path_in(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn refuse_unapproved_nested_folderbase_path(
     root: &Path,
     relative: &Path,
@@ -11661,6 +11679,7 @@ fn refuse_unapproved_nested_folderbase_path(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn verify_rollback_file(
     journal: &MigrationJournal,
     relative: &Path,
@@ -11788,6 +11807,7 @@ fn persist_new_plan(plan: &MigrationPlan) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn persist_plan_transition(
     root: &Path,
     migration_id: &str,
@@ -13452,6 +13472,7 @@ fn copy_new(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn restore_snapshot_no_clobber(
     root: &Path,
     migration_id: &str,
@@ -13528,6 +13549,7 @@ fn restore_snapshot_no_clobber(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn write_bytes_new(path: &Path, content: &[u8]) -> Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -13637,6 +13659,7 @@ fn persist_plan_in(filesystem: &MigrationFilesystem, plan: &MigrationPlan) -> Re
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn persist_journal(path: &Path, journal: &MigrationJournal) -> Result<()> {
     let content =
         serde_json::to_vec_pretty(journal).map_err(|source| FolderbaseError::json(path, source))?;
@@ -13701,6 +13724,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn cleanup_staging(root: &Path, migration_id: &str) {
     let staging_relative = PathBuf::from(MIGRATIONS_DIR)
         .join(migration_id)
@@ -14095,6 +14119,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn migration_fixture() -> TempDir {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("Client-Shared")).unwrap();
@@ -14134,6 +14159,7 @@ mod tests {
         root
     }
 
+    #[allow(dead_code)]
     fn typed_answers(analysis: &MigrationAnalysis) -> Vec<MigrationAnswer> {
         analysis
             .questions

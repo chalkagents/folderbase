@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     fs,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::mpsc,
     thread,
 };
@@ -1101,6 +1101,7 @@ fn rollback_snapshot_path(fixture: &ClosedLeafFixture) -> PathBuf {
         .join(format!("{operation_index:08}.snapshot"))
 }
 
+#[allow(dead_code)]
 fn persist_apply_intent(fixture: &ClosedLeafFixture) {
     let state = FolderbaseState::open_existing(fixture.root.path()).expect("state capability");
     let filesystem =
@@ -1175,6 +1176,7 @@ fn persist_apply_intent(fixture: &ClosedLeafFixture) {
         .expect("persist apply intent");
 }
 
+#[allow(dead_code)]
 fn install_claimed_crash_state(fixture: &ClosedLeafFixture) {
     let Some(source) = fixture.source.as_deref() else {
         // Creates claim an exact absence rather than moving an original leaf.
@@ -1185,6 +1187,7 @@ fn install_claimed_crash_state(fixture: &ClosedLeafFixture) {
         .expect("atomically retain the expected original in its private claim");
 }
 
+#[allow(dead_code)]
 fn install_published_crash_state(fixture: &ClosedLeafFixture) {
     match fixture.expected {
         ExpectedVisibleLeaf::Directory => {
@@ -2069,7 +2072,21 @@ fn expect_conflicted(
         Ok(MigrationOutcome::Conflicted {
             migration_id,
             conflicts,
-        }) if !conflicts.is_empty() => (migration_id, conflicts),
+        }) if !conflicts.is_empty() => {
+            assert!(
+                conflicts.iter().all(|conflict| {
+                    !conflict.affected_paths.is_empty()
+                        && conflict.affected_paths.iter().all(|path| {
+                            !path.as_os_str().is_empty()
+                                && path
+                                    .components()
+                                    .all(|component| matches!(component, Component::Normal(_)))
+                        })
+                }),
+                "{reason} must expose only nonempty program-relative affected paths: {conflicts:?}"
+            );
+            (migration_id, conflicts)
+        }
         Ok(other) => panic!("{reason} must return a nonempty Conflicted outcome, got {other:?}"),
         Err(error) => {
             panic!(
@@ -2141,7 +2158,7 @@ fn expected_regular_bytes(fixture: &ClosedLeafFixture) -> &[u8] {
 }
 
 fn recorded_path_matches(root: &Path, recorded: &Path, absolute: &Path) -> bool {
-    recorded == absolute || root.join(recorded) == absolute
+    !recorded.is_absolute() && root.join(recorded) == absolute
 }
 
 fn assert_same_byte_substitution_before_claim_conflicts(kind: ClosedLeafKind) {
@@ -2551,6 +2568,7 @@ fn latest_journal_generation(root: &Path, migration_id: &str) -> (PathBuf, serde
     (path, value)
 }
 
+#[allow(dead_code)]
 fn journal_generation_checksum(value: &serde_json::Value) -> String {
     let controlled = if value.get("inverse_receipts").is_some() {
         serde_json::json!([
@@ -2589,6 +2607,7 @@ fn journal_generation_checksum(value: &serde_json::Value) -> String {
     format!("{:x}", digest.finalize())
 }
 
+#[allow(dead_code)]
 fn append_test_journal_generation(
     fixture: &ClosedLeafFixture,
     direction: &str,
@@ -6525,6 +6544,21 @@ fn released_applying_journal(
     }
 }
 
+fn released_legacy_applying_journal(
+    plan: &MigrationPlan,
+    approval_digest: String,
+    in_flight_operation: Option<usize>,
+) -> MigrationJournal {
+    let mut journal = released_applying_journal(plan, approval_digest, in_flight_operation);
+    journal.approval_scheme = None;
+    journal.template_references.clear();
+    journal.targets.clear();
+    journal.plan_extensions.clear();
+    journal.approval_digest =
+        journal_plan_digest(&journal).expect("released legacy approval digest");
+    journal
+}
+
 fn write_released_result_json(path: &Path, journal: &MigrationJournal) -> Vec<u8> {
     let mut value = serde_json::to_value(journal).expect("released result value");
     let object = value.as_object_mut().expect("released result object");
@@ -6663,12 +6697,7 @@ fn released_terminal_result_states_reopen_semantically_without_byte_rewrite() {
         let migration_id = plan.id.clone();
         let approved = approve_migration(plan).expect("approved migration");
         let mut plan = approved.plan;
-        let mut journal = released_applying_journal(&plan, approved.approval_digest, None);
-        journal.approval_scheme = None;
-        journal.template_references.clear();
-        journal.targets.clear();
-        journal.plan_extensions.clear();
-        journal.approval_digest = journal_plan_digest(&journal).expect("released terminal digest");
+        let mut journal = released_legacy_applying_journal(&plan, approved.approval_digest, None);
         journal.state = state;
         if state == MigrationState::Verified {
             let created = install_released_additive_outputs(&plan);
@@ -6755,12 +6784,7 @@ fn released_result_recover_adapter_uses_legacy_recovery_for_applying() {
     let migration_id = plan.id.clone();
     let approved = approve_migration(plan).expect("approved migration");
     let mut plan = approved.plan;
-    let mut journal = released_applying_journal(&plan, approved.approval_digest, None);
-    journal.approval_scheme = None;
-    journal.template_references.clear();
-    journal.targets.clear();
-    journal.plan_extensions.clear();
-    journal.approval_digest = journal_plan_digest(&journal).expect("released applying digest");
+    let journal = released_legacy_applying_journal(&plan, approved.approval_digest, None);
     let result_path = migration_result_path(root.path(), &migration_id);
     let released_bytes = write_released_result_json(&result_path, &journal);
     plan.state = MigrationState::Applying;
@@ -6791,12 +6815,7 @@ fn released_result_recover_adapter_uses_legacy_recovery_for_rolling_back() {
     let approved = approve_migration(plan).expect("approved migration");
     let mut plan = approved.plan;
     let created_paths = install_released_additive_outputs(&plan);
-    let mut journal = released_applying_journal(&plan, approved.approval_digest, None);
-    journal.approval_scheme = None;
-    journal.template_references.clear();
-    journal.targets.clear();
-    journal.plan_extensions.clear();
-    journal.approval_digest = journal_plan_digest(&journal).expect("released rolling-back digest");
+    let mut journal = released_legacy_applying_journal(&plan, approved.approval_digest, None);
     journal.state = MigrationState::RollingBack;
     journal.completed_operations = journal.operations.len();
     journal.created_paths = created_paths.clone();
@@ -6841,13 +6860,7 @@ fn released_legacy_result_recovery_rejects_non_execution_states_without_rewrite(
         let migration_id = plan.id.clone();
         let approved = approve_migration(plan).expect("approved migration");
         let mut plan = approved.plan;
-        let mut journal = released_applying_journal(&plan, approved.approval_digest, None);
-        journal.approval_scheme = None;
-        journal.template_references.clear();
-        journal.targets.clear();
-        journal.plan_extensions.clear();
-        journal.approval_digest =
-            journal_plan_digest(&journal).expect("unsupported released-state digest");
+        let mut journal = released_legacy_applying_journal(&plan, approved.approval_digest, None);
         journal.state = state;
         let result_path = migration_result_path(root.path(), &migration_id);
         let released_bytes = write_released_result_json(&result_path, &journal);
@@ -6883,13 +6896,7 @@ fn legacy_only_verified_additive_rollback_keeps_the_released_result_semantics() 
         "fixture must install additive outputs"
     );
 
-    let mut journal = released_applying_journal(&plan, approved.approval_digest, None);
-    journal.approval_scheme = None;
-    journal.template_references.clear();
-    journal.targets.clear();
-    journal.plan_extensions.clear();
-    journal.approval_digest =
-        journal_plan_digest(&journal).expect("released additive approval digest");
+    let mut journal = released_legacy_applying_journal(&plan, approved.approval_digest, None);
     journal.state = MigrationState::Verified;
     journal.completed_operations = journal.operations.len();
     journal.created_paths = created_paths.clone();
@@ -8196,11 +8203,7 @@ fn sibling_scan_classifies_all_legacy_execution_states_from_result_evidence() {
         let migration_id = plan.id.clone();
         let approved = approve_migration(plan).expect("approved migration");
         let mut plan = approved.plan;
-        let mut journal = released_applying_journal(&plan, approved.approval_digest, None);
-        journal.approval_scheme = None;
-        journal.template_references.clear();
-        journal.targets.clear();
-        journal.plan_extensions.clear();
+        let mut journal = released_legacy_applying_journal(&plan, approved.approval_digest, None);
         if matches!(
             legacy_state,
             MigrationState::Verified | MigrationState::RollingBack
@@ -8661,6 +8664,75 @@ fn caller_root_substitution_after_nofollow_open_is_rejected_before_replacement_w
         fs::remove_dir_all(&caller_root).expect("remove replacement root after assertion");
         fs::rename(&detached, &caller_root).expect("restore TempDir path for cleanup");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn public_apply_retains_one_root_authority_from_classification_through_new_transaction_compile() {
+    let root = initialized_root();
+    fs::write(root.path().join("README.md"), b"approved retained source\n").expect("source");
+    let analysis = analyze_migration(root.path()).expect("analysis");
+    let answers = typed_answers(&analysis);
+    let plan = plan_migration(analysis, answers, "Organized").expect("migration plan");
+    let migration_id = plan.id.clone();
+    let approved = approve_migration(plan).expect("approval");
+    let approval_digest = approved.approval_digest().to_owned();
+    drop(approved);
+
+    let visible_root = root.path().to_path_buf();
+    let detached_root =
+        visible_root.with_file_name(format!(".public-apply-retained-{}", Uuid::now_v7()));
+    let mut replacement_before = None;
+    let outcome = run_current_transaction_v1_apply_with_hooks(
+        &visible_root,
+        &migration_id,
+        &approval_digest,
+        || {
+            fs::rename(&visible_root, &detached_root).expect("detach retained Folderbase Root");
+            copy_tree(&detached_root, &visible_root);
+            fs::write(
+                visible_root.join("README.md"),
+                b"foreign replacement source must never be read\n",
+            )
+            .expect("foreign replacement source");
+            fs::write(
+                visible_root.join("replacement-only.txt"),
+                b"public Apply must never observe this replacement\n",
+            )
+            .expect("replacement sentinel");
+            replacement_before = Some(raw_tree_snapshot(&visible_root));
+        },
+        |_| {},
+        |_| {},
+    )
+    .expect("public Apply must continue through its retained root authority");
+
+    let replacement_after = raw_tree_snapshot(&visible_root);
+    let retained_source =
+        fs::read(detached_root.join("Organized/README.md")).expect("retained output");
+    let retained_transaction =
+        transaction_v1_root(&detached_root, &migration_id).join("program.json");
+    let replacement_transaction = transaction_v1_root(&visible_root, &migration_id);
+    let retained_transaction_exists = retained_transaction.is_file();
+    let replacement_transaction_exists = replacement_transaction.exists();
+    fs::remove_dir_all(&visible_root).expect("remove replacement root");
+    fs::rename(&detached_root, &visible_root).expect("restore TempDir pathname");
+
+    assert!(matches!(outcome, MigrationOutcome::Applied(_)));
+    assert_eq!(retained_source, b"approved retained source\n");
+    assert!(
+        retained_transaction_exists,
+        "new transaction state must be compiled beneath the retained root"
+    );
+    assert_eq!(
+        replacement_after,
+        replacement_before.expect("replacement snapshot"),
+        "the replacement root must receive zero reads-derived or writes-visible changes"
+    );
+    assert!(
+        !replacement_transaction_exists,
+        "the replacement root must receive no transaction-v1 state"
+    );
 }
 
 #[test]
