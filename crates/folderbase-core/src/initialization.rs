@@ -18,7 +18,7 @@ use crate::model::{
     InitializationDestinationEntry, InitializationDestinationKind, InitializationRequest,
 };
 use crate::physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity};
-use crate::root_attestation::DEFAULT_V05_CAPTURE_IGNORE_RULES;
+use crate::root_attestation::{DEFAULT_V05_CAPTURE_IGNORE_RULES, metadata_is_link_or_reparse};
 use crate::template::template_package_sha256;
 use crate::traversal_policy::{
     NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary_with_observer,
@@ -654,15 +654,13 @@ pub fn initialize(plan: &InitializationPlan) -> Result<InitializationResult> {
         });
     }
 
-    let root_file = fs::File::open(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    let current_identity = PhysicalIdentity::from_file(&root_file)
-        .map_err(|source| FolderbaseError::io(&root, source))?;
-    if current_identity != plan.root_identity.identity() {
+    let opened_root = open_root_capability(&root)?;
+    if opened_root.identity.identity() != plan.root_identity.identity() {
         return Err(FolderbaseError::PlanRootIdentityChanged(root));
     }
     let mut preflight_budget = InitializationInventoryBudget::default();
     refuse_nested_target(&root, &mut preflight_budget)?;
-    let root_dir = Dir::from_std_file(root_file);
+    let root_dir = opened_root.directory;
 
     verify_template_preconditions(&root_dir, plan, &mut preflight_budget)?;
     validate_planned_paths_against_existing(&plan.root, &plan.directories, &plan.writes)?;
@@ -725,7 +723,18 @@ pub fn initialize_with_expected_plan_digest(
 pub(crate) fn create_directory_no_clobber(root_dir: &Dir, root: &Path, path: &Path) -> Result<()> {
     ensure_safe_relative(path)?;
     let (parent, name) = open_parent_dir_nofollow(root_dir, root, path)?;
-    if let Err(source) = parent.create_dir(&name) {
+    let builder = cap_std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use cap_std::fs::DirBuilderExt;
+
+        let mut builder = builder;
+        if path.starts_with(".folderbase") {
+            builder.mode(0o700);
+        }
+        builder
+    };
+    if let Err(source) = parent.create_dir_with(&name, &builder) {
         return Err(if source.kind() == std::io::ErrorKind::AlreadyExists {
             FolderbaseError::WouldOverwrite(root.join(path))
         } else {
@@ -755,6 +764,14 @@ pub(crate) fn install_text_no_clobber(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+
+        if path.starts_with(".folderbase") {
+            options.mode(0o600);
+        }
+    }
     let mut staged = staging_parent
         .open_with(&staging_name, &options)
         .map_err(|source| FolderbaseError::io(root.join(&staged_path), source))?;
@@ -1049,11 +1066,40 @@ struct OpenedRootCapability {
 }
 
 fn open_root_capability(root: &Path) -> Result<OpenedRootCapability> {
-    let file = fs::File::open(root).map_err(|source| FolderbaseError::io(root, source))?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+
+        options
+            // Root initialization needs a stable namespace capability, not a
+            // readable stream. Requesting GENERIC_READ for a directory is
+            // rejected by valid Windows ACLs that still permit traversal and
+            // child creation. Attribute and identity queries work with zero
+            // desired access, while omitting delete sharing prevents the root
+            // from being detached beneath the retained capability.
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = options
+        .open(root)
+        .map_err(|source| FolderbaseError::io(root, source))?;
     let metadata = file
         .metadata()
         .map_err(|source| FolderbaseError::io(root, source))?;
-    if !metadata.is_dir() {
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
     let digest_identity = root_digest_identity(&file, &metadata, root)?;

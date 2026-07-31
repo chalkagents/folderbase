@@ -70,6 +70,9 @@ pub enum FolderbaseError {
     #[error("protocol upgrade is blocked by pending work: {0}")]
     ProtocolUpgradeBlocked(&'static str),
 
+    #[error("Folderbase recovery is required before this migration can continue: {work}")]
+    RecoveryRequired { work: String },
+
     #[error("initialization destination changed after approval: {0}")]
     InitializationDestinationChanged(PathBuf),
 
@@ -104,6 +107,9 @@ pub enum FolderbaseError {
 
     #[error("restore namespace repair is required before retrying at: {0}")]
     RestoreNamespaceRepairRequired(PathBuf),
+
+    #[error("migration filesystem is unsupported at {path}: {reason}")]
+    UnsupportedMigrationFilesystem { path: PathBuf, reason: String },
 
     #[error("template expansion contains structural changes that require an approved migration")]
     StructuralTemplateChangeRequiresApproval,

@@ -202,6 +202,7 @@ chunk range has been streamed and checked.
 - [Accepted bounded full-state Folderbase Version decision](docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md)
 - [Proposed metadata-first capture transaction](docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md)
 - [Accepted ordinary-folder and optional-narrative decision](docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md)
+- [Proposed durable migration transaction module](docs/adr/0007-execute-migrations-through-one-durable-transaction-module.md)
 
 Protocol `0.x` and crate `0.x` releases are pre-stable. Wire and filesystem
 contracts may change between minor versions until 1.0.

@@ -1546,6 +1546,10 @@ impl FolderbaseState {
         Ok(())
     }
 
+    pub(crate) fn display_root(&self) -> &Path {
+        &self.display_root
+    }
+
     pub(crate) fn verify_root_identity(&self, expected: &PhysicalIdentity) -> Result<()> {
         if &self.root_identity != expected {
             return Err(FolderbaseError::UnsafePath(self.display_root.clone()));
@@ -2334,19 +2338,18 @@ fn open_root_nofollow(root: &Path, _access: StateAccess) -> Result<Dir> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
-        };
-        let desired_access = match _access {
-            StateAccess::ReadOnly => GENERIC_READ,
-            StateAccess::Mutable => GENERIC_READ | GENERIC_WRITE,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
         };
         options
-            .access_mode(desired_access)
+            // The directory handle is namespace authority, not a data stream.
+            // Child reads and mutations open their own capability-relative
+            // handles, so requesting GENERIC_READ/WRITE here only rejects
+            // valid Windows directory ACLs without adding authority.
+            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
     let file = options
         .open(root)
@@ -2378,24 +2381,18 @@ fn open_directory_nofollow(
     access: StateAccess,
 ) -> std::io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
-    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
     };
 
     let mut options = CapOpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    if access == StateAccess::Mutable {
-        options.write(true);
-    }
-    let desired_access = match access {
-        StateAccess::ReadOnly => GENERIC_READ,
-        StateAccess::Mutable => GENERIC_READ | GENERIC_WRITE,
-    };
     options
-        .access_mode(desired_access)
+        .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
+        .follow(FollowSymlinks::No)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let _ = access;
     let file = parent.open_with(name, &options)?.into_std();
     let metadata = file.metadata()?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
@@ -2445,7 +2442,7 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
         .map_err(|source| FolderbaseError::io(display, source))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(windows)))]
 fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
     directory
         .try_clone()
@@ -2453,6 +2450,15 @@ fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
         .into_std_file()
         .sync_all()
         .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(windows)]
+fn sync_directory(_directory: &Dir, _display: &Path) -> Result<()> {
+    // Windows does not provide the POSIX directory-fsync contract, and
+    // FlushFileBuffers rejects directory handles with ERROR_ACCESS_DENIED.
+    // File publication still flushes each staged regular file before its
+    // no-clobber namespace transition.
+    Ok(())
 }
 
 #[cfg(test)]

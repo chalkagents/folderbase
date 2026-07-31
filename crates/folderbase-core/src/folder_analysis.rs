@@ -4,12 +4,18 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(not(windows))]
+use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(windows)]
+use cap_std::fs::OpenOptions as CapOpenOptions;
 use cap_std::{ambient_authority, fs::Dir};
-use walkdir::WalkDir;
 
 use crate::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseError, InventorySummary,
     NestedFolderbaseBoundary, NestedFolderbaseState, ReconstructableTree, Result,
+    root_attestation::metadata_is_link_or_reparse,
     traversal_policy::{
         NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary,
         is_folderbase_state_component, is_git_metadata_component, is_reconstructable_directory,
@@ -72,12 +78,34 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
         io::ErrorKind::NotFound => FolderbaseError::InvalidRoot(root.to_path_buf()),
         _ => FolderbaseError::io(root, error),
     })?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+    if metadata_is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
 
+    let directory = Dir::open_ambient_dir(root, ambient_authority())
+        .map_err(|source| FolderbaseError::io(root, source))?;
+    analyze_folder_from_retained(&directory, root, collapse_reconstructable, false)
+}
+
+pub(crate) fn analyze_folder_from_retained(
+    root: &Dir,
+    display_root: &Path,
+    collapse_reconstructable: bool,
+    reject_windows_reparse: bool,
+) -> Result<FolderAnalysis> {
+    let root_file = root
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(display_root, source))?
+        .into_std_file();
+    let root_metadata = root_file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display_root, source))?;
+    if metadata_is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
+        return Err(FolderbaseError::InvalidRoot(display_root.to_path_buf()));
+    }
+
     let mut analysis = FolderAnalysis {
-        root: root.to_path_buf(),
+        root: display_root.to_path_buf(),
         inventory: InventorySummary::default(),
         classified_paths: Vec::new(),
         git_repositories: Vec::new(),
@@ -88,34 +116,85 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
         warnings: Vec::new(),
         files: Vec::new(),
     };
-    let mut entries = WalkDir::new(root)
-        .follow_links(false)
-        .sort_by_file_name()
-        .into_iter();
+    walk_retained_directory(
+        root,
+        display_root,
+        Path::new(""),
+        collapse_reconstructable,
+        reject_windows_reparse,
+        &mut analysis,
+    )?;
+    sort_analysis(&mut analysis);
+    Ok(analysis)
+}
 
-    while let Some(next_entry) = entries.next() {
-        let entry = next_entry.map_err(|error| {
-            let path = error
-                .path()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.to_path_buf());
-            let source = error
-                .into_io_error()
-                .unwrap_or_else(|| io::Error::other("filesystem traversal failed"));
-            FolderbaseError::io(path, source)
-        })?;
-        if entry.depth() == 0 {
-            continue;
-        }
+fn walk_retained_directory(
+    directory: &Dir,
+    display_root: &Path,
+    relative_directory: &Path,
+    collapse_reconstructable: bool,
+    reject_windows_reparse: bool,
+    analysis: &mut FolderAnalysis,
+) -> Result<()> {
+    let display_directory = display_root.join(relative_directory);
+    let mut entries = Vec::new();
+    for entry in directory
+        .entries()
+        .map_err(|source| FolderbaseError::io(&display_directory, source))?
+    {
+        entries.push(entry.map_err(|source| FolderbaseError::io(&display_directory, source))?);
+    }
+    entries.sort_by_key(|entry| entry.file_name());
 
-        let relative = safe_relative(root, entry.path())?;
-        let file_type = entry.file_type();
-        let reconstructable = file_type.is_dir() && is_reconstructable_directory(entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let relative = relative_directory.join(&name);
+        let display = display_root.join(&relative);
+        let advertised_file_type = entry
+            .file_type()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let reconstructable = advertised_file_type.is_dir() && is_reconstructable_directory(&name);
+        #[cfg(windows)]
+        let (entry_metadata, child) = match open_windows_analysis_entry(directory, &name, &display)
+        {
+            Ok(Some(opened)) => opened,
+            Ok(None) if reject_windows_reparse => {
+                return Err(FolderbaseError::UnsafePath(display));
+            }
+            Ok(None) => {
+                analysis.warnings.push(format!(
+                    "Skipped Windows reparse point without following it: {}",
+                    relative.display()
+                ));
+                continue;
+            }
+            Err(_) if reconstructable && collapse_reconstructable => {
+                record_collapsed_reconstructable(analysis, relative);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        #[cfg(windows)]
+        let file_type = entry_metadata.file_type();
+        #[cfg(not(windows))]
+        let file_type = advertised_file_type;
+        #[cfg(not(windows))]
+        let child = if file_type.is_dir() {
+            match directory.open_dir_nofollow(&name) {
+                Ok(child) => Some(child),
+                Err(_) if reconstructable && collapse_reconstructable => {
+                    record_collapsed_reconstructable(analysis, relative);
+                    continue;
+                }
+                Err(source) => return Err(FolderbaseError::io(display, source)),
+            }
+        } else {
+            None
+        };
 
-        if file_type.is_dir() {
-            match nested_folderbase_state(entry.path()) {
+        if let Some(child) = &child {
+            match nested_folderbase_state_retained(child, &display, reject_windows_reparse) {
                 Ok(Some(state)) => {
-                    entries.skip_current_dir();
                     analysis.nested_folderbases.push(NestedFolderbaseBoundary {
                         path: relative,
                         state,
@@ -123,32 +202,22 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
                     continue;
                 }
                 Ok(None) => {}
+                Err(error @ FolderbaseError::UnsafePath(_)) if reject_windows_reparse => {
+                    return Err(error);
+                }
                 Err(_) if reconstructable && collapse_reconstructable => {
-                    entries.skip_current_dir();
-                    analysis.inventory.reconstructable_tree_count += 1;
-                    let display = relative.display().to_string();
-                    analysis
-                        .reconstructable_trees
-                        .push(ReconstructableTree { path: relative });
-                    analysis.warnings.push(format!(
-                        "Collapsed unreadable reconstructable tree without entering it: {}",
-                        display
-                    ));
+                    record_collapsed_reconstructable(analysis, relative);
                     continue;
                 }
                 Err(error) => return Err(error),
             }
         }
 
-        if is_folderbase_state_component(entry.file_name()) {
-            if file_type.is_dir() {
-                entries.skip_current_dir();
-            }
+        if is_folderbase_state_component(&name) {
             continue;
         }
 
         if collapse_reconstructable && reconstructable {
-            entries.skip_current_dir();
             analysis.inventory.reconstructable_tree_count += 1;
             analysis
                 .reconstructable_trees
@@ -156,10 +225,7 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
             continue;
         }
 
-        if is_git_metadata_component(entry.file_name()) {
-            if file_type.is_dir() {
-                entries.skip_current_dir();
-            }
+        if is_git_metadata_component(&name) {
             if file_type.is_dir() || file_type.is_file() {
                 let repository = relative
                     .parent()
@@ -189,111 +255,104 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
             continue;
         }
 
-        if file_type.is_dir() {
+        if let Some(child) = child {
             if let Some((kind, reason)) = boundary_reason(&relative) {
                 analysis.boundary_hints.push(BoundaryHint {
-                    path: relative,
+                    path: relative.clone(),
                     kind: kind.to_owned(),
                     reason: reason.to_owned(),
                 });
             }
+            walk_retained_directory(
+                &child,
+                display_root,
+                &relative,
+                collapse_reconstructable,
+                reject_windows_reparse,
+                analysis,
+            )?;
             continue;
         }
 
-        if !file_type.is_file() {
+        #[cfg(not(windows))]
+        let entry_bytes = {
+            let metadata = directory
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if metadata.file_type().is_symlink() {
+                analysis.warnings.push(format!(
+                    "Skipped symbolic link without following it: {}",
+                    relative.display()
+                ));
+                continue;
+            }
+            if !metadata.is_file() {
+                analysis
+                    .warnings
+                    .push(format!("Skipped non-regular file: {}", relative.display()));
+                continue;
+            }
+            metadata.len()
+        };
+        #[cfg(windows)]
+        let entry_bytes = if entry_metadata.is_file() {
+            entry_metadata.len()
+        } else {
             analysis
                 .warnings
                 .push(format!("Skipped non-regular file: {}", relative.display()));
             continue;
-        }
+        };
 
-        let bytes = entry
-            .metadata()
-            .map_err(|error| FolderbaseError::io(entry.path(), error.into()))?
-            .len();
-        let mut classifications = Vec::new();
-        classify(
-            &mut analysis,
-            &mut classifications,
-            &relative,
-            bytes,
-            Classification::Generated,
-            is_generated(&relative),
-            "Path is inside a known generated or reconstructable area.",
-        );
-        classify(
-            &mut analysis,
-            &mut classifications,
-            &relative,
-            bytes,
-            Classification::SecretShaped,
-            is_secret_shaped(&relative),
-            "Filename resembles a credential or secret; contents were not read.",
-        );
-        classify(
-            &mut analysis,
-            &mut classifications,
-            &relative,
-            bytes,
-            Classification::Temporary,
-            is_temporary(&relative),
-            "Path resembles temporary, cache, backup, or worktree content.",
-        );
-        classify(
-            &mut analysis,
-            &mut classifications,
-            &relative,
-            bytes,
-            Classification::Large,
-            bytes >= LARGE_FILE_BYTES,
-            "File is at least 100 MiB.",
-        );
-        classify(
-            &mut analysis,
-            &mut classifications,
-            &relative,
-            bytes,
-            Classification::Versioned,
-            is_version_shaped(&relative),
-            "Filename resembles a draft, revision, copy, or numbered version.",
-        );
-
-        analysis.inventory.file_count += 1;
-        analysis.inventory.total_bytes = analysis.inventory.total_bytes.saturating_add(bytes);
-        if is_context_file(&relative) {
-            analysis.context_files.push(relative.clone());
-        }
-        if file_name_eq(&relative, ".gitmodules") {
-            let repository = relative
-                .parent()
-                .map(displayable_relative)
-                .unwrap_or_else(|| PathBuf::from("."));
-            analysis.git_repositories.push(repository.clone());
-            analysis.boundary_hints.push(BoundaryHint {
-                path: repository,
-                kind: "lifecycle".to_owned(),
-                reason: "Git metadata indicates independent version history and a possible project boundary."
-                    .to_owned(),
-            });
-        }
-        analysis.files.push(AnalyzedFile {
-            path: relative,
-            bytes,
-            classifications,
-        });
+        record_analyzed_file(analysis, relative, entry_bytes);
     }
-
-    sort_analysis(&mut analysis);
-    Ok(analysis)
+    Ok(())
 }
 
-fn nested_folderbase_state(root: &Path) -> Result<Option<NestedFolderbaseState>> {
-    let directory = Dir::open_ambient_dir(root, ambient_authority())
-        .map_err(|source| FolderbaseError::io(root, source))?;
+#[cfg(windows)]
+fn open_windows_analysis_entry(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> Result<Option<(fs::Metadata, Option<Dir>)>> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) {
+        return Ok(None);
+    }
+    let child = metadata.is_dir().then(|| Dir::from_std_file(file));
+    Ok(Some((metadata, child)))
+}
+
+fn nested_folderbase_state_retained(
+    directory: &Dir,
+    display: &Path,
+    reject_unsafe_shapes: bool,
+) -> Result<Option<NestedFolderbaseState>> {
     Ok(
-        match classify_nested_folderbase_boundary(&directory, root)? {
-            NestedFolderbaseBoundaryKind::ExactBoundary
-            | NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
+        match classify_nested_folderbase_boundary(directory, display)? {
+            NestedFolderbaseBoundaryKind::ExactBoundary => Some(NestedFolderbaseState::Unchecked),
+            NestedFolderbaseBoundaryKind::UnsafeAliasShape if reject_unsafe_shapes => {
+                return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+            }
+            NestedFolderbaseBoundaryKind::UnsafeAliasShape => {
                 Some(NestedFolderbaseState::Unchecked)
             }
             NestedFolderbaseBoundaryKind::None => None,
@@ -301,21 +360,88 @@ fn nested_folderbase_state(root: &Path) -> Result<Option<NestedFolderbaseState>>
     )
 }
 
-fn safe_relative(root: &Path, child: &Path) -> Result<PathBuf> {
-    let relative = child
-        .strip_prefix(root)
-        .map_err(|_| FolderbaseError::UnsafePath(child.to_path_buf()))?;
-    let mut safe = PathBuf::new();
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => safe.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(FolderbaseError::UnsafePath(child.to_path_buf()));
-            }
-        }
+fn record_collapsed_reconstructable(analysis: &mut FolderAnalysis, relative: PathBuf) {
+    analysis.inventory.reconstructable_tree_count += 1;
+    let display = relative.display().to_string();
+    analysis
+        .reconstructable_trees
+        .push(ReconstructableTree { path: relative });
+    analysis.warnings.push(format!(
+        "Collapsed unreadable reconstructable tree without entering it: {display}"
+    ));
+}
+
+fn record_analyzed_file(analysis: &mut FolderAnalysis, relative: PathBuf, bytes: u64) {
+    let mut classifications = Vec::new();
+    classify(
+        analysis,
+        &mut classifications,
+        &relative,
+        bytes,
+        Classification::Generated,
+        is_generated(&relative),
+        "Path is inside a known generated or reconstructable area.",
+    );
+    classify(
+        analysis,
+        &mut classifications,
+        &relative,
+        bytes,
+        Classification::SecretShaped,
+        is_secret_shaped(&relative),
+        "Filename resembles a credential or secret; contents were not read.",
+    );
+    classify(
+        analysis,
+        &mut classifications,
+        &relative,
+        bytes,
+        Classification::Temporary,
+        is_temporary(&relative),
+        "Path resembles temporary, cache, backup, or worktree content.",
+    );
+    classify(
+        analysis,
+        &mut classifications,
+        &relative,
+        bytes,
+        Classification::Large,
+        bytes >= LARGE_FILE_BYTES,
+        "File is at least 100 MiB.",
+    );
+    classify(
+        analysis,
+        &mut classifications,
+        &relative,
+        bytes,
+        Classification::Versioned,
+        is_version_shaped(&relative),
+        "Filename resembles a draft, revision, copy, or numbered version.",
+    );
+
+    analysis.inventory.file_count += 1;
+    analysis.inventory.total_bytes = analysis.inventory.total_bytes.saturating_add(bytes);
+    if is_context_file(&relative) {
+        analysis.context_files.push(relative.clone());
     }
-    Ok(safe)
+    if file_name_eq(&relative, ".gitmodules") {
+        let repository = relative
+            .parent()
+            .map(displayable_relative)
+            .unwrap_or_else(|| PathBuf::from("."));
+        analysis.git_repositories.push(repository.clone());
+        analysis.boundary_hints.push(BoundaryHint {
+            path: repository,
+            kind: "lifecycle".to_owned(),
+            reason: "Git metadata indicates independent version history and a possible project boundary."
+                .to_owned(),
+        });
+    }
+    analysis.files.push(AnalyzedFile {
+        path: relative,
+        bytes,
+        classifications,
+    });
 }
 
 fn displayable_relative(path: &Path) -> PathBuf {
@@ -640,5 +766,102 @@ fn classification_rank(classification: Classification) -> u8 {
         Classification::Temporary => 2,
         Classification::Large => 3,
         Classification::Versioned => 4,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_reparse_tests {
+    use std::{fs, process::Command};
+
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::{analyze_folder, analyze_folder_from_retained};
+    use crate::FolderbaseError;
+
+    #[test]
+    fn public_analysis_skips_a_directory_junction_without_descent() {
+        let root = tempfile::tempdir().expect("analysis root");
+        let target = tempfile::tempdir().expect("junction target");
+        fs::write(target.path().join("foreign.txt"), b"foreign\n").expect("foreign file");
+        let junction = root.path().join("node_modules");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .expect("run mklink");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let analysis = analyze_folder(root.path()).expect("tolerant public analysis");
+        assert_eq!(analysis.inventory.file_count, 0);
+        let junction_name = junction
+            .file_name()
+            .expect("junction filename")
+            .to_string_lossy();
+        assert!(analysis.warnings.iter().any(|warning| {
+            warning.contains("Skipped Windows reparse point")
+                && warning.contains(junction_name.as_ref())
+        }));
+    }
+
+    #[test]
+    fn retained_transaction_analysis_rejects_a_directory_junction_before_descent() {
+        let root = tempfile::tempdir().expect("analysis root");
+        let target = tempfile::tempdir().expect("junction target");
+        fs::write(target.path().join("foreign.txt"), b"foreign\n").expect("foreign file");
+        let junction = root.path().join("node_modules");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .expect("run mklink");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let retained =
+            Dir::open_ambient_dir(root.path(), ambient_authority()).expect("retained root");
+
+        assert!(matches!(
+            analyze_folder_from_retained(&retained, root.path(), true, true),
+            Err(FolderbaseError::UnsafePath(path)) if path == junction
+        ));
+    }
+
+    #[test]
+    fn retained_transaction_analysis_rejects_a_nested_folderbase_junction() {
+        let root = tempfile::tempdir().expect("analysis root");
+        let project = root.path().join("project");
+        fs::create_dir(&project).expect("project");
+        let target = tempfile::tempdir().expect("junction target");
+        fs::write(target.path().join("manifest.json"), b"{}\n").expect("foreign manifest");
+        let junction = project.join(".folderbase");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .expect("run mklink");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let retained =
+            Dir::open_ambient_dir(root.path(), ambient_authority()).expect("retained root");
+
+        assert!(matches!(
+            analyze_folder_from_retained(&retained, root.path(), true, true),
+            Err(FolderbaseError::UnsafePath(path)) if path == project
+        ));
     }
 }

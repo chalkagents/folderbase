@@ -362,6 +362,50 @@ fn restore_tombstone_reinstates_exact_sealed_bytes_metadata_and_local_head() {
 }
 
 #[test]
+fn nested_tombstone_restore_preserves_the_portable_slash_path_contract() {
+    let root = folderbase();
+    let path = root.path().join("docs/proposal.docx");
+    fs::create_dir(path.parent().expect("nested parent")).expect("nested parent");
+    fs::write(&path, b"nested sealed bytes").expect("nested proposal");
+    let store = FolderbaseVersionStore::open(root.path()).expect("open");
+    store
+        .seal_capture(store.plan_capture().expect("genesis plan"))
+        .expect("genesis");
+    fs::remove_file(&path).expect("delete nested proposal");
+    let deletion = store
+        .seal_capture(store.plan_capture().expect("deletion plan"))
+        .expect("deletion");
+    let deleted = store
+        .read_version(deletion.version_id())
+        .expect("deletion version");
+    assert!(
+        deleted
+            .tombstones()
+            .iter()
+            .any(|tombstone| tombstone.path() == "docs/proposal.docx")
+    );
+
+    assert!(
+        store.restore_tombstone(r"docs\proposal.docx").is_err(),
+        "portable paths never accept platform-native separators"
+    );
+    let restored = store
+        .restore_tombstone("docs/proposal.docx")
+        .expect("restore nested portable path");
+    assert_eq!(
+        fs::read(&path).expect("restored bytes"),
+        b"nested sealed bytes"
+    );
+    assert!(
+        store
+            .read_version(restored.version_id())
+            .expect("restored version")
+            .lookup_binding("docs/proposal.docx")
+            .is_some()
+    );
+}
+
+#[test]
 fn restore_refuses_every_existing_target_without_mutating_history_or_intent() {
     let root = folderbase();
     for (path, bytes) in [

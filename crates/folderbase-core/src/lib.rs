@@ -20,9 +20,12 @@ mod initialization;
 mod inspection;
 mod local_versions;
 mod migration;
+#[cfg(test)]
+mod migration_execution_contract_red_tests;
 mod migration_filesystem;
 mod model;
 mod physical_identity;
+mod portable_wire_path;
 mod protocol_upgrade;
 mod reorganization;
 mod root_attestation;
@@ -59,11 +62,12 @@ pub use local_versions::{
 };
 pub use migration::{
     ApprovedMigration, MigrationAnalysis, MigrationAnswer, MigrationAnswerException,
-    MigrationContentKind, MigrationCopyPreview, MigrationExclusion, MigrationOperation,
-    MigrationOption, MigrationPlan, MigrationPreview, MigrationQuestion, MigrationQuestionKind,
-    MigrationResult, MigrationState, MigrationTarget, MigrationTargetKind, ProposedBoundary,
-    RollbackResult, analyze_migration, apply_migration, approve_migration, plan_migration,
-    preview_migration, rollback_migration,
+    MigrationCommand, MigrationConflict, MigrationConflictDirection, MigrationContentKind,
+    MigrationCopyPreview, MigrationExclusion, MigrationExecution, MigrationOperation,
+    MigrationOption, MigrationOutcome, MigrationPlan, MigrationPreview, MigrationQuestion,
+    MigrationQuestionKind, MigrationResult, MigrationState, MigrationTarget, MigrationTargetKind,
+    ProposedBoundary, RollbackResult, RootClaim, analyze_migration, apply_migration,
+    approve_migration, plan_migration, preview_migration, rollback_migration,
 };
 pub use model::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseKind, InitializationOptions,

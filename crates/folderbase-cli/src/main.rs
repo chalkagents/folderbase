@@ -10,15 +10,16 @@ use folderbase_core::ROOT_INSTANCE_FORMAT_V1 as CURRENT_ROOT_INSTANCE_FORMAT;
 #[cfg(windows)]
 use folderbase_core::ROOT_INSTANCE_FORMAT_V2 as CURRENT_ROOT_INSTANCE_FORMAT;
 use folderbase_core::{
-    ApprovedMigration, FolderbaseCaptureError, FolderbaseError, FolderbaseKind,
-    FolderbaseVersionStore, InitializationOptions, InitializationPlan, InitializationPlanDigest,
-    InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
-    MigrationAnalysis, MigrationAnswer, MigrationPlan, MigrationPreview, MigrationResult,
-    MigrationState, ProtocolUpgradePlanDigest, RollbackResult, RootAttestationError,
-    TemplateAnswerType, TemplateAnswerValue, TemplatePackage, ValidationLevel, ValidationReport,
-    ValidationSeverity, VersionId, analyze_migration, apply_migration, apply_protocol_upgrade,
-    approve_migration, attest_folderbase_root, initialize, initialize_with_expected_plan_digest,
-    inspect, list_workspace, load_builtin_template, plan_initialization, plan_migration,
+    FolderbaseCaptureError, FolderbaseError, FolderbaseKind, FolderbaseVersionStore,
+    InitializationOptions, InitializationPlan, InitializationPlanDigest, InitializationResult,
+    InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES, MigrationAnalysis,
+    MigrationAnswer, MigrationCommand, MigrationConflict, MigrationExecution, MigrationOutcome,
+    MigrationPlan, MigrationPreview, MigrationResult, MigrationState, ProtocolUpgradePlanDigest,
+    RollbackResult, RootAttestationError, RootClaim, TemplateAnswerType, TemplateAnswerValue,
+    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
+    analyze_migration, apply_migration, apply_protocol_upgrade, approve_migration,
+    attest_folderbase_root, initialize, initialize_with_expected_plan_digest, inspect,
+    list_workspace, load_builtin_template, plan_initialization, plan_migration,
     plan_protocol_upgrade, plan_template_initialization, preview_migration, read_workspace_text,
     save_workspace_text, validate,
 };
@@ -663,13 +664,23 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     migration_id,
                     json,
                 } => {
-                    let approved = ApprovedMigration::reopen(&path, &migration_id)?;
-                    let result = apply_migration(approved)?;
-                    if json {
-                        print_json(&result)?;
-                    } else {
-                        print_migration_result(&result);
-                    }
+                    let plan = MigrationPlan::reopen(&path, &migration_id)?;
+                    let approval_digest = plan.approval_digest().ok_or_else(|| {
+                        FolderbaseError::InvalidMigrationState {
+                            expected: "approved",
+                            actual: format!("{:?}", plan.state).to_ascii_lowercase(),
+                        }
+                    })?;
+                    let outcome = MigrationExecution::run(
+                        RootClaim::Current {
+                            display_root: &path,
+                        },
+                        MigrationCommand::Apply {
+                            migration_id: &migration_id,
+                            approval_digest,
+                        },
+                    )?;
+                    return render_migration_outcome(outcome, json);
                 }
                 TransformCommand::Reopen {
                     path,
@@ -688,33 +699,30 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     migration_id,
                     json,
                 } => {
-                    let result = MigrationResult::recover(path, &migration_id)?;
-                    if json {
-                        print_json(&result)?;
-                    } else {
-                        print_migration_result(&result);
-                    }
+                    let outcome = MigrationExecution::run(
+                        RootClaim::Current {
+                            display_root: &path,
+                        },
+                        MigrationCommand::Recover {
+                            migration_id: &migration_id,
+                        },
+                    )?;
+                    return render_migration_outcome(outcome, json);
                 }
                 TransformCommand::Rollback {
                     path,
                     migration_id,
                     json,
                 } => {
-                    let reopened = MigrationResult::reopen(&path, &migration_id)?;
-                    let result = if reopened.state == MigrationState::RolledBack {
-                        RollbackResult {
-                            migration_id,
-                            removed_paths: Vec::new(),
-                            state: MigrationState::RolledBack,
-                        }
-                    } else {
-                        MigrationResult::rollback_by_id(path, &migration_id)?
-                    };
-                    if json {
-                        print_json(&result)?;
-                    } else {
-                        print_rollback_result(&result);
-                    }
+                    let outcome = MigrationExecution::run(
+                        RootClaim::Current {
+                            display_root: &path,
+                        },
+                        MigrationCommand::Rollback {
+                            migration_id: &migration_id,
+                        },
+                    )?;
+                    return render_migration_outcome(outcome, json);
                 }
             }
             Ok(EXIT_SUCCESS)
@@ -956,6 +964,7 @@ fn error_code(error: &CliError) -> &'static str {
         FolderbaseError::InvalidProtocolUpgradePlanDigest => "invalid_protocol_upgrade_plan_digest",
         FolderbaseError::ProtocolUpgradePlanChanged { .. } => "protocol_upgrade_plan_changed",
         FolderbaseError::ProtocolUpgradeBlocked(_) => "protocol_upgrade_blocked",
+        FolderbaseError::RecoveryRequired { .. } => "recovery_required",
         FolderbaseError::InitializationInventoryLimitExceeded { .. } => {
             "initialization_inventory_limit_exceeded"
         }
@@ -968,6 +977,9 @@ fn error_code(error: &CliError) -> &'static str {
         FolderbaseError::MigrationVerificationFailed(_) => "migration_verification_failed",
         FolderbaseError::WouldOverwrite(_) => "would_overwrite",
         FolderbaseError::RestoreNamespaceRepairRequired(_) => "restore_namespace_repair_required",
+        FolderbaseError::UnsupportedMigrationFilesystem { .. } => {
+            "unsupported_migration_filesystem"
+        }
         FolderbaseError::StructuralTemplateChangeRequiresApproval => {
             "structural_template_change_requires_approval"
         }
@@ -1254,13 +1266,130 @@ fn print_migration_preview(preview: &MigrationPreview) {
 }
 
 fn print_migration_result(result: &MigrationResult) {
-    println!("Migration verified {}", result.migration_id);
-    println!(
-        "{} additive paths created · journal {}",
-        result.created_paths.len(),
-        result.journal_path.display()
-    );
-    println!("Original source files were preserved.");
+    match result.state {
+        MigrationState::Analyzing => {
+            println!("Migration analyzing {}", result.migration_id);
+        }
+        MigrationState::Questions => {
+            println!("Migration awaiting answers {}", result.migration_id);
+        }
+        MigrationState::Proposed => {
+            println!("Migration proposed {}", result.migration_id);
+        }
+        MigrationState::Approved => {
+            println!("Migration approved {}", result.migration_id);
+        }
+        MigrationState::Applying => {
+            println!("Migration applying {}", result.migration_id);
+            println!(
+                "Durable progress is recorded at {}",
+                result.journal_path.display()
+            );
+        }
+        MigrationState::Verified => {
+            println!("Migration verified {}", result.migration_id);
+            println!(
+                "{} additive paths created · journal {}",
+                result.created_paths.len(),
+                result.journal_path.display()
+            );
+            println!("Original source files were preserved.");
+        }
+        MigrationState::Conflicted => {
+            println!("Migration conflicted {}", result.migration_id);
+            println!(
+                "Inspect or recover durable state at {}",
+                result.journal_path.display()
+            );
+        }
+        MigrationState::RollingBack => {
+            println!("Migration rolling back {}", result.migration_id);
+            println!(
+                "Durable progress is recorded at {}",
+                result.journal_path.display()
+            );
+        }
+        MigrationState::Rejected => {
+            println!("Migration rejected {}", result.migration_id);
+        }
+        MigrationState::RolledBack => {
+            println!("Migration rolled back {}", result.migration_id);
+            println!("Original source files were preserved.");
+        }
+    }
+}
+
+fn print_migration_conflicts(migration_id: &str, conflicts: &[MigrationConflict]) {
+    println!("Migration conflicted {migration_id}");
+    for conflict in conflicts {
+        let paths = conflict
+            .affected_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {}: expected {}; observed {}",
+            paths, conflict.expected, conflict.observed
+        );
+        if let Some(preserved) = &conflict.preserved_artifact {
+            println!("    preserved at {}", preserved.display());
+        }
+    }
+}
+
+fn render_migration_outcome(outcome: MigrationOutcome, json: bool) -> Result<u8, CliError> {
+    match outcome {
+        MigrationOutcome::Applied(result) => {
+            if json {
+                print_json(&result)?;
+            } else {
+                print_migration_result(&result);
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        MigrationOutcome::RolledBack(result) => {
+            if json {
+                print_json(&result)?;
+            } else {
+                print_rollback_result(&result);
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        MigrationOutcome::Conflicted {
+            migration_id,
+            conflicts,
+        } => {
+            if json {
+                print_json(&serde_json::json!({
+                    "migration_id": migration_id,
+                    "state": "conflicted",
+                    "conflicts": conflicts,
+                }))?;
+            } else {
+                print_migration_conflicts(&migration_id, &conflicts);
+            }
+            Ok(EXIT_INVALID)
+        }
+        MigrationOutcome::RecoveryRequired { migration_id, work } => {
+            if json {
+                print_json(&serde_json::json!({
+                    "migration_id": migration_id,
+                    "state": "recovery_required",
+                    "work": work,
+                }))?;
+            } else {
+                println!("Migration recovery required {migration_id}");
+                println!("  Finish or recover: {work}");
+            }
+            Ok(EXIT_INVALID)
+        }
+        _ => Err(FolderbaseError::InvalidMigrationState {
+            expected: "supported_migration_outcome",
+            actual: "unsupported_migration_outcome".to_owned(),
+        }
+        .into()),
+    }
 }
 
 fn print_rollback_result(result: &RollbackResult) {
@@ -1337,6 +1466,16 @@ mod tests {
         });
 
         assert_eq!(error_code(&error), "nested_boundary_work_limit_exceeded");
+    }
+
+    #[test]
+    fn reports_an_unsupported_migration_filesystem() {
+        let error = CliError::Folderbase(FolderbaseError::UnsupportedMigrationFilesystem {
+            path: PathBuf::from("workspace"),
+            reason: "atomic no-replace rename is unavailable".to_owned(),
+        });
+
+        assert_eq!(error_code(&error), "unsupported_migration_filesystem");
     }
 
     #[test]
