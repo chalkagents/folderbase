@@ -283,16 +283,27 @@ Regular files have no portable executable bit and therefore observe
 `executable: false`; directories are inherently traversable and observe
 `executable: true`. Core never synthesizes Unix mode bits on Windows. When an
 exact retained directory needs `FILE_WRITE_ATTRIBUTES`, Core reopens that same
-object with `ReOpenFile`, revalidates that it is a non-reparse directory, and
-closes the elevated handle after the leaf operation. No-replace rename is
+object with `ReOpenFile` using the closed
+`FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES` union needed to read, change,
+and revalidate its fidelity, then closes the elevated handle after the leaf
+operation. No-replace rename is
 different: child directory capabilities are initially opened with the closed
 union of `FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` documented for the
-destination `RootDirectory`, and that retained capability is passed directly
-to `SetFileInformationByHandle`. Core does not try to widen or ambiently reopen
-the destination directory while publishing. Source leaves request `DELETE`,
-`FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer uses the complete
-`FILE_RENAME_INFO` structure size plus the filename bytes. Core never recovers
-rights by reopening `.` or an ambient pathname.
+destination `RootDirectory`, with delete sharing enabled. For a cross-directory
+rename, that retained destination capability is passed directly to
+`NtSetInformationFile`. For a same-directory rename, Core compares the
+physical identities of the retained source and destination parents and passes
+`RootDirectory = NULL` with the simple destination name, as required by the
+kernel rename contract. Core uses the native handle-relative call because the
+Win32 wrapper resolves a NULL-root simple name against process current working
+directory. Core does not try to widen or ambiently reopen a directory while
+publishing. Source leaves request `DELETE`, `FILE_READ_ATTRIBUTES`, and
+`SYNCHRONIZE`, but omit `FILE_SHARE_DELETE` so their directory entries remain
+pinned from the verified open through the native rename. A pre-existing or new
+competing delete/rename handle therefore causes a safe sharing failure instead
+of moving the opened leaf outside its retained parent. The rename buffer uses
+the complete `FILE_RENAME_INFORMATION` structure size plus the filename bytes.
+Core never recovers rights by reopening `.` or an ambient pathname.
 
 ### Claim and publish one leaf at a time
 

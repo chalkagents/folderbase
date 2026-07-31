@@ -3462,9 +3462,9 @@ fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::Fil
 
 #[cfg(windows)]
 fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
-    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES};
 
-    reopen_windows_directory_with_access(directory, FILE_WRITE_ATTRIBUTES)
+    reopen_windows_directory_with_access(directory, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
         .map_err(|source| FolderbaseError::io(display, source))
 }
 
@@ -3829,18 +3829,40 @@ fn rename_noreplace(
     destination_parent: &Dir,
     destination_name: &OsStr,
 ) -> std::io::Result<()> {
+    rename_noreplace_with_hook(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        || {},
+    )
+}
+
+#[cfg(windows)]
+fn rename_noreplace_with_hook(
+    source_parent: &Dir,
+    source_name: &OsStr,
+    destination_parent: &Dir,
+    destination_name: &OsStr,
+    before_native_rename: impl FnOnce(),
+) -> std::io::Result<()> {
     use cap_std::fs::OpenOptionsExt;
     use std::{
         mem::size_of,
         os::windows::{ffi::OsStrExt, io::AsRawHandle},
         ptr,
     };
-    use windows_sys::Win32::{
-        Foundation::HANDLE,
-        Storage::FileSystem::{
-            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
-            SYNCHRONIZE, SetFileInformationByHandle,
+    use windows_sys::{
+        Wdk::Storage::FileSystem::{
+            FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
+        },
+        Win32::{
+            Foundation::{HANDLE, RtlNtStatusToDosError},
+            Storage::FileSystem::{
+                DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+            },
+            System::IO::IO_STATUS_BLOCK,
         },
     };
 
@@ -3858,7 +3880,10 @@ fn rename_noreplace(
     source_options
         .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        // Pin this directory entry until the native rename completes. If a
+        // competing delete/rename handle already exists, opening fails safely;
+        // after this open, new delete/rename access receives a sharing error.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .follow(FollowSymlinks::No);
     let source = source_parent
         .open_with(source_name, &source_options)
@@ -3869,16 +3894,30 @@ fn rename_noreplace(
             )
         })?
         .into_std();
-    let source_metadata = source.metadata()?;
+    let source_metadata = source.metadata().map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read source metadata for no-replace rename: {source}"),
+        )
+    })?;
     if metadata_is_link_or_reparse(&source_metadata) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "refusing to rename a reparse-point leaf",
         ));
     }
-    // `RootDirectory` is the already-retained directory capability. Reopening
-    // it can fail on Windows when the original grant was intentionally narrow,
-    // and it would weaken the capability-relative publication boundary.
+    // Windows requires `RootDirectory = NULL` when a rename stays in the same
+    // directory. Compare the retained objects rather than references because
+    // callers can hold multiple handles for the same physical parent.
+    let source_directory = source_parent
+        .try_clone()
+        .map_err(|source| {
+            std::io::Error::new(
+                source.kind(),
+                format!("clone source directory for no-replace rename: {source}"),
+            )
+        })?
+        .into_std_file();
     let destination_directory = destination_parent.try_clone().map_err(|source| {
         std::io::Error::new(
             source.kind(),
@@ -3886,23 +3925,47 @@ fn rename_noreplace(
         )
     })?;
     let destination_directory = destination_directory.into_std_file();
+    let source_parent_identity = crate::physical_identity::PhysicalIdentity::from_file(
+        &source_directory,
+    )
+    .map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read source parent identity for no-replace rename: {source}"),
+        )
+    })?;
+    let destination_parent_identity = crate::physical_identity::PhysicalIdentity::from_file(
+        &destination_directory,
+    )
+    .map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!("read destination parent identity for no-replace rename: {source}"),
+        )
+    })?;
+    let same_parent = source_parent_identity == destination_parent_identity;
 
     let file_name_bytes = destination_utf16
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    // The Win32 contract requires the complete structure size plus the
+    // The native rename contract requires the complete structure size plus the
     // filename bytes. The FileName field offset is smaller on 64-bit Windows
     // because FILE_RENAME_INFO has trailing alignment padding.
-    let total_bytes = size_of::<FILE_RENAME_INFO>()
+    let total_bytes = size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(file_name_bytes)
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     let words = total_bytes.div_ceil(size_of::<usize>());
     let mut storage = vec![0_usize; words];
-    let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    before_native_rename();
     unsafe {
         (*information).Anonymous.ReplaceIfExists = false;
-        (*information).RootDirectory = destination_directory.as_raw_handle() as HANDLE;
+        (*information).RootDirectory = if same_parent {
+            ptr::null_mut()
+        } else {
+            destination_directory.as_raw_handle() as HANDLE
+        };
         (*information).FileNameLength = u32::try_from(file_name_bytes)
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         ptr::copy_nonoverlapping(
@@ -3910,18 +3973,20 @@ fn rename_noreplace(
             (*information).FileName.as_mut_ptr(),
             destination_utf16.len(),
         );
-        if SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        let status = NtSetInformationFile(
             source.as_raw_handle() as HANDLE,
-            FileRenameInfo,
-            information.cast(),
+            &raw mut io_status,
+            information.cast_const().cast(),
             u32::try_from(total_bytes)
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
-        ) == 0
-        {
-            let source = std::io::Error::last_os_error();
+            FileRenameInformation,
+        );
+        if status < 0 {
+            let source = std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32);
             return Err(std::io::Error::new(
                 source.kind(),
-                format!("SetFileInformationByHandle(FileRenameInfo): {source}"),
+                format!("NtSetInformationFile(FileRenameInformation): {source}"),
             ));
         }
     }
@@ -4050,8 +4115,8 @@ mod windows_directory_fidelity_tests {
     use cap_std::{ambient_authority, fs::Dir};
 
     use super::{
-        ExactRegularLeaf, MigrationFilesystem, VerifiedPrivateDirectory, open_directory_nofollow,
-        set_directory_fidelity,
+        ExactDirectoryLeaf, ExactRegularLeaf, MigrationFilesystem, VerifiedPrivateDirectory,
+        open_directory_nofollow, set_directory_fidelity,
     };
     use crate::FolderbaseError;
 
@@ -4190,6 +4255,36 @@ mod windows_directory_fidelity_tests {
                 .readonly()
         );
     }
+
+    #[test]
+    fn private_directory_claim_sets_fidelity_through_a_narrow_retained_parent() {
+        let root = tempfile::tempdir().expect("temporary migration root");
+        fs::create_dir(root.path().join("claims")).expect("private claims directory");
+        let filesystem = MigrationFilesystem {
+            root: Dir::open_ambient_dir(root.path(), ambient_authority())
+                .expect("retained migration root"),
+            display_root: root.path().to_path_buf(),
+        };
+        let claims = filesystem
+            .open_private_directory(Path::new("claims"))
+            .expect("narrow retained claims directory");
+
+        let claim = claims
+            .prepare_directory_claim("00000000.publish.claim", false, true)
+            .expect("directory claim fidelity retains read and write attribute access");
+
+        claims
+            .exact_empty_directory_fact(
+                OsStr::new("00000000.publish.claim"),
+                ExactDirectoryLeaf {
+                    physical_identity_sha256: &claim.physical_identity_sha256,
+                    device_sha256: &claim.device_sha256,
+                    read_only: false,
+                    executable: true,
+                },
+            )
+            .expect("prepared private directory claim remains exact");
+    }
 }
 
 #[cfg(test)]
@@ -4202,9 +4297,16 @@ mod rename_noreplace_error_tests {
     };
 
     use cap_std::fs::Dir;
+    #[cfg(windows)]
+    use sha2::{Digest, Sha256};
 
+    #[cfg(windows)]
+    use super::rename_noreplace_with_hook;
     use super::{map_rename_noreplace_error, rename_noreplace};
     use crate::FolderbaseError;
+
+    #[cfg(windows)]
+    use super::MigrationFilesystem;
 
     #[cfg(not(any(
         target_os = "linux",
@@ -4303,6 +4405,113 @@ mod rename_noreplace_error_tests {
         assert_eq!(
             fs::read(root.path().join("destination.bin")).expect("destination bytes"),
             b"source bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_recognizes_separate_handles_for_the_same_parent() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        fs::write(root.path().join("source.bin"), b"source bytes").expect("source");
+        let source_directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("source parent capability");
+        let destination_directory =
+            Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+                .expect("destination parent capability");
+
+        rename_noreplace(
+            &source_directory,
+            OsStr::new("source.bin"),
+            &destination_directory,
+            OsStr::new("destination.bin"),
+        )
+        .expect("native same-parent no-replace move through separate handles");
+
+        assert!(!root.path().join("source.bin").exists());
+        assert_eq!(
+            fs::read(root.path().join("destination.bin")).expect("destination bytes"),
+            b"source bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_installs_a_prepared_private_publish_claim() {
+        let root = tempfile::tempdir().expect("retained private publication fixture");
+        fs::create_dir(root.path().join("source-private")).expect("source private");
+        fs::create_dir(root.path().join("destination-private")).expect("destination private");
+        let approved = b"approved private bytes\n";
+        fs::write(root.path().join("source-private/source.bin"), approved).expect("source");
+        let filesystem = MigrationFilesystem {
+            root: Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+                .expect("retained publication root"),
+            display_root: root.path().to_path_buf(),
+        };
+        let source = filesystem
+            .open_private_directory(Path::new("source-private"))
+            .expect("source private capability");
+        let destination = filesystem
+            .open_private_directory(Path::new("destination-private"))
+            .expect("destination private capability");
+        let expected_sha256 = format!("{:x}", Sha256::digest(approved));
+
+        filesystem
+            .prepare_private_publish_claim(
+                &source,
+                OsStr::new("source.bin"),
+                &destination,
+                "claim.bin",
+                &expected_sha256,
+                approved.len() as u64,
+                false,
+                false,
+                || {},
+            )
+            .expect("prepared claim must install through the retained private directory");
+
+        assert!(
+            !root
+                .path()
+                .join("destination-private/.claim.bin.preparing")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(root.path().join("destination-private/claim.bin"))
+                .expect("durable claim bytes"),
+            approved
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_pins_the_opened_source_against_a_concurrent_move() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        let source_path = root.path().join("source.bin");
+        let competing_path = root.path().join("competing.bin");
+        let destination_path = root.path().join("destination.bin");
+        fs::write(&source_path, b"approved source bytes").expect("source");
+        let directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("retained directory");
+
+        rename_noreplace_with_hook(
+            &directory,
+            OsStr::new("source.bin"),
+            &directory,
+            OsStr::new("destination.bin"),
+            || {
+                fs::rename(&source_path, &competing_path)
+                    .expect_err("the opened source must reject a competing move");
+                assert!(source_path.exists());
+                assert!(!competing_path.exists());
+            },
+        )
+        .expect("native no-replace publishes the pinned approved leaf");
+
+        assert!(!source_path.exists());
+        assert!(!competing_path.exists());
+        assert_eq!(
+            fs::read(destination_path).expect("destination bytes"),
+            b"approved source bytes"
         );
     }
 

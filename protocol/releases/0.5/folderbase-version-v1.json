@@ -12,7 +12,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "85bfdeca36de23c924a414a5211d1ae55f314c9ebbaca85565958ffb3584cfc4"
+      "sha256": "76c4f29a0dfac546342ad513972611b5aefbebb918ee9a1021b46f38248875d9"
     },
     {
       "path": "Cargo.lock",
@@ -20,7 +20,7 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "f79d3b0e17a107c4012d109aa80c894a36f503e11363bae7442b10525bf3c53a"
+      "sha256": "50e33ce0a8df824a8200380a8357e722e49858a136926c85b3be77cdefd3e619"
     },
     {
       "path": "LICENSE",
@@ -140,7 +140,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folderbase_state.rs",
-      "sha256": "4633e3966d5a4524a4fa76fb2e7f9c02637dce96adbed8d21e00d74c5a8936b9"
+      "sha256": "46c30386e237a8b1403a9bcb07a858598a745612c5673952d6cb5aa2374069d9"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_version.rs",
@@ -184,7 +184,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
-      "sha256": "f6d39a8dcb2b3fa8fd546061ccf1be7d3027165a72fb28df2aa344cd5a966f16"
+      "sha256": "c6d19edda85d7328a11fc3a74a337cdc005f8356102e42fc286551c85e2a3647"
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",
