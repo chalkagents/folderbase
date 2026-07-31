@@ -32,7 +32,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "2de5fc59c88823c5c6c2509aa39d9e9227302a7adc1c32929f1ef51d0b6c76c6"
+      "sha256": "b53fc1067b532396b2a47b90ec6a29cf1257748488791cda05ef2561bc266b68"
     },
     {
       "path": "crates/folderbase-cli/Cargo.toml",
