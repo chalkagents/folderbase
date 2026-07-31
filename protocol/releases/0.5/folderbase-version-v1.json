@@ -124,7 +124,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folder_analysis.rs",
-      "sha256": "ef66f6256c44044456c09c3e83872b0d697bc63153d9363fd652d78e4891c919"
+      "sha256": "746ed1b13938ae960d2d01f75efbbf7fffaf6ed6ef85f52fc36dd26efd6c7544"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_capture.rs",

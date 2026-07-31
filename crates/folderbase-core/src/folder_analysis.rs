@@ -799,9 +799,13 @@ mod windows_reparse_tests {
 
         let analysis = analyze_folder(root.path()).expect("tolerant public analysis");
         assert_eq!(analysis.inventory.file_count, 0);
+        let junction_name = junction
+            .file_name()
+            .expect("junction filename")
+            .to_string_lossy();
         assert!(analysis.warnings.iter().any(|warning| {
             warning.contains("Skipped Windows reparse point")
-                && warning.contains(&junction.file_name().unwrap().to_string_lossy())
+                && warning.contains(junction_name.as_ref())
         }));
     }
 
