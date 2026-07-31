@@ -63,19 +63,21 @@ binds metadata without embedding content. Case-only renames are refused. Paths a
 NFC-normalized for collision detection, and the selected path profile additionally
 controls Unicode case folding.
 
-Generic create, replace, and move operations cannot enter `.folderbase` or `.git`
-or replace the root entry, adapters, or ignore policy. Managed adapter updates are
-limited to the matching root `AGENTS.md` or `CLAUDE.md`. Their `managed_block`
-payload is only the marker-free body—not a whole adapter file and not a pre-wrapped
-block. Any `<!-- folderbase:` marker syntax in that body is refused, including
-obsolete noncanonical wrappers. Application uses the established
-`<!-- folderbase:begin -->` and `<!-- folderbase:end -->` markers to replace or
-append that block while preserving all surrounding user-owned text. The four typed Object
-operations are the only v1 seam into `.folderbase/objects/<obj_UUID>.json`; they
-bind the real `obj_<UUID>` Object ID, `version_<UUID>` base Version ID, and exact
-record digest. Relationship types follow the Object Protocol lowercase-token
-grammar. The contract does not invent revision counters absent from Object
-Protocol 0.1.
+Generic create, replace, and move operations cannot enter `.folderbase` or
+`.git` or replace adapters or the policy-controlling `.folderbaseignore`.
+Protocol 0.5 `FOLDERBASE.md` is fully ordinary and is not a protected marker, so
+generic operations may address it under the normal structural-change policy.
+Managed adapter updates are limited to the matching root `AGENTS.md` or
+`CLAUDE.md`. Their `managed_block` payload is only the marker-free body—not a
+whole adapter file and not a pre-wrapped block. Any `<!-- folderbase:` marker
+syntax in that body is refused, including obsolete noncanonical wrappers.
+Application uses the established `<!-- folderbase:begin -->` and
+`<!-- folderbase:end -->` markers to replace or append that block while
+preserving all surrounding user-owned text. The four typed Object operations
+are the only v1 seam into `.folderbase/objects/<obj_UUID>.json`; they bind the
+real `obj_<UUID>` Object ID, `version_<UUID>` base Version ID, and exact record
+digest. Relationship types follow the Object Protocol lowercase-token grammar.
+The contract does not invent revision counters absent from Object Protocol 0.1.
 
 Templates may be cited as provenance, but are optional guidance. They never become
 continuing layout authority. Drafts and Plans contain no grants, roles, approval

@@ -15,6 +15,8 @@ use cap_fs_ext::DirExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::ffi::CString;
 use uuid::Uuid;
 
 use crate::{
@@ -22,6 +24,7 @@ use crate::{
     folderbase_restore_authority::{stable_file_identity_sha256, stable_file_link_count},
     physical_identity::PhysicalIdentity,
     root_attestation::metadata_is_link_or_reparse,
+    traversal_policy::{NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary},
 };
 
 const STATE_COMPONENT: &str = ".folderbase";
@@ -200,6 +203,22 @@ impl FolderbaseState {
         Ok(Some(bytes))
     }
 
+    pub(crate) fn read_bounded_if_present(
+        &self,
+        relative: &Path,
+        maximum_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        match self.read_bounded(relative, maximum_bytes) {
+            Ok(record) => Ok(record),
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn private_directory_names(
         &self,
         relative: &Path,
@@ -223,6 +242,40 @@ impl FolderbaseState {
             names.push(entry.file_name());
         }
         Ok(names)
+    }
+
+    pub(crate) fn private_directory_names_if_present(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        let relative = state_relative(relative)?;
+        match self.open_dir(&relative) {
+            Ok(directory) => {
+                let display = self.display_path(&relative);
+                let mut names = Vec::new();
+                for entry in directory
+                    .read_dir(".")
+                    .map_err(|source| FolderbaseError::io(&display, source))?
+                {
+                    let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+                    if names.len() >= maximum_entries {
+                        return Err(FolderbaseError::InvalidRecord {
+                            path: display,
+                            message: "private directory exceeds its bounded entry limit".to_owned(),
+                        });
+                    }
+                    names.push(entry.file_name());
+                }
+                Ok(names)
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
@@ -1327,6 +1380,129 @@ impl FolderbaseState {
         verify_exact_file(&parent, &name, bytes, &display)
     }
 
+    pub(crate) fn compare_exchange_exact_owned_with_hook(
+        &self,
+        relative: &Path,
+        expected: &[u8],
+        replacement: &[u8],
+        exchange_owner: &str,
+        before_exchange: impl FnOnce(),
+    ) -> Result<()> {
+        self.compare_exchange_exact_owned_with_hooks(
+            relative,
+            expected,
+            replacement,
+            exchange_owner,
+            before_exchange,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn compare_exchange_exact_owned_with_hooks(
+        &self,
+        relative: &Path,
+        expected: &[u8],
+        replacement: &[u8],
+        exchange_owner: &str,
+        before_exchange: impl FnOnce(),
+        after_platform_exchange: impl FnOnce() -> io::Result<()>,
+    ) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let (parent, name) = self.open_parent(&relative)?;
+        let display = self.display_path(&relative);
+        validate_exchange_owner(exchange_owner, &display)?;
+        let temporary = OsString::from(format!(".exchange-{exchange_owner}.tmp"));
+        let parent_display = display
+            .parent()
+            .expect("state record has a parent")
+            .to_path_buf();
+        write_staged(&parent, &temporary, replacement, &display)?;
+        before_exchange();
+        if let Err(source) = atomic_exchange_with_hook(
+            &parent,
+            &parent_display,
+            &temporary,
+            &name,
+            exchange_owner,
+            after_platform_exchange,
+        ) {
+            let _ = parent.remove_file(&temporary);
+            return Err(FolderbaseError::io(display, source));
+        }
+        if verify_exact_file(&parent, &temporary, expected, &display).is_err() {
+            if let Err(source) = atomic_exchange_with_hook(
+                &parent,
+                &parent_display,
+                &temporary,
+                &name,
+                exchange_owner,
+                || Ok(()),
+            ) {
+                return Err(FolderbaseError::io(display, source));
+            }
+            if verify_exact_file(&parent, &temporary, replacement, &display).is_ok() {
+                let _ = parent.remove_file(&temporary);
+                let _ = sync_directory(&parent, &display);
+            } else {
+                let recovery =
+                    OsString::from(format!("manifest.concurrent-{exchange_owner}.recovery"));
+                let _ = parent.rename(&temporary, &parent, &recovery);
+                let _ = sync_directory(&parent, &display);
+            }
+            return Err(FolderbaseError::WouldOverwrite(display));
+        }
+        parent
+            .remove_file(&temporary)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        sync_directory(&parent, &display)?;
+        verify_exact_file(&parent, &name, replacement, &display)
+    }
+
+    pub(crate) fn recover_owned_exchange_artifacts(
+        &self,
+        relative: &Path,
+        exchange_owner: &str,
+        expected: &[u8],
+        replacement: &[u8],
+    ) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let (parent, _) = self.open_parent(&relative)?;
+        let display = self.display_path(&relative);
+        validate_exchange_owner(exchange_owner, &display)?;
+        let mut removed = false;
+        for artifact in [
+            OsString::from(format!(".exchange-{exchange_owner}.tmp")),
+            OsString::from(format!(".exchange-backup-{exchange_owner}.tmp")),
+        ] {
+            match parent.symlink_metadata(&artifact) {
+                Ok(_) => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(FolderbaseError::io(&display, source)),
+            }
+            if verify_exact_file(&parent, &artifact, expected, &display).is_err()
+                && verify_exact_file(&parent, &artifact, replacement, &display).is_err()
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: format!(
+                        "owned exchange artifact {} does not match either sealed state",
+                        artifact.to_string_lossy()
+                    ),
+                });
+            }
+            parent
+                .remove_file(&artifact)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            removed = true;
+        }
+        if removed {
+            sync_directory(&parent, &display)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn remove_durable(&self, relative: &Path) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
@@ -1368,6 +1544,29 @@ impl FolderbaseState {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn verify_root_identity(&self, expected: &PhysicalIdentity) -> Result<()> {
+        if &self.root_identity != expected {
+            return Err(FolderbaseError::UnsafePath(self.display_root.clone()));
+        }
+        self.verify_still_attached()
+    }
+
+    pub(crate) fn classify_attached_root_boundary(&self) -> Result<NestedFolderbaseBoundaryKind> {
+        self.verify_still_attached()?;
+        classify_nested_folderbase_boundary(&self.root, &self.display_root)
+    }
+
+    /// Clone the exact retained root authority for a sibling deep module.
+    ///
+    /// The clone names the same directory object even if the ambient display
+    /// path is concurrently renamed or replaced. Callers must use
+    /// `display_root` only for diagnostics.
+    pub(crate) fn clone_root_capability(&self) -> Result<Dir> {
+        self.root
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(&self.display_root, source))
     }
 
     fn open_parent(&self, relative: &Path) -> Result<(Dir, OsString)> {
@@ -1426,7 +1625,9 @@ impl FolderbaseState {
                 display.push(component);
                 directory = open_directory_nofollow(&directory, component, &display, self.access)
                     .map_err(|source| FolderbaseError::io(&display, source))?;
-                if contains_folderbase_marker(&directory, &display)? {
+                if classify_nested_folderbase_boundary(&directory, &display)?
+                    != NestedFolderbaseBoundaryKind::None
+                {
                     return Err(FolderbaseError::UnsafePath(display));
                 }
             }
@@ -1489,6 +1690,140 @@ impl FolderbaseState {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn atomic_exchange_with_hook(
+    parent: &Dir,
+    _parent_display: &Path,
+    left: &OsStr,
+    right: &OsStr,
+    _exchange_owner: &str,
+    after_exchange: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let left = CString::new(left.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in exchange path"))?;
+    let right = CString::new(right.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in exchange path"))?;
+    let result = unsafe {
+        libc::renameatx_np(
+            parent.as_raw_fd(),
+            left.as_ptr(),
+            parent.as_raw_fd(),
+            right.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        after_exchange()
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn atomic_exchange_with_hook(
+    parent: &Dir,
+    _parent_display: &Path,
+    left: &OsStr,
+    right: &OsStr,
+    _exchange_owner: &str,
+    after_exchange: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let left = CString::new(left.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in exchange path"))?;
+    let right = CString::new(right.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in exchange path"))?;
+    const RENAME_EXCHANGE: libc::c_uint = 2;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent.as_raw_fd(),
+            left.as_ptr(),
+            parent.as_raw_fd(),
+            right.as_ptr(),
+            RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        after_exchange()
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn atomic_exchange_with_hook(
+    parent: &Dir,
+    parent_display: &Path,
+    left: &OsStr,
+    right: &OsStr,
+    exchange_owner: &str,
+    after_exchange: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let replaced = parent_display.join(right);
+    let replacement = parent_display.join(left);
+    let backup_name = OsString::from(format!(".exchange-backup-{exchange_owner}.tmp"));
+    let backup = parent_display.join(&backup_name);
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let replaced_wide = wide(&replaced);
+    let replacement_wide = wide(&replacement);
+    let backup_wide = wide(&backup);
+    let result = unsafe {
+        ReplaceFileW(
+            replaced_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    after_exchange()?;
+    parent.rename(&backup_name, parent, left)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn atomic_exchange_with_hook(
+    _parent: &Dir,
+    _parent_display: &Path,
+    _left: &OsStr,
+    _right: &OsStr,
+    _exchange_owner: &str,
+    _after_exchange: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic file exchange is unavailable on this platform",
+    ))
+}
+
+fn validate_exchange_owner(exchange_owner: &str, display: &Path) -> Result<()> {
+    if !matches!(
+        Uuid::parse_str(exchange_owner),
+        Ok(owner) if owner.hyphenated().to_string() == exchange_owner
+    ) {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display.to_path_buf(),
+            message: "exchange owner is not a canonical UUID".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn state_relative(path: &Path) -> Result<PathBuf> {
     let relative = path
         .strip_prefix(STATE_COMPONENT)
@@ -1522,68 +1857,6 @@ fn safe_workspace_relative(path: &Path) -> Result<PathBuf> {
         safe.push(name);
     }
     Ok(safe)
-}
-
-fn contains_folderbase_marker(directory: &Dir, display: &Path) -> Result<bool> {
-    let Some(state_name) = unique_matching_child(directory, display, is_folderbase_state_name)?
-    else {
-        return Ok(false);
-    };
-    let state_display = display.join(&state_name);
-    let state = match open_directory_nofollow(
-        directory,
-        &state_name,
-        &state_display,
-        StateAccess::ReadOnly,
-    ) {
-        Ok(state) => state,
-        Err(source) => return Err(FolderbaseError::io(state_display, source)),
-    };
-    let Some(marker) = unique_matching_child(&state, &state_display, is_folderbase_manifest_name)?
-    else {
-        return Ok(false);
-    };
-    let marker_display = state_display.join(&marker);
-    let metadata = match state.symlink_metadata(marker) {
-        Ok(metadata) => metadata,
-        Err(source) => return Err(FolderbaseError::io(marker_display, source)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(FolderbaseError::UnsafePath(marker_display));
-    }
-    Ok(true)
-}
-
-fn unique_matching_child(
-    directory: &Dir,
-    display: &Path,
-    matches: impl Fn(&OsStr) -> bool,
-) -> Result<Option<OsString>> {
-    let mut found = None;
-    for entry in directory
-        .entries()
-        .map_err(|source| FolderbaseError::io(display, source))?
-    {
-        let entry = entry.map_err(|source| FolderbaseError::io(display, source))?;
-        let name = entry.file_name();
-        if matches(&name) {
-            if found.is_some() {
-                return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
-            }
-            found = Some(name);
-        }
-    }
-    Ok(found)
-}
-
-fn is_folderbase_state_name(name: &OsStr) -> bool {
-    name.to_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case(STATE_COMPONENT))
-}
-
-fn is_folderbase_manifest_name(name: &OsStr) -> bool {
-    name.to_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case("manifest.json"))
 }
 
 fn verify_open_regular_metadata(
@@ -2426,18 +2699,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn nested_folderbase_marker_names_are_ascii_case_folded() {
-        assert!(is_folderbase_state_name(OsStr::new(".folderbase")));
-        assert!(is_folderbase_state_name(OsStr::new(".FOLDERBASE")));
-        assert!(is_folderbase_manifest_name(OsStr::new("manifest.json")));
-        assert!(is_folderbase_manifest_name(OsStr::new("MANIFEST.JSON")));
-        assert!(!is_folderbase_state_name(OsStr::new(".folderbase-other")));
-        assert!(!is_folderbase_manifest_name(OsStr::new(
-            "manifest.json.bak"
-        )));
-    }
-
     #[cfg(unix)]
     #[test]
     fn retained_parent_capability_never_redirects_publication_through_a_swapped_symlink() {
@@ -2676,5 +2937,99 @@ mod tests {
             fs::read(fixture.path().join(".folderbase/local/proof")).expect("proof"),
             b"replaced"
         );
+    }
+
+    #[test]
+    fn exchange_recovery_reclaims_only_exact_owned_artifacts() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        let manifest = fixture.path().join(".folderbase/manifest.json");
+        let expected = b"legacy manifest\n";
+        let replacement = b"ordinary manifest\n";
+        fs::write(&manifest, expected).expect("manifest");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let owner = Uuid::now_v7().to_string();
+        let owned = fixture
+            .path()
+            .join(format!(".folderbase/.exchange-{owner}.tmp"));
+        let foreign = fixture
+            .path()
+            .join(".folderbase/.exchange-backup-foreign.tmp");
+        fs::write(&owned, replacement).expect("owned artifact");
+        fs::write(&foreign, expected).expect("foreign artifact");
+
+        state
+            .recover_owned_exchange_artifacts(
+                Path::new(".folderbase/manifest.json"),
+                &owner,
+                expected,
+                replacement,
+            )
+            .expect("owned cleanup");
+
+        assert!(!owned.exists());
+        assert!(foreign.exists(), "unowned artifacts are never reclaimed");
+        assert_eq!(fs::read(manifest).expect("manifest"), expected);
+
+        fs::write(&owned, b"unsealed bytes").expect("mismatched owned name");
+        assert!(
+            state
+                .recover_owned_exchange_artifacts(
+                    Path::new(".folderbase/manifest.json"),
+                    &owner,
+                    expected,
+                    replacement,
+                )
+                .is_err(),
+            "an owned name alone never authorizes deletion"
+        );
+        assert!(
+            owned.exists(),
+            "mismatched recovery evidence remains for inspection"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interrupted_windows_exchange_reclaims_only_its_owned_artifacts() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        let manifest = fixture.path().join(".folderbase/manifest.json");
+        let expected = b"legacy manifest\n";
+        let replacement = b"ordinary manifest\n";
+        fs::write(&manifest, expected).expect("manifest");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let owner = Uuid::now_v7().to_string();
+        let foreign = fixture
+            .path()
+            .join(".folderbase/.exchange-backup-foreign.tmp");
+        fs::write(&foreign, expected).expect("foreign artifact");
+
+        state
+            .compare_exchange_exact_owned_with_hooks(
+                Path::new(".folderbase/manifest.json"),
+                expected,
+                replacement,
+                &owner,
+                || {},
+                || Err(io::Error::other("simulated crash after ReplaceFileW")),
+            )
+            .expect_err("interrupted exchange");
+        let owned = fixture
+            .path()
+            .join(format!(".folderbase/.exchange-backup-{owner}.tmp"));
+        assert!(owned.exists(), "fault leaves the exact owned backup");
+
+        state
+            .recover_owned_exchange_artifacts(
+                Path::new(".folderbase/manifest.json"),
+                &owner,
+                expected,
+                replacement,
+            )
+            .expect("owned cleanup");
+        assert!(!owned.exists());
+        assert!(foreign.exists(), "unowned artifacts are never reclaimed");
+        assert_eq!(fs::read(manifest).expect("target manifest"), replacement);
     }
 }

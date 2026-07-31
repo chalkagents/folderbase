@@ -5,7 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use cap_std::fs::Dir;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use chrono::DateTime;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,6 +16,10 @@ use walkdir::WalkDir;
 use crate::{
     FolderbaseError, Result, ValidationFinding, ValidationLevel, ValidationReport,
     ValidationSeverity,
+    root_attestation::{
+        MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile, attest_folderbase_root,
+        decode_manifest_protocol_profile,
+    },
 };
 
 const MANIFEST: &str = ".folderbase/manifest.json";
@@ -25,45 +30,6 @@ pub fn validate(root: impl AsRef<Path>, level: ValidationLevel) -> Result<Valida
     let root_file = fs::File::open(&root).map_err(|source| FolderbaseError::io(&root, source))?;
     let root_dir = Dir::from_std_file(root_file);
     let mut findings = Findings::default();
-
-    let entry_path = Path::new("FOLDERBASE.md");
-    match safe_discovery_file(&root, &root_dir, entry_path)? {
-        DiscoveryFile::Missing => findings.error(
-            "missing_folderbase_entry",
-            Some(PathBuf::from("FOLDERBASE.md")),
-            "A folderbase root must contain FOLDERBASE.md.",
-        ),
-        DiscoveryFile::Symlink => findings.error(
-            "discovery_file_symlink",
-            Some(PathBuf::from("FOLDERBASE.md")),
-            "FOLDERBASE.md must be a regular file inside the folderbase root, not a symlink.",
-        ),
-        DiscoveryFile::Regular => match read_cap_string(&root, &root_dir, entry_path) {
-            Ok(contents) => validate_folderbase_entry(&contents, &mut findings),
-            Err(source) => {
-                findings.error(
-                    "folderbase_entry_not_utf8",
-                    Some(PathBuf::from("FOLDERBASE.md")),
-                    format!("FOLDERBASE.md must be readable UTF-8 Markdown: {source}"),
-                );
-            }
-        },
-    }
-
-    let ignore_path = Path::new(".folderbaseignore");
-    match safe_discovery_file(&root, &root_dir, ignore_path)? {
-        DiscoveryFile::Missing => findings.error(
-            "missing_ignore_file",
-            Some(ignore_path.to_path_buf()),
-            "A folderbase root must contain .folderbaseignore.",
-        ),
-        DiscoveryFile::Symlink => findings.error(
-            "discovery_file_symlink",
-            Some(ignore_path.to_path_buf()),
-            ".folderbaseignore must be a regular file inside the folderbase root, not a symlink.",
-        ),
-        DiscoveryFile::Regular => {}
-    }
 
     let manifest_path = Path::new(MANIFEST);
     let manifest = match safe_discovery_file(&root, &root_dir, manifest_path)? {
@@ -83,17 +49,55 @@ pub fn validate(root: impl AsRef<Path>, level: ValidationLevel) -> Result<Valida
             );
             None
         }
-        DiscoveryFile::Regular => read_json_record(
-            &root,
-            &root_dir,
-            manifest_path,
-            "manifest_json_invalid",
-            &mut findings,
-        )?,
+        DiscoveryFile::Regular => {
+            let encoded = read_cap_bytes_bounded(
+                &root,
+                &root_dir,
+                manifest_path,
+                MAX_FOLDERBASE_MANIFEST_BYTES,
+            )?;
+            match decode_manifest_protocol_profile(&encoded) {
+                Ok((manifest, _, _, profile)) => match attest_folderbase_root(&root) {
+                    Ok(attestation)
+                        if attestation.manifest_sha256
+                            == format!("{:x}", Sha256::digest(&encoded)) =>
+                    {
+                        Some((manifest, profile))
+                    }
+                    Ok(_) => {
+                        findings.error(
+                            "manifest_changed_during_validation",
+                            Some(PathBuf::from(MANIFEST)),
+                            "The manifest changed while validation was reading it.",
+                        );
+                        None
+                    }
+                    Err(source) => {
+                        findings.error(
+                            source.code(),
+                            Some(PathBuf::from(MANIFEST)),
+                            source.to_string(),
+                        );
+                        None
+                    }
+                },
+                Err(source) => {
+                    findings.error(
+                        source.code(),
+                        Some(PathBuf::from(MANIFEST)),
+                        source.to_string(),
+                    );
+                    None
+                }
+            }
+        }
     };
 
-    if let Some(manifest) = manifest.as_ref() {
-        validate_manifest(&root, &root_dir, manifest, &mut findings);
+    if let Some((manifest, profile)) = manifest.as_ref() {
+        if profile.requires_legacy_root_files() {
+            validate_legacy_root_files(&root, &root_dir, &mut findings)?;
+        }
+        validate_manifest(&root, &root_dir, manifest, profile, &mut findings);
     }
 
     let known_objects = validate_objects(&root, &root_dir, level, &mut findings)?;
@@ -147,6 +151,45 @@ pub fn validate(root: impl AsRef<Path>, level: ValidationLevel) -> Result<Valida
     })
 }
 
+fn validate_legacy_root_files(root: &Path, root_dir: &Dir, findings: &mut Findings) -> Result<()> {
+    let entry_path = Path::new("FOLDERBASE.md");
+    match safe_discovery_file(root, root_dir, entry_path)? {
+        DiscoveryFile::Missing => findings.error(
+            "missing_folderbase_entry",
+            Some(entry_path.to_path_buf()),
+            "A legacy Folderbase root must contain FOLDERBASE.md.",
+        ),
+        DiscoveryFile::Symlink => findings.error(
+            "discovery_file_symlink",
+            Some(entry_path.to_path_buf()),
+            "Legacy FOLDERBASE.md must be a regular file inside the Folderbase root.",
+        ),
+        DiscoveryFile::Regular => match read_cap_string(root, root_dir, entry_path) {
+            Ok(contents) => validate_folderbase_entry(&contents, findings),
+            Err(source) => findings.error(
+                "folderbase_entry_not_utf8",
+                Some(entry_path.to_path_buf()),
+                format!("Legacy FOLDERBASE.md must be readable UTF-8 Markdown: {source}"),
+            ),
+        },
+    }
+    let ignore_path = Path::new(".folderbaseignore");
+    match safe_discovery_file(root, root_dir, ignore_path)? {
+        DiscoveryFile::Missing => findings.error(
+            "missing_ignore_file",
+            Some(ignore_path.to_path_buf()),
+            "A legacy Folderbase root must contain .folderbaseignore.",
+        ),
+        DiscoveryFile::Symlink => findings.error(
+            "discovery_file_symlink",
+            Some(ignore_path.to_path_buf()),
+            "Legacy .folderbaseignore must be a regular file inside the Folderbase root.",
+        ),
+        DiscoveryFile::Regular => {}
+    }
+    Ok(())
+}
+
 fn canonical_directory(path: &Path) -> Result<PathBuf> {
     if !path.is_dir() {
         return Err(FolderbaseError::InvalidRoot(path.to_path_buf()));
@@ -178,6 +221,44 @@ fn read_cap_string(root: &Path, root_dir: &Dir, path: &Path) -> Result<String> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|source| FolderbaseError::io(root.join(path), source))?;
+    Ok(contents)
+}
+
+fn read_cap_bytes_bounded(
+    root: &Path,
+    root_dir: &Dir,
+    path: &Path,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>> {
+    let display = root.join(path);
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = root_dir
+        .open_with(path, &options)
+        .map_err(|source| FolderbaseError::io(&display, source))?;
+    let before = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(&display, source))?;
+    if !before.is_file() || before.len() > maximum_bytes {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display,
+            message: "manifest is not a bounded regular file".to_owned(),
+        });
+    }
+    let mut contents = Vec::new();
+    file.by_ref()
+        .take(maximum_bytes + 1)
+        .read_to_end(&mut contents)
+        .map_err(|source| FolderbaseError::io(&display, source))?;
+    let after = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(&display, source))?;
+    if contents.len() as u64 > maximum_bytes || before.len() != after.len() {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display,
+            message: "manifest exceeded its bound or changed while validation read it".to_owned(),
+        });
+    }
     Ok(contents)
 }
 
@@ -232,7 +313,13 @@ fn validate_folderbase_entry(contents: &str, findings: &mut Findings) {
     }
 }
 
-fn validate_manifest(root: &Path, root_dir: &Dir, manifest: &Value, findings: &mut Findings) {
+fn validate_manifest(
+    root: &Path,
+    root_dir: &Dir,
+    manifest: &Value,
+    profile: &ManifestProtocolProfile,
+    findings: &mut Findings,
+) {
     let Some(record) = manifest.as_object() else {
         findings.error(
             "manifest_not_object",
@@ -318,30 +405,32 @@ fn validate_manifest(root: &Path, root_dir: &Dir, manifest: &Value, findings: &m
         ),
     }
 
-    match folderbase.get("entry").and_then(Value::as_str) {
-        Some(entry) => {
-            if entry != "FOLDERBASE.md" {
-                findings.error(
-                    "noncanonical_folderbase_entry",
-                    Some(PathBuf::from(MANIFEST)),
-                    "folderbase.entry must point to the canonical FOLDERBASE.md entry point.",
+    if profile.requires_legacy_root_files() {
+        match folderbase.get("entry").and_then(Value::as_str) {
+            Some(entry) => {
+                if entry != "FOLDERBASE.md" {
+                    findings.error(
+                        "noncanonical_folderbase_entry",
+                        Some(PathBuf::from(MANIFEST)),
+                        "folderbase.entry must point to the canonical FOLDERBASE.md entry point.",
+                    );
+                }
+                validate_declared_path(
+                    root,
+                    root_dir,
+                    entry,
+                    true,
+                    true,
+                    "folderbase.entry",
+                    findings,
                 );
             }
-            validate_declared_path(
-                root,
-                root_dir,
-                entry,
-                true,
-                true,
-                "folderbase.entry",
-                findings,
-            );
+            None => findings.error(
+                "missing_folderbase_entry_field",
+                Some(PathBuf::from(MANIFEST)),
+                "folderbase.entry is required.",
+            ),
         }
-        None => findings.error(
-            "missing_folderbase_entry_field",
-            Some(PathBuf::from(MANIFEST)),
-            "folderbase.entry is required.",
-        ),
     }
 
     if let Some(adapters) = record.get("adapters") {
@@ -1070,7 +1159,7 @@ fn protocol_compatibility(version: &str) -> ProtocolCompatibility {
         return ProtocolCompatibility::Unsupported;
     };
     match (major, minor) {
-        (0, 1) => ProtocolCompatibility::Supported,
+        (0, 1 | 5) => ProtocolCompatibility::Supported,
         (0, minor) if minor > 1 => ProtocolCompatibility::FutureMinor,
         _ => ProtocolCompatibility::Unsupported,
     }
@@ -1205,10 +1294,15 @@ mod tests {
         let temp = initialized_folderbase();
         let report = validate(temp.path(), ValidationLevel::Shallow).unwrap();
         assert!(report.valid, "{:?}", report.findings);
+        assert!(
+            report.findings.is_empty(),
+            "the exact native 0.5 profile is supported without compatibility warnings: {:?}",
+            report.findings
+        );
     }
 
     #[test]
-    fn unsafe_entry_path_is_rejected_without_following_it() {
+    fn v05_entry_extension_has_no_protocol_path_authority() {
         let temp = initialized_folderbase();
         let manifest_path = temp.path().join(MANIFEST);
         let mut manifest: Value =
@@ -1221,13 +1315,7 @@ mod tests {
         .unwrap();
 
         let report = validate(temp.path(), ValidationLevel::Shallow).unwrap();
-        assert!(!report.valid);
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|finding| finding.code == "unsafe_protocol_path")
-        );
+        assert!(report.valid, "{:?}", report.findings);
     }
 
     #[test]
@@ -1303,22 +1391,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_folderbase_section_is_invalid() {
+    fn optional_v05_folderbase_md_has_no_required_sections() {
         let temp = initialized_folderbase();
         let entry_path = temp.path().join("FOLDERBASE.md");
-        let entry = fs::read_to_string(&entry_path)
-            .unwrap()
-            .replace("## Unresolved work", "## Later");
-        fs::write(entry_path, entry).unwrap();
+        fs::write(entry_path, "# Any user narrative\n").unwrap();
 
         let report = validate(temp.path(), ValidationLevel::Shallow).unwrap();
-        assert!(!report.valid);
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|finding| finding.code == "missing_folderbase_entry_section")
-        );
+        assert!(report.valid, "{:?}", report.findings);
     }
 
     #[cfg(unix)]
@@ -1399,6 +1478,13 @@ mod tests {
         let mut manifest: Value =
             serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
         manifest["protocol_version"] = Value::String("0.2.0".to_owned());
+        manifest["folderbase"]["entry"] = Value::String("FOLDERBASE.md".to_owned());
+        fs::write(
+            temp.path().join("FOLDERBASE.md"),
+            "# Legacy Folderbase\n\n## Purpose\nTest compatibility.\n\n## Current state\nReady.\n\n## Navigate\nUse ordinary files.\n\n## Operating rules\nPreserve bytes.\n\n## Unresolved work\nNone.\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join(".folderbaseignore"), "").unwrap();
         fs::write(
             &manifest_path,
             serde_json::to_string_pretty(&manifest).unwrap(),

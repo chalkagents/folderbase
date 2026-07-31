@@ -125,7 +125,7 @@
         },
         {
           "not": {
-            "pattern": "^([fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][.]md|[aA][gG][eE][nN][tT][sS][.]md|[cC][lL][aA][uU][dD][eE][.]md|[.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][iI][gG][nN][oO][rR][eE])$"
+            "pattern": "^([aA][gG][eE][nN][tT][sS][.]md|[cC][lL][aA][uU][dD][eE][.]md|[.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE][iI][gG][nN][oO][rR][eE])$"
           }
         }
       ]

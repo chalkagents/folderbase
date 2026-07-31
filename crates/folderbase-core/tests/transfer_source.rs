@@ -315,12 +315,82 @@ fn a_new_nested_folderbase_boundary_revokes_parent_transfer_access() {
     fs::write(fixture.path().join("client/FOLDERBASE.md"), b"# Client\n").unwrap();
     fs::write(
         fixture.path().join("client/.folderbase/manifest.json"),
-        b"{}",
+        b"{not-json",
     )
     .unwrap();
     let mut output = Vec::new();
     assert!(source.copy_chunk(0, &mut output).is_err());
     assert!(output.is_empty());
+}
+
+#[test]
+fn markerless_context_does_not_revoke_parent_transfer_access() {
+    let (fixture, mut source, bytes) = client_transfer_fixture();
+    fs::create_dir_all(fixture.path().join("client/.folderbase/questions")).unwrap();
+    fs::write(
+        fixture.path().join("client/.folderbase/summary.md"),
+        b"ordinary context",
+    )
+    .unwrap();
+
+    let mut output = Vec::new();
+    source.copy_chunk(0, &mut output).unwrap();
+    assert_eq!(output, bytes);
+}
+
+#[test]
+fn case_folded_marker_alias_revokes_transfer_without_becoming_authority() {
+    let (fixture, mut source, _) = client_transfer_fixture();
+    fs::create_dir_all(fixture.path().join("client/.FOLDERBASE")).unwrap();
+    fs::write(
+        fixture.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
+        b"opaque",
+    )
+    .unwrap();
+
+    let mut output = Vec::new();
+    assert!(matches!(
+        source.copy_chunk(0, &mut output),
+        Err(TransferSourceError::SourceChanged)
+    ));
+    assert!(output.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_shaped_marker_revokes_transfer_without_being_followed() {
+    use std::os::unix::fs::symlink;
+
+    let (fixture, mut source, _) = client_transfer_fixture();
+    symlink(
+        fixture.path().join("missing-state"),
+        fixture.path().join("client/.folderbase"),
+    )
+    .unwrap();
+
+    let mut output = Vec::new();
+    assert!(matches!(
+        source.copy_chunk(0, &mut output),
+        Err(TransferSourceError::SourceChanged)
+    ));
+    assert!(output.is_empty());
+}
+
+fn client_transfer_fixture() -> (
+    tempfile::TempDir,
+    folderbase_core::ChunkTransferSource,
+    Vec<u8>,
+) {
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("client")).unwrap();
+    let bytes = (0_u8..=63).cycle().take(300_000).collect::<Vec<_>>();
+    fs::write(fixture.path().join("client/private.pdf"), &bytes).unwrap();
+    let store = LocalVersionStore::open(fixture.path()).unwrap();
+    let captured = store.capture_file("client/private.pdf").unwrap();
+    let source = store
+        .open_chunk_transfer(&captured.version.id, ChunkTransferProfile::StandardV1)
+        .unwrap();
+    (fixture, source, bytes)
 }
 
 #[test]
@@ -488,11 +558,6 @@ fn transferred_out_fixture() -> (
     .unwrap();
     fs::create_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
     fs::copy(
-        child_fixture.path().join("FOLDERBASE.md"),
-        fixture.path().join("Client/FOLDERBASE.md"),
-    )
-    .unwrap();
-    fs::copy(
         child_fixture.path().join(".folderbase/manifest.json"),
         fixture.path().join("Client/.folderbase/manifest.json"),
     )
@@ -516,7 +581,6 @@ fn transferred_out_fixture() -> (
             .is_file()
     );
 
-    fs::remove_file(fixture.path().join("Client/FOLDERBASE.md")).unwrap();
     fs::remove_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
 
     (

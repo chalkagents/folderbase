@@ -17,7 +17,10 @@ export CARGO_TARGET_DIR="$temporary_root/target"
 
 cd "$repository_root"
 
+node scripts/verify-folderbase-version-digest-vectors.mjs
 node scripts/verify-folderbase-version-distribution.mjs
+node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
+node scripts/verify-folderbase-version-0.5-distribution.mjs
 
 for template in \
   person \
@@ -58,5 +61,7 @@ do
 done
 
 cargo package --workspace --locked --allow-dirty
+"$repository_root/scripts/test-extracted-package-source-sensitivity.sh" \
+  "$CARGO_TARGET_DIR/package"
 "$repository_root/scripts/test-extracted-packages.sh" \
   "$CARGO_TARGET_DIR/package"

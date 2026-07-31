@@ -45,11 +45,17 @@ jobs:
       - name: Verify the independent reorganization digest vector
         run: node scripts/verify-reorganization-digest-vector.mjs
 
-      - name: Verify independent Folderbase Version digest vectors
+      - name: Verify independent Folderbase Version 0.4 digest vectors
         run: node scripts/verify-folderbase-version-digest-vectors.mjs
 
-      - name: Verify the Folderbase Version repository distribution
+      - name: Verify the Folderbase Version 0.4 repository distribution
         run: node scripts/verify-folderbase-version-distribution.mjs
+
+      - name: Verify independent Folderbase Version 0.5 digest vectors
+        run: node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
+
+      - name: Verify the complete Folderbase Version 0.5 candidate closure
+        run: node scripts/verify-folderbase-version-0.5-distribution.mjs
 
       - name: Test
         run: cargo test --workspace --all-features --locked
@@ -81,6 +87,9 @@ jobs:
       - name: Test the public Folderbase Version contract
         run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
 
+      - name: Test the Folderbase Version 0.5 candidate contract
+        run: cargo test --package folderbase-core --test folderbase_version_05_conformance --locked
+
       - name: Test metadata-only Folderbase capture planning
         run: cargo test --package folderbase-core --test folderbase_capture --locked
 
@@ -93,8 +102,11 @@ jobs:
           cargo test --package folderbase-core --lib --locked folderbase_state::tests::
           cargo test --package folderbase-core --lib --locked local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 
-      - name: Verify independent Folderbase Version digest vectors
+      - name: Verify independent Folderbase Version 0.4 digest vectors
         run: node scripts/verify-folderbase-version-digest-vectors.mjs
+
+      - name: Verify independent Folderbase Version 0.5 digest vectors
+        run: node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 
       - name: Test the public receiver contract
         run: cargo test --package folderbase-core --test transfer_receiver --locked

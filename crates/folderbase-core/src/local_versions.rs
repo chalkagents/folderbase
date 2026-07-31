@@ -24,7 +24,7 @@ use crate::{
     folderbase_state::FolderbaseState,
     workspace::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
-        resolve_existing_workspace_file,
+        refuse_generic_workspace_mutation_path, resolve_existing_workspace_file,
     },
 };
 
@@ -683,10 +683,12 @@ impl LocalVersionStore {
         new_bytes: &[u8],
     ) -> Result<VersionedReplaceResult> {
         let relative_path = safe_content_path(relative_path.as_ref())?;
+        refuse_generic_workspace_mutation_path(&relative_path)?;
         let _lock = self.acquire_transaction_lock()?;
         self.ensure_store_layout()?;
         let (materialized_path, relative_path) =
             resolve_existing_workspace_file(&self.root, &relative_path)?;
+        refuse_generic_workspace_mutation_path(&relative_path)?;
 
         let current_file = open_existing_nofollow(&materialized_path)?;
         let metadata = current_file
@@ -1173,6 +1175,25 @@ impl LocalVersionStore {
     }
 
     pub(crate) fn acquire_transaction_lock_in(
+        &self,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
+        let lock = self.acquire_transaction_lock_in_allowing_protocol_upgrade(state)?;
+        if state
+            .read_bounded_if_present(
+                Path::new(".folderbase/transactions/protocol-upgrades/active.json"),
+                16 * 1024 * 1024,
+            )?
+            .is_some()
+        {
+            return Err(FolderbaseError::ProtocolUpgradeBlocked(
+                "Folderbase protocol upgrade recovery",
+            ));
+        }
+        Ok(lock)
+    }
+
+    pub(crate) fn acquire_transaction_lock_in_allowing_protocol_upgrade(
         &self,
         state: &FolderbaseState,
     ) -> Result<StoreTransactionLock> {
@@ -3710,6 +3731,38 @@ mod tests {
     };
 
     #[test]
+    fn generic_versioned_replace_refuses_the_exact_root_ignore_policy_before_writes() {
+        for policy_path in [".folderbaseignore", ".FOLDERBASEIGNORE"] {
+            let fixture = tempfile::tempdir().expect("temporary version store");
+            fs::write(fixture.path().join(policy_path), b"node_modules/\n").expect("ignore policy");
+            let store = LocalVersionStore::open(fixture.path()).expect("version store");
+            let expected = ContentDigest {
+                algorithm: "sha256".to_owned(),
+                digest: "4d56952b0fb13bf8f9b6c13a6d4c34a075bac3af447636a1df4335d7576e2f97"
+                    .to_owned(),
+                bytes: 14,
+            };
+
+            let error = store
+                .replace_file_versioned(policy_path, &expected, b"target/\n")
+                .expect_err("generic local-version replacement cannot change capture policy");
+
+            assert!(matches!(
+                error,
+                FolderbaseError::UnsafePath(path) if path == Path::new(policy_path)
+            ));
+            assert_eq!(
+                fs::read(fixture.path().join(policy_path)).unwrap(),
+                b"node_modules/\n"
+            );
+            assert!(
+                !fixture.path().join(".folderbase").exists(),
+                "policy refusal must precede lazy version-state creation"
+            );
+        }
+    }
+
+    #[test]
     fn transaction_lock_is_exclusive_across_independent_handles() {
         let fixture = tempfile::tempdir().expect("temporary lock store");
         fs::create_dir_all(fixture.path().join(LOCKS_DIRECTORY)).expect("lock directory");
@@ -4012,11 +4065,6 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(fixture.path().join("Client/.folderbase")).unwrap();
-        fs::copy(
-            child_fixture.path().join("FOLDERBASE.md"),
-            fixture.path().join("Client/FOLDERBASE.md"),
-        )
-        .unwrap();
         fs::copy(
             child_fixture.path().join(".folderbase/manifest.json"),
             fixture.path().join("Client/.folderbase/manifest.json"),

@@ -16,8 +16,9 @@ not require a Folderbase account.
 
 - **Folders stay folders.** Existing repositories, documents, media, PDFs,
   databases, and other file types keep their ordinary paths and native tools.
-- **Agents are first-class users.** `FOLDERBASE.md`, `AGENTS.md`, and
-  `CLAUDE.md` provide direct local entry points without requiring an MCP server.
+- **Agents are first-class users.** Ordinary files remain directly readable,
+  while optional `FOLDERBASE.md` context and opt-in `AGENTS.md` or `CLAUDE.md`
+  adapters can provide local entry points without becoming authority.
 - **Structure is guidance, not a cage.** Templates initialize useful structure
   and can expand over time. Reorganization is explicit, previewable, and
   reversible.
@@ -60,6 +61,14 @@ recovery UX, which is intentionally outside the KISS local protocol. Folderbase
 Cloud and server-side sharing authority are separate authenticated trust
 domains; local metadata possession alone never grants Cloud access.
 
+Nested traversal recognizes only the exact, no-follow
+`.folderbase/manifest.json` regular-file marker as an opaque boundary; it does
+not decode the nested bytes through the parent. Markerless `.folderbase` state
+and optional context are inert. Case aliases and symlink or wrong-type marker
+shapes gain no authority: read-only analysis may quarantine them as
+`Unchecked` (`unchecked` on the wire) and omit descendants, while
+materialization, mutation, transfer, and restore operations reject them.
+
 ## Install
 
 Folderbase currently requires Rust 1.96 or newer.
@@ -67,6 +76,7 @@ Folderbase currently requires Rust 1.96 or newer.
 ```sh
 cargo install --path crates/folderbase-cli --locked
 folderbase --version
+# folderbase 0.5.0-rc.1
 ```
 
 Once the first crates.io release is published:
@@ -127,17 +137,20 @@ preflight is contained by root-capability traversal, no-follow parent opens,
 and per-write no-clobber installation; competing bytes are preserved and the
 operation fails rather than overwriting them.
 
-Initialization leaves the original files in place and adds the Folderbase
-protocol surface:
+Native protocol 0.5 initialization leaves the original files in place and
+creates only the machine-readable manifest by default:
 
 ```text
 project/
 ├── .folderbase/
 │   └── manifest.json
-├── .folderbaseignore
-├── FOLDERBASE.md
 └── …your existing files
 ```
+
+Root `FOLDERBASE.md` is fully ordinary optional content. Root
+`.folderbaseignore` is optional user-owned capture-policy input: when present
+it is bounded, force-captured, and changed through typed policy-aware flows.
+Agent adapters are opt-in and are never independent authority.
 
 For a disorganized or multi-boundary folder, use the migration workflow. It
 analyzes the folder, asks bounded questions, produces a reviewable plan, and
@@ -155,7 +168,7 @@ context:
 
 ```sh
 folderbase workspace list /path/to/project --json
-folderbase workspace read /path/to/project FOLDERBASE.md --json
+folderbase workspace read /path/to/project README.md --json
 ```
 
 Text saves use an expected SHA-256 so stale agent sessions cannot silently
@@ -163,7 +176,7 @@ overwrite newer work:
 
 ```sh
 printf '%s' "$UPDATED_TEXT" | folderbase workspace save \
-  /path/to/project FOLDERBASE.md \
+  /path/to/project README.md \
   --expected-sha256 "$LOADED_SHA256" \
   --stdin \
   --json
@@ -188,6 +201,7 @@ chunk range has been streamed and checked.
 - [Accepted canonical streaming-transfer decision](docs/adr/0001-stream-immutable-versions-through-canonical-manifests.md)
 - [Accepted bounded full-state Folderbase Version decision](docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md)
 - [Proposed metadata-first capture transaction](docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md)
+- [Accepted ordinary-folder and optional-narrative decision](docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md)
 
 Protocol `0.x` and crate `0.x` releases are pre-stable. Wire and filesystem
 contracts may change between minor versions until 1.0.
@@ -199,6 +213,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features --locked
 bash scripts/check-public-eclipse.sh
+node scripts/verify-folderbase-version-digest-vectors.mjs
+node scripts/verify-folderbase-version-distribution.mjs
+node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
+node scripts/verify-folderbase-version-0.5-distribution.mjs
 bash scripts/test-package-install.sh
 ```
 

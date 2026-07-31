@@ -20,8 +20,10 @@ mod initialization;
 mod inspection;
 mod local_versions;
 mod migration;
+mod migration_filesystem;
 mod model;
 mod physical_identity;
+mod protocol_upgrade;
 mod reorganization;
 mod root_attestation;
 mod sharing;
@@ -74,6 +76,10 @@ pub use model::{
     TemplateDescriptor, TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest,
     TemplateQuestion, TemplateRenderPlan, TemplateStructuralChange, TemplateStructuralChangeKind,
     ValidationFinding, ValidationLevel, ValidationReport, ValidationSeverity,
+};
+pub use protocol_upgrade::{
+    ProtocolUpgradePlan, ProtocolUpgradePlanDigest, ProtocolUpgradeResult, apply_protocol_upgrade,
+    plan_protocol_upgrade,
 };
 pub use reorganization::{
     AnalysisScope, ConsequentialAnswer, ConsequentialAnswerType, ConsequentialQuestion,

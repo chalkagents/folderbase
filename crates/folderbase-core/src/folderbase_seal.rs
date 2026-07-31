@@ -982,6 +982,12 @@ fn restored_version(
             "restore parent belongs to a different Folderbase".to_owned(),
         ));
     }
+    if current.protocol_version() != store.protocol_profile.folderbase_version_protocol() {
+        return Err(FolderbaseCaptureError::InvalidRestoreTransaction(
+            "capture a Folderbase Version for the active live-root protocol before restoring"
+                .to_owned(),
+        ));
+    }
     let mut bindings = current.bindings().to_vec();
     bindings.push(binding.clone());
     bindings.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
@@ -997,7 +1003,8 @@ fn restored_version(
         current.exclusions().to_vec(),
     );
     Ok(FolderbaseVersion::from_verified_parts(
-        FolderbaseVersionParts::portable_v1_from_verified_producer(
+        FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+            current.protocol_version(),
             store.root_attestation.folderbase_id.clone(),
             target_version_id.to_owned(),
             vec![current.version_id().to_owned()],
@@ -2956,7 +2963,8 @@ fn preflight_capture_envelopes(
         })
         .collect();
     let tombstones = transaction.target_tombstones.clone();
-    let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
+    let parts = FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+        plan.folderbase_version_protocol(),
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
         plan.current_local_head()
@@ -3201,7 +3209,8 @@ fn build_and_install_capture(
         })
         .collect();
     let tombstones = transaction.target_tombstones.clone();
-    let parts = FolderbaseVersionParts::portable_v1_from_verified_producer(
+    let parts = FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+        plan.folderbase_version_protocol(),
         plan.folderbase_id(),
         transaction.target_version_id.clone(),
         plan.current_local_head()
@@ -4908,7 +4917,7 @@ mod tests {
     use super::*;
 
     const MANIFEST: &[u8] = br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
   }
@@ -8116,7 +8125,7 @@ mod tests {
         fs::write(
             root.path().join("client/.folderbase/manifest.json"),
             br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }
@@ -8159,7 +8168,7 @@ mod tests {
         fs::write(
             root.path().join("client/.FOLDERBASE/MANIFEST.JSON"),
             br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }
@@ -9140,7 +9149,7 @@ mod tests {
         fs::write(
             root.path().join("client/.folderbase/manifest.json"),
             br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c474"
   }

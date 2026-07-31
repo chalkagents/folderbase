@@ -8,7 +8,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     time::SystemTime,
 };
 
@@ -24,6 +24,7 @@ use crate::{
         ChunkManifest, LARGE_PROFILE_V1, MAX_OBJECT_BYTES, ManifestViolation,
         ObjectVerificationError, STANDARD_PROFILE_V1, is_sha256, plan_streamed_manifest,
     },
+    traversal_policy::{NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary},
 };
 
 pub use crate::transfer_manifest::TRANSFER_IO_BUFFER_BYTES;
@@ -520,6 +521,7 @@ impl<'a> TransferAuthority<'a> {
             .root
             .try_clone()
             .map_err(|_| TransferSourceError::SourceChanged)?;
+        let mut display = PathBuf::from(self.store.root());
         let mut components = relative.components().peekable();
         while let Some(component) = components.next() {
             let Component::Normal(expected) = component else {
@@ -538,7 +540,11 @@ impl<'a> TransferAuthority<'a> {
                 let child = current
                     .open_dir_nofollow(&actual)
                     .map_err(|_| TransferSourceError::SourceChanged)?;
-                if has_nested_folderbase_marker(&child)? {
+                display.push(&actual);
+                if classify_nested_folderbase_boundary(&child, &display)
+                    .map_err(|_| TransferSourceError::SourceChanged)?
+                    != NestedFolderbaseBoundaryKind::None
+                {
                     return Err(TransferSourceError::SourceChanged);
                 }
                 current = child;
@@ -575,55 +581,6 @@ fn case_folded_child(
         }
     }
     Ok(found)
-}
-
-fn has_nested_folderbase_marker(directory: &Dir) -> Result<bool, TransferSourceError> {
-    let mut has_entry = false;
-    let mut state_entries = Vec::new();
-    for entry in directory
-        .entries()
-        .map_err(|_| TransferSourceError::SourceChanged)?
-    {
-        let entry = entry.map_err(|_| TransferSourceError::SourceChanged)?;
-        let name = entry.file_name();
-        if os_name_eq_ignore_ascii_case(&name, "FOLDERBASE.md") {
-            has_entry = true;
-        } else if os_name_eq_ignore_ascii_case(&name, ".folderbase") {
-            state_entries.push(name);
-        }
-    }
-    if !has_entry {
-        return Ok(false);
-    }
-    for state_name in state_entries {
-        let metadata = directory
-            .symlink_metadata(&state_name)
-            .map_err(|_| TransferSourceError::SourceChanged)?;
-        if metadata.file_type().is_symlink() {
-            return Ok(true);
-        }
-        if !metadata.is_dir() {
-            continue;
-        }
-        let state = directory
-            .open_dir_nofollow(&state_name)
-            .map_err(|_| TransferSourceError::SourceChanged)?;
-        for entry in state
-            .entries()
-            .map_err(|_| TransferSourceError::SourceChanged)?
-        {
-            let entry = entry.map_err(|_| TransferSourceError::SourceChanged)?;
-            if os_name_eq_ignore_ascii_case(&entry.file_name(), "manifest.json") {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn os_name_eq_ignore_ascii_case(name: &OsStr, expected: &str) -> bool {
-    name.to_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
 }
 
 fn open_optional_file_nofollow(

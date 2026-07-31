@@ -387,6 +387,7 @@ pub enum TemplateApplicationState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateComparisonSource {
+    Unmanaged,
     Origin,
     Application,
 }
@@ -578,7 +579,7 @@ impl Default for InitializationOptions {
         Self {
             name: None,
             kind: FolderbaseKind::Project,
-            create_agent_adapters: true,
+            create_agent_adapters: false,
         }
     }
 }

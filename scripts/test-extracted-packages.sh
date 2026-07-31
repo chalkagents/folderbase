@@ -37,10 +37,30 @@ core_source="$extraction_root/$(basename "$core_archive" .crate)"
 cli_source="$extraction_root/$(basename "$cli_archive" .crate)"
 
 test -f "$core_source/src/folderbase_version.rs"
+for package in folderbase-core folderbase-cli
+do
+  source_root="$repository_root/crates/$package"
+  extracted_root="$extraction_root/$(basename "$(resolve_archive "$package")" .crate)"
+  while IFS= read -r extracted_path
+  do
+    relative_path=${extracted_path#"$extracted_root/"}
+    cmp "$source_root/$relative_path" "$extracted_path"
+  done < <(
+    find "$extracted_root" \
+      -type f \
+      \( \
+        -name '*.rs' -o \
+        -path "$extracted_root/assets/*" \
+      \) \
+      -print 2>/dev/null |
+      LC_ALL=C sort
+  )
+done
 test ! -e "$core_source/protocol"
 test ! -e "$core_source/tests/folderbase_version_conformance.rs"
 grep -Fq 'contract = "folderbase-version-v1"' "$core_source/Cargo.toml"
 grep -Fq 'protocol-version = "0.4"' "$core_source/Cargo.toml"
+grep -Fq 'candidate-protocol-version = "0.5"' "$core_source/Cargo.toml"
 grep -Fq 'distribution = "repository-tag-source-archive"' "$core_source/Cargo.toml"
 grep -Fq 'cargo-package-role = "runtime-implementation-only"' "$core_source/Cargo.toml"
 
@@ -67,7 +87,7 @@ cargo install \
   --config "patch.crates-io.folderbase-core.path='$core_source'"
 
 folderbase="$extraction_root/install/bin/folderbase"
-"$folderbase" --version
+test "$("$folderbase" --version)" = "folderbase 0.5.0-rc.1"
 
 mkdir -p "$extraction_root/outside-checkout/unmanaged"
 cd "$extraction_root/outside-checkout"
@@ -79,7 +99,7 @@ cd "$extraction_root/outside-checkout"
   --json > initialization.json
 
 test -f unmanaged/.folderbase/manifest.json
-test -f unmanaged/.folderbaseignore
+test ! -e unmanaged/.folderbaseignore
 test -f unmanaged/FOLDERBASE.md
 
 printf '%s\n' 'Extracted Cargo packages are self-contained and testable.'

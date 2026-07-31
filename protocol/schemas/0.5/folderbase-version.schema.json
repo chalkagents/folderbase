@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.5/folderbase-version.schema.json",
+  "title": "Folderbase Version v1, protocol 0.5",
+  "description": "Canonical bounded full state for one protocol 0.5 Folderbase boundary. Root FOLDERBASE.md and .folderbaseignore files are ordinary optional bindings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "protocol_version",
+    "folderbase_id",
+    "version_id",
+    "parents",
+    "created_at",
+    "path_policy",
+    "root_manifest",
+    "bindings",
+    "tombstones",
+    "exclusions"
+  ],
+  "properties": {
+    "format": {
+      "const": "folderbase-version-v1"
+    },
+    "protocol_version": {
+      "const": "0.5"
+    },
+    "folderbase_id": {
+      "$ref": "#/$defs/folderbase_id"
+    },
+    "version_id": {
+      "$ref": "#/$defs/folderbase_version_id"
+    },
+    "parents": {
+      "type": "array",
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/folderbase_version_id"
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "path_policy": {
+      "$ref": "#/$defs/path_policy"
+    },
+    "root_manifest": {
+      "$ref": "#/$defs/root_manifest"
+    },
+    "bindings": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/directory_binding"
+          },
+          {
+            "$ref": "#/$defs/regular_file_binding"
+          },
+          {
+            "$ref": "#/$defs/symlink_binding"
+          }
+        ]
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "$ref": "#/$defs/tombstone"
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "$ref": "#/$defs/exclusion"
+      }
+    }
+  },
+  "$defs": {
+    "folderbase_id": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "folderbase_version_id": {
+      "type": "string",
+      "pattern": "^fbversion_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "object_id": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "object_version_id": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "portable_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\u0000)(?!.*(?:^|/)\\.folderbase(?:/|$)).+(?<!/)$"
+    },
+    "path_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "normalization",
+        "normalization_unicode_version",
+        "case_folding",
+        "case_folding_unicode_version"
+      ],
+      "properties": {
+        "format": {
+          "const": "folderbase-portable-path-v1"
+        },
+        "normalization": {
+          "const": "NFC"
+        },
+        "normalization_unicode_version": {
+          "const": "17.0.0"
+        },
+        "case_folding": {
+          "const": "full-default"
+        },
+        "case_folding_unicode_version": {
+          "const": "9.0.0"
+        }
+      }
+    },
+    "root_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "object_version_id",
+        "content_sha256",
+        "bytes"
+      ],
+      "properties": {
+        "path": {
+          "const": ".folderbase/manifest.json"
+        },
+        "object_version_id": {
+          "$ref": "#/$defs/object_version_id"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        }
+      }
+    },
+    "directory_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "object_id",
+        "lifecycle",
+        "kind"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/portable_path"
+        },
+        "object_id": {
+          "$ref": "#/$defs/object_id"
+        },
+        "lifecycle": {
+          "const": "live"
+        },
+        "kind": {
+          "const": "directory"
+        }
+      }
+    },
+    "regular_file_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "object_id",
+        "lifecycle",
+        "kind",
+        "object_version_id",
+        "content_sha256",
+        "bytes",
+        "executable"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/portable_path"
+        },
+        "object_id": {
+          "$ref": "#/$defs/object_id"
+        },
+        "lifecycle": {
+          "const": "live"
+        },
+        "kind": {
+          "const": "regular_file"
+        },
+        "object_version_id": {
+          "$ref": "#/$defs/object_version_id"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        },
+        "executable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "symlink_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "object_id",
+        "lifecycle",
+        "kind",
+        "object_version_id",
+        "target",
+        "target_safety"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/portable_path"
+        },
+        "object_id": {
+          "$ref": "#/$defs/object_id"
+        },
+        "lifecycle": {
+          "const": "live"
+        },
+        "kind": {
+          "const": "symlink"
+        },
+        "object_version_id": {
+          "$ref": "#/$defs/object_version_id"
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "target_safety": {
+          "const": "relative-within-folderbase"
+        }
+      }
+    },
+    "tombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "object_id",
+        "lifecycle",
+        "deleted_kind",
+        "last_object_version_id"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/portable_path"
+        },
+        "object_id": {
+          "$ref": "#/$defs/object_id"
+        },
+        "lifecycle": {
+          "const": "deleted"
+        },
+        "deleted_kind": {
+          "enum": [
+            "directory",
+            "regular_file",
+            "symlink"
+          ]
+        },
+        "last_object_version_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/object_version_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "exclusion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/portable_path"
+            },
+            "kind": {
+              "const": "nested_folderbase"
+            },
+            "reason": {
+              "const": "nested-folderbase-boundary"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/portable_path"
+            },
+            "kind": {
+              "enum": [
+                "hard_link",
+                "fifo",
+                "socket",
+                "block_device",
+                "character_device",
+                "other_special"
+              ]
+            },
+            "reason": {
+              "const": "unsupported-v1"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

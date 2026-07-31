@@ -9,7 +9,7 @@ use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473";
 const MANIFEST: &[u8] = br#"{
-  "protocol_version": "0.4.0",
+  "protocol_version": "0.1.0",
   "folderbase": {
     "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473"
   }
@@ -182,7 +182,11 @@ fn nested_folderbases_are_typed_boundaries_and_all_regular_file_formats_remain_o
     }
     let child = root.path().join("Clients/Prosperna");
     fs::create_dir_all(child.join(".folderbase")).expect("nested state");
-    fs::write(child.join(".folderbase/manifest.json"), MANIFEST).expect("nested manifest");
+    fs::write(
+        child.join(".folderbase/manifest.json"),
+        b"{not-json and still opaque",
+    )
+    .expect("opaque nested manifest");
     fs::write(child.join("FOLDERBASE.md"), "# Child\n").expect("nested entry");
     #[cfg(unix)]
     fs::write(child.join("CON"), "must not be traversed").expect("unsafe nested descendant");
@@ -253,6 +257,41 @@ fn malformed_nested_entry_marker_still_closes_the_nested_boundary() {
     assert_eq!(
         boundary.reason(),
         CaptureExclusionReason::NestedFolderbaseBoundary
+    );
+}
+
+#[test]
+fn capture_refuses_case_folded_marker_aliases_without_granting_them_authority() {
+    let root = folderbase();
+    let child = root.path().join("Clients/Alias");
+    fs::create_dir_all(child.join(".FOLDERBASE")).expect("nested alias state");
+    fs::write(child.join(".FOLDERBASE/MANIFEST.JSON"), b"opaque").expect("nested alias manifest");
+    fs::write(child.join("private.bin"), b"must not be captured").expect("private descendant");
+
+    assert!(
+        FolderbaseVersionStore::open(root.path())
+            .expect("open")
+            .plan_capture()
+            .is_err(),
+        "an alias-shaped marker fails closed but never becomes protocol authority"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_refuses_a_symlink_shaped_marker_without_following_it() {
+    let root = folderbase();
+    let child = root.path().join("Clients/Symlink");
+    fs::create_dir_all(&child).expect("child");
+    std::os::unix::fs::symlink(root.path().join("missing-state"), child.join(".folderbase"))
+        .expect("state symlink");
+    fs::write(child.join("private.bin"), b"must not be captured").expect("private descendant");
+
+    assert!(
+        FolderbaseVersionStore::open(root.path())
+            .expect("open")
+            .plan_capture()
+            .is_err()
     );
 }
 
@@ -568,7 +607,7 @@ fn in_scope_paths_fail_closed_on_non_utf8_and_portable_case_collisions() {
 }
 
 #[test]
-fn required_ignore_marker_and_bounded_policy_fail_closed() {
+fn required_ignore_marker_and_capture_policy_validation_fail_closed() {
     let missing = folderbase();
     fs::remove_file(missing.path().join(".folderbaseignore")).expect("remove marker");
     assert!(matches!(
@@ -591,6 +630,15 @@ fn required_ignore_marker_and_bounded_policy_fail_closed() {
             .plan_capture(),
         Err(FolderbaseCaptureError::IgnorePolicyTooLarge { maximum_bytes })
             if maximum_bytes == folderbase_core::MAX_FOLDERBASEIGNORE_BYTES
+    ));
+
+    let invalid = folderbase();
+    fs::write(invalid.path().join(".folderbaseignore"), "{a,b\n").expect("invalid ignore policy");
+    assert!(matches!(
+        FolderbaseVersionStore::open(invalid.path())
+            .expect("marker is present")
+            .plan_capture(),
+        Err(FolderbaseCaptureError::InvalidIgnorePolicy(_))
     ));
 }
 
@@ -638,6 +686,29 @@ fn local_head_from_another_physical_root_is_rejected() {
         Err(FolderbaseCaptureError::InvalidLocalHead(message))
             if message.contains("attested physical Folderbase Root")
     ));
+}
+
+#[test]
+fn public_capture_fails_closed_at_the_shared_boundary_work_ceiling() {
+    const EXPECTED_SHARED_WORK_CEILING: usize = 16_384;
+
+    let root = folderbase();
+    let crowded = root.path().join("crowded");
+    fs::create_dir(&crowded).expect("crowded directory");
+    for index in 0..=EXPECTED_SHARED_WORK_CEILING {
+        fs::write(crowded.join(format!("entry-{index:05}")), b"").expect("ordinary entry");
+    }
+
+    let error = FolderbaseVersionStore::open(root.path())
+        .expect("open Folderbase")
+        .plan_capture()
+        .expect_err("shared classifier work must be bounded");
+    assert!(
+        error
+            .to_string()
+            .contains("nested Folderbase boundary inspection exceeded"),
+        "public callers must inherit the shared classifier's hard work ceiling, got: {error}"
+    );
 }
 
 fn state_paths(root: &Path) -> Vec<String> {

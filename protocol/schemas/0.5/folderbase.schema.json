@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+  "title": "Folderbase 0.5 manifest",
+  "description": "Engine-owned root authority for an ordinary Folderbase. Visible narratives, questions, and root ignore files are optional and non-authoritative.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "folderbase",
+    "policies"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://folderbase.ai/protocol/0.5/folderbase.schema.json"
+    },
+    "protocol_version": {
+      "const": "0.5.0"
+    },
+    "folderbase": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "status",
+        "created_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/folderbaseId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "person",
+            "organization",
+            "engagement",
+            "project",
+            "customer",
+            "temporary",
+            "custom"
+          ]
+        },
+        "status": {
+          "enum": [
+            "active",
+            "paused",
+            "archived"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "template_provenance": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "adapters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "agent",
+          "path"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "path": {
+            "$ref": "#/$defs/safeRelativePath"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "folderbase_protocol_upgrade": {
+      "$ref": "#/$defs/protocolUpgradeReceipt"
+    },
+    "policies": {
+      "type": "object",
+      "required": [
+        "availability",
+        "structural_changes",
+        "archive",
+        "cloud_sync",
+        "capture_ignore"
+      ],
+      "properties": {
+        "availability": {
+          "enum": [
+            "keep_local",
+            "managed",
+            "cloud_only"
+          ]
+        },
+        "structural_changes": {
+          "enum": [
+            "suggest",
+            "approve",
+            "autonomous"
+          ]
+        },
+        "archive": {
+          "enum": [
+            "manual",
+            "approve",
+            "automatic"
+          ]
+        },
+        "cloud_sync": {
+          "enum": [
+            "disabled",
+            "enabled"
+          ]
+        },
+        "capture_ignore": {
+          "type": "object",
+          "required": [
+            "format",
+            "rules"
+          ],
+          "properties": {
+            "format": {
+              "const": "folderbase-capture-ignore-v1"
+            },
+            "rules": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\u0000]+$"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "protocolUpgradeReceipt": {
+      "type": "object",
+      "required": [
+        "format",
+        "from_protocol_version",
+        "target_manifest_without_receipt_sha256",
+        "plan_digest"
+      ],
+      "properties": {
+        "format": {
+          "const": "folderbase-protocol-upgrade-receipt-v1"
+        },
+        "from_protocol_version": {
+          "type": "string",
+          "minLength": 5
+        },
+        "target_manifest_without_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "plan_digest": {
+          "type": "object",
+          "required": [
+            "algorithm",
+            "digest"
+          ],
+          "properties": {
+            "algorithm": {
+              "const": "sha256"
+            },
+            "digest": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*(?:^|/)(?:[.][fF][oO][lL][dD][eE][rR][bB][aA][sS][eE]|[.][gG][iI][tT])(?:/|$))(?!.*\\u0000)(?!.*\\/$).+$"
+    }
+  }
+}

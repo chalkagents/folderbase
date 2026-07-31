@@ -113,19 +113,35 @@ V2 root rejects any different full identity; immutable legacy evidence remains
 explicitly legacy until its pending transaction is retired.
 
 Attestation opens the exact supplied root without following a symbolic link or
-Windows reparse point and retains its handle. It then resolves
-`.folderbase`, `.folderbase/manifest.json`, and `FOLDERBASE.md` only through
-root-relative capabilities, without following links. The state marker must be a
-directory and both files must be regular files. Core retains and revalidates the
-opened identities before returning the receipt. It never walks to an ancestor
-to find markers. A nested valid root therefore attests independently, while an
-invalid nested folder fails locally even if its parent is valid.
+Windows reparse point and retains its handle. It always resolves
+`.folderbase` and `.folderbase/manifest.json` through root-relative
+capabilities, without following links. The state marker must be a directory and
+the manifest must be a regular file. Protocol 0.1 and 0.2 additionally require
+the root `FOLDERBASE.md` regular-file marker. Native protocol 0.5 does not:
+the exact manifest is the root authority, and root `FOLDERBASE.md` is fully
+ordinary optional content. An optional root `.folderbaseignore` is user-owned
+but remains bounded policy input rather than ordinary narrative. Core retains
+and revalidates the identities required by the selected profile before
+returning the receipt. It never walks to an ancestor to find markers. A nested
+valid 0.5 root therefore attests independently without a narrative file, while
+an invalid nested folder fails locally even if its parent is valid.
+
+This explicit-root attestation is distinct from parent traversal. A parent that
+observes any exact regular, no-follow `.folderbase/manifest.json` records an
+opaque nested boundary without reading or decoding its bytes. Malformed nested
+state therefore remains hidden from the parent; only an operation explicitly
+opened on that root attempts attestation and reports the local failure.
+Markerless state or context is inert. ASCII-case marker aliases, symlink or
+non-directory state markers, and symlink or non-regular manifest markers are
+unsafe shapes rather than authority. Analysis may quarantine them as
+`Unchecked` (`unchecked` on the wire) and omit descendants; materializing,
+mutating, transfer, and restore seams reject them.
 
 On Windows, every path and opened handle is additionally rejected when
 `FILE_ATTRIBUTE_REPARSE_POINT` is set, regardless of reparse tag. This includes
-junctions and other reparse-point types at the exact root, state
-directory, manifest, or entry, both during initial opening and final
-revalidation.
+junctions and other reparse-point types at the exact root, state directory,
+manifest, or any profile-required entry marker, both during initial opening and
+final revalidation.
 
 The manifest is limited to 16 MiB. JSON parsing rejects duplicate object keys
 recursively before extracting the minimum required shape. This prevents a
@@ -133,9 +149,10 @@ parser or implementation from silently choosing between two security-relevant
 values. No attestation state file is written.
 
 The public error is a typed, non-exhaustive taxonomy. A closed public marker
-enum identifies `.folderbase`, `.folderbase/manifest.json`, and
-`FOLDERBASE.md`, so callers can handle known protocol markers while remaining
-forward-compatible with new error categories. Attestation errors distinguish
+enum identifies `.folderbase`, `.folderbase/manifest.json`, and the legacy
+`FOLDERBASE.md` marker, so callers can handle known profile-specific markers
+while remaining forward-compatible with new error categories. Attestation
+errors distinguish
 `RootNotFound`, `RootSymlink`, and `RootNotDirectory`;
 `MarkerMissing`, `MarkerSymlink`, and `MarkerWrongType`; an oversized manifest;
 `ManifestInvalidJson`; `ManifestDuplicateField` at any depth; missing and
@@ -144,10 +161,11 @@ protocol version; one `RootChangedDuringAttestation` for any changed retained
 root, marker, or manifest-byte chain; unavailable physical identity; and
 filesystem I/O.
 
-Final validation reopens the exact root, state directory, manifest, and entry.
-It requires the retained identities to match and bounded-reads the reopened
-manifest again. The second exact-byte SHA-256 must equal the receipt's
-`manifest_sha256`; inode, length, or timestamp checks alone are insufficient.
+Final validation reopens the exact root, state directory, manifest, and every
+additional marker required by the selected profile. It requires the retained
+identities to match and bounded-reads the reopened manifest again. The second
+exact-byte SHA-256 must equal the receipt's `manifest_sha256`; inode, length, or
+timestamp checks alone are insufficient.
 
 The CLI exposes:
 
@@ -162,8 +180,12 @@ set and exit with operational status 2.
 
 Attestation is evidence about a local materialization. It does not prove share
 grants, actor authority, cloud readiness, sync completeness, object history, or
-workspace health beyond the exact marker contract above. Those decisions remain
-in their respective Core and product layers.
+workspace health beyond the exact profile contract above. Optional
+`.folderbase/summary.md` and `.folderbase/questions.jsonl` hints never enter the
+logical tuple and grant no mutation or sharing authority. Other
+`.folderbase/**` content remains private and inert without becoming a named
+hint format. Those decisions remain in their respective Core and product
+layers.
 
 ## Rejected alternatives
 
@@ -196,7 +218,8 @@ The decision is implemented when Core and CLI tests prove:
 - exact-byte logical receipts and stable device-local instance receipts;
 - distinct instance receipts for physical copies;
 - exact-root behavior for valid and invalid nested roots;
-- no-follow and correct-type checks for all markers;
+- no-follow and correct-type checks for all markers required by each supported
+  profile;
 - recursive duplicate-key rejection and the 16 MiB bound;
 - invalid canonical IDs and SemVer rejection without normalization;
 - retained-identity change detection where a deterministic race can be staged;

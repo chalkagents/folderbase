@@ -631,6 +631,44 @@ fn case_folded_nested_markers_still_fail_closed() {
 }
 
 #[test]
+fn migration_analysis_treats_markerless_context_as_inert() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("child");
+    fs::create_dir_all(nested.join(".folderbase/questions")).unwrap();
+    fs::write(nested.join(".folderbase/summary.md"), "ordinary context\n").unwrap();
+    fs::write(nested.join("ordinary.txt"), "visible ordinary bytes\n").unwrap();
+
+    let analysis = analyze_migration(root.path()).unwrap();
+
+    assert!(analysis.nested_folderbases.is_empty());
+    assert_eq!(analysis.file_count, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_analysis_fails_closed_on_a_symlink_shaped_marker_without_attesting_it() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("child");
+    fs::create_dir(&nested).unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("missing-state"),
+        nested.join(".folderbase"),
+    )
+    .unwrap();
+    fs::write(nested.join("never-expose.txt"), "nested secret bytes\n").unwrap();
+
+    let analysis = analyze_migration(root.path()).unwrap();
+
+    assert_eq!(analysis.file_count, 0);
+    assert_eq!(analysis.nested_folderbases.len(), 1);
+    assert_eq!(analysis.nested_folderbases[0].path, Path::new("child"));
+    assert_eq!(
+        analysis.nested_folderbases[0].state,
+        NestedFolderbaseState::Unchecked
+    );
+}
+
+#[test]
 fn ambiguous_case_folded_state_aliases_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     let nested = root.path().join("child");
@@ -2479,6 +2517,7 @@ fn migration_adapter_body_retains_its_legacy_utf8_byte_limit() {
 #[test]
 fn changing_ignore_policy_is_structural() {
     let root = initialized_folderbase_fixture();
+    fs::write(root.path().join(".folderbaseignore"), "").unwrap();
     let policy = "node_modules/\n.next/\nDerived/\n";
     let plan = MigrationPlan::propose_structural(
         root.path(),
@@ -2758,11 +2797,6 @@ fn structural_plan_refuses_implicit_nested_folderbase_transfer() {
     .unwrap();
     fs::create_dir_all(nested.join(".folderbase")).unwrap();
     fs::copy(
-        nested_fixture.path().join("FOLDERBASE.md"),
-        nested.join("FOLDERBASE.md"),
-    )
-    .unwrap();
-    fs::copy(
         nested_fixture.path().join(".folderbase/manifest.json"),
         nested.join(".folderbase/manifest.json"),
     )
@@ -2843,7 +2877,7 @@ fn rollback_refuses_to_restore_parent_history_into_a_new_nested_folderbase() {
 }
 
 #[test]
-fn rollback_refuses_case_folded_nested_folderbase_created_after_apply() {
+fn rollback_fails_closed_on_case_folded_aliases_without_granting_them_authority() {
     let root = initialized_folderbase_fixture();
     fs::create_dir_all(root.path().join("Client")).unwrap();
     fs::create_dir_all(root.path().join("Archive")).unwrap();
@@ -2865,7 +2899,7 @@ fn rollback_refuses_case_folded_nested_folderbase_created_after_apply() {
     )
     .unwrap();
 
-    let error = rollback_migration(&result).unwrap_err();
+    let error = rollback_migration(&result).expect_err("unsafe aliases fail closed");
 
     assert!(matches!(error, FolderbaseError::UnsafePath(path) if path == Path::new("Client")));
     assert!(!root.path().join("Client/notes.md").exists());
@@ -2904,6 +2938,30 @@ fn ordinary_moves_refuse_protocol_and_repository_control_paths() {
     .unwrap_err();
     assert!(matches!(destination_error, FolderbaseError::UnsafePath(_)));
     assert!(destination_root.path().join("notes.md").exists());
+}
+
+#[test]
+fn ordinary_move_can_reorganize_an_optional_v05_folderbase_md() {
+    let root = initialized_folderbase_fixture();
+    fs::create_dir(root.path().join("Archive")).unwrap();
+    fs::write(root.path().join("FOLDERBASE.md"), "# Optional narrative\n").unwrap();
+    let plan = MigrationPlan::propose_structural(
+        root.path(),
+        vec![MigrationOperation::move_object(
+            "FOLDERBASE.md",
+            "Archive/FOLDERBASE.md",
+        )],
+    )
+    .expect("ordinary narrative move plan");
+
+    apply_migration(approve_migration(plan).expect("approve"))
+        .expect("apply ordinary narrative move");
+
+    assert!(!root.path().join("FOLDERBASE.md").exists());
+    assert_eq!(
+        fs::read(root.path().join("Archive/FOLDERBASE.md")).unwrap(),
+        b"# Optional narrative\n"
+    );
 }
 
 #[test]
