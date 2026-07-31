@@ -87,7 +87,7 @@ cargo install \
   --config "patch.crates-io.folderbase-core.path='$core_source'"
 
 folderbase="$extraction_root/install/bin/folderbase"
-"$folderbase" --version
+test "$("$folderbase" --version)" = "folderbase 0.5.0-rc.1"
 
 mkdir -p "$extraction_root/outside-checkout/unmanaged"
 cd "$extraction_root/outside-checkout"

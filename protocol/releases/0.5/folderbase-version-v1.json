@@ -12,11 +12,11 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "c782570304d8356756472a6c7d603075c7cbe6374f8c40ee883db9b66b198666"
+      "sha256": "59fa0a675930bb1be43f0246c6d1455d73fc444a41c32f67c323e81abbf0e28a"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "b3f3b675a3330aa47ff785eabddbc76fae0b8f1654d48367380950890a119d53"
+      "sha256": "f79d3b0e17a107c4012d109aa80c894a36f503e11363bae7442b10525bf3c53a"
     },
     {
       "path": "LICENSE",
@@ -28,11 +28,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "0250ec97ce07073d4385b374cc79eca344903986ba507406a5abe776ce2a188d"
+      "sha256": "6569c87e49fae6c1765df62f9408d78cd8c7781e0cbf12c455e32672efc96288"
     },
     {
       "path": "crates/folderbase-cli/Cargo.toml",
-      "sha256": "a7f173ed2173d3be9ac60099f195fc8dc648114e409c533986d867ff088d69b2"
+      "sha256": "b270236fa91859a804d20417163c8687202af724935dedbeac62c4347232f853"
     },
     {
       "path": "crates/folderbase-cli/LICENSE",
@@ -56,7 +56,7 @@
     },
     {
       "path": "crates/folderbase-cli/tests/folderbase_full_eclipse.rs",
-      "sha256": "b5805fbb0a57460f4c464ed33361d3ce95c606cfcbb41fef447d836f4e8e860f"
+      "sha256": "27a183c17070eb8c9b12690ffdd1467c2c3dc21acd12cb3a0a5f3f3e6ce5a73c"
     },
     {
       "path": "crates/folderbase-cli/tests/transform_fixture.rs",
@@ -124,7 +124,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folderbase_capture.rs",
-      "sha256": "7fc410fb0bb1401791bdc83576668c801a4284c2c5e4cb4087391028df5c0477"
+      "sha256": "ab5b0032b173db61239836e637a192f74fdf721a050f1fb76c222336dc6dc7f4"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_restore_authority.rs",
@@ -136,7 +136,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folderbase_state.rs",
-      "sha256": "197b09f8dfb6286dce79ce13d06aecd59c03825ffad0bb05a4b566baa88ea43a"
+      "sha256": "585e517070cfd68fa306ae9a3db65eaf05c6dc6cef915b6be093393932a17f52"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_version.rs",
@@ -160,7 +160,7 @@
     },
     {
       "path": "crates/folderbase-core/src/lib.rs",
-      "sha256": "620fb68648f1a37218205d03dcbfbe5af59e8f2807bede6f1753221cd3219852"
+      "sha256": "46d7032b46c0a28427ff76229303591279fbee2177978dfdbb7bfc7e60e12754"
     },
     {
       "path": "crates/folderbase-core/src/local_versions.rs",
@@ -168,7 +168,11 @@
     },
     {
       "path": "crates/folderbase-core/src/migration.rs",
-      "sha256": "70e91f067c781e0d75e4a9357e091494392776d6ddd6b37f6663faae53e291d5"
+      "sha256": "5f0a2a2dc87c85b62126309a43423fc8a96f4b36b986a245fed451d4162786c5"
+    },
+    {
+      "path": "crates/folderbase-core/src/migration_filesystem.rs",
+      "sha256": "32fb299688e9e48a8407fa186afa224b714b813c64b85507c8c7fe4872a30f8b"
     },
     {
       "path": "crates/folderbase-core/src/model.rs",
@@ -180,7 +184,7 @@
     },
     {
       "path": "crates/folderbase-core/src/protocol_upgrade.rs",
-      "sha256": "b22be7eec96bfdcf6cf8c3a663d1d03541c9d8b147b9a629300bffbc74be571d"
+      "sha256": "66d23726d73c7b66162e33921444a45c1a03bea66f7e04ca8854077832ffa2b0"
     },
     {
       "path": "crates/folderbase-core/src/reorganization.rs",
@@ -200,7 +204,7 @@
     },
     {
       "path": "crates/folderbase-core/src/template.rs",
-      "sha256": "b3799793cbf0f722ebb9cc6a90ca0f212744971972a2c1885060ceb21a88b66e"
+      "sha256": "d2cefdd645e93bd2c1267ddecd91cb7c23078d0f78acbadd9ffbcb5b0a86589b"
     },
     {
       "path": "crates/folderbase-core/src/template_expansion.rs",
@@ -244,7 +248,7 @@
     },
     {
       "path": "crates/folderbase-core/tests/folderbase_capture.rs",
-      "sha256": "13b452183054fc9fdbc2488b5eeb50c0d44ac891bc5499d5c7ec4eb4321380c4"
+      "sha256": "0ef1e31c7c8b68020afc5d2eb2a1b10f354e83fa90c851a261fcad55b0a9c5d7"
     },
     {
       "path": "crates/folderbase-core/tests/folderbase_seal.rs",
@@ -572,7 +576,7 @@
     },
     {
       "path": "scripts/test-extracted-packages.sh",
-      "sha256": "c4c1cc5d3ec47d7147a376917872024279497c15d35ce7987c0fc455c57b459d"
+      "sha256": "c0b4f45e0978c982cd8c63f4c11d61b3c76c964c83a3340dd122a7c0c255fad6"
     },
     {
       "path": "scripts/test-package-install.sh",

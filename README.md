@@ -76,6 +76,7 @@ Folderbase currently requires Rust 1.96 or newer.
 ```sh
 cargo install --path crates/folderbase-cli --locked
 folderbase --version
+# folderbase 0.5.0-rc.1
 ```
 
 Once the first crates.io release is published:

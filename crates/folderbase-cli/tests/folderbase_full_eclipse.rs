@@ -63,6 +63,14 @@ fn cargo_and_executable_surface_is_folderbase_only() {
         .collect::<Vec<_>>();
     package_names.sort_unstable();
     assert_eq!(package_names, ["folderbase-cli", "folderbase-core"]);
+    assert!(
+        metadata["packages"]
+            .as_array()
+            .expect("workspace packages")
+            .iter()
+            .all(|package| package["version"] == "0.5.0-rc.1"),
+        "every published workspace package must carry the protocol 0.5 release-candidate identity"
+    );
 
     let core = metadata["packages"]
         .as_array()
@@ -104,7 +112,7 @@ fn cargo_and_executable_surface_is_folderbase_only() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::starts_with("folderbase "));
+        .stdout("folderbase 0.5.0-rc.1\n");
 }
 
 #[test]
