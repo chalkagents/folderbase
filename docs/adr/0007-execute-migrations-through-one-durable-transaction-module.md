@@ -297,7 +297,7 @@ Win32 wrapper resolves a NULL-root simple name against process current working
 directory. Core does not try to widen or ambiently reopen a directory while
 publishing. Source leaves request `DELETE`,
 `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer uses the complete
-`FILE_RENAME_INFO` structure size plus the filename bytes. Core never recovers
+`FILE_RENAME_INFORMATION` structure size plus the filename bytes. Core never recovers
 rights by reopening `.` or an ambient pathname.
 
 ### Claim and publish one leaf at a time
