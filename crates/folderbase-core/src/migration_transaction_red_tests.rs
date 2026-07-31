@@ -736,11 +736,11 @@ fn transaction_v1_rejects_generation_count_above_the_operation_derived_bound() {
         serde_json::from_slice(&fs::read(program_path(&fixture)).expect("immutable program"))
             .expect("program JSON");
     let operation_count = value["steps"].as_array().expect("program steps").len();
-    // Six phase records bracket at most one intent/completion pair in each
-    // direction for every compiled leaf operation. Each retained conflict
-    // reserves both its retry intent and exact evidence generation.
+    // Six phase records bracket intent/completion plus the journal-bound
+    // publication and cleanup pair for each compiled leaf operation. Each
+    // retained conflict reserves both its retry intent and exact evidence.
     let maximum_generation_count =
-        6 + operation_count * 4 + transaction_v1::MAX_RETAINED_CONFLICTS * 2;
+        6 + operation_count * 6 + transaction_v1::MAX_RETAINED_CONFLICTS * 2;
     let journal = journal_root(&fixture);
     let first = journal.join("00000000000000000000.json");
     for generation in 1..=maximum_generation_count {
@@ -1586,10 +1586,15 @@ fn rollback_after_regular_private_apply_receipt_only_journalizes_existing_eviden
             .expect("rollback must reach its durable direction checkpoint");
         }));
         let checkpoints = checkpoints.into_inner();
-        let expected = vec![
-            TransactionV1Checkpoint::JournalApplyReceiptPersisted(operation_index),
-            TransactionV1Checkpoint::RollbackRequested,
-        ];
+        let mut expected = vec![TransactionV1Checkpoint::JournalApplyReceiptPersisted(
+            operation_index,
+        )];
+        if !matches!(kind, ClosedLeafKind::MoveFile) {
+            expected.push(TransactionV1Checkpoint::PrivatePublicationOwnershipRetired(
+                operation_index,
+            ));
+        }
+        expected.push(TransactionV1Checkpoint::RollbackRequested);
         let (_, durable) = latest_journal_generation(fixture.root.path(), &fixture.migration_id);
         if checkpoints != expected
             || interrupted.is_ok()
@@ -7172,6 +7177,336 @@ fn synced_private_publish_staging_recovers_without_exposing_a_partial_final_clai
     );
 }
 
+struct BoundPublicationFixture {
+    root: TempDir,
+    migration_id: String,
+    claims: PathBuf,
+    claim_name: String,
+}
+
+impl BoundPublicationFixture {
+    fn final_claim(&self) -> PathBuf {
+        self.claims.join(&self.claim_name)
+    }
+
+    fn stage(&self) -> PathBuf {
+        self.claims.join(format!(".{}.preparing", self.claim_name))
+    }
+
+    fn ownership(&self) -> PathBuf {
+        self.claims
+            .join(format!(".{}.ownership.json", self.claim_name))
+    }
+
+    fn ownership_stage(&self) -> PathBuf {
+        self.claims
+            .join(format!("..{}.ownership.json.preparing", self.claim_name))
+    }
+
+    fn recover(&self) -> Result<MigrationOutcome> {
+        MigrationExecution::run(
+            RootClaim::Current {
+                display_root: self.root.path(),
+            },
+            MigrationCommand::Recover {
+                migration_id: &self.migration_id,
+            },
+        )
+    }
+}
+
+fn interrupt_bound_publication(
+    stop: impl Fn(TransactionV1Checkpoint) -> bool,
+) -> BoundPublicationFixture {
+    let (root, migration_id, approval_digest) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"journal-bound bytes\n")]);
+    let interrupted = catch_unwind(AssertUnwindSafe(|| {
+        run_transaction_v1_with_hook(
+            root.path(),
+            MigrationCommand::Apply {
+                migration_id: &migration_id,
+                approval_digest: &approval_digest,
+            },
+            |checkpoint| {
+                if stop(checkpoint) {
+                    let (_, journal) = latest_journal_generation(root.path(), &migration_id);
+                    if journal["active_publication"].is_object() {
+                        panic!("stop at journal-bound publication checkpoint");
+                    }
+                }
+            },
+        )
+    }));
+    assert!(interrupted.is_err(), "fixture must interrupt");
+    let (_, journal) = latest_journal_generation(root.path(), &migration_id);
+    let claim_name = journal["active_publication"]["claim_name"]
+        .as_str()
+        .expect("durable active publication claim")
+        .to_owned();
+    let claims = transaction_v1_root(root.path(), &migration_id).join("claims");
+    BoundPublicationFixture {
+        root,
+        migration_id,
+        claims,
+        claim_name,
+    }
+}
+
+fn substitute_preserving_permissions(path: &Path) -> PhysicalIdentity {
+    let bytes = fs::read(path).expect("bound artifact bytes");
+    let permissions = fs::metadata(path)
+        .expect("bound artifact metadata")
+        .permissions();
+    let identity = substitute_regular(path, &bytes);
+    fs::set_permissions(path, permissions).expect("preserve artifact fidelity");
+    identity
+}
+
+#[test]
+fn coherent_same_byte_new_inode_stage_and_sidecar_are_rejected_by_the_journal_binding() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+        )
+    });
+    let stage = fixture.stage();
+    let ownership = fixture.ownership();
+    let stage_identity = substitute_preserving_permissions(&stage);
+    let ownership_identity = substitute_preserving_permissions(&ownership);
+
+    fixture
+        .recover()
+        .expect_err("coherent same-byte substitutions do not inherit publication ownership");
+
+    assert_eq!(
+        PhysicalIdentity::from_path(&stage).expect("foreign stage remains"),
+        stage_identity
+    );
+    assert_eq!(
+        PhysicalIdentity::from_path(&ownership).expect("foreign sidecar remains"),
+        ownership_identity
+    );
+    assert!(!fixture.final_claim().exists());
+}
+
+#[test]
+fn same_byte_new_inode_sidecar_is_retained_when_receipted_cleanup_rejects_it() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::JournalApplyReceiptPersisted(_)
+        )
+    });
+    let ownership = fixture.ownership();
+    let foreign_identity = substitute_preserving_permissions(&ownership);
+
+    fixture
+        .recover()
+        .expect_err("cleanup requires the exact journal-bound ownership sidecar");
+
+    assert_eq!(
+        PhysicalIdentity::from_path(&ownership).expect("foreign sidecar remains"),
+        foreign_identity
+    );
+}
+
+#[test]
+fn fidelity_only_sidecar_tampering_is_retained_when_cleanup_rejects_it() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::JournalApplyReceiptPersisted(_)
+        )
+    });
+    let ownership = fixture.ownership();
+    let mut permissions = fs::metadata(&ownership)
+        .expect("ownership metadata")
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&ownership, permissions).expect("tamper sidecar fidelity");
+
+    fixture
+        .recover()
+        .expect_err("cleanup rejects fidelity-only sidecar tampering");
+
+    assert!(ownership.exists(), "tampered sidecar remains for review");
+    assert!(
+        fs::metadata(&ownership)
+            .expect("tampered sidecar metadata")
+            .permissions()
+            .readonly()
+    );
+}
+
+#[test]
+fn bound_ownership_staging_recovers_before_claim_installation() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+        )
+    });
+    fs::rename(fixture.ownership(), fixture.ownership_stage())
+        .expect("leave exact bound sidecar at its recoverable staging name");
+
+    let recovered = fixture
+        .recover()
+        .expect("journal binding authorizes exact ownership staging recovery");
+
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(!fixture.ownership_stage().exists());
+}
+
+#[test]
+fn unbound_private_publication_staging_is_retained_and_reported() {
+    let (root, migration_id, approval_digest) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"unbound staging\n")]);
+    let interrupted = catch_unwind(AssertUnwindSafe(|| {
+        run_transaction_v1_with_hook(
+            root.path(),
+            MigrationCommand::Apply {
+                migration_id: &migration_id,
+                approval_digest: &approval_digest,
+            },
+            |checkpoint| {
+                if matches!(checkpoint, TransactionV1Checkpoint::ApplyIntentPersisted(_)) {
+                    panic!("stop before any publication binding");
+                }
+            },
+        )
+    }));
+    assert!(interrupted.is_err());
+    let claims = transaction_v1_root(root.path(), &migration_id).join("claims");
+    let unbound = claims.join(".00000000.publish.claim.preparing");
+    fs::write(&unbound, b"unbound but retained\n").expect("unbound staging artifact");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("unbound staging has no mutation authority");
+
+    assert_eq!(
+        fs::read(&unbound).expect("unbound staging remains"),
+        b"unbound but retained\n"
+    );
+}
+
+#[test]
+fn foreign_staging_beside_an_exact_final_claim_is_rejected_and_retained() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+        )
+    });
+    fs::rename(fixture.stage(), fixture.final_claim()).expect("install exact final claim");
+    fs::write(fixture.stage(), b"foreign staging peer\n").expect("foreign staging peer");
+
+    fixture
+        .recover()
+        .expect_err("a foreign staging peer cannot accompany the exact final claim");
+
+    assert_eq!(
+        fs::read(fixture.stage()).expect("foreign staging remains"),
+        b"foreign staging peer\n"
+    );
+    assert!(fixture.final_claim().exists());
+}
+
+#[test]
+fn exact_two_link_private_publication_converges_but_a_mismatch_does_not() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+        )
+    });
+    fs::hard_link(fixture.stage(), fixture.final_claim())
+        .expect("leave exact final-link checkpoint");
+    let recovered = fixture
+        .recover()
+        .expect("exact two-link publication converges");
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(!fixture.stage().exists());
+
+    let mismatch = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublishClaimStaged(_)
+        )
+    });
+    fs::rename(mismatch.stage(), mismatch.final_claim()).expect("install exact final");
+    fs::write(mismatch.stage(), b"mismatched peer\n").expect("mismatched peer");
+    mismatch
+        .recover()
+        .expect_err("mismatched final/staging topology is retained");
+    assert!(mismatch.stage().exists());
+    assert!(mismatch.final_claim().exists());
+}
+
+#[test]
+fn crash_after_journal_receipt_before_publication_cleanup_converges() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::JournalApplyReceiptPersisted(_)
+        )
+    });
+    assert!(fixture.ownership().exists());
+    assert!(
+        latest_journal_generation(fixture.root.path(), &fixture.migration_id)
+            .1["active_publication"]
+            .is_object()
+    );
+
+    let recovered = fixture
+        .recover()
+        .expect("receipt-backed publication cleanup resumes");
+
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(!fixture.ownership().exists());
+    assert!(
+        latest_journal_generation(fixture.root.path(), &fixture.migration_id)
+            .1
+            .get("active_publication")
+            .is_none()
+    );
+}
+
+#[test]
+fn crash_after_publication_cleanup_before_binding_clear_converges() {
+    let fixture = interrupt_bound_publication(|checkpoint| {
+        matches!(
+            checkpoint,
+            TransactionV1Checkpoint::PrivatePublicationOwnershipRetired(_)
+        )
+    });
+    assert!(!fixture.ownership().exists());
+    assert!(
+        latest_journal_generation(fixture.root.path(), &fixture.migration_id)
+            .1["active_publication"]
+            .is_object()
+    );
+
+    let recovered = fixture
+        .recover()
+        .expect("cleanup-before-clear is idempotent");
+
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(
+        latest_journal_generation(fixture.root.path(), &fixture.migration_id)
+            .1
+            .get("active_publication")
+            .is_none()
+    );
+}
+
 #[test]
 fn changed_private_publish_staging_is_retained_without_exposing_a_final_claim() {
     let (root, migration_id, approval_digest) =
@@ -9359,10 +9694,9 @@ fn unreceipted_abort_adversarial_matrix_preserves_every_unowned_leaf_and_exact_p
                     claim_identity
                 );
 
-                request_test_rollback(&fixture);
                 let (before_path, _) =
                     latest_journal_generation(fixture.root.path(), &fixture.migration_id);
-                let error = public_recover(&fixture)
+                let error = public_rollback(&fixture)
                     .expect_err("mutated private regular claim must fail closed");
                 let (after_path, _) =
                     latest_journal_generation(fixture.root.path(), &fixture.migration_id);

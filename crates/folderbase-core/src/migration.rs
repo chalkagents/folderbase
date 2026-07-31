@@ -45,9 +45,10 @@ use crate::{
 };
 use transaction_v1::{
     MAX_JOURNAL_GENERATION_BYTES, MAX_JOURNAL_GENERATIONS, MAX_PROGRAM_BYTES, MutationProgramV1,
-    ProgramAbsentLeafV1, ProgramGeneratedFileV1, ProgramGeneratedRoleV1, ProgramMaterializationV1,
-    ProgramPrivateBlobV1, ProgramStepV1, TRANSACTION_DIRECTORY, TransactionDirectionV1,
-    TransactionJournalGenerationV1, TransactionPhaseV1, validate_append, validate_chain,
+    PrivatePublicationBindingV1, PrivatePublicationExactRegularFactV1, ProgramAbsentLeafV1,
+    ProgramGeneratedFileV1, ProgramGeneratedRoleV1, ProgramMaterializationV1, ProgramPrivateBlobV1,
+    ProgramStepV1, TRANSACTION_DIRECTORY, TransactionDirectionV1, TransactionJournalGenerationV1,
+    TransactionPhaseV1, validate_append, validate_chain,
 };
 
 const STATE_DIR: &str = ".folderbase";
@@ -2563,6 +2564,7 @@ enum TransactionV1Checkpoint {
     VisiblePublishComplete(usize),
     PrivateApplyReceiptPersisted(usize),
     JournalApplyReceiptPersisted(usize),
+    PrivatePublicationOwnershipRetired(usize),
     RollbackRequested,
     InverseClaimComplete(usize),
     PrivateRollbackReceiptPersisted(usize),
@@ -3174,23 +3176,7 @@ fn persist_private_leaf_receipt(
         &name,
         &format!(".{name}.preparing"),
         &receipt.encode()?,
-    )?;
-    retire_private_publication_ownership_for_receipt(transaction, receipt)
-}
-
-fn retire_private_publication_ownership_for_receipt(
-    transaction: &PreparedTransactionV1,
-    receipt: &PrivateLeafReceiptV1,
-) -> Result<()> {
-    let kind = match receipt.direction {
-        PrivateReceiptDirectionV1::Apply => "publish",
-        PrivateReceiptDirectionV1::Rollback => "restore",
-    };
-    let claim_name = private_claim_name(receipt.operation_index, kind);
-    transaction
-        .private
-        .claims
-        .retire_private_publication_ownership(OsStr::new(&claim_name))
+    )
 }
 
 fn load_private_leaf_receipt(
@@ -3766,26 +3752,38 @@ fn append_transaction_v1_generation(
     transaction: &mut PreparedTransactionV1,
     generation: TransactionJournalGenerationV1,
 ) -> Result<()> {
-    validate_append(
+    append_transaction_v1_generation_parts(
+        filesystem,
         &transaction.program,
         &transaction.program_digest,
-        &transaction.generations,
-        &generation,
-    )?;
+        &mut transaction.generations,
+        &transaction.private,
+        generation,
+    )
+}
+
+fn append_transaction_v1_generation_parts(
+    filesystem: &MigrationFilesystem,
+    program: &MutationProgramV1,
+    program_digest: &str,
+    generations: &mut Vec<TransactionJournalGenerationV1>,
+    private: &PrivateTransactionV1,
+    generation: TransactionJournalGenerationV1,
+) -> Result<()> {
+    validate_append(program, program_digest, generations, &generation)?;
     let journal_root = PathBuf::from(MIGRATIONS_DIR)
-        .join(transaction.program.transaction_id())
+        .join(program.transaction_id())
         .join(TRANSACTION_DIRECTORY)
         .join("journal");
     let generation_name = generation.file_name();
     let path = journal_root.join(&generation_name);
     let bytes = generation.encode(&filesystem.display(&path))?;
-    transaction.private.journal.publish_recoverable_new(
+    private.journal.publish_recoverable_new(
         &generation_name,
         JOURNAL_GENERATION_STAGING_NAME,
         &bytes,
     )?;
-    let reopened_bytes = transaction
-        .private
+    let reopened_bytes = private
         .journal
         .read_regular_bounded(OsStr::new(&generation_name), MAX_JOURNAL_GENERATION_BYTES)?;
     let reopened =
@@ -3795,12 +3793,8 @@ fn append_transaction_v1_generation(
             filesystem.display(&path),
         ));
     }
-    transaction.generations.push(reopened);
-    validate_chain(
-        &transaction.program,
-        &transaction.program_digest,
-        &transaction.generations,
-    )
+    generations.push(reopened);
+    validate_chain(program, program_digest, generations)
 }
 
 fn transaction_v1_journal_path(migration_id: &str) -> PathBuf {
@@ -3824,18 +3818,127 @@ fn transaction_v1_result(
     }
 }
 
-fn private_blob_directory<'a>(
-    transaction: &'a PreparedTransactionV1,
-    blob: &ProgramPrivateBlobV1<'_>,
-) -> Result<&'a VerifiedPrivateDirectory> {
-    match blob.directory {
-        "stages" => Ok(&transaction.private.stages),
-        "snapshots" => Ok(&transaction.private.snapshots),
-        _ => Err(invalid_journal(
-            Path::new("<mutation-program-v1>"),
-            "program blob names an unsupported private directory",
-        )),
+#[allow(clippy::too_many_arguments)]
+fn prepare_journal_bound_private_publish_claim(
+    filesystem: &MigrationFilesystem,
+    program: &MutationProgramV1,
+    program_digest: &str,
+    generations: &mut Vec<TransactionJournalGenerationV1>,
+    private: &PrivateTransactionV1,
+    operation_index: usize,
+    direction: TransactionDirectionV1,
+    blob: ProgramPrivateBlobV1<'_>,
+    claim_name: &str,
+    checkpoint: &mut impl FnMut(TransactionV1Checkpoint),
+) -> Result<MigrationRegularFact> {
+    let binding = match generations
+        .last()
+        .and_then(TransactionJournalGenerationV1::active_publication)
+        .cloned()
+    {
+        Some(binding) => {
+            if binding.operation_index() != operation_index
+                || binding.direction() != direction
+                || binding.claim_name() != claim_name
+            {
+                return Err(invalid_journal(
+                    Path::new("<migration-journal-v1>"),
+                    "active private publication does not match the requested claim",
+                ));
+            }
+            binding
+        }
+        None => {
+            let staged = filesystem.stage_new_private_publish_claim(
+                match blob.directory {
+                    "stages" => &private.stages,
+                    "snapshots" => &private.snapshots,
+                    _ => {
+                        return Err(invalid_journal(
+                            Path::new("<mutation-program-v1>"),
+                            "program blob names an unsupported private directory",
+                        ));
+                    }
+                },
+                blob.name,
+                &private.claims,
+                claim_name,
+                blob.sha256,
+                blob.bytes,
+                blob.fidelity.read_only,
+                blob.fidelity.executable,
+            )?;
+            let binding = PrivatePublicationBindingV1::new(
+                program.transaction_id().to_owned(),
+                program_digest.to_owned(),
+                operation_index,
+                direction,
+                claim_name.to_owned(),
+                PrivatePublicationExactRegularFactV1::new(&staged.stage, staged.stage_sha256),
+                PrivatePublicationExactRegularFactV1::new(
+                    &staged.ownership_record,
+                    staged.ownership_record_sha256,
+                ),
+            );
+            let current = generations
+                .last()
+                .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?
+                .clone();
+            let bound = current.next_private_publication_bound(program, binding)?;
+            append_transaction_v1_generation_parts(
+                filesystem,
+                program,
+                program_digest,
+                generations,
+                private,
+                bound,
+            )?;
+            checkpoint(TransactionV1Checkpoint::PrivatePublishClaimStaged(
+                operation_index,
+            ));
+            generations
+                .last()
+                .and_then(TransactionJournalGenerationV1::active_publication)
+                .cloned()
+                .expect("the appended publication binding is the journal head")
+        }
+    };
+    filesystem.install_private_publish_claim(
+        &private.claims,
+        claim_name,
+        binding.stage().exact(1),
+        binding.ownership_record().exact(1),
+    )
+}
+
+fn finish_receipted_private_publication(
+    filesystem: &MigrationFilesystem,
+    transaction: &mut PreparedTransactionV1,
+    checkpoint: &mut impl FnMut(TransactionV1Checkpoint),
+) -> Result<bool> {
+    let current = transaction
+        .generations
+        .last()
+        .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?
+        .clone();
+    let Some(binding) = current.active_publication().cloned() else {
+        return Ok(false);
+    };
+    let operation_index = binding.operation_index();
+    if !private_publication_is_receipted(&current, &binding) {
+        return Ok(false);
     }
+    filesystem.retire_journal_bound_private_publication(
+        &transaction.private.claims,
+        binding.claim_name(),
+        binding.ownership_record().exact(1),
+    )?;
+    checkpoint(TransactionV1Checkpoint::PrivatePublicationOwnershipRetired(
+        operation_index,
+    ));
+    let cleared = current.next_private_publication_cleared(&transaction.program)?;
+    append_transaction_v1_generation(filesystem, transaction, cleared)?;
+    Ok(true)
 }
 
 fn regular_fact_matches_program(
@@ -4260,20 +4363,21 @@ fn validate_transaction_v1_environment(
 
 fn apply_transaction_v1_step(
     filesystem: &MigrationFilesystem,
-    transaction: &PreparedTransactionV1,
+    transaction: &mut PreparedTransactionV1,
     operation_index: usize,
     checkpoint: &mut impl FnMut(TransactionV1Checkpoint),
 ) -> Result<Option<String>> {
     let current = transaction
         .generations
         .last()
-        .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?;
-    validate_transaction_v1_environment(filesystem, transaction, current)?;
+        .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?
+        .clone();
+    validate_transaction_v1_environment(filesystem, transaction, &current)?;
     let retained_parents =
         transaction
             .program
-            .retain_step_parents(filesystem, operation_index, current)?;
-    let validate_parents = || {
+            .retain_step_parents(filesystem, operation_index, &current)?;
+    let validate_parents = |transaction: &PreparedTransactionV1| {
         let current = transaction
             .generations
             .last()
@@ -4283,7 +4387,7 @@ fn apply_transaction_v1_step(
             .program
             .validate_step_parents(filesystem, operation_index, current)
     };
-    validate_parents()?;
+    validate_parents(transaction)?;
     if let ProgramStepV1::CreateDirectory { target, fidelity } =
         transaction.program.step(operation_index)?
     {
@@ -4331,7 +4435,7 @@ fn apply_transaction_v1_step(
             if filesystem.metadata(target.path)?.is_none() {
                 require_program_absent(filesystem, target)?;
             }
-            validate_parents()?;
+            validate_parents(transaction)?;
             checkpoint(TransactionV1Checkpoint::ParentsRevalidatedBeforePublish(
                 operation_index,
             ));
@@ -4350,7 +4454,7 @@ fn apply_transaction_v1_step(
         checkpoint(TransactionV1Checkpoint::VisiblePublishComplete(
             operation_index,
         ));
-        validate_parents()?;
+        validate_parents(transaction)?;
         let fact = filesystem.directory_fact(target.path)?;
         let read_only = fact.read_only;
         let executable = directory_fact_executable(&fact);
@@ -4379,26 +4483,23 @@ fn apply_transaction_v1_step(
         ProgramStepV1::CreateDirectory { .. } => unreachable!("handled before regular leaves"),
         ProgramStepV1::CreateFile { target, image } => {
             let claim_name = private_claim_name(operation_index, "publish");
-            let claim = filesystem.prepare_private_publish_claim(
-                private_blob_directory(transaction, &image)?,
-                image.name,
-                &transaction.private.claims,
+            let claim = prepare_journal_bound_private_publish_claim(
+                filesystem,
+                &transaction.program,
+                &transaction.program_digest,
+                &mut transaction.generations,
+                &transaction.private,
+                operation_index,
+                TransactionDirectionV1::Apply,
+                image,
                 &claim_name,
-                image.sha256,
-                image.bytes,
-                image.fidelity.read_only,
-                image.fidelity.executable,
-                || {
-                    checkpoint(TransactionV1Checkpoint::PrivatePublishClaimStaged(
-                        operation_index,
-                    ));
-                },
+                checkpoint,
             )?;
             checkpoint(TransactionV1Checkpoint::ClaimComplete(operation_index));
             if filesystem.metadata(target.path)?.is_none() {
                 require_program_absent(filesystem, target)?;
             }
-            validate_parents()?;
+            validate_parents(transaction)?;
             checkpoint(TransactionV1Checkpoint::ParentsRevalidatedBeforePublish(
                 operation_index,
             ));
@@ -4418,25 +4519,22 @@ fn apply_transaction_v1_step(
             checkpoint(TransactionV1Checkpoint::VisiblePublishComplete(
                 operation_index,
             ));
-            validate_parents()?;
+            validate_parents(transaction)?;
             (None, Some(published.physical_identity_sha256))
         }
         ProgramStepV1::ReplaceFile { target, image, .. } => {
             let publish_name = private_claim_name(operation_index, "publish");
-            let publish_claim = filesystem.prepare_private_publish_claim(
-                private_blob_directory(transaction, &image)?,
-                image.name,
-                &transaction.private.claims,
+            let publish_claim = prepare_journal_bound_private_publish_claim(
+                filesystem,
+                &transaction.program,
+                &transaction.program_digest,
+                &mut transaction.generations,
+                &transaction.private,
+                operation_index,
+                TransactionDirectionV1::Apply,
+                image,
                 &publish_name,
-                image.sha256,
-                image.bytes,
-                image.fidelity.read_only,
-                image.fidelity.executable,
-                || {
-                    checkpoint(TransactionV1Checkpoint::PrivatePublishClaimStaged(
-                        operation_index,
-                    ));
-                },
+                checkpoint,
             )?;
             checkpoint(TransactionV1Checkpoint::ReplacePublishClaimPrepared(
                 operation_index,
@@ -4462,7 +4560,7 @@ fn apply_transaction_v1_step(
             } else {
                 ExactExistingClaimSource::Absent
             };
-            validate_parents()?;
+            validate_parents(transaction)?;
             let source_claim = match filesystem.claim_exact_leaf_through(ExactLeafClaimRequest {
                 source_parent: retained_parents.get(target.parent)?,
                 source_name: source_leaf_name,
@@ -4490,7 +4588,7 @@ fn apply_transaction_v1_step(
                 }
             };
             checkpoint(TransactionV1Checkpoint::ClaimComplete(operation_index));
-            validate_parents()?;
+            validate_parents(transaction)?;
             checkpoint(TransactionV1Checkpoint::ParentsRevalidatedBeforePublish(
                 operation_index,
             ));
@@ -4510,7 +4608,7 @@ fn apply_transaction_v1_step(
             checkpoint(TransactionV1Checkpoint::VisiblePublishComplete(
                 operation_index,
             ));
-            validate_parents()?;
+            validate_parents(transaction)?;
             (
                 Some(source_claim.physical_identity_sha256),
                 Some(published.physical_identity_sha256),
@@ -4557,7 +4655,7 @@ fn apply_transaction_v1_step(
                     },
                 )?;
             }
-            validate_parents()?;
+            validate_parents(transaction)?;
             let source_claim = match filesystem.claim_exact_leaf_through(ExactLeafClaimRequest {
                 source_parent: retained_parents.get(source.parent)?,
                 source_name: source_leaf_name,
@@ -4588,7 +4686,7 @@ fn apply_transaction_v1_step(
             if filesystem.metadata(destination.path)?.is_none() {
                 require_program_absent(filesystem, destination)?;
             }
-            validate_parents()?;
+            validate_parents(transaction)?;
             checkpoint(TransactionV1Checkpoint::ParentsRevalidatedBeforePublish(
                 operation_index,
             ));
@@ -4607,7 +4705,7 @@ fn apply_transaction_v1_step(
             checkpoint(TransactionV1Checkpoint::VisiblePublishComplete(
                 operation_index,
             ));
-            validate_parents()?;
+            validate_parents(transaction)?;
             (
                 Some(source_claim.physical_identity_sha256),
                 Some(published.physical_identity_sha256),
@@ -4729,7 +4827,7 @@ fn verify_apply_private_receipt(
             )?;
         }
     }
-    retire_private_publication_ownership_for_receipt(transaction, receipt)
+    Ok(())
 }
 
 fn is_exact_create_directory_prepublication_receipt(
@@ -4992,6 +5090,9 @@ fn execute_transaction_v1_apply_with_hook(
             .last()
             .expect("transaction-v1 has a validated generation")
             .clone();
+        if finish_receipted_private_publication(filesystem, transaction, &mut checkpoint)? {
+            continue;
+        }
         if current.direction() == TransactionDirectionV1::Rollback {
             return Err(FolderbaseError::InvalidMigrationState {
                 expected: MigrationState::Applying.as_str(),
@@ -5044,7 +5145,12 @@ fn execute_transaction_v1_apply_with_hook(
                         return Err(error);
                     }
                 };
-            let receipt = current.next_apply_receipt(&transaction.program, index, identity)?;
+            let receipt_head = transaction
+                .generations
+                .last()
+                .expect("step execution retains a validated journal head")
+                .clone();
+            let receipt = receipt_head.next_apply_receipt(&transaction.program, index, identity)?;
             append_transaction_v1_generation(filesystem, transaction, receipt)?;
             checkpoint(TransactionV1Checkpoint::JournalApplyReceiptPersisted(index));
             continue;
@@ -5117,7 +5223,7 @@ fn retains_preserved_aborted_create_descendant(
 
 fn rollback_transaction_v1_step(
     filesystem: &MigrationFilesystem,
-    transaction: &PreparedTransactionV1,
+    transaction: &mut PreparedTransactionV1,
     operation_index: usize,
     published_identity: Option<&str>,
     checkpoint: &mut impl FnMut(TransactionV1Checkpoint),
@@ -5126,17 +5232,18 @@ fn rollback_transaction_v1_step(
     let current = transaction
         .generations
         .last()
-        .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?;
-    validate_transaction_v1_environment(filesystem, transaction, current)?;
+        .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?
+        .clone();
+    validate_transaction_v1_environment(filesystem, transaction, &current)?;
     let retained_parents =
         transaction
             .program
-            .retain_step_parents(filesystem, operation_index, current)?;
-    let validate_authority = || {
-        validate_transaction_v1_environment(filesystem, transaction, current)?;
+            .retain_step_parents(filesystem, operation_index, &current)?;
+    let validate_authority = |transaction: &PreparedTransactionV1| {
+        validate_transaction_v1_environment(filesystem, transaction, &current)?;
         transaction
             .program
-            .validate_step_parents(filesystem, operation_index, current)
+            .validate_step_parents(filesystem, operation_index, &current)
     };
     if let Some(receipt) = load_private_leaf_receipt(
         transaction,
@@ -5155,7 +5262,7 @@ fn rollback_transaction_v1_step(
                 )
             })?;
             if retains_preserved_aborted_create_descendant(filesystem, transaction, target.path)? {
-                validate_authority()?;
+                validate_authority(transaction)?;
                 filesystem.exact_directory_fact(
                     target.path,
                     ExactDirectoryLeaf {
@@ -5166,14 +5273,14 @@ fn rollback_transaction_v1_step(
                     },
                     false,
                 )?;
-                validate_authority()?;
+                validate_authority(transaction)?;
                 Some(expected_identity.to_owned())
             } else {
                 let rollback_name = private_claim_name(operation_index, "rollback");
                 let source_name = target.path.file_name().ok_or_else(|| {
                     invalid_journal(target.path, "program target has no leaf name")
                 })?;
-                validate_authority()?;
+                validate_authority(transaction)?;
                 let claim = match filesystem.claim_exact_leaf_through(ExactLeafClaimRequest {
                     source_parent: retained_parents.get(target.parent)?,
                     source_name,
@@ -5200,7 +5307,7 @@ fn rollback_transaction_v1_step(
                 checkpoint(TransactionV1Checkpoint::InverseClaimComplete(
                     operation_index,
                 ));
-                validate_authority()?;
+                validate_authority(transaction)?;
                 if claim.physical_identity_sha256 != expected_identity {
                     return Err(FolderbaseError::MigrationVerificationFailed(
                         transaction
@@ -5221,7 +5328,7 @@ fn rollback_transaction_v1_step(
                     "created file has no published identity",
                 )
             })?;
-            validate_authority()?;
+            validate_authority(transaction)?;
             let claim = claim_transaction_v1_exact_rollback_output(
                 filesystem,
                 transaction,
@@ -5242,7 +5349,7 @@ fn rollback_transaction_v1_step(
             checkpoint(TransactionV1Checkpoint::InverseClaimComplete(
                 operation_index,
             ));
-            validate_authority()?;
+            validate_authority(transaction)?;
             if claim.physical_identity_sha256 != expected_identity {
                 return Err(FolderbaseError::MigrationVerificationFailed(
                     transaction
@@ -5315,7 +5422,7 @@ fn rollback_transaction_v1_step(
                 }),
                 None => ExactExistingClaimSource::Absent,
             };
-            validate_authority()?;
+            validate_authority(transaction)?;
             claim_transaction_v1_exact_rollback_output(
                 filesystem,
                 transaction,
@@ -5328,7 +5435,7 @@ fn rollback_transaction_v1_step(
             checkpoint(TransactionV1Checkpoint::InverseClaimComplete(
                 operation_index,
             ));
-            validate_authority()?;
+            validate_authority(transaction)?;
             if let Some(restore) = existing_restore {
                 let restored = ExactRegularLeaf {
                     physical_identity_sha256: &restore.physical_identity_sha256,
@@ -5346,20 +5453,17 @@ fn rollback_transaction_v1_step(
                 filesystem.exact_regular_fact(target.path, restored)?;
                 Some(restore.physical_identity_sha256)
             } else {
-                let restore_claim = filesystem.prepare_private_publish_claim(
-                    private_blob_directory(transaction, &rollback_snapshot)?,
-                    rollback_snapshot.name,
-                    &transaction.private.claims,
+                let restore_claim = prepare_journal_bound_private_publish_claim(
+                    filesystem,
+                    &transaction.program,
+                    &transaction.program_digest,
+                    &mut transaction.generations,
+                    &transaction.private,
+                    operation_index,
+                    TransactionDirectionV1::Rollback,
+                    rollback_snapshot,
                     &restore_name,
-                    rollback_snapshot.sha256,
-                    rollback_snapshot.bytes,
-                    rollback_snapshot.fidelity.read_only,
-                    rollback_snapshot.fidelity.executable,
-                    || {
-                        checkpoint(TransactionV1Checkpoint::PrivatePublishClaimStaged(
-                            operation_index,
-                        ));
-                    },
+                    checkpoint,
                 )?;
                 transaction.private.claims.exact_regular_fact(
                     OsStr::new(&restore_name),
@@ -5373,7 +5477,7 @@ fn rollback_transaction_v1_step(
                         link_count: target.link_count,
                     },
                 )?;
-                validate_authority()?;
+                validate_authority(transaction)?;
                 let destination_name = target.path.file_name().ok_or_else(|| {
                     invalid_journal(target.path, "program target has no leaf name")
                 })?;
@@ -5386,7 +5490,7 @@ fn rollback_transaction_v1_step(
                     target.sha256,
                     target.bytes,
                 )?;
-                validate_authority()?;
+                validate_authority(transaction)?;
                 let restored = ExactRegularLeaf {
                     physical_identity_sha256: &restored.physical_identity_sha256,
                     device_sha256: target.device_sha256,
@@ -5446,7 +5550,7 @@ fn rollback_transaction_v1_step(
                     filesystem.display(source.path),
                 ));
             }
-            validate_authority()?;
+            validate_authority(transaction)?;
             claim_transaction_v1_exact_rollback_output(
                 filesystem,
                 transaction,
@@ -5459,7 +5563,7 @@ fn rollback_transaction_v1_step(
             checkpoint(TransactionV1Checkpoint::InverseClaimComplete(
                 operation_index,
             ));
-            validate_authority()?;
+            validate_authority(transaction)?;
 
             let restore_name = private_claim_name(operation_index, "restore");
             let existing_restore =
@@ -5490,20 +5594,17 @@ fn rollback_transaction_v1_step(
                 filesystem.exact_regular_fact(source.path, restored)?;
                 Some(restore.physical_identity_sha256)
             } else {
-                let restore_claim = filesystem.prepare_private_publish_claim(
-                    private_blob_directory(transaction, &rollback_snapshot)?,
-                    rollback_snapshot.name,
-                    &transaction.private.claims,
+                let restore_claim = prepare_journal_bound_private_publish_claim(
+                    filesystem,
+                    &transaction.program,
+                    &transaction.program_digest,
+                    &mut transaction.generations,
+                    &transaction.private,
+                    operation_index,
+                    TransactionDirectionV1::Rollback,
+                    rollback_snapshot,
                     &restore_name,
-                    rollback_snapshot.sha256,
-                    rollback_snapshot.bytes,
-                    rollback_snapshot.fidelity.read_only,
-                    rollback_snapshot.fidelity.executable,
-                    || {
-                        checkpoint(TransactionV1Checkpoint::PrivatePublishClaimStaged(
-                            operation_index,
-                        ));
-                    },
+                    checkpoint,
                 )?;
                 transaction.private.claims.exact_regular_fact(
                     OsStr::new(&restore_name),
@@ -5517,7 +5618,7 @@ fn rollback_transaction_v1_step(
                         link_count: source.link_count,
                     },
                 )?;
-                validate_authority()?;
+                validate_authority(transaction)?;
                 let destination_name = source.path.file_name().ok_or_else(|| {
                     invalid_journal(source.path, "program source has no leaf name")
                 })?;
@@ -5530,7 +5631,7 @@ fn rollback_transaction_v1_step(
                     source.sha256,
                     source.bytes,
                 )?;
-                validate_authority()?;
+                validate_authority(transaction)?;
                 let restored = ExactRegularLeaf {
                     physical_identity_sha256: &restored.physical_identity_sha256,
                     device_sha256: source.device_sha256,
@@ -5550,7 +5651,7 @@ fn rollback_transaction_v1_step(
             }
         }
     };
-    validate_authority()?;
+    validate_authority(transaction)?;
     let receipt = PrivateLeafReceiptV1::new(
         transaction,
         operation_index,
@@ -5596,7 +5697,7 @@ fn verify_rollback_private_receipt(
                     },
                     false,
                 )?;
-                return retire_private_publication_ownership_for_receipt(transaction, receipt);
+                return Ok(());
             }
             if filesystem.metadata(target.path)?.is_some() {
                 return Err(FolderbaseError::MigrationVerificationFailed(
@@ -5732,7 +5833,7 @@ fn verify_rollback_private_receipt(
             filesystem.exact_regular_fact(source.path, restored)?;
         }
     }
-    retire_private_publication_ownership_for_receipt(transaction, receipt)
+    Ok(())
 }
 
 fn claim_transaction_v1_exact_rollback_output(
@@ -7106,6 +7207,9 @@ fn execute_transaction_v1_rollback_with_hook(
             .last()
             .expect("transaction-v1 has a validated generation")
             .clone();
+        if finish_receipted_private_publication(filesystem, transaction, &mut checkpoint)? {
+            continue;
+        }
         if current.phase() == TransactionPhaseV1::RolledBack {
             validate_transaction_v1_environment(filesystem, transaction, &current)?;
             reconcile_plan_terminal(filesystem, &transaction.program, MigrationState::RolledBack);
@@ -7197,8 +7301,16 @@ fn execute_transaction_v1_rollback_with_hook(
                 }
             };
             removed_paths.extend(removed);
-            let receipt =
-                current.next_rollback_receipt(&transaction.program, index, restored_identity)?;
+            let receipt_head = transaction
+                .generations
+                .last()
+                .expect("inverse execution retains a validated journal head")
+                .clone();
+            let receipt = receipt_head.next_rollback_receipt(
+                &transaction.program,
+                index,
+                restored_identity,
+            )?;
             append_transaction_v1_generation(filesystem, transaction, receipt)?;
             checkpoint(TransactionV1Checkpoint::JournalRollbackReceiptPersisted(
                 index,
@@ -7557,6 +7669,21 @@ fn validate_private_claim_set(
         }
     }
 
+    if let Some(binding) = current.active_publication() {
+        let claim = OsString::from(binding.claim_name());
+        allowed.insert(claim.clone(), false);
+        allowed.insert(
+            OsString::from(format!(".{}.preparing", claim.to_string_lossy())),
+            false,
+        );
+        let ownership = OsString::from(format!(".{}.ownership.json", claim.to_string_lossy()));
+        allowed.insert(ownership.clone(), false);
+        allowed.insert(
+            OsString::from(format!(".{}.preparing", ownership.to_string_lossy())),
+            false,
+        );
+    }
+
     let claims_root = transaction_root.join("claims");
     let observed = observed_entries
         .iter()
@@ -7589,6 +7716,156 @@ fn validate_private_claim_set(
         }
     }
     Ok(())
+}
+
+fn private_publication_is_receipted(
+    current: &TransactionJournalGenerationV1,
+    binding: &PrivatePublicationBindingV1,
+) -> bool {
+    let operation_index = binding.operation_index();
+    match binding.direction() {
+        TransactionDirectionV1::Apply => {
+            current
+                .apply_receipt_records()
+                .iter()
+                .any(|(index, _)| *index == operation_index)
+                || current.abort_receipt_sha256(operation_index).is_some()
+        }
+        TransactionDirectionV1::Rollback => current
+            .inverse_receipt_records()
+            .iter()
+            .any(|(index, _)| *index == operation_index),
+    }
+}
+
+fn private_publication_has_durable_leaf_receipt(
+    transaction: &PreparedTransactionV1,
+    binding: &PrivatePublicationBindingV1,
+) -> Result<bool> {
+    let operation_index = binding.operation_index();
+    match binding.direction() {
+        TransactionDirectionV1::Apply => Ok(load_private_leaf_receipt(
+            transaction,
+            operation_index,
+            PrivateReceiptDirectionV1::Apply,
+        )?
+        .is_some()),
+        TransactionDirectionV1::Rollback => Ok(load_private_leaf_receipt(
+            transaction,
+            operation_index,
+            PrivateReceiptDirectionV1::Rollback,
+        )?
+        .is_some()),
+    }
+}
+
+fn private_publication_has_durable_abort_receipt(
+    transaction: &PreparedTransactionV1,
+    binding: &PrivatePublicationBindingV1,
+) -> Result<bool> {
+    if binding.direction() != TransactionDirectionV1::Apply {
+        return Ok(false);
+    }
+    Ok(load_private_abort_work_receipt(transaction, binding.operation_index())?.is_some())
+}
+
+fn validate_active_private_publication(
+    filesystem: &MigrationFilesystem,
+    transaction: &PreparedTransactionV1,
+    observed_entries: &[(OsString, bool)],
+) -> Result<()> {
+    let current = transaction
+        .generations
+        .last()
+        .ok_or_else(|| invalid_journal(Path::new("<transaction-v1>"), "journal is empty"))?;
+    let active = current.active_publication();
+    let active_names = active.map(|binding| {
+        let claim = binding.claim_name();
+        BTreeSet::from([
+            OsString::from(claim),
+            OsString::from(format!(".{claim}.preparing")),
+            OsString::from(format!(".{claim}.ownership.json")),
+            OsString::from(format!("..{claim}.ownership.json.preparing")),
+        ])
+    });
+    let publication_artifacts = observed_entries
+        .iter()
+        .filter(|(name, is_directory)| {
+            !*is_directory
+                && name.to_str().is_some_and(|name| {
+                    name.ends_with(".ownership.json")
+                        || name.ends_with(".ownership.json.preparing")
+                        || (name.starts_with('.') && name.ends_with(".claim.preparing"))
+                })
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    if publication_artifacts.iter().any(|name| {
+        active_names
+            .as_ref()
+            .is_none_or(|active| !active.contains(name))
+    }) {
+        let name = publication_artifacts
+            .iter()
+            .find(|name| {
+                active_names
+                    .as_ref()
+                    .is_none_or(|active| !active.contains(*name))
+            })
+            .expect("the predicate established one unbound artifact");
+        return Err(FolderbaseError::InvalidRecord {
+            path: transaction.private.claims.display_path(name),
+            message: "unbound private publication artifact is retained for review".to_owned(),
+        });
+    }
+    let Some(binding) = active else {
+        return Ok(());
+    };
+    let ownership_name = OsString::from(format!(".{}.ownership.json", binding.claim_name()));
+    let ownership_staging_name = OsString::from(format!(
+        "..{}.ownership.json.preparing",
+        binding.claim_name()
+    ));
+    let ownership_exists = publication_artifacts.contains(&ownership_name)
+        || publication_artifacts.contains(&ownership_staging_name);
+    if ownership_exists {
+        let durable_abort = private_publication_has_durable_abort_receipt(transaction, binding)?;
+        if durable_abort {
+            filesystem.validate_private_publication_ownership_binding(
+                &transaction.private.claims,
+                binding.claim_name(),
+                binding.stage().exact(1),
+                binding.ownership_record().exact(1),
+            )?;
+        } else if private_publication_is_receipted(current, binding)
+            || private_publication_has_durable_leaf_receipt(transaction, binding)?
+        {
+            filesystem.validate_receipted_private_publish_claim(
+                &transaction.private.claims,
+                binding.claim_name(),
+                binding.stage().exact(1),
+                binding.ownership_record().exact(1),
+            )?;
+        } else {
+            filesystem.reconcile_private_publish_claim(
+                &transaction.private.claims,
+                binding.claim_name(),
+                binding.stage().exact(1),
+                binding.ownership_record().exact(1),
+            )?;
+        }
+        return Ok(());
+    }
+    if private_publication_is_receipted(current, binding) {
+        return Ok(());
+    }
+    Err(FolderbaseError::InvalidRecord {
+        path: transaction
+            .private
+            .claims
+            .display_path(OsStr::new(binding.claim_name())),
+        message: "active private publication is missing its bound ownership proof".to_owned(),
+    })
 }
 
 fn verify_create_directory_rollback_claim(
@@ -7741,10 +8018,6 @@ fn reopen_transaction_v1(
             _ => program.operation_count().saturating_add(1),
         };
         let allowed = program.allowed_private_file_names(directory);
-        if directory == "claims" {
-            private_directory
-                .repair_orphaned_private_publication_ownership(maximum_entries, &allowed)?;
-        }
         let entries = private_directory.closed_entries(maximum_entries)?;
         if directory == "claims" {
             observed_claim_entries = entries.clone();
@@ -7860,6 +8133,7 @@ fn reopen_transaction_v1(
         },
     };
     repair_recoverable_private_receipt_staging(filesystem, &prepared)?;
+    validate_active_private_publication(filesystem, &prepared, &observed_claim_entries)?;
     validate_private_leaf_receipt_set(&prepared)?;
     validate_private_claim_set(
         filesystem,

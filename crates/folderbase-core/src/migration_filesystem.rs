@@ -5,7 +5,6 @@
 //! durable read or mutation relative to one retained, no-follow root handle.
 
 use std::{
-    collections::BTreeSet,
     ffi::{OsStr, OsString},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -35,6 +34,14 @@ pub(crate) struct MigrationRegularFact {
     pub(crate) read_only: bool,
     pub(crate) unix_mode: Option<u32>,
     pub(crate) link_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PrivatePublicationFacts {
+    pub(crate) stage: MigrationRegularFact,
+    pub(crate) stage_sha256: String,
+    pub(crate) ownership_record: MigrationRegularFact,
+    pub(crate) ownership_record_sha256: String,
 }
 
 const PRIVATE_PUBLICATION_OWNERSHIP_FORMAT: &str = "folderbase.private-publication-ownership.v1";
@@ -862,37 +869,6 @@ impl VerifiedPrivateDirectory {
             .map(|_| ())
     }
 
-    fn load_private_publication_ownership(
-        &self,
-        name: &OsStr,
-        expected_sha256: &str,
-        expected_bytes: u64,
-        read_only: bool,
-        executable: bool,
-    ) -> Result<Option<PrivatePublicationOwnershipV1>> {
-        let bytes = match self
-            .read_relaxed_regular_bounded(name, MAX_PRIVATE_PUBLICATION_OWNERSHIP_BYTES)
-        {
-            Ok(bytes) => bytes,
-            Err(FolderbaseError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        let record = PrivatePublicationOwnershipV1::decode(&self.display.join(name), &bytes)?;
-        self.verify_private_publication_ownership(
-            name,
-            &record,
-            expected_sha256,
-            expected_bytes,
-            read_only,
-            executable,
-        )?;
-        Ok(Some(record))
-    }
-
     fn verify_private_publication_ownership(
         &self,
         name: &OsStr,
@@ -935,98 +911,12 @@ impl VerifiedPrivateDirectory {
         self.remove_exact_regular(name, exact_regular_leaf(fact, sha256, link_count))
     }
 
-    pub(crate) fn retire_private_publication_ownership(&self, claim_name: &OsStr) -> Result<()> {
-        let ownership_name = private_publication_ownership_name(claim_name);
-        let bytes = match self
-            .read_relaxed_regular_bounded(&ownership_name, MAX_PRIVATE_PUBLICATION_OWNERSHIP_BYTES)
-        {
-            Ok(bytes) => bytes,
-            Err(FolderbaseError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        let record =
-            PrivatePublicationOwnershipV1::decode(&self.display.join(&ownership_name), &bytes)?;
-        self.verify_private_publication_ownership(
-            &ownership_name,
-            &record,
-            &record.sha256,
-            record.bytes,
-            record.read_only,
-            record.executable,
-        )?;
-        let encoded_sha256 = format!("{:x}", Sha256::digest(&bytes));
-        let fact = self.relaxed_regular_fact(&ownership_name, &encoded_sha256)?;
-        self.remove_exact_regular(
-            &ownership_name,
-            exact_regular_leaf(&fact, &encoded_sha256, 1),
-        )
-    }
-
     pub(crate) fn remove_exact_owned_regular(
         &self,
         name: &OsStr,
         expected: ExactRegularLeaf<'_>,
     ) -> Result<()> {
-        self.remove_exact_regular(name, expected)?;
-        self.retire_private_publication_ownership(name)
-    }
-
-    pub(crate) fn repair_orphaned_private_publication_ownership(
-        &self,
-        maximum_entries: usize,
-        allowed_names: &BTreeSet<OsString>,
-    ) -> Result<()> {
-        let entries = self.closed_entries(maximum_entries)?;
-        for (name, is_directory) in &entries {
-            if *is_directory {
-                continue;
-            }
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if name.starts_with("..") && name.ends_with(".ownership.json.preparing") {
-                if !allowed_names.contains(OsStr::new(name)) {
-                    continue;
-                }
-                let final_name = &name[1..name.len() - ".preparing".len()];
-                if !entries
-                    .iter()
-                    .any(|(entry, kind)| !*kind && entry == OsStr::new(final_name))
-                {
-                    return Err(FolderbaseError::InvalidRecord {
-                        path: self.display.join(name),
-                        message: "private ownership publication is incomplete".to_owned(),
-                    });
-                }
-                continue;
-            }
-            let Some(claim_name) = name
-                .strip_prefix('.')
-                .and_then(|name| name.strip_suffix(".ownership.json"))
-            else {
-                continue;
-            };
-            if !allowed_names.contains(OsStr::new(name))
-                || !allowed_names.contains(OsStr::new(claim_name))
-            {
-                continue;
-            }
-            let preparing_name = format!(".{claim_name}.preparing");
-            let claim_exists = entries
-                .iter()
-                .any(|(entry, kind)| !*kind && entry == OsStr::new(claim_name));
-            let preparing_exists = entries
-                .iter()
-                .any(|(entry, kind)| !*kind && entry == OsStr::new(&preparing_name));
-            if !claim_exists && !preparing_exists {
-                self.retire_private_publication_ownership(OsStr::new(claim_name))?;
-            }
-        }
-        Ok(())
+        self.remove_exact_regular(name, expected)
     }
 
     pub(crate) fn install_recoverable_regular(
@@ -2070,7 +1960,7 @@ impl MigrationFilesystem {
     // explicit avoids hiding which identity, content, and mode constraints are
     // checked at this mutation boundary.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_private_publish_claim(
+    pub(crate) fn stage_new_private_publish_claim(
         &self,
         source: &VerifiedPrivateDirectory,
         source_name: &OsStr,
@@ -2080,8 +1970,7 @@ impl MigrationFilesystem {
         expected_bytes: u64,
         read_only: bool,
         executable: bool,
-        after_staged_sync: impl FnOnce(),
-    ) -> Result<MigrationRegularFact> {
+    ) -> Result<PrivatePublicationFacts> {
         validate_private_name(destination_name)?;
         let destination_name = OsStr::new(destination_name);
         let preparing_name =
@@ -2089,101 +1978,24 @@ impl MigrationFilesystem {
         validate_private_name_os(&preparing_name)?;
         let ownership_name = private_publication_ownership_name(destination_name);
         let ownership_staging_name = private_publication_ownership_staging_name(destination_name);
-        let ownership = destination.load_private_publication_ownership(
-            &ownership_name,
-            expected_sha256,
-            expected_bytes,
-            read_only,
-            executable,
-        )?;
-        match destination.relaxed_regular_fact(destination_name, expected_sha256) {
-            Ok(fact) if fact.bytes == expected_bytes => {
-                let ownership =
-                    ownership
-                        .as_ref()
-                        .ok_or_else(|| FolderbaseError::InvalidRecord {
-                            path: destination.display.join(&ownership_name),
-                            message: "private claim is missing its durable ownership record"
-                                .to_owned(),
-                        })?;
-                destination
-                    .exact_regular_fact(destination_name, ownership.exact(fact.link_count))?;
-                match destination.relaxed_regular_fact(&preparing_name, expected_sha256) {
-                    Err(FolderbaseError::Io { source, .. })
-                        if source.kind() == std::io::ErrorKind::NotFound
-                            && matches!(fact.link_count, 1 | 2) =>
-                    {
-                        return Ok(fact);
-                    }
-                    Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {}
-                    Err(error) => return Err(error),
-                }
-                return install_witnessed_private_claim(
-                    destination,
-                    &preparing_name,
-                    destination_name,
-                    ownership,
-                );
-            }
-            Ok(_) => {
-                return Err(FolderbaseError::MigrationVerificationFailed(
-                    destination.display.join(destination_name),
-                ));
-            }
-            Err(FolderbaseError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
         let preparing_display = destination.display.join(&preparing_name);
-        let preparing_ready =
-            match destination.relaxed_regular_fact(&preparing_name, expected_sha256) {
-                Ok(fact) if fact.bytes == expected_bytes && fact.link_count == 1 => {
-                    let ownership =
-                        ownership
-                            .as_ref()
-                            .ok_or_else(|| FolderbaseError::InvalidRecord {
-                                path: destination.display.join(&ownership_name),
-                                message: "private staging is missing its durable ownership record"
-                                    .to_owned(),
-                            })?;
-                    destination.exact_regular_fact(&preparing_name, ownership.exact(1))?;
-                    true
-                }
-                Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
-                    return Err(FolderbaseError::MigrationVerificationFailed(
-                        preparing_display,
-                    ));
+        for name in [
+            destination_name,
+            preparing_name.as_os_str(),
+            ownership_name.as_os_str(),
+            ownership_staging_name.as_os_str(),
+        ] {
+            match destination.relaxed_regular_fact_observed(name) {
+                Ok(_) => {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: destination.display.join(name),
+                        message: "unbound private publication artifact requires review".to_owned(),
+                    });
                 }
                 Err(FolderbaseError::Io { source, .. })
-                    if source.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    false
-                }
+                    if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
-            };
-        if preparing_ready {
-            after_staged_sync();
-            let ownership = ownership
-                .as_ref()
-                .ok_or_else(|| FolderbaseError::InvalidRecord {
-                    path: destination.display.join(&ownership_name),
-                    message: "private staging is missing its durable ownership record".to_owned(),
-                })?;
-            destination.exact_regular_fact(&preparing_name, ownership.exact(1))?;
-            destination.verify_private_publication_ownership(
-                &ownership_name,
-                ownership,
-                expected_sha256,
-                expected_bytes,
-                read_only,
-                executable,
-            )?;
-            return install_witnessed_private_claim(
-                destination,
-                &preparing_name,
-                destination_name,
-                ownership,
-            );
+            }
         }
         let (mut source_file, source_metadata, source_display) =
             source.open_regular(source_name)?;
@@ -2249,7 +2061,6 @@ impl MigrationFilesystem {
             ownership_staging_name_str,
             &ownership.encode(&destination.display.join(&ownership_name))?,
         )?;
-        after_staged_sync();
         destination.exact_regular_fact(&preparing_name, ownership.exact(1))?;
         destination.verify_private_publication_ownership(
             &ownership_name,
@@ -2259,7 +2070,205 @@ impl MigrationFilesystem {
             read_only,
             executable,
         )?;
-        install_witnessed_private_claim(destination, &preparing_name, destination_name, &ownership)
+        let (ownership_record, ownership_record_sha256) =
+            destination.relaxed_regular_fact_observed(&ownership_name)?;
+        destination.exact_regular_fact(
+            &ownership_name,
+            exact_regular_leaf(&ownership_record, &ownership_record_sha256, 1),
+        )?;
+        Ok(PrivatePublicationFacts {
+            stage: staged_fact,
+            stage_sha256: expected_sha256.to_owned(),
+            ownership_record,
+            ownership_record_sha256,
+        })
+    }
+
+    pub(crate) fn reconcile_private_publish_claim(
+        &self,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        stage: ExactRegularLeaf<'_>,
+        ownership_record: ExactRegularLeaf<'_>,
+    ) -> Result<MigrationRegularFact> {
+        validate_private_name(destination_name)?;
+        let destination_name = OsStr::new(destination_name);
+        let preparing_name =
+            OsString::from(format!(".{}.preparing", destination_name.to_string_lossy()));
+        reconcile_private_publication_ownership_binding(
+            destination,
+            destination_name,
+            stage,
+            ownership_record,
+        )?;
+        let final_fact = exact_regular_fact_if_present(destination, destination_name, stage)?;
+        let preparing_fact = exact_regular_fact_if_present(destination, &preparing_name, stage)?;
+        match (final_fact, preparing_fact) {
+            (None, Some(preparing)) if preparing.link_count == 1 => Ok(preparing),
+            (Some(final_fact), None) => Ok(final_fact),
+            (Some(final_fact), Some(preparing))
+                if final_fact.physical_identity_sha256 == preparing.physical_identity_sha256
+                    && final_fact.device_sha256 == preparing.device_sha256
+                    && final_fact.link_count == 2
+                    && preparing.link_count == 2 =>
+            {
+                Ok(final_fact)
+            }
+            _ => Err(FolderbaseError::InvalidRecord {
+                path: destination.display.join(destination_name),
+                message: "journal-bound private publication has an invalid alias topology"
+                    .to_owned(),
+            }),
+        }
+    }
+
+    pub(crate) fn validate_private_publication_ownership_binding(
+        &self,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        stage: ExactRegularLeaf<'_>,
+        ownership_record: ExactRegularLeaf<'_>,
+    ) -> Result<()> {
+        validate_private_name(destination_name)?;
+        reconcile_private_publication_ownership_binding(
+            destination,
+            OsStr::new(destination_name),
+            stage,
+            ownership_record,
+        )
+    }
+
+    pub(crate) fn validate_receipted_private_publish_claim(
+        &self,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        stage: ExactRegularLeaf<'_>,
+        ownership_record: ExactRegularLeaf<'_>,
+    ) -> Result<MigrationRegularFact> {
+        validate_private_name(destination_name)?;
+        let destination_name = OsStr::new(destination_name);
+        let preparing_name =
+            OsString::from(format!(".{}.preparing", destination_name.to_string_lossy()));
+        reconcile_private_publication_ownership_binding(
+            destination,
+            destination_name,
+            stage,
+            ownership_record,
+        )?;
+        let final_fact = exact_regular_fact_if_present(destination, destination_name, stage)?;
+        let preparing_fact = exact_regular_fact_if_present(destination, &preparing_name, stage)?;
+        match (final_fact, preparing_fact) {
+            (Some(final_fact), None) => Ok(final_fact),
+            _ => Err(FolderbaseError::InvalidRecord {
+                path: destination.display.join(destination_name),
+                message: "receipted private publication has an invalid alias topology".to_owned(),
+            }),
+        }
+    }
+
+    pub(crate) fn install_private_publish_claim(
+        &self,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        stage: ExactRegularLeaf<'_>,
+        ownership_record: ExactRegularLeaf<'_>,
+    ) -> Result<MigrationRegularFact> {
+        let _ = self.reconcile_private_publish_claim(
+            destination,
+            destination_name,
+            stage,
+            ownership_record,
+        )?;
+        let destination_name = OsStr::new(destination_name);
+        let preparing_name =
+            OsString::from(format!(".{}.preparing", destination_name.to_string_lossy()));
+        install_journal_bound_private_claim(destination, &preparing_name, destination_name, stage)
+    }
+
+    pub(crate) fn retire_journal_bound_private_publication(
+        &self,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        ownership_record: ExactRegularLeaf<'_>,
+    ) -> Result<()> {
+        validate_private_name(destination_name)?;
+        let destination_name = OsStr::new(destination_name);
+        let ownership_name = private_publication_ownership_name(destination_name);
+        let ownership_staging_name = private_publication_ownership_staging_name(destination_name);
+        let final_exists = match destination.relaxed_regular_fact_observed(&ownership_name) {
+            Ok(_) => true,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        let staging_exists =
+            match destination.relaxed_regular_fact_observed(&ownership_staging_name) {
+                Ok(_) => true,
+                Err(FolderbaseError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    false
+                }
+                Err(error) => return Err(error),
+            };
+        if !final_exists && !staging_exists {
+            return Ok(());
+        }
+        let fact = reconcile_journal_bound_recoverable_regular(
+            destination,
+            &ownership_staging_name,
+            &ownership_name,
+            ownership_record,
+        )?;
+        destination.remove_exact_regular(
+            &ownership_name,
+            ExactRegularLeaf {
+                link_count: 1,
+                ..ownership_record
+            },
+        )?;
+        if fact.link_count != 1 {
+            return Err(FolderbaseError::MigrationVerificationFailed(
+                destination.display.join(&ownership_name),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_private_publish_claim(
+        &self,
+        source: &VerifiedPrivateDirectory,
+        source_name: &OsStr,
+        destination: &VerifiedPrivateDirectory,
+        destination_name: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
+        read_only: bool,
+        executable: bool,
+        after_staged_sync: impl FnOnce(),
+    ) -> Result<MigrationRegularFact> {
+        let facts = self.stage_new_private_publish_claim(
+            source,
+            source_name,
+            destination,
+            destination_name,
+            expected_sha256,
+            expected_bytes,
+            read_only,
+            executable,
+        )?;
+        after_staged_sync();
+        self.install_private_publish_claim(
+            destination,
+            destination_name,
+            exact_regular_leaf(&facts.stage, &facts.stage_sha256, 1),
+            exact_regular_leaf(&facts.ownership_record, &facts.ownership_record_sha256, 1),
+        )
     }
 
     pub(crate) fn claim_exact_leaf_through(
@@ -2932,21 +2941,173 @@ fn private_publication_ownership_staging_name(destination_name: &OsStr) -> OsStr
     ))
 }
 
-fn install_witnessed_private_claim(
+fn reconcile_private_publication_ownership_binding(
+    destination: &VerifiedPrivateDirectory,
+    destination_name: &OsStr,
+    stage: ExactRegularLeaf<'_>,
+    ownership_record: ExactRegularLeaf<'_>,
+) -> Result<()> {
+    let ownership_name = private_publication_ownership_name(destination_name);
+    let ownership_staging_name = private_publication_ownership_staging_name(destination_name);
+    reconcile_journal_bound_recoverable_regular(
+        destination,
+        &ownership_staging_name,
+        &ownership_name,
+        ownership_record,
+    )?;
+    let ownership_bytes = destination
+        .read_regular_bounded(&ownership_name, MAX_PRIVATE_PUBLICATION_OWNERSHIP_BYTES)?;
+    let ownership = PrivatePublicationOwnershipV1::decode(
+        &destination.display.join(&ownership_name),
+        &ownership_bytes,
+    )?;
+    if ownership.physical_identity_sha256 != stage.physical_identity_sha256
+        || ownership.device_sha256 != stage.device_sha256
+        || ownership.bytes != stage.bytes
+        || ownership.sha256 != stage.sha256
+        || ownership.read_only != stage.read_only
+        || ownership.executable != stage.executable
+    {
+        return Err(FolderbaseError::InvalidRecord {
+            path: destination.display.join(&ownership_name),
+            message: "private ownership record disagrees with the journal binding".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn exact_regular_fact_if_present(
+    destination: &VerifiedPrivateDirectory,
+    name: &OsStr,
+    expected: ExactRegularLeaf<'_>,
+) -> Result<Option<MigrationRegularFact>> {
+    match destination.relaxed_regular_fact(name, expected.sha256) {
+        Ok(fact) => {
+            destination.exact_regular_fact(
+                name,
+                ExactRegularLeaf {
+                    link_count: fact.link_count,
+                    ..expected
+                },
+            )?;
+            Ok(Some(fact))
+        }
+        Err(FolderbaseError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn reconcile_journal_bound_recoverable_regular(
+    destination: &VerifiedPrivateDirectory,
+    staging_name: &OsStr,
+    destination_name: &OsStr,
+    expected: ExactRegularLeaf<'_>,
+) -> Result<MigrationRegularFact> {
+    let final_fact = exact_regular_fact_if_present(destination, destination_name, expected)?;
+    let staging_fact = exact_regular_fact_if_present(destination, staging_name, expected)?;
+    match (final_fact, staging_fact) {
+        (Some(final_fact), None) if final_fact.link_count == 1 => Ok(final_fact),
+        (None, Some(staging_fact)) if staging_fact.link_count == 1 => {
+            rename_noreplace(
+                &destination.directory,
+                staging_name,
+                &destination.directory,
+                destination_name,
+            )
+            .map_err(|source| {
+                map_rename_noreplace_error(destination.display.join(destination_name), source)
+            })?;
+            sync_directory(&destination.directory, &destination.display)?;
+            destination.exact_regular_fact(
+                destination_name,
+                ExactRegularLeaf {
+                    link_count: 1,
+                    ..expected
+                },
+            )
+        }
+        (Some(final_fact), Some(staging_fact))
+            if final_fact.physical_identity_sha256 == staging_fact.physical_identity_sha256
+                && final_fact.device_sha256 == staging_fact.device_sha256
+                && final_fact.link_count == 2
+                && staging_fact.link_count == 2 =>
+        {
+            destination.remove_exact_regular(
+                staging_name,
+                ExactRegularLeaf {
+                    link_count: 2,
+                    ..expected
+                },
+            )?;
+            destination.exact_regular_fact(
+                destination_name,
+                ExactRegularLeaf {
+                    link_count: 1,
+                    ..expected
+                },
+            )
+        }
+        _ => Err(FolderbaseError::InvalidRecord {
+            path: destination.display.join(destination_name),
+            message: "bound recoverable publication has an invalid alias topology".to_owned(),
+        }),
+    }
+}
+
+fn install_journal_bound_private_claim(
     destination: &VerifiedPrivateDirectory,
     preparing_name: &OsStr,
     destination_name: &OsStr,
-    ownership: &PrivatePublicationOwnershipV1,
+    expected: ExactRegularLeaf<'_>,
 ) -> Result<MigrationRegularFact> {
     let destination_display = destination.display.join(destination_name);
-    match destination.relaxed_regular_fact(destination_name, &ownership.sha256) {
-        Ok(final_fact) if final_fact.link_count == 1 => {
-            destination.exact_regular_fact(destination_name, ownership.exact(1))?;
-            match destination.relaxed_regular_fact(preparing_name, &ownership.sha256) {
+    match destination.relaxed_regular_fact(destination_name, expected.sha256) {
+        Ok(final_fact) => {
+            destination.exact_regular_fact(
+                destination_name,
+                ExactRegularLeaf {
+                    link_count: final_fact.link_count,
+                    ..expected
+                },
+            )?;
+            match destination.relaxed_regular_fact(preparing_name, expected.sha256) {
                 Err(FolderbaseError::Io { source, .. })
                     if source.kind() == std::io::ErrorKind::NotFound =>
                 {
                     Ok(final_fact)
+                }
+                Ok(preparing_fact)
+                    if final_fact.link_count == 2
+                        && preparing_fact.link_count == 2
+                        && preparing_fact.physical_identity_sha256
+                            == final_fact.physical_identity_sha256
+                        && preparing_fact.device_sha256 == final_fact.device_sha256 =>
+                {
+                    destination.exact_regular_fact(
+                        preparing_name,
+                        ExactRegularLeaf {
+                            link_count: 2,
+                            ..expected
+                        },
+                    )?;
+                    destination.remove_exact_regular(
+                        preparing_name,
+                        ExactRegularLeaf {
+                            link_count: 2,
+                            ..expected
+                        },
+                    )?;
+                    destination.exact_regular_fact(
+                        destination_name,
+                        ExactRegularLeaf {
+                            link_count: 1,
+                            ..expected
+                        },
+                    )
                 }
                 Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
                     Err(FolderbaseError::InvalidRecord {
@@ -2957,13 +3118,16 @@ fn install_witnessed_private_claim(
                 Err(error) => Err(error),
             }
         }
-        Ok(_) => Err(FolderbaseError::MigrationVerificationFailed(
-            destination_display,
-        )),
         Err(FolderbaseError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
-            destination.exact_regular_fact(preparing_name, ownership.exact(1))?;
+            destination.exact_regular_fact(
+                preparing_name,
+                ExactRegularLeaf {
+                    link_count: 1,
+                    ..expected
+                },
+            )?;
             rename_noreplace(
                 &destination.directory,
                 preparing_name,
@@ -2972,7 +3136,13 @@ fn install_witnessed_private_claim(
             )
             .map_err(|source| map_rename_noreplace_error(&destination_display, source))?;
             sync_directory(&destination.directory, &destination_display)?;
-            destination.exact_regular_fact(destination_name, ownership.exact(1))
+            destination.exact_regular_fact(
+                destination_name,
+                ExactRegularLeaf {
+                    link_count: 1,
+                    ..expected
+                },
+            )
         }
         Err(error) => Err(error),
     }

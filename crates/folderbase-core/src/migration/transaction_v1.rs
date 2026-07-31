@@ -25,7 +25,7 @@ pub(super) const TRANSACTION_DIRECTORY: &str = "transaction-v1";
 pub(super) const MAX_PROGRAM_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_JOURNAL_GENERATION_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const MAX_JOURNAL_GENERATIONS: usize = 65_536;
-const JOURNAL_GENERATIONS_PER_OPERATION: usize = 4;
+const JOURNAL_GENERATIONS_PER_OPERATION: usize = 6;
 const JOURNAL_GENERATION_OVERHEAD: usize = 6;
 pub(super) const MAX_RETAINED_CONFLICTS: usize = 8;
 const JOURNAL_GENERATIONS_PER_RETAINED_CONFLICT: usize = 2;
@@ -2256,6 +2256,8 @@ pub(super) struct TransactionJournalGenerationV1 {
     phase: TransactionPhaseV1,
     operation_cursor: usize,
     in_flight_operation: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_publication: Option<PrivatePublicationBindingV1>,
     receipts: Vec<MutationReceiptV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     inverse_receipts: Vec<MutationReceiptV1>,
@@ -2263,6 +2265,187 @@ pub(super) struct TransactionJournalGenerationV1 {
     abort_receipts: Vec<ApplyAbortReceiptV1>,
     conflicts: Vec<MutationConflictEvidenceV1>,
     checksum: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PrivatePublicationBindingV1 {
+    transaction_id: String,
+    program_digest: String,
+    operation_index: usize,
+    direction: TransactionDirectionV1,
+    claim_name: String,
+    stage: PrivatePublicationExactRegularFactV1,
+    ownership_record: PrivatePublicationExactRegularFactV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PrivatePublicationExactRegularFactV1 {
+    physical_identity_sha256: String,
+    device_sha256: String,
+    bytes: u64,
+    sha256: String,
+    read_only: bool,
+    executable: bool,
+}
+
+impl PrivatePublicationExactRegularFactV1 {
+    pub(super) fn new(fact: &MigrationRegularFact, sha256: String) -> Self {
+        Self {
+            physical_identity_sha256: fact.physical_identity_sha256.clone(),
+            device_sha256: fact.device_sha256.clone(),
+            bytes: fact.bytes,
+            sha256,
+            read_only: fact.read_only,
+            executable: fact.unix_mode.is_some_and(|mode| mode & 0o111 != 0),
+        }
+    }
+
+    pub(super) fn exact(&self, link_count: u64) -> ExactRegularLeaf<'_> {
+        ExactRegularLeaf {
+            physical_identity_sha256: &self.physical_identity_sha256,
+            device_sha256: &self.device_sha256,
+            bytes: self.bytes,
+            sha256: &self.sha256,
+            read_only: self.read_only,
+            executable: self.executable,
+            link_count,
+        }
+    }
+
+    fn validate(&self) -> bool {
+        is_sha256(&self.physical_identity_sha256)
+            && is_sha256(&self.device_sha256)
+            && is_sha256(&self.sha256)
+    }
+}
+
+impl PrivatePublicationBindingV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        transaction_id: String,
+        program_digest: String,
+        operation_index: usize,
+        direction: TransactionDirectionV1,
+        claim_name: String,
+        stage: PrivatePublicationExactRegularFactV1,
+        ownership_record: PrivatePublicationExactRegularFactV1,
+    ) -> Self {
+        Self {
+            transaction_id,
+            program_digest,
+            operation_index,
+            direction,
+            claim_name,
+            stage,
+            ownership_record,
+        }
+    }
+
+    pub(super) fn operation_index(&self) -> usize {
+        self.operation_index
+    }
+
+    pub(super) fn direction(&self) -> TransactionDirectionV1 {
+        self.direction
+    }
+
+    pub(super) fn claim_name(&self) -> &str {
+        &self.claim_name
+    }
+
+    pub(super) fn stage(&self) -> &PrivatePublicationExactRegularFactV1 {
+        &self.stage
+    }
+
+    pub(super) fn ownership_record(&self) -> &PrivatePublicationExactRegularFactV1 {
+        &self.ownership_record
+    }
+
+    fn validate(
+        &self,
+        program: &MutationProgramV1,
+        journal: &TransactionJournalGenerationV1,
+    ) -> Result<bool> {
+        let expected_claim = match self.direction {
+            TransactionDirectionV1::Apply => private_publication_program_blob(
+                program.step(self.operation_index)?,
+                self.direction,
+            )
+            .map(|blob| (private_claim_name_v1(self.operation_index, "publish"), blob)),
+            TransactionDirectionV1::Rollback => private_publication_program_blob(
+                program.step(self.operation_index)?,
+                self.direction,
+            )
+            .map(|blob| (private_claim_name_v1(self.operation_index, "restore"), blob)),
+        };
+        let Some((claim_name, blob)) = expected_claim else {
+            return Ok(false);
+        };
+        let state_matches = match self.direction {
+            TransactionDirectionV1::Apply => {
+                journal.in_flight_operation == Some(self.operation_index)
+                    || journal
+                        .receipts
+                        .get(self.operation_index)
+                        .is_some_and(|receipt| {
+                            receipt.operation_index == self.operation_index
+                                && journal.operation_cursor == self.operation_index + 1
+                        })
+                    || journal
+                        .abort_receipts
+                        .iter()
+                        .any(|receipt| receipt.operation_index == self.operation_index)
+            }
+            TransactionDirectionV1::Rollback => {
+                (journal.direction == TransactionDirectionV1::Rollback
+                    && journal.in_flight_operation == Some(self.operation_index))
+                    || journal
+                        .inverse_receipts
+                        .iter()
+                        .any(|receipt| receipt.operation_index == self.operation_index)
+            }
+        };
+        Ok(self.transaction_id == program.transaction_id()
+            && self.program_digest == journal.program_digest
+            && self.operation_index < program.operation_count()
+            && self.claim_name == claim_name
+            && self.stage.validate()
+            && self.ownership_record.validate()
+            && self.stage.bytes == blob.bytes
+            && self.stage.sha256 == blob.sha256
+            && self.stage.read_only == blob.fidelity.read_only
+            && self.stage.executable == blob.fidelity.executable
+            && self.ownership_record.device_sha256 == self.stage.device_sha256
+            && !self.ownership_record.read_only
+            && !self.ownership_record.executable
+            && state_matches)
+    }
+}
+
+fn private_claim_name_v1(operation_index: usize, kind: &str) -> String {
+    format!("{operation_index:08}.{kind}.claim")
+}
+
+fn private_publication_program_blob(
+    step: ProgramStepV1<'_>,
+    direction: TransactionDirectionV1,
+) -> Option<ProgramPrivateBlobV1<'_>> {
+    match (direction, step) {
+        (TransactionDirectionV1::Apply, ProgramStepV1::CreateFile { image, .. })
+        | (TransactionDirectionV1::Apply, ProgramStepV1::ReplaceFile { image, .. }) => Some(image),
+        (
+            TransactionDirectionV1::Rollback,
+            ProgramStepV1::ReplaceFile {
+                rollback_snapshot, ..
+            }
+            | ProgramStepV1::MoveFile {
+                rollback_snapshot, ..
+            },
+        ) => Some(rollback_snapshot),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2310,6 +2493,7 @@ impl TransactionJournalGenerationV1 {
             phase: TransactionPhaseV1::Prepared,
             operation_cursor: 0,
             in_flight_operation: None,
+            active_publication: None,
             receipts: Vec::new(),
             inverse_receipts: Vec::new(),
             abort_receipts: Vec::new(),
@@ -2375,6 +2559,51 @@ impl TransactionJournalGenerationV1 {
 
     pub(super) fn in_flight_operation(&self) -> Option<usize> {
         self.in_flight_operation
+    }
+
+    pub(super) fn active_publication(&self) -> Option<&PrivatePublicationBindingV1> {
+        self.active_publication.as_ref()
+    }
+
+    pub(super) fn next_private_publication_bound(
+        &self,
+        program: &MutationProgramV1,
+        binding: PrivatePublicationBindingV1,
+    ) -> Result<Self> {
+        if self.active_publication.is_some()
+            || self.in_flight_operation != Some(binding.operation_index)
+        {
+            return Err(invalid(
+                Path::new("<migration-journal-v1>"),
+                "private publication binding does not match the durable in-flight operation",
+            ));
+        }
+        let mut next = self.clone();
+        next.generation += 1;
+        next.previous_checksum = Some(self.checksum.clone());
+        next.active_publication = Some(binding);
+        next.checksum = next.calculate_checksum()?;
+        next.validate(program)?;
+        Ok(next)
+    }
+
+    pub(super) fn next_private_publication_cleared(
+        &self,
+        program: &MutationProgramV1,
+    ) -> Result<Self> {
+        if self.active_publication.is_none() {
+            return Err(invalid(
+                Path::new("<migration-journal-v1>"),
+                "private publication cleanup has no durable binding",
+            ));
+        }
+        let mut next = self.clone();
+        next.generation += 1;
+        next.previous_checksum = Some(self.checksum.clone());
+        next.active_publication = None;
+        next.checksum = next.calculate_checksum()?;
+        next.validate(program)?;
+        Ok(next)
     }
 
     pub(super) fn receipt_identity(&self, operation_index: usize) -> Option<&str> {
@@ -2472,6 +2701,7 @@ impl TransactionJournalGenerationV1 {
             phase: TransactionPhaseV1::Conflicted,
             operation_cursor: self.operation_cursor,
             in_flight_operation: self.in_flight_operation,
+            active_publication: self.active_publication.clone(),
             receipts: self.receipts.clone(),
             inverse_receipts: self.inverse_receipts.clone(),
             abort_receipts: self.abort_receipts.clone(),
@@ -2766,6 +2996,7 @@ impl TransactionJournalGenerationV1 {
             phase: transition.phase,
             operation_cursor: transition.operation_cursor,
             in_flight_operation: transition.in_flight_operation,
+            active_publication: self.active_publication.clone(),
             receipts: transition.receipts,
             inverse_receipts: transition.inverse_receipts,
             abort_receipts: transition.abort_receipts,
@@ -2809,6 +3040,7 @@ impl TransactionJournalGenerationV1 {
             phase,
             operation_cursor,
             in_flight_operation,
+            active_publication: self.active_publication.clone(),
             receipts,
             inverse_receipts: self.inverse_receipts.clone(),
             abort_receipts: self.abort_receipts.clone(),
@@ -2822,7 +3054,7 @@ impl TransactionJournalGenerationV1 {
 
     fn calculate_checksum(&self) -> Result<String> {
         let path = Path::new("<migration-journal-generation-v1>");
-        let bytes = if self.abort_receipts.is_empty() {
+        let bytes = if self.active_publication.is_none() && self.abort_receipts.is_empty() {
             // Preserve the exact checksum bytes of every pre-abort transaction-v1
             // generation. The extension enters the checksum domain only when an
             // abort receipt actually exists.
@@ -2840,6 +3072,22 @@ impl TransactionJournalGenerationV1 {
                 &self.inverse_receipts,
                 &self.conflicts,
             ))
+        } else if self.active_publication.is_none() {
+            serde_json::to_vec(&(
+                &self.format,
+                &self.transaction_id,
+                &self.program_digest,
+                self.generation,
+                &self.previous_checksum,
+                self.direction,
+                self.phase,
+                self.operation_cursor,
+                self.in_flight_operation,
+                &self.receipts,
+                &self.inverse_receipts,
+                &self.abort_receipts,
+                &self.conflicts,
+            ))
         } else {
             serde_json::to_vec(&(
                 &self.format,
@@ -2851,6 +3099,7 @@ impl TransactionJournalGenerationV1 {
                 self.phase,
                 self.operation_cursor,
                 self.in_flight_operation,
+                &self.active_publication,
                 &self.receipts,
                 &self.inverse_receipts,
                 &self.abort_receipts,
@@ -2920,6 +3169,10 @@ impl TransactionJournalGenerationV1 {
                     || !is_sha256(&receipt.private_receipt_sha256)
             })
             || (self.direction == TransactionDirectionV1::Apply && !self.abort_receipts.is_empty())
+            || self
+                .active_publication
+                .as_ref()
+                .is_some_and(|binding| !matches!(binding.validate(program, self), Ok(true)))
             || self.checksum != self.calculate_checksum()?
         {
             return Err(invalid(path, "journal generation is inconsistent"));
@@ -2972,6 +3225,7 @@ pub(super) fn validate_chain(
                 || generation.phase != TransactionPhaseV1::Prepared
                 || generation.operation_cursor != 0
                 || generation.in_flight_operation.is_some()
+                || generation.active_publication.is_some()
                 || !generation.receipts.is_empty()
                 || !generation.inverse_receipts.is_empty()
                 || !generation.abort_receipts.is_empty()
@@ -3022,6 +3276,8 @@ fn validate_transition(
 ) -> Result<()> {
     let apply_intent = next.direction == TransactionDirectionV1::Apply
         && next.phase == TransactionPhaseV1::Applying
+        && previous.active_publication.is_none()
+        && next.active_publication.is_none()
         && next.conflicts == previous.conflicts
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == Some(previous.operation_cursor)
@@ -3038,6 +3294,7 @@ fn validate_transition(
         );
     let apply_receipt = next.direction == TransactionDirectionV1::Apply
         && next.phase == TransactionPhaseV1::Applying
+        && next.active_publication == previous.active_publication
         && next.conflicts == previous.conflicts
         && matches!(
             previous.phase,
@@ -3056,6 +3313,8 @@ fn validate_transition(
             .is_some_and(|receipt| receipt.operation_index == previous.operation_cursor);
     let applied = next.direction == TransactionDirectionV1::Apply
         && next.phase == TransactionPhaseV1::Applied
+        && previous.active_publication.is_none()
+        && next.active_publication.is_none()
         && next.conflicts == previous.conflicts
         && next.in_flight_operation.is_none()
         && next.operation_cursor == program.operation_count()
@@ -3082,6 +3341,7 @@ fn validate_transition(
         && next.phase == TransactionPhaseV1::RollbackRequested
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == previous.in_flight_operation
+        && next.active_publication == previous.active_publication
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts
         && next.abort_receipts == previous.abort_receipts
@@ -3097,6 +3357,7 @@ fn validate_transition(
         && next.phase == TransactionPhaseV1::RollbackRequested
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation.is_none()
+        && next.active_publication == previous.active_publication
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts
         && next.abort_receipts.len() == previous.abort_receipts.len() + 1
@@ -3114,11 +3375,13 @@ fn validate_transition(
                 | TransactionPhaseV1::Conflicted
         )
         && previous.in_flight_operation.is_none()
+        && previous.active_publication.is_none()
         && previous.operation_cursor > 0
         && next.direction == TransactionDirectionV1::Rollback
         && next.phase == TransactionPhaseV1::RollingBack
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == Some(previous.operation_cursor - 1)
+        && next.active_publication.is_none()
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts
         && next.abort_receipts == previous.abort_receipts
@@ -3133,6 +3396,7 @@ fn validate_transition(
         && next.phase == TransactionPhaseV1::RollingBack
         && next.operation_cursor + 1 == previous.operation_cursor
         && next.in_flight_operation.is_none()
+        && next.active_publication == previous.active_publication
         && previous.receipts == next.receipts
         && next.abort_receipts == previous.abort_receipts
         && next.inverse_receipts.len() == previous.inverse_receipts.len() + 1
@@ -3149,11 +3413,13 @@ fn validate_transition(
         )
         && previous.operation_cursor == 0
         && previous.in_flight_operation.is_none()
+        && previous.active_publication.is_none()
         && previous.inverse_receipts.len() == previous.receipts.len()
         && next.direction == TransactionDirectionV1::Rollback
         && next.phase == TransactionPhaseV1::RolledBack
         && next.operation_cursor == 0
         && next.in_flight_operation.is_none()
+        && next.active_publication.is_none()
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts
         && next.abort_receipts == previous.abort_receipts
@@ -3162,11 +3428,32 @@ fn validate_transition(
         && next.phase == TransactionPhaseV1::Conflicted
         && next.operation_cursor == previous.operation_cursor
         && next.in_flight_operation == previous.in_flight_operation
+        && next.active_publication == previous.active_publication
         && next.receipts == previous.receipts
         && next.inverse_receipts == previous.inverse_receipts
         && next.abort_receipts == previous.abort_receipts
         && next.conflicts.len() == previous.conflicts.len() + 1
         && next.conflicts[..previous.conflicts.len()] == previous.conflicts;
+    let publication_bound = next.direction == previous.direction
+        && next.phase == previous.phase
+        && next.operation_cursor == previous.operation_cursor
+        && next.in_flight_operation == previous.in_flight_operation
+        && previous.active_publication.is_none()
+        && next.active_publication.is_some()
+        && next.receipts == previous.receipts
+        && next.inverse_receipts == previous.inverse_receipts
+        && next.abort_receipts == previous.abort_receipts
+        && next.conflicts == previous.conflicts;
+    let publication_cleared = next.direction == previous.direction
+        && next.phase == previous.phase
+        && next.operation_cursor == previous.operation_cursor
+        && next.in_flight_operation == previous.in_flight_operation
+        && previous.active_publication.is_some()
+        && next.active_publication.is_none()
+        && next.receipts == previous.receipts
+        && next.inverse_receipts == previous.inverse_receipts
+        && next.abort_receipts == previous.abort_receipts
+        && next.conflicts == previous.conflicts;
     if apply_intent
         || apply_receipt
         || applied
@@ -3176,6 +3463,8 @@ fn validate_transition(
         || rollback_receipt
         || rolled_back
         || conflicted
+        || publication_bound
+        || publication_cleared
     {
         return Ok(());
     }
@@ -3275,6 +3564,7 @@ mod tests {
             phase: TransactionPhaseV1::RollingBack,
             operation_cursor: 1,
             in_flight_operation: Some(0),
+            active_publication: None,
             receipts: vec![MutationReceiptV1 {
                 operation_index: 0,
                 published_identity_sha256: Some("3".repeat(64)),
