@@ -4,12 +4,18 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(not(windows))]
 use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(windows)]
+use cap_std::fs::OpenOptions as CapOpenOptions;
 use cap_std::{ambient_authority, fs::Dir};
 
 use crate::{
     BoundaryHint, Classification, ClassifiedPath, FolderbaseError, InventorySummary,
     NestedFolderbaseBoundary, NestedFolderbaseState, ReconstructableTree, Result,
+    root_attestation::metadata_is_link_or_reparse,
     traversal_policy::{
         NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary,
         is_folderbase_state_component, is_git_metadata_component, is_reconstructable_directory,
@@ -72,7 +78,7 @@ fn analyze_folder_with(root: &Path, collapse_reconstructable: bool) -> Result<Fo
         io::ErrorKind::NotFound => FolderbaseError::InvalidRoot(root.to_path_buf()),
         _ => FolderbaseError::io(root, error),
     })?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+    if metadata_is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
 
@@ -93,7 +99,7 @@ pub(crate) fn analyze_folder_from_retained(
     let root_metadata = root_file
         .metadata()
         .map_err(|source| FolderbaseError::io(display_root, source))?;
-    if !root_metadata.is_dir() {
+    if metadata_is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(display_root.to_path_buf()));
     }
 
@@ -141,10 +147,25 @@ fn walk_retained_directory(
         let name = entry.file_name();
         let relative = relative_directory.join(&name);
         let display = display_root.join(&relative);
-        let file_type = entry
+        let advertised_file_type = entry
             .file_type()
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        let reconstructable = file_type.is_dir() && is_reconstructable_directory(&name);
+        let reconstructable = advertised_file_type.is_dir() && is_reconstructable_directory(&name);
+        #[cfg(windows)]
+        let (entry_metadata, child) = match open_windows_analysis_entry(directory, &name, &display)
+        {
+            Ok(opened) => opened,
+            Err(_) if reconstructable && collapse_reconstructable => {
+                record_collapsed_reconstructable(analysis, relative);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        #[cfg(windows)]
+        let file_type = entry_metadata.file_type();
+        #[cfg(not(windows))]
+        let file_type = advertised_file_type;
+        #[cfg(not(windows))]
         let child = if file_type.is_dir() {
             match directory.open_dir_nofollow(&name) {
                 Ok(child) => Some(child),
@@ -236,26 +257,71 @@ fn walk_retained_directory(
             continue;
         }
 
-        let metadata = directory
-            .symlink_metadata(&name)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
-        if metadata.file_type().is_symlink() {
-            analysis.warnings.push(format!(
-                "Skipped symbolic link without following it: {}",
-                relative.display()
-            ));
-            continue;
-        }
-        if !metadata.is_file() {
+        #[cfg(not(windows))]
+        let entry_bytes = {
+            let metadata = directory
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            if metadata.file_type().is_symlink() {
+                analysis.warnings.push(format!(
+                    "Skipped symbolic link without following it: {}",
+                    relative.display()
+                ));
+                continue;
+            }
+            if !metadata.is_file() {
+                analysis
+                    .warnings
+                    .push(format!("Skipped non-regular file: {}", relative.display()));
+                continue;
+            }
+            metadata.len()
+        };
+        #[cfg(windows)]
+        let entry_bytes = if entry_metadata.is_file() {
+            entry_metadata.len()
+        } else {
             analysis
                 .warnings
                 .push(format!("Skipped non-regular file: {}", relative.display()));
             continue;
-        }
+        };
 
-        record_analyzed_file(analysis, relative, metadata.len());
+        record_analyzed_file(analysis, relative, entry_bytes);
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn open_windows_analysis_entry(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> Result<(fs::Metadata, Option<Dir>)> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    let child = metadata.is_dir().then(|| Dir::from_std_file(file));
+    Ok((metadata, child))
 }
 
 fn nested_folderbase_state_retained(
@@ -679,5 +745,38 @@ fn classification_rank(classification: Classification) -> u8 {
         Classification::Temporary => 2,
         Classification::Large => 3,
         Classification::Versioned => 4,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_reparse_tests {
+    use std::{fs, process::Command};
+
+    use super::analyze_folder;
+    use crate::FolderbaseError;
+
+    #[test]
+    fn retained_analysis_rejects_a_directory_junction_before_descent() {
+        let root = tempfile::tempdir().expect("analysis root");
+        let target = tempfile::tempdir().expect("junction target");
+        fs::write(target.path().join("foreign.txt"), b"foreign\n").expect("foreign file");
+        let junction = root.path().join("linked");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .expect("run mklink");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(matches!(
+            analyze_folder(root.path()),
+            Err(FolderbaseError::UnsafePath(path)) if path == junction
+        ));
     }
 }

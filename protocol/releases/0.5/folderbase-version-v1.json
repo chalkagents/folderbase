@@ -124,7 +124,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folder_analysis.rs",
-      "sha256": "7f3a123150e38041b887426a4bec8a81b504e5b7a228812c7f064274af66beec"
+      "sha256": "6947011a00efe2c880334ec296a3c740a857ea69cebb719da1bdcc6bdbfc11d8"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_capture.rs",
@@ -136,7 +136,7 @@
     },
     {
       "path": "crates/folderbase-core/src/folderbase_seal.rs",
-      "sha256": "b99b3740c345e53a6fab5146348dddd9e850ba0f66a6747352cff3b313b05ddc"
+      "sha256": "a92a8f2a5663337ea95e7cbaacebf3db9988547867cc71f3f58781e73cdf8035"
     },
     {
       "path": "crates/folderbase-core/src/folderbase_state.rs",
@@ -184,7 +184,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
-      "sha256": "82fb2de3b83caec39139bf8e04d9d047dcc3f3318bf9a921af52aa142af72e5a"
+      "sha256": "eeea2773f5a1098469340106b5f29873e7f1d7fcb6a33cfb0265c16e69abb947"
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",
@@ -356,7 +356,7 @@
     },
     {
       "path": "docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md",
-      "sha256": "e2a8dadde4e37dd174163f144060b9581f67c8b7d8a03bfb7de4e210c9de5a93"
+      "sha256": "5bdceeede6a512991d4219bb693328d5ec887d2dfd6fa0b7e24c861fb485230d"
     },
     {
       "path": "docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md",

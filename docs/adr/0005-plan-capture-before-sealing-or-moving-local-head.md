@@ -281,15 +281,17 @@ A replacement ancestor can neither redirect an operation into another
 directory nor be mistaken for the intended publication. Core moves no Head and
 returns no `Restored` result after that proof fails.
 
-This is a cooperative namespace invariant, not a claim that POSIX pathnames
-cannot be renamed by an uncoordinated same-user process. On Unix, a process may
-move the exact opened parent after the final attachment proof and before or
-after the hard link. The held capability still confines mutation to that exact
-directory, so the only possible orphan is the exact transaction-owned link in
-the moved directory; Core never follows the replacement path and never attempts
-a racy pathname rollback that could delete unrelated content. Windows directory
-capabilities deny delete sharing while held, so the equivalent parent detach is
-blocked by the operating system.
+This is a cooperative namespace invariant, not a claim that pathnames cannot be
+renamed by an uncoordinated same-user process. On every supported platform,
+including Windows, a process may move the exact opened parent after an
+attachment proof. The held capability still confines mutation to that exact
+directory, while the required pre- and post-publication reopen checks reject a
+missing or replacement ambient parent before Core can report success. The only
+possible orphan is therefore the exact transaction-owned link in the moved
+directory; Core never follows the replacement path and never attempts a racy
+pathname rollback that could delete unrelated content. Windows share modes may
+reduce the race surface, but pathname attachment never depends on them as a
+protocol invariant.
 
 Retry also preserves exact link topology. An absent destination may be
 published only while the retained stage has exactly one link. An already

@@ -822,19 +822,7 @@ impl VerifiedPrivateDirectory {
     ) -> Result<(std::fs::File, std::fs::Metadata, PathBuf)> {
         validate_private_name_os(name)?;
         let display = self.display.join(name);
-        let mut options = OpenOptions::new();
-        options.read(true).follow(FollowSymlinks::No);
-        #[cfg(windows)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            };
-
-            options
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-        }
+        let options = nofollow_regular_read_options();
         let file = self
             .directory
             .open_with(name, &options)
@@ -957,20 +945,7 @@ impl MigrationFilesystem {
             Err(source) => return Err(FolderbaseError::io(&display, source)),
         };
         if metadata.is_file() && !metadata.file_type().is_symlink() {
-            let mut options = OpenOptions::new();
-            options.read(true).follow(FollowSymlinks::No);
-            #[cfg(windows)]
-            {
-                use cap_std::fs::OpenOptionsExt;
-                use windows_sys::Win32::Storage::FileSystem::{
-                    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-                    FILE_SHARE_WRITE,
-                };
-
-                options
-                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-            }
+            let options = nofollow_regular_read_options();
             let mut file = parent
                 .open_with(&name, &options)
                 .map_err(|source| FolderbaseError::io(&display, source))?;
@@ -1121,19 +1096,7 @@ impl MigrationFilesystem {
     fn open_visible_regular(&self, relative: &Path) -> Result<VerifiedVisibleRegular> {
         let (parent, name) = self.open_parent(relative)?;
         let display = self.display(relative);
-        let mut options = OpenOptions::new();
-        options.read(true).follow(FollowSymlinks::No);
-        #[cfg(windows)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            };
-
-            options
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-        }
+        let options = nofollow_regular_read_options();
         let file = parent
             .open_with(&name, &options)
             .map_err(|source| FolderbaseError::io(&display, source))?;
@@ -1165,16 +1128,16 @@ impl MigrationFilesystem {
     ) -> Result<Vec<u8>> {
         let (parent, name) = self.open_parent(relative)?;
         let display = self.display(relative);
-        let mut options = OpenOptions::new();
-        options.read(true).follow(FollowSymlinks::No);
+        let options = nofollow_regular_read_options();
         let mut file = parent
             .open_with(&name, &options)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
+            .map_err(|source| FolderbaseError::io(&display, source))?
+            .into_std();
         let metadata = file
             .metadata()
             .map_err(|source| FolderbaseError::io(&display, source))?;
         if !metadata.is_file()
-            || metadata.file_type().is_symlink()
+            || metadata_is_link_or_reparse(&metadata)
             || metadata.len() > maximum_bytes
         {
             return Err(FolderbaseError::InvalidRecord {
@@ -1199,15 +1162,15 @@ impl MigrationFilesystem {
     pub(crate) fn sha256_regular(&self, relative: &Path) -> Result<String> {
         let (parent, name) = self.open_parent(relative)?;
         let display = self.display(relative);
-        let mut options = OpenOptions::new();
-        options.read(true).follow(FollowSymlinks::No);
+        let options = nofollow_regular_read_options();
         let mut file = parent
             .open_with(&name, &options)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
+            .map_err(|source| FolderbaseError::io(&display, source))?
+            .into_std();
         let metadata = file
             .metadata()
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
+        if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
             return Err(FolderbaseError::UnsafePath(display));
         }
         let mut hasher = Sha256::new();
@@ -1237,8 +1200,7 @@ impl MigrationFilesystem {
     pub(crate) fn physical_identity_sha256(&self, relative: &Path) -> Result<String> {
         let (parent, name) = self.open_parent(relative)?;
         let display = self.display(relative);
-        let mut options = OpenOptions::new();
-        options.read(true).follow(FollowSymlinks::No);
+        let options = nofollow_regular_read_options();
         let file = parent
             .open_with(&name, &options)
             .map_err(|source| FolderbaseError::io(&display, source))?
@@ -1246,7 +1208,7 @@ impl MigrationFilesystem {
         let metadata = file
             .metadata()
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
+        if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
             return Err(FolderbaseError::UnsafePath(display));
         }
         crate::physical_identity::PhysicalIdentity::from_file(&file)
@@ -2648,6 +2610,23 @@ fn visible_directory_fact_from_parent(
     directory_fact_from_handle(&directory, &display)
 }
 
+fn nofollow_regular_read_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    options
+}
+
 fn validate_directory_fidelity(
     fact: &MigrationDirectoryFact,
     read_only: bool,
@@ -2721,12 +2700,39 @@ fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::Fil
     Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(windows)))]
 fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
     directory
         .try_clone()
         .map(Dir::into_std_file)
         .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(windows)]
+fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .follow(FollowSymlinks::No)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let file = directory
+        .open_with(Path::new("."), &options)
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(FolderbaseError::UnsafePath(display.to_path_buf()));
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -3233,6 +3239,43 @@ mod linux_directory_sync_tests {
 #[cfg(windows)]
 fn sync_directory(_directory: &Dir, _display: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_directory_fidelity_tests {
+    use std::{ffi::OsStr, fs};
+
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::{open_directory_nofollow, set_directory_fidelity};
+
+    #[test]
+    fn retained_directory_reopens_with_write_attributes_for_fidelity() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let private_path = root.path().join("private");
+        fs::create_dir(&private_path).expect("private directory");
+        let ambient = Dir::open_ambient_dir(root.path(), ambient_authority()).expect("root");
+        let retained =
+            open_directory_nofollow(&ambient, OsStr::new("private"), &private_path).expect("child");
+
+        set_directory_fidelity(&retained, true, false, &private_path)
+            .expect("set readonly fidelity");
+        assert!(
+            fs::metadata(&private_path)
+                .expect("readonly metadata")
+                .permissions()
+                .readonly()
+        );
+
+        set_directory_fidelity(&retained, false, false, &private_path)
+            .expect("clear readonly fidelity");
+        assert!(
+            !fs::metadata(&private_path)
+                .expect("writable metadata")
+                .permissions()
+                .readonly()
+        );
+    }
 }
 
 #[cfg(test)]
