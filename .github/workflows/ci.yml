@@ -109,7 +109,7 @@ jobs:
         run: cargo test --package folderbase-core --test migration --locked
 
       - name: Test transaction-v1 crash, restart, conflict, and rollback matrices
-        run: cargo test --package folderbase-core --lib --locked migration::migration_transaction_red_tests::
+        run: "cargo test --package folderbase-core --lib --locked migration::migration_transaction_red_tests::"
 
       - name: Verify independent Folderbase Version 0.4 digest vectors
         run: node scripts/verify-folderbase-version-digest-vectors.mjs
