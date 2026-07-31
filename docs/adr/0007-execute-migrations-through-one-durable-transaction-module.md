@@ -287,9 +287,13 @@ object with `ReOpenFile`, revalidates that it is a non-reparse directory, and
 closes the elevated handle after the leaf operation. No-replace rename is
 different: child directory capabilities are initially opened with the closed
 union of `FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` documented for the
-destination `RootDirectory`, and that retained capability is passed directly
-to `SetFileInformationByHandle`. Core does not try to widen or ambiently reopen
-the destination directory while publishing. Source leaves request `DELETE`,
+destination `RootDirectory`, with delete sharing enabled. For a cross-directory
+rename, that retained destination capability is passed directly to
+`SetFileInformationByHandle`. For a same-directory rename, Core compares the
+physical identities of the retained source and destination parents and passes
+`RootDirectory = NULL` with the simple destination name, as required by the
+Windows rename contract. Core does not try to widen or ambiently reopen a
+directory while publishing. Source leaves request `DELETE`,
 `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer uses the complete
 `FILE_RENAME_INFO` structure size plus the filename bytes. Core never recovers
 rights by reopening `.` or an ambient pathname.

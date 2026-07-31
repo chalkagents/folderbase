@@ -3706,9 +3706,18 @@ fn rename_noreplace(
             "refusing to rename a reparse-point leaf",
         ));
     }
-    // `RootDirectory` is the already-retained directory capability. Reopening
-    // it can fail on Windows when the original grant was intentionally narrow,
-    // and it would weaken the capability-relative publication boundary.
+    // Windows requires `RootDirectory = NULL` when a rename stays in the same
+    // directory. Compare the retained objects rather than references because
+    // callers can hold multiple handles for the same physical parent.
+    let source_directory = source_parent
+        .try_clone()
+        .map_err(|source| {
+            std::io::Error::new(
+                source.kind(),
+                format!("clone source directory for no-replace rename: {source}"),
+            )
+        })?
+        .into_std_file();
     let destination_directory = destination_parent.try_clone().map_err(|source| {
         std::io::Error::new(
             source.kind(),
@@ -3716,6 +3725,8 @@ fn rename_noreplace(
         )
     })?;
     let destination_directory = destination_directory.into_std_file();
+    let same_parent = crate::physical_identity::PhysicalIdentity::from_file(&source_directory)?
+        == crate::physical_identity::PhysicalIdentity::from_file(&destination_directory)?;
 
     let file_name_bytes = destination_utf16
         .len()
@@ -3732,7 +3743,11 @@ fn rename_noreplace(
     let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*information).Anonymous.ReplaceIfExists = false;
-        (*information).RootDirectory = destination_directory.as_raw_handle() as HANDLE;
+        (*information).RootDirectory = if same_parent {
+            ptr::null_mut()
+        } else {
+            destination_directory.as_raw_handle() as HANDLE
+        };
         (*information).FileNameLength = u32::try_from(file_name_bytes)
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         ptr::copy_nonoverlapping(
@@ -4128,6 +4143,32 @@ mod rename_noreplace_error_tests {
             OsStr::new("destination.bin"),
         )
         .expect("native no-replace move");
+
+        assert!(!root.path().join("source.bin").exists());
+        assert_eq!(
+            fs::read(root.path().join("destination.bin")).expect("destination bytes"),
+            b"source bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_recognizes_separate_handles_for_the_same_parent() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        fs::write(root.path().join("source.bin"), b"source bytes").expect("source");
+        let source_directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("source parent capability");
+        let destination_directory =
+            Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+                .expect("destination parent capability");
+
+        rename_noreplace(
+            &source_directory,
+            OsStr::new("source.bin"),
+            &destination_directory,
+            OsStr::new("destination.bin"),
+        )
+        .expect("native same-parent no-replace move through separate handles");
 
         assert!(!root.path().join("source.bin").exists());
         assert_eq!(

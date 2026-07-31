@@ -2339,17 +2339,17 @@ fn open_root_nofollow(root: &Path, _access: StateAccess) -> Result<Dir> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
         };
         options
             // The directory handle is namespace authority, not a data stream.
             // Child reads and mutations open their own capability-relative
             // handles, so requesting GENERIC_READ/WRITE here only rejects
             // valid Windows directory ACLs without adding authority.
-            .access_mode(0)
+            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
     let file = options
         .open(root)
@@ -2382,15 +2382,16 @@ fn open_directory_nofollow(
 ) -> std::io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
     };
 
     let mut options = CapOpenOptions::new();
     options
-        .access_mode(0)
+        .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
         .follow(FollowSymlinks::No)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     let _ = access;
     let file = parent.open_with(name, &options)?.into_std();
     let metadata = file.metadata()?;
