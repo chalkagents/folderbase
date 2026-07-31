@@ -3565,11 +3565,19 @@ fn materialize_folderbase_targets_in(
                 )
             })
             .collect::<Vec<_>>();
-        writes.extend([
-            (path.join(".folderbase/manifest.json"), manifest_bytes),
-            (path.join("AGENTS.md"), adapter.clone()),
-            (path.join("CLAUDE.md"), adapter),
-        ]);
+        writes.push((path.join(".folderbase/manifest.json"), manifest_bytes));
+        plan_materialized_agent_adapter_in(
+            filesystem,
+            path.join("AGENTS.md"),
+            adapter.clone(),
+            &mut writes,
+        )?;
+        plan_materialized_agent_adapter_in(
+            filesystem,
+            path.join("CLAUDE.md"),
+            adapter,
+            &mut writes,
+        )?;
         writes.sort_by(|left, right| left.0.cmp(&right.0));
         let created_files = writes
             .iter()
@@ -3633,6 +3641,25 @@ fn materialize_folderbase_targets_in(
             journal,
             checkpoint,
         )?;
+    }
+    Ok(())
+}
+
+fn plan_materialized_agent_adapter_in(
+    filesystem: &MigrationFilesystem,
+    path: PathBuf,
+    generated: Vec<u8>,
+    writes: &mut Vec<(PathBuf, Vec<u8>)>,
+) -> Result<()> {
+    if writes.iter().any(|(planned, _)| planned == &path) {
+        return Ok(());
+    }
+    match filesystem.metadata(&path)? {
+        None => writes.push((path, generated)),
+        Some(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Some(_) => {
+            return Err(FolderbaseError::WouldOverwrite(filesystem.display(&path)));
+        }
     }
     Ok(())
 }

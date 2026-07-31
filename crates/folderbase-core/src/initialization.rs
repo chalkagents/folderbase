@@ -262,7 +262,7 @@ fn plan_initialization_with_template(
     });
 
     if options.create_agent_adapters {
-        plan_file(
+        plan_agent_adapter_unless_template_owned(
             &root,
             Path::new(CODEX_ADAPTER),
             "Codex bootstrap adapter",
@@ -270,7 +270,7 @@ fn plan_initialization_with_template(
             &mut writes,
             &mut preserved_paths,
         )?;
-        plan_file(
+        plan_agent_adapter_unless_template_owned(
             &root,
             Path::new(CLAUDE_ADAPTER),
             "Claude bootstrap adapter",
@@ -1548,6 +1548,27 @@ pub(crate) fn safe_destination(root: &Path, relative_path: &Path) -> Result<Path
         }
     }
     Ok(root.join(relative_path))
+}
+
+fn plan_agent_adapter_unless_template_owned(
+    root: &Path,
+    relative_path: &Path,
+    purpose: &str,
+    content: String,
+    writes: &mut Vec<PlannedWrite>,
+    preserved_paths: &mut Vec<PreservedPath>,
+) -> Result<()> {
+    if writes.iter().any(|write| write.path == relative_path) {
+        return Ok(());
+    }
+    plan_file(
+        root,
+        relative_path,
+        purpose,
+        content,
+        writes,
+        preserved_paths,
+    )
 }
 
 fn plan_file(

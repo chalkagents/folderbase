@@ -7,6 +7,10 @@
   "repository": "https://github.com/chalkagents/folderbase",
   "files": [
     {
+      "path": ".gitattributes",
+      "sha256": "d60f352d0db1404c70afb4bb8b2ca3fd1c610572aa40720e8a0b7baa7885418c"
+    },
+    {
       "path": ".github/workflows/ci.yml",
       "sha256": "dac87a4939aab76767af3ca2bea83c12b46193e340f3457560f6d1006c1f1b09"
     },
@@ -152,7 +156,7 @@
     },
     {
       "path": "crates/folderbase-core/src/initialization.rs",
-      "sha256": "6104701f6a99ed7a53785397956b0728f02b12d29d9ad7d84e2032b2b8293b3f"
+      "sha256": "1c6bb3d0a86bccb64a0fd4cdf9ed33c3e4edf74d03a67ddb965908db655d5840"
     },
     {
       "path": "crates/folderbase-core/src/inspection.rs",
@@ -168,7 +172,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration.rs",
-      "sha256": "5f0a2a2dc87c85b62126309a43423fc8a96f4b36b986a245fed451d4162786c5"
+      "sha256": "da510c439bf5d4bea89c5da41197bb8db34e389580bf9d3008af1aafd91bbeff"
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
@@ -308,7 +312,7 @@
     },
     {
       "path": "crates/folderbase-core/tests/templates.rs",
-      "sha256": "e5042d94e2b14bc7049a21bb9022c9156490e498fc81c94c70b2c6baa0ff1c17"
+      "sha256": "233d0e2db93f460e285a658bb667a2b58e62c11be65dcd0fa3237827ec326c0b"
     },
     {
       "path": "crates/folderbase-core/tests/transfer_manifest_conformance.rs",
@@ -588,7 +592,7 @@
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-distribution.mjs",
-      "sha256": "fd27bda60e07f25f34e9cbff91af3b000efe15d00721e7c7b26a8cf5b57ba01b"
+      "sha256": "0491b41f27a4ca845f54d6ce4d089c61224bfde7d139a3a3ba245ac9281125a0"
     }
   ]
 }
