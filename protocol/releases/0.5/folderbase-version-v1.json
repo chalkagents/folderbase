@@ -20,7 +20,7 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "f79d3b0e17a107c4012d109aa80c894a36f503e11363bae7442b10525bf3c53a"
+      "sha256": "50e33ce0a8df824a8200380a8357e722e49858a136926c85b3be77cdefd3e619"
     },
     {
       "path": "LICENSE",
@@ -184,7 +184,7 @@
     },
     {
       "path": "crates/folderbase-core/src/migration_filesystem.rs",
-      "sha256": "0e7389f2702ae408bafd48d5373a379325a6b57963a702e61f06232d9b26eccf"
+      "sha256": "6675caf7b57901cd820a6286797fc387a2f6d54f93e30602b0f52fb5361b501e"
     },
     {
       "path": "crates/folderbase-core/src/migration_transaction_red_tests.rs",

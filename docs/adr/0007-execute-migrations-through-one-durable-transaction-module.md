@@ -289,11 +289,13 @@ different: child directory capabilities are initially opened with the closed
 union of `FILE_TRAVERSE` and `FILE_READ_ATTRIBUTES` documented for the
 destination `RootDirectory`, with delete sharing enabled. For a cross-directory
 rename, that retained destination capability is passed directly to
-`SetFileInformationByHandle`. For a same-directory rename, Core compares the
+`NtSetInformationFile`. For a same-directory rename, Core compares the
 physical identities of the retained source and destination parents and passes
 `RootDirectory = NULL` with the simple destination name, as required by the
-Windows rename contract. Core does not try to widen or ambiently reopen a
-directory while publishing. Source leaves request `DELETE`,
+kernel rename contract. Core uses the native handle-relative call because the
+Win32 wrapper resolves a NULL-root simple name against process current working
+directory. Core does not try to widen or ambiently reopen a directory while
+publishing. Source leaves request `DELETE`,
 `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer uses the complete
 `FILE_RENAME_INFO` structure size plus the filename bytes. Core never recovers
 rights by reopening `.` or an ambient pathname.

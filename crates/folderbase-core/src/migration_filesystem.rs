@@ -3665,12 +3665,18 @@ fn rename_noreplace(
         os::windows::{ffi::OsStrExt, io::AsRawHandle},
         ptr,
     };
-    use windows_sys::Win32::{
-        Foundation::HANDLE,
-        Storage::FileSystem::{
-            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-            FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
-            SYNCHRONIZE, SetFileInformationByHandle,
+    use windows_sys::{
+        Wdk::Storage::FileSystem::{
+            FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
+        },
+        Win32::{
+            Foundation::{HANDLE, RtlNtStatusToDosError},
+            Storage::FileSystem::{
+                DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                SYNCHRONIZE,
+            },
+            System::IO::IO_STATUS_BLOCK,
         },
     };
 
@@ -3732,15 +3738,15 @@ fn rename_noreplace(
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    // The Win32 contract requires the complete structure size plus the
+    // The native rename contract requires the complete structure size plus the
     // filename bytes. The FileName field offset is smaller on 64-bit Windows
     // because FILE_RENAME_INFO has trailing alignment padding.
-    let total_bytes = size_of::<FILE_RENAME_INFO>()
+    let total_bytes = size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(file_name_bytes)
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     let words = total_bytes.div_ceil(size_of::<usize>());
     let mut storage = vec![0_usize; words];
-    let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     unsafe {
         (*information).Anonymous.ReplaceIfExists = false;
         (*information).RootDirectory = if same_parent {
@@ -3755,18 +3761,20 @@ fn rename_noreplace(
             (*information).FileName.as_mut_ptr(),
             destination_utf16.len(),
         );
-        if SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        let status = NtSetInformationFile(
             source.as_raw_handle() as HANDLE,
-            FileRenameInfo,
-            information.cast(),
+            &raw mut io_status,
+            information.cast_const().cast(),
             u32::try_from(total_bytes)
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
-        ) == 0
-        {
-            let source = std::io::Error::last_os_error();
+            FileRenameInformation,
+        );
+        if status < 0 {
+            let source = std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32);
             return Err(std::io::Error::new(
                 source.kind(),
-                format!("SetFileInformationByHandle(FileRenameInfo): {source}"),
+                format!("NtSetInformationFile(FileRenameInformation): {source}"),
             ));
         }
     }
