@@ -8022,8 +8022,9 @@ fn oversized_uncommitted_journal_write_is_rejected_before_content_read() {
     let content_read = Cell::new(false);
 
     journal
-        .retire_uncommitted_regular_write_with_read_hook(
+        .quarantine_uncommitted_regular_write_with_read_hook(
             OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            OsStr::new(&journal_generation_quarantine_name(1)),
             MAX_JOURNAL_GENERATION_BYTES,
             || content_read.set(true),
         )
@@ -8064,8 +8065,9 @@ fn replaced_uncommitted_journal_write_is_rejected_without_unbounded_reopen() {
     let content_reads = Cell::new(0_u8);
 
     journal
-        .retire_uncommitted_regular_write_with_race_hooks(
+        .quarantine_uncommitted_regular_write_with_race_hooks(
             OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            OsStr::new(&journal_generation_quarantine_name(1)),
             MAX_JOURNAL_GENERATION_BYTES,
             || content_reads.set(content_reads.get().saturating_add(1)),
             || {
@@ -8075,6 +8077,7 @@ fn replaced_uncommitted_journal_write_is_rejected_without_unbounded_reopen() {
                     &vec![b'f'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
                 );
             },
+            || {},
         )
         .expect_err("a replacement scratch must fail closed");
 
@@ -8093,6 +8096,185 @@ fn replaced_uncommitted_journal_write_is_rejected_without_unbounded_reopen() {
         fs::read(&displaced_path).expect("admitted inode remains displaced"),
         b"admitted scratch"
     );
+}
+
+#[test]
+fn bounded_foreign_swap_at_retirement_is_preserved_in_quarantine() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"retirement race\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let journal_path = root.path().join(&journal_relative);
+    let writing = journal_path.join(JOURNAL_GENERATION_WRITE_NAME);
+    let quarantine = journal_path.join(journal_generation_quarantine_name(1));
+    write_private_journal_artifact(&writing, b"admitted scratch");
+    let displaced = tempfile::tempdir().expect("displaced scratch directory");
+    let displaced_path = displaced.path().join("original-scratch");
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+
+    journal
+        .quarantine_uncommitted_regular_write_with_race_hooks(
+            OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            OsStr::new(&journal_generation_quarantine_name(1)),
+            MAX_JOURNAL_GENERATION_BYTES,
+            || {},
+            || {},
+            || {
+                fs::rename(&writing, &displaced_path).expect("retain admitted scratch");
+                write_private_journal_artifact(&writing, b"bounded foreign scratch");
+            },
+        )
+        .expect_err("foreign replacement must fail closed after quarantine");
+
+    assert_eq!(
+        fs::read(&quarantine).expect("foreign replacement quarantined"),
+        b"bounded foreign scratch"
+    );
+    assert_eq!(
+        fs::read(&displaced_path).expect("admitted scratch survives"),
+        b"admitted scratch"
+    );
+}
+
+#[test]
+fn crash_after_quarantine_before_recompute_recovers_from_durable_chain() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"quarantine restart\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let journal_path = root.path().join(&journal_relative);
+    let writing = journal_path.join(JOURNAL_GENERATION_WRITE_NAME);
+    let quarantine_name = journal_generation_quarantine_name(1);
+    let quarantine = journal_path.join(&quarantine_name);
+    write_private_journal_artifact(&writing, b"torn generation one");
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+
+    journal
+        .quarantine_uncommitted_regular_write_if_present(
+            OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            OsStr::new(&quarantine_name),
+            MAX_JOURNAL_GENERATION_BYTES,
+        )
+        .expect("model crash after durable quarantine and before recompute");
+    drop(journal);
+
+    let recovered = MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect("restart recomputes the next generation from durable authority");
+
+    assert!(matches!(recovered, MigrationOutcome::Applied(_)));
+    assert!(!writing.exists());
+    assert_eq!(
+        fs::read(&quarantine).expect("non-authoritative quarantine retained"),
+        b"torn generation one"
+    );
+}
+
+#[test]
+fn second_torn_scratch_for_one_generation_fails_closed_without_new_orphan_name() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"bounded quarantine\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let journal_path = root.path().join(&journal_relative);
+    let writing = journal_path.join(JOURNAL_GENERATION_WRITE_NAME);
+    let quarantine_name = journal_generation_quarantine_name(1);
+    let quarantine = journal_path.join(&quarantine_name);
+    write_private_journal_artifact(&writing, b"first torn generation");
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+    journal
+        .quarantine_uncommitted_regular_write_if_present(
+            OsStr::new(JOURNAL_GENERATION_WRITE_NAME),
+            OsStr::new(&quarantine_name),
+            MAX_JOURNAL_GENERATION_BYTES,
+        )
+        .expect("first scratch occupies the one bounded quarantine");
+    drop(journal);
+    write_private_journal_artifact(&writing, b"second torn generation");
+
+    MigrationExecution::run(
+        RootClaim::Current {
+            display_root: root.path(),
+        },
+        MigrationCommand::Recover {
+            migration_id: &migration_id,
+        },
+    )
+    .expect_err("a second scratch for one generation requires manual review");
+
+    assert_eq!(
+        fs::read(&quarantine).expect("first quarantine retained"),
+        b"first torn generation"
+    );
+    assert_eq!(
+        fs::read(&writing).expect("second scratch retained"),
+        b"second torn generation"
+    );
+    let orphan_names = fs::read_dir(&journal_path)
+        .expect("journal directory")
+        .map(|entry| entry.expect("journal entry").file_name())
+        .filter(|name| {
+            name.to_string_lossy()
+                .starts_with(JOURNAL_GENERATION_QUARANTINE_PREFIX)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(orphan_names, vec![OsString::from(quarantine_name)]);
+}
+
+#[test]
+fn noncanonical_or_future_journal_quarantine_fails_closed() {
+    for quarantine_name in [
+        ".next-generation-1.quarantine".to_owned(),
+        journal_generation_quarantine_name(2),
+    ] {
+        let (root, migration_id, _) = prepared_additive_v1_fixture_with_digest(&[(
+            "README.md",
+            b"closed quarantine grammar\n",
+        )]);
+        let quarantine = transaction_v1_root(root.path(), &migration_id)
+            .join("journal")
+            .join(&quarantine_name);
+        write_private_journal_artifact(&quarantine, b"non-authoritative evidence");
+
+        MigrationExecution::run(
+            RootClaim::Current {
+                display_root: root.path(),
+            },
+            MigrationCommand::Recover {
+                migration_id: &migration_id,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read(&quarantine).expect("unrecognized evidence retained"),
+            b"non-authoritative evidence"
+        );
+    }
 }
 
 #[test]

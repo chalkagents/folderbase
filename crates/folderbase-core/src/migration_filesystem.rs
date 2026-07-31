@@ -882,21 +882,31 @@ impl VerifiedPrivateDirectory {
         name: &str,
         staging_name: &str,
         writing_name: &str,
+        quarantine_name: &str,
         bytes: &[u8],
     ) -> Result<()> {
         validate_private_name(name)?;
         validate_private_name(staging_name)?;
         validate_private_name(writing_name)?;
-        if name == staging_name || name == writing_name || staging_name == writing_name {
+        validate_private_name(quarantine_name)?;
+        let distinct_names = [name, staging_name, writing_name, quarantine_name]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if distinct_names.len() != 4 {
             return Err(FolderbaseError::UnsafePath(self.display.join(writing_name)));
         }
         let name_os = OsStr::new(name);
         let staging_name_os = OsStr::new(staging_name);
         let writing_name_os = OsStr::new(writing_name);
+        let quarantine_name_os = OsStr::new(quarantine_name);
         let expected_sha256 = format!("{:x}", Sha256::digest(bytes));
         let expected_bytes = bytes.len() as u64;
 
-        self.retire_uncommitted_regular_write_if_present(writing_name_os, expected_bytes)?;
+        self.quarantine_uncommitted_regular_write_if_present(
+            writing_name_os,
+            quarantine_name_os,
+            expected_bytes,
+        )?;
         let publication_already_started = [name_os, staging_name_os].into_iter().try_fold(
             false,
             |present, candidate| match self.relaxed_regular_fact_observed(candidate) {
@@ -958,20 +968,30 @@ impl VerifiedPrivateDirectory {
         self.publish_recoverable_new(name, staging_name, bytes)
     }
 
-    pub(crate) fn retire_uncommitted_regular_write_if_present(
+    pub(crate) fn quarantine_uncommitted_regular_write_if_present(
         &self,
         name: &OsStr,
+        quarantine_name: &OsStr,
         maximum_bytes: u64,
     ) -> Result<()> {
-        self.retire_uncommitted_regular_write_with_hooks(name, maximum_bytes, || {}, || {})
+        self.quarantine_uncommitted_regular_write_with_hooks(
+            name,
+            quarantine_name,
+            maximum_bytes,
+            || {},
+            || {},
+            || {},
+        )
     }
 
-    fn retire_uncommitted_regular_write_with_hooks(
+    fn quarantine_uncommitted_regular_write_with_hooks(
         &self,
         name: &OsStr,
+        quarantine_name: &OsStr,
         maximum_bytes: u64,
         mut before_content_read: impl FnMut(),
         after_initial_read: impl FnOnce(),
+        before_retirement: impl FnOnce(),
     ) -> Result<()> {
         let Some(initial) = self.observe_uncommitted_regular_write_bounded(
             name,
@@ -999,21 +1019,28 @@ impl VerifiedPrivateDirectory {
             &self.display.join(name),
             ExactFactLocation::Private,
         )?;
-        let display = self.display.join(name);
-        reject_windows_reparse(&self.directory, name, &display)?;
-        self.directory
-            .remove_file(name)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
-        sync_directory(&self.directory, &display)?;
-        match self.directory.symlink_metadata(name) {
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Ok(_) => Err(FolderbaseError::InvalidRecord {
-                path: display,
-                message: "uncommitted private write pathname was recreated during cleanup"
-                    .to_owned(),
-            }),
-            Err(source) => Err(FolderbaseError::io(display, source)),
-        }
+        before_retirement();
+        let quarantine_display = self.display.join(quarantine_name);
+        rename_noreplace(&self.directory, name, &self.directory, quarantine_name)
+            .map_err(|source| map_rename_noreplace_error(quarantine_display.clone(), source))?;
+        sync_directory(&self.directory, &quarantine_display)?;
+        let quarantined = self
+            .observe_uncommitted_regular_write_bounded(
+                quarantine_name,
+                maximum_bytes,
+                &mut before_content_read,
+            )?
+            .ok_or_else(|| FolderbaseError::InvalidRecord {
+                path: quarantine_display.clone(),
+                message: "quarantined private write disappeared before verification".to_owned(),
+            })?;
+        require_exact_regular_fact(
+            &quarantined.fact,
+            &quarantined.sha256,
+            exact_regular_leaf(&current.fact, &current.sha256, 1),
+            &quarantine_display,
+            ExactFactLocation::Private,
+        )
     }
 
     fn observe_uncommitted_regular_write_bounded(
@@ -1103,34 +1130,54 @@ impl VerifiedPrivateDirectory {
     }
 
     #[cfg(test)]
-    pub(crate) fn retire_uncommitted_regular_write_with_read_hook(
+    pub(crate) fn quarantine_uncommitted_regular_write_with_read_hook(
         &self,
         name: &OsStr,
+        quarantine_name: &OsStr,
         maximum_bytes: u64,
         before_content_read: impl FnMut(),
     ) -> Result<()> {
-        self.retire_uncommitted_regular_write_with_hooks(
+        self.quarantine_uncommitted_regular_write_with_hooks(
             name,
+            quarantine_name,
             maximum_bytes,
             before_content_read,
+            || {},
             || {},
         )
     }
 
     #[cfg(test)]
-    pub(crate) fn retire_uncommitted_regular_write_with_race_hooks(
+    pub(crate) fn quarantine_uncommitted_regular_write_with_race_hooks(
         &self,
         name: &OsStr,
+        quarantine_name: &OsStr,
         maximum_bytes: u64,
         before_content_read: impl FnMut(),
         after_initial_read: impl FnOnce(),
+        before_retirement: impl FnOnce(),
     ) -> Result<()> {
-        self.retire_uncommitted_regular_write_with_hooks(
+        self.quarantine_uncommitted_regular_write_with_hooks(
             name,
+            quarantine_name,
             maximum_bytes,
             before_content_read,
             after_initial_read,
+            before_retirement,
         )
+    }
+
+    pub(crate) fn verify_bounded_private_regular(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+    ) -> Result<()> {
+        self.observe_uncommitted_regular_write_bounded(name, maximum_bytes, &mut || {})?
+            .ok_or_else(|| FolderbaseError::InvalidRecord {
+                path: self.display.join(name),
+                message: "bounded private regular file disappeared during verification".to_owned(),
+            })?;
+        Ok(())
     }
 
     fn verify_private_publication_ownership(

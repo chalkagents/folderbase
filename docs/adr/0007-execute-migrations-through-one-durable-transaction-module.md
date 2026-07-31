@@ -378,11 +378,23 @@ synchronized. Core first writes the bytes under the reserved
 `.next-generation.writing` scratch name, synchronizes that file and its parent,
 and then atomically moves the singleton leaf to the durable staging name with
 no-clobber semantics. The scratch name carries no journal authority: after a
-process exit, a bounded owner-only singleton scratch is exactly retired and the
-next generation is recomputed from the last valid chain state. An oversized,
-aliased, non-regular, or non-owner-only scratch fails closed. Once the durable
-staging name is visible, the ordinary staging rule above applies, so malformed
-or partial durable stages remain retained and reported rather than discarded.
+process exit, a bounded owner-only singleton scratch is atomically moved with
+no-clobber semantics to the one reserved quarantine name derived from the next
+durable generation index. Core synchronizes the retained journal directory and
+then bounded-verifies the quarantined identity, digest, length, alias topology,
+and fidelity against the last admitted scratch observation. A mismatch leaves
+the quarantine intact and fails closed; a match also leaves it intact as
+non-authoritative history while Core recomputes the canonical next generation
+from the last valid chain state. Closed journal grammar admits only exact
+twenty-digit generation quarantine names, at most one per bounded generation,
+and never decodes them into journal authority. A second torn scratch for the
+same generation cannot overwrite or create another quarantine: both the
+existing quarantine and the new `.writing` leaf remain for manual review. This
+is the deliberately bounded automated-recovery limit. An oversized, aliased,
+non-regular, non-owner-only, malformed-name, or out-of-range quarantine or
+scratch fails closed. Once the durable staging name is visible, the ordinary
+staging rule above applies, so malformed or partial durable stages remain
+retained and reported rather than discarded.
 
 Conflict records include a retained no-follow fingerprint of the affected
 ordinary leaves. Repeating an unchanged conflict returns the existing record

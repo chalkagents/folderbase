@@ -66,6 +66,112 @@ const MANAGED_BLOCK_BEGIN: &str = "<!-- folderbase:begin -->";
 const MANAGED_BLOCK_END: &str = "<!-- folderbase:end -->";
 const JOURNAL_GENERATION_STAGING_NAME: &str = ".next-generation.preparing";
 const JOURNAL_GENERATION_WRITE_NAME: &str = ".next-generation.writing";
+const JOURNAL_GENERATION_QUARANTINE_PREFIX: &str = ".next-generation-";
+const JOURNAL_GENERATION_QUARANTINE_SUFFIX: &str = ".quarantine";
+
+fn journal_generation_quarantine_name(generation: usize) -> String {
+    format!(
+        "{JOURNAL_GENERATION_QUARANTINE_PREFIX}{generation:020}{JOURNAL_GENERATION_QUARANTINE_SUFFIX}"
+    )
+}
+
+fn journal_generation_index(name: &OsStr) -> Option<usize> {
+    let name = name.to_str()?;
+    let digits = name.strip_suffix(".json")?;
+    if digits.len() != 20 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let index = digits.parse::<usize>().ok()?;
+    (name == format!("{index:020}.json")).then_some(index)
+}
+
+fn journal_generation_quarantine_index(name: &OsStr) -> Option<usize> {
+    let name = name.to_str()?;
+    let digits = name
+        .strip_prefix(JOURNAL_GENERATION_QUARANTINE_PREFIX)?
+        .strip_suffix(JOURNAL_GENERATION_QUARANTINE_SUFFIX)?;
+    if digits.len() != 20 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let index = digits.parse::<usize>().ok()?;
+    (name == journal_generation_quarantine_name(index)).then_some(index)
+}
+
+fn maximum_journal_directory_entries(maximum_generations: usize) -> usize {
+    maximum_generations.saturating_mul(2).saturating_add(2)
+}
+
+#[derive(Debug)]
+struct ClassifiedJournalEntries {
+    generation_names: Vec<OsString>,
+    staging_present: bool,
+    writing_present: bool,
+}
+
+fn classify_journal_entries(
+    filesystem: &MigrationFilesystem,
+    journal: &VerifiedPrivateDirectory,
+    journal_root: &Path,
+    entries: &[(OsString, bool)],
+    maximum_generations: usize,
+) -> Result<ClassifiedJournalEntries> {
+    let mut generations = Vec::new();
+    let mut quarantines = Vec::new();
+    let mut staging_present = false;
+    let mut writing_present = false;
+    for (name, is_directory) in entries {
+        if *is_directory {
+            return Err(FolderbaseError::InvalidRecord {
+                path: filesystem.display(&journal_root.join(name)),
+                message: "transaction journal contains an unexpected directory".to_owned(),
+            });
+        }
+        if name == OsStr::new(JOURNAL_GENERATION_STAGING_NAME) {
+            staging_present = true;
+        } else if name == OsStr::new(JOURNAL_GENERATION_WRITE_NAME) {
+            writing_present = true;
+        } else if let Some(index) = journal_generation_index(name) {
+            generations.push((index, name.clone()));
+        } else if let Some(index) = journal_generation_quarantine_index(name) {
+            quarantines.push((index, name.clone()));
+        } else {
+            return Err(FolderbaseError::InvalidRecord {
+                path: filesystem.display(&journal_root.join(name)),
+                message: "transaction journal contains an unknown artifact".to_owned(),
+            });
+        }
+    }
+    generations.sort_by_key(|(index, _)| *index);
+    for (expected, (observed, name)) in generations.iter().enumerate() {
+        if *observed != expected {
+            return Err(FolderbaseError::InvalidRecord {
+                path: filesystem.display(&journal_root.join(name)),
+                message: "transaction journal contains an unknown or gapped generation".to_owned(),
+            });
+        }
+    }
+    if generations.len() > maximum_generations {
+        return Err(FolderbaseError::InvalidRecord {
+            path: filesystem.display(journal_root),
+            message: "transaction journal exceeds its generation bound".to_owned(),
+        });
+    }
+    quarantines.sort_by_key(|(index, _)| *index);
+    for (index, name) in &quarantines {
+        if *index >= maximum_generations || *index > generations.len() {
+            return Err(FolderbaseError::InvalidRecord {
+                path: filesystem.display(&journal_root.join(name)),
+                message: "journal quarantine does not name a bounded durable generation".to_owned(),
+            });
+        }
+        journal.verify_bounded_private_regular(name, MAX_JOURNAL_GENERATION_BYTES)?;
+    }
+    Ok(ClassifiedJournalEntries {
+        generation_names: generations.into_iter().map(|(_, name)| name).collect(),
+        staging_present,
+        writing_present,
+    })
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationAnalysis {
@@ -3823,6 +3929,7 @@ fn append_transaction_v1_generation_parts(
         .join(TRANSACTION_DIRECTORY)
         .join("journal");
     let generation_name = generation.file_name();
+    let quarantine_name = journal_generation_quarantine_name(generations.len());
     let path = journal_root.join(&generation_name);
     let bytes = generation.encode(&filesystem.display(&path))?;
     private
@@ -3831,6 +3938,7 @@ fn append_transaction_v1_generation_parts(
             &generation_name,
             JOURNAL_GENERATION_STAGING_NAME,
             JOURNAL_GENERATION_WRITE_NAME,
+            &quarantine_name,
             &bytes,
         )?;
     let reopened_bytes = private
@@ -7444,27 +7552,18 @@ fn is_provable_prepared_transaction_v1_prefix(
         .any(|(name, _)| name == OsStr::new("journal"))
     {
         let journal = transaction.open_directory("journal")?;
-        let journal_entries = journal.closed_entries(MAX_JOURNAL_GENERATIONS.saturating_add(2))?;
-        for (name, is_directory) in &journal_entries {
-            if matches!(
-                name.to_str(),
-                Some(JOURNAL_GENERATION_STAGING_NAME | JOURNAL_GENERATION_WRITE_NAME)
-            ) && !*is_directory
-            {
-                continue;
-            }
-            if !*is_directory
-                && name
-                    .to_str()
-                    .is_some_and(|name| name.len() == 25 && name.ends_with(".json"))
-            {
-                return Ok(false);
-            }
-            return Err(FolderbaseError::InvalidRecord {
-                path: filesystem.display(&transaction_root.join("journal").join(name)),
-                message: "transaction journal contains an ambiguous pre-Prepared artifact"
-                    .to_owned(),
-            });
+        let journal_root = transaction_root.join("journal");
+        let journal_entries =
+            journal.closed_entries(maximum_journal_directory_entries(MAX_JOURNAL_GENERATIONS))?;
+        let classified = classify_journal_entries(
+            filesystem,
+            &journal,
+            &journal_root,
+            &journal_entries,
+            MAX_JOURNAL_GENERATIONS,
+        )?;
+        if !classified.generation_names.is_empty() {
+            return Ok(false);
         }
     }
     for directory_name in ["claims", "receipts"] {
@@ -7577,6 +7676,7 @@ fn prepare_transaction_v1(
         &initial.file_name(),
         JOURNAL_GENERATION_STAGING_NAME,
         JOURNAL_GENERATION_WRITE_NAME,
+        &journal_generation_quarantine_name(0),
         &initial_bytes,
     )?;
     let prepared = reopen_transaction_v1(filesystem, &migration_root, Some(&reopened))?;
@@ -8153,9 +8253,23 @@ fn reopen_transaction_v1(
         &program,
         &program_digest,
     )?;
-    let mut generation_names =
-        journal.closed_regular_file_names(program.maximum_journal_generations())?;
-    generation_names.sort();
+    let journal_entries = journal.closed_entries(maximum_journal_directory_entries(
+        program.maximum_journal_generations(),
+    ))?;
+    let classified = classify_journal_entries(
+        filesystem,
+        &journal,
+        &journal_root,
+        &journal_entries,
+        program.maximum_journal_generations(),
+    )?;
+    if classified.staging_present || classified.writing_present {
+        return Err(FolderbaseError::InvalidRecord {
+            path: filesystem.display(&journal_root),
+            message: "recoverable journal publication remains unresolved".to_owned(),
+        });
+    }
+    let generation_names = classified.generation_names;
     let mut generations = Vec::with_capacity(generation_names.len());
     for (index, name) in generation_names.into_iter().enumerate() {
         let expected_name = format!("{index:020}.json");
@@ -8209,32 +8323,35 @@ fn repair_recoverable_journal_staging(
     program_digest: &str,
 ) -> Result<()> {
     let staging_name = OsStr::new(JOURNAL_GENERATION_STAGING_NAME);
-    let mut entries =
-        journal.closed_entries(program.maximum_journal_generations().saturating_add(2))?;
+    let maximum_generations = program.maximum_journal_generations();
+    let maximum_entries = maximum_journal_directory_entries(maximum_generations);
+    let mut entries = journal.closed_entries(maximum_entries)?;
+    let mut classified = classify_journal_entries(
+        filesystem,
+        journal,
+        journal_root,
+        &entries,
+        maximum_generations,
+    )?;
     let writing_name = OsStr::new(JOURNAL_GENERATION_WRITE_NAME);
-    if let Some((_, writing_is_directory)) = entries.iter().find(|(name, _)| name == writing_name) {
-        if *writing_is_directory {
-            return Err(FolderbaseError::InvalidRecord {
-                path: filesystem.display(&journal_root.join(writing_name)),
-                message: "uncommitted journal write is not a regular file".to_owned(),
-            });
-        }
-        journal.retire_uncommitted_regular_write_if_present(
+    if classified.writing_present {
+        let quarantine_name = journal_generation_quarantine_name(classified.generation_names.len());
+        journal.quarantine_uncommitted_regular_write_if_present(
             writing_name,
+            OsStr::new(&quarantine_name),
             MAX_JOURNAL_GENERATION_BYTES,
         )?;
-        entries =
-            journal.closed_entries(program.maximum_journal_generations().saturating_add(1))?;
+        entries = journal.closed_entries(maximum_entries)?;
+        classified = classify_journal_entries(
+            filesystem,
+            journal,
+            journal_root,
+            &entries,
+            maximum_generations,
+        )?;
     }
-    let Some((_, staging_is_directory)) = entries.iter().find(|(name, _)| name == staging_name)
-    else {
+    if !classified.staging_present {
         return Ok(());
-    };
-    if *staging_is_directory {
-        return Err(FolderbaseError::InvalidRecord {
-            path: filesystem.display(&journal_root.join(staging_name)),
-            message: "journal generation staging is not a regular file".to_owned(),
-        });
     }
 
     let (staged_fact, staged_sha256) = journal.relaxed_regular_fact_observed(staging_name)?;
@@ -8245,13 +8362,14 @@ fn repair_recoverable_journal_staging(
         TransactionJournalGenerationV1::decode(&filesystem.display(&staging_path), &staged_bytes)?;
     let destination_name = staged.file_name();
     let destination_name_os = OsStr::new(&destination_name);
-    let final_exists = entries
+    let final_exists = classified
+        .generation_names
         .iter()
-        .any(|(name, is_directory)| name == destination_name_os && !is_directory);
-    let mut generation_names = entries
-        .iter()
-        .filter(|(name, _)| name != staging_name && !(final_exists && name == destination_name_os))
-        .map(|(name, _)| name.clone())
+        .any(|name| name == destination_name_os);
+    let mut generation_names = classified
+        .generation_names
+        .into_iter()
+        .filter(|name| !(final_exists && name == destination_name_os))
         .collect::<Vec<_>>();
     generation_names.sort();
     let mut generations = Vec::with_capacity(generation_names.len());
