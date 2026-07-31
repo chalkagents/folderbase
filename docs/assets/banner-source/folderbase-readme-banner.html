@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1600, initial-scale=1">
+  <title>Folderbase README banner</title>
+  <style>
+    :root {
+      --paper: #f4efe6;
+      --paper-raised: #faf6ef;
+      --ink: #17120e;
+      --muted: #6c675f;
+      --line: rgba(23, 18, 14, 0.16);
+      --line-strong: rgba(23, 18, 14, 0.34);
+      --lime: #d7ff3f;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 1600px;
+      height: 640px;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    body {
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: geometricPrecision;
+    }
+
+    .banner {
+      position: relative;
+      width: 1600px;
+      height: 640px;
+      isolation: isolate;
+    }
+
+    .drafting-field {
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 690px 1fr;
+      gap: 62px;
+      height: 100%;
+      padding: 66px 74px 58px;
+    }
+
+    .editorial {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .mark {
+      display: grid;
+      width: 72px;
+      height: 72px;
+      place-items: center;
+      border: 1.5px solid var(--ink);
+      background: var(--lime);
+      font-size: 37px;
+      font-weight: 850;
+      letter-spacing: -0.055em;
+      line-height: 1;
+    }
+
+    .wordmark {
+      font-size: 46px;
+      font-weight: 780;
+      letter-spacing: -0.035em;
+      line-height: 1;
+    }
+
+    .category {
+      width: max-content;
+      margin-top: 25px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line-strong);
+      color: var(--muted);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.13em;
+      line-height: 1;
+    }
+
+    h1 {
+      max-width: 680px;
+      margin: 52px 0 0;
+      font-size: 78px;
+      font-weight: 760;
+      letter-spacing: -0.065em;
+      line-height: 0.98;
+    }
+
+    h1 em {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 2px 15px 8px 11px;
+      background: var(--lime);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 0.97em;
+      font-weight: 500;
+      letter-spacing: -0.055em;
+      line-height: 0.9;
+    }
+
+    .proof-line {
+      display: flex;
+      gap: 24px;
+      margin-top: auto;
+      color: var(--muted);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+    }
+
+    .proof-line span {
+      position: relative;
+      padding-left: 14px;
+    }
+
+    .proof-line span::before {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      width: 5px;
+      height: 5px;
+      background: var(--lime);
+      content: "";
+      transform: translateY(-50%);
+    }
+
+    .system-wrap {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      padding-top: 26px;
+    }
+
+    .diagram-kicker {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 25px;
+      color: var(--muted);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: 0.15em;
+    }
+
+    .diagram-kicker::before {
+      width: 30px;
+      height: 1px;
+      background: var(--ink);
+      content: "";
+    }
+
+    .system {
+      position: relative;
+      display: grid;
+      grid-template-columns: 210px 42px 226px 42px 174px;
+      align-items: center;
+      min-height: 395px;
+    }
+
+    .stage {
+      position: relative;
+      height: 332px;
+    }
+
+    .stage-label {
+      position: absolute;
+      top: -35px;
+      left: 0;
+      width: 100%;
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+
+    .stage-shell {
+      height: 100%;
+      border: 1.5px solid var(--ink);
+      background: rgba(250, 246, 239, 0.78);
+    }
+
+    .stage-files .stage-shell {
+      position: relative;
+      padding: 44px 20px 20px;
+      border-radius: 0 0 2px 2px;
+    }
+
+    .stage-files .stage-shell::before {
+      position: absolute;
+      top: -20px;
+      left: -1.5px;
+      width: 82px;
+      height: 21px;
+      border: 1.5px solid var(--ink);
+      border-bottom: 0;
+      background: var(--paper-raised);
+      content: "";
+    }
+
+    .file-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 11px;
+    }
+
+    .file {
+      position: relative;
+      display: flex;
+      height: 71px;
+      align-items: flex-end;
+      padding: 10px;
+      border: 1px solid var(--line-strong);
+      background: var(--paper);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+    }
+
+    .file::after {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 9px;
+      height: 9px;
+      border-top: 1px solid var(--ink);
+      border-right: 1px solid var(--ink);
+      content: "";
+    }
+
+    .file:nth-child(2),
+    .file:nth-child(5) {
+      border-color: var(--ink);
+      box-shadow: inset 4px 0 0 var(--lime);
+    }
+
+    .stage-layer .stage-shell {
+      padding: 15px;
+      border: 1.5px dashed var(--ink);
+      background: rgba(215, 255, 63, 0.14);
+    }
+
+    .layer-card {
+      height: 100%;
+      border: 1.5px solid var(--ink);
+      background: var(--paper-raised);
+    }
+
+    .layer-row {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      align-items: center;
+      height: 60px;
+      padding: 0 15px;
+      border-bottom: 1px solid var(--line-strong);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: 0.055em;
+    }
+
+    .layer-row:last-child { border-bottom: 0; }
+
+    .layer-index {
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .layer-row:first-child {
+      background: var(--lime);
+    }
+
+    .flow-arrow {
+      display: grid;
+      place-items: center;
+    }
+
+    .flow-arrow svg {
+      width: 30px;
+      height: 18px;
+      overflow: visible;
+    }
+
+    .stage-agent .stage-shell {
+      display: flex;
+      align-items: center;
+      flex-direction: column;
+      justify-content: center;
+      background: var(--ink);
+      color: var(--paper);
+    }
+
+    .grant-symbol {
+      position: relative;
+      display: grid;
+      width: 88px;
+      height: 88px;
+      place-items: center;
+      border: 1px solid var(--lime);
+      border-radius: 50%;
+    }
+
+    .grant-symbol::before {
+      width: 18px;
+      height: 18px;
+      border: 5px solid var(--lime);
+      border-radius: 50%;
+      content: "";
+    }
+
+    .grant-symbol::after {
+      position: absolute;
+      top: 51px;
+      left: 41px;
+      width: 6px;
+      height: 29px;
+      background: var(--lime);
+      content: "";
+    }
+
+    .grant-copy {
+      margin-top: 28px;
+      text-align: center;
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      line-height: 1.7;
+    }
+
+    .return-flow {
+      position: absolute;
+      right: 76px;
+      bottom: -30px;
+      left: 104px;
+      height: 40px;
+      border-right: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
+      border-left: 1px solid var(--ink);
+    }
+
+    .return-flow::before {
+      position: absolute;
+      top: -1px;
+      left: -5px;
+      width: 9px;
+      height: 9px;
+      border-top: 1px solid var(--ink);
+      border-left: 1px solid var(--ink);
+      content: "";
+      transform: rotate(45deg);
+    }
+
+    .return-flow span {
+      position: absolute;
+      bottom: -7px;
+      left: 50%;
+      padding: 0 10px;
+      background: var(--paper);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.12em;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+
+    .system-note {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 48px;
+      padding-top: 15px;
+      border-top: 1px solid var(--line-strong);
+      color: var(--muted);
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      letter-spacing: 0.11em;
+    }
+  </style>
+</head>
+<body>
+  <main class="banner">
+    <svg class="drafting-field" width="1600" height="640" viewBox="0 0 1600 640" aria-hidden="true">
+      <defs>
+        <pattern id="small-grid" width="48" height="48" patternUnits="userSpaceOnUse">
+          <path d="M 48 0 L 0 0 0 48" fill="none" stroke="rgba(23,18,14,.10)" stroke-width="1"/>
+        </pattern>
+      </defs>
+      <rect width="1600" height="640" fill="#f4efe6"/>
+      <rect x="32" y="32" width="1536" height="576" fill="url(#small-grid)"/>
+      <rect x="32.5" y="32.5" width="1535" height="575" fill="none" stroke="rgba(23,18,14,.46)"/>
+      <path d="M16 32h32M32 16v32M1552 32h32M1568 16v32M16 608h32M32 592v32M1552 608h32M1568 592v32" fill="none" stroke="#17120e" stroke-width="1"/>
+      <circle cx="32" cy="32" r="5" fill="#d7ff3f" stroke="#17120e"/>
+      <circle cx="1568" cy="32" r="5" fill="#d7ff3f" stroke="#17120e"/>
+      <circle cx="32" cy="608" r="5" fill="#d7ff3f" stroke="#17120e"/>
+      <circle cx="1568" cy="608" r="5" fill="#d7ff3f" stroke="#17120e"/>
+    </svg>
+
+    <div class="layout">
+      <section class="editorial">
+        <div class="brand-row">
+          <div class="mark">FB</div>
+          <div class="wordmark">FOLDERBASE</div>
+        </div>
+        <div class="category">THE OPEN FOLDER DATABASE FOR AI AGENTS</div>
+        <h1>Turn any folder<br>into a <em>database.</em></h1>
+        <div class="proof-line" aria-label="Product principles">
+          <span>OPEN CORE</span>
+          <span>LOCAL-FIRST</span>
+          <span>EXPLICIT GRANTS</span>
+        </div>
+      </section>
+
+      <section class="system-wrap">
+        <div class="diagram-kicker">THE ADDITIVE LAYER</div>
+        <section class="system" aria-label="Ordinary folder becomes a folder database and receives an agent grant">
+          <article class="stage stage-files">
+            <div class="stage-label">ORDINARY FOLDER</div>
+            <div class="stage-shell">
+              <div class="file-grid">
+                <div class="file">DOC</div>
+                <div class="file">IMG</div>
+                <div class="file">CODE</div>
+                <div class="file">CSV</div>
+                <div class="file">PDF</div>
+                <div class="file">MD</div>
+              </div>
+            </div>
+          </article>
+
+          <div class="flow-arrow" aria-hidden="true">
+            <svg viewBox="0 0 30 18">
+              <path d="M0 9h27M19 1l8 8-8 8" fill="none" stroke="#17120e" stroke-width="1.5"/>
+            </svg>
+          </div>
+
+          <article class="stage stage-layer">
+            <div class="stage-label">.folderbase/</div>
+            <div class="stage-shell">
+              <div class="layer-card">
+                <div class="layer-row"><span class="layer-index">01</span><span>IDENTITY</span></div>
+                <div class="layer-row"><span class="layer-index">02</span><span>VERSIONS</span></div>
+                <div class="layer-row"><span class="layer-index">03</span><span>POLICY</span></div>
+                <div class="layer-row"><span class="layer-index">04</span><span>QUERIES</span></div>
+                <div class="layer-row"><span class="layer-index">05</span><span>CHANGE SETS</span></div>
+              </div>
+            </div>
+          </article>
+
+          <div class="flow-arrow" aria-hidden="true">
+            <svg viewBox="0 0 30 18">
+              <path d="M0 9h27M19 1l8 8-8 8" fill="none" stroke="#17120e" stroke-width="1.5"/>
+            </svg>
+          </div>
+
+          <article class="stage stage-agent">
+            <div class="stage-label">AGENT GRANT</div>
+            <div class="stage-shell">
+              <div class="grant-symbol" aria-hidden="true"></div>
+              <div class="grant-copy">SCOPED ACCESS<br>SAFE WRITES</div>
+            </div>
+          </article>
+
+          <div class="return-flow" aria-hidden="true"><span>CHANGE SETS</span></div>
+        </section>
+        <div class="system-note"><span>FILES STAY FILES</span><span>STRUCTURE STAYS PORTABLE</span></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
