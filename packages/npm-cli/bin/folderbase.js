@@ -22,6 +22,7 @@ const version = packageMetadata.version;
 const releaseTag = `v${version}`;
 const maximumChecksumBytes = 1024 * 1024;
 const maximumBinaryBytes = 256 * 1024 * 1024;
+const maximumRedirects = 10;
 
 function targetFor(platform, architecture) {
   const targets = new Map([
@@ -53,22 +54,49 @@ function cacheRoot() {
   );
 }
 
+function permitsDownloadUrl(url) {
+  const allowLoopbackHttp =
+    process.env.FOLDERBASE_CLI_TEST_ALLOW_HTTP === "1" &&
+    (url.hostname === "127.0.0.1" || url.hostname === "localhost");
+  return url.protocol === "https:" || allowLoopbackHttp;
+}
+
+function requireDownloadUrl(url, subject) {
+  if (!permitsDownloadUrl(url)) {
+    throw new Error(`${subject} requires HTTPS`);
+  }
+}
+
 function releaseBaseUrl() {
   const base =
     process.env.FOLDERBASE_CLI_RELEASE_BASE_URL ||
     "https://github.com/chalkagents/folderbase/releases/download";
-  const url = new URL(base);
-  const allowLoopbackHttp =
-    process.env.FOLDERBASE_CLI_TEST_ALLOW_HTTP === "1" &&
-    (url.hostname === "127.0.0.1" || url.hostname === "localhost");
-  if (url.protocol !== "https:" && !allowLoopbackHttp) {
-    throw new Error("release downloads require HTTPS");
-  }
+  requireDownloadUrl(new URL(base), "release downloads");
   return base.replace(/\/+$/, "");
 }
 
 async function download(url, maximumBytes) {
-  const response = await fetch(url, { redirect: "follow" });
+  let currentUrl = new URL(url);
+  requireDownloadUrl(currentUrl, "release downloads");
+  let response;
+  for (let redirects = 0; ; redirects += 1) {
+    response = await fetch(currentUrl, { redirect: "manual" });
+    if (![301, 302, 303, 307, 308].includes(response.status)) {
+      break;
+    }
+    if (redirects >= maximumRedirects) {
+      throw new Error(`download exceeds the ${maximumRedirects}-redirect limit`);
+    }
+    const location = response.headers.get("location");
+    if (!location) {
+      throw new Error("download redirect is missing a Location header");
+    }
+    const redirectUrl = new URL(location, currentUrl);
+    await response.body?.cancel();
+    requireDownloadUrl(redirectUrl, "redirect target");
+    currentUrl = redirectUrl;
+  }
+  requireDownloadUrl(new URL(response.url || currentUrl), "download response");
   if (!response.ok || !response.body) {
     throw new Error(`download failed with HTTP ${response.status}: ${url}`);
   }
@@ -106,20 +134,37 @@ async function writeAtomically(path, bytes, mode) {
 }
 
 function expectedDigest(checksums, assetName) {
-  const matches = [];
-  for (const line of checksums.split(/\r?\n/)) {
-    const match = line.match(/^([0-9a-f]{64}) [ *](\S+)$/);
-    if (match && match[2] === assetName) {
-      matches.push(match[1]);
-    }
+  const allowedAssetNames = new Set(
+    [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+    ].map((target) => `folderbase-${releaseTag}-${target}`),
+  );
+  const lines = checksums.split(/\r?\n/);
+  if (lines.at(-1) === "") {
+    lines.pop();
   }
-  if (matches.length === 0) {
+  const digests = new Map();
+  for (const line of lines) {
+    const match = line.match(/^([0-9a-f]{64}) [ *](\S+)$/);
+    if (!match) {
+      throw new Error("release contains a malformed checksum record");
+    }
+    const [, digest, name] = match;
+    if (!allowedAssetNames.has(name)) {
+      throw new Error(`release contains an unexpected checksum entry for ${name}`);
+    }
+    if (digests.has(name)) {
+      throw new Error(`release contains ambiguous checksum entries for ${name}`);
+    }
+    digests.set(name, digest);
+  }
+  if (!digests.has(assetName)) {
     throw new Error(`release checksums do not contain ${assetName}`);
   }
-  if (matches.length !== 1) {
-    throw new Error(`release contains ambiguous checksum entries for ${assetName}`);
-  }
-  return matches[0];
+  return digests.get(assetName);
 }
 
 async function digestFile(path) {
@@ -189,11 +234,32 @@ async function run() {
     stdio: "inherit",
     windowsHide: true,
   });
-  child.on("error", (error) => {
+  const signalHandlers = new Map();
+  const removeSignalHandlers = () => {
+    for (const [signal, handler] of signalHandlers) {
+      process.off(signal, handler);
+    }
+    signalHandlers.clear();
+  };
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM", "SIGQUIT"]) {
+    const handler = () => {
+      if (
+        child.exitCode === null &&
+        child.signalCode === null
+      ) {
+        child.kill(signal);
+      }
+    };
+    signalHandlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  child.once("error", (error) => {
+    removeSignalHandlers();
     console.error(`folderbase: could not start the native CLI: ${error.message}`);
     process.exitCode = 1;
   });
-  child.on("exit", (code, signal) => {
+  child.once("exit", (code, signal) => {
+    removeSignalHandlers();
     if (signal) {
       process.kill(process.pid, signal);
       return;
