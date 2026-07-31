@@ -26,6 +26,7 @@ const conformanceRoot = join(
   "conformance",
   "folderbase-version-0.5",
 );
+const attributesPath = join(repositoryRoot, ".gitattributes");
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -84,6 +85,12 @@ for (const [key, value] of Object.entries(expectedHeader)) {
   }
 }
 
+if (readFileSync(attributesPath, "utf8") !== "* text=auto eol=lf\n") {
+  throw new Error(
+    "repository checkout policy must keep the candidate byte surface LF-exact",
+  );
+}
+
 const releaseSidecar = readFileSync(releaseSidecarPath, "utf8");
 if (!/^[0-9a-f]{64}\n?$/.test(releaseSidecar)) {
   throw new Error("invalid protocol 0.5 release-manifest SHA-256 sidecar");
@@ -127,6 +134,7 @@ const completeRuntimePackageClosure = [
   ...walk(join(repositoryRoot, "crates", "folderbase-cli")),
 ].sort();
 const requiredNonConformanceFiles = [
+  ".gitattributes",
   ".github/workflows/ci.yml",
   "README.md",
   "docs/adr/0003-attest-exact-folderbase-roots.md",

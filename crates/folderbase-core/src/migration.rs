@@ -8887,7 +8887,7 @@ fn compile_program_materialization(
         let adapter = migration_agent_adapter().into_bytes();
         for adapter_path in ["AGENTS.md", "CLAUDE.md"] {
             let relative = path.join(adapter_path);
-            if !preserved.contains(&relative) {
+            if !preserved.contains(&relative) && !files.iter().any(|file| file.path == relative) {
                 files.push(ProgramGeneratedFileV1 {
                     path: relative,
                     bytes: adapter.clone(),
