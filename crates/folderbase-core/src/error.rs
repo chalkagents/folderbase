@@ -139,18 +139,7 @@ pub enum FolderbaseError {
 }
 
 impl FolderbaseError {
-    #[track_caller]
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        #[cfg(target_os = "linux")]
-        if source.raw_os_error() == Some(libc::EBADF) {
-            let caller = std::panic::Location::caller();
-            eprintln!(
-                "[DEBUG-fb41h-ebadf] {}:{}:{}",
-                caller.file(),
-                caller.line(),
-                caller.column()
-            );
-        }
         Self::Io {
             path: path.into(),
             source,

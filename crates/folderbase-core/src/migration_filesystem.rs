@@ -2670,10 +2670,7 @@ fn set_directory_fidelity(
     executable: bool,
     display: &Path,
 ) -> Result<()> {
-    let file = directory
-        .try_clone()
-        .map_err(|source| FolderbaseError::io(display, source))?
-        .into_std_file();
+    let file = reopen_directory_file(directory, display)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2697,6 +2694,39 @@ fn set_directory_fidelity(
         let _ = executable;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // cap-std intentionally retains Linux directories with O_PATH. That is
+    // sufficient for capability-relative traversal, but descriptor operations
+    // such as fchmod and fsync fail with EBADF. Reopen only the fixed "."
+    // component through the retained capability, preserving the no-ambient-path
+    // security boundary while obtaining an operable directory descriptor.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(FolderbaseError::io(
+            display,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
+    directory
+        .try_clone()
+        .map(Dir::into_std_file)
+        .map_err(|source| FolderbaseError::io(display, source))
 }
 
 #[cfg(unix)]
@@ -3141,27 +3171,7 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::i
 
 #[cfg(target_os = "linux")]
 fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-
-    // cap-std intentionally retains Linux directories with O_PATH. That is
-    // sufficient for capability-relative traversal but Linux rejects fsync on
-    // an O_PATH descriptor with EBADF. Reopen only the fixed "." component
-    // through the retained capability so durability never falls back to the
-    // mutable ambient pathname.
-    let descriptor = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            c".".as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if descriptor < 0 {
-        return Err(FolderbaseError::io(
-            display,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    let file = reopen_directory_file(directory, display)?;
     file.sync_all()
         .map_err(|source| FolderbaseError::io(display, source))
 }
@@ -3182,7 +3192,7 @@ mod linux_directory_sync_tests {
     use cap_fs_ext::DirExt;
     use cap_std::{ambient_authority, fs::Dir};
 
-    use super::sync_directory;
+    use super::{set_directory_fidelity, sync_directory};
 
     #[test]
     fn retained_o_path_directory_is_reopened_before_fsync() {
@@ -3195,6 +3205,29 @@ mod linux_directory_sync_tests {
 
         sync_directory(&retained, &root.path().join("private"))
             .expect("O_PATH authority must be reopened as an fsyncable descriptor");
+    }
+
+    #[test]
+    fn retained_o_path_directory_is_reopened_before_setting_fidelity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let private_path = root.path().join("private");
+        fs::create_dir(&private_path).expect("private directory");
+        let ambient = Dir::open_ambient_dir(root.path(), ambient_authority()).expect("root");
+        let retained = ambient
+            .open_dir_nofollow("private")
+            .expect("retained no-follow directory");
+
+        set_directory_fidelity(&retained, true, true, &private_path)
+            .expect("O_PATH authority must be reopened as a chmod-capable descriptor");
+
+        let mode = fs::metadata(&private_path)
+            .expect("private metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o555);
     }
 }
 
