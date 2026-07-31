@@ -7907,15 +7907,26 @@ fn deterministic_journal_generation_staging_recovers_synced_and_final_link_check
             .expect("final link published before staging retirement");
         }
 
-        let recovered = MigrationExecution::run(
+        let recovery = MigrationExecution::run(
             RootClaim::Current {
                 display_root: root.path(),
             },
             MigrationCommand::Recover {
                 migration_id: &migration_id,
             },
-        )
-        .expect("restart repairs or completes the one bounded staging name");
+        );
+        if checkpoint == "final_link" {
+            recovery.expect_err("legacy final-plus-stage alias requires manual review");
+            assert!(staging.is_file(), "legacy staging alias is retained");
+            assert!(
+                staging
+                    .with_file_name(staged_generation.file_name())
+                    .is_file(),
+                "durable final is retained"
+            );
+            continue;
+        }
+        let recovered = recovery.expect("restart completes the one bounded staging name");
         assert!(matches!(recovered, MigrationOutcome::Applied(_)));
         assert!(!staging.exists(), "staging is retired after recovery");
         let reopened =
@@ -7929,6 +7940,181 @@ fn deterministic_journal_generation_staging_recovers_synced_and_final_link_check
             TransactionPhaseV1::Applied
         );
     }
+}
+
+#[test]
+fn oversized_paired_journal_final_is_rejected_before_content_read() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"oversized final\n")]);
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&migration_id);
+    let transaction =
+        reopen_transaction_v1(&filesystem, &migration_root, None).expect("transaction");
+    let current = transaction.generations.last().expect("prepared generation");
+    let next = current
+        .next_apply_intent(&transaction.program, current.operation_cursor())
+        .expect("next journal generation");
+    let journal_root = migration_root.join(TRANSACTION_DIRECTORY).join("journal");
+    let journal_path = root.path().join(&journal_root);
+    let staging = journal_path.join(JOURNAL_GENERATION_STAGING_NAME);
+    let final_path = journal_path.join(next.file_name());
+    write_private_journal_artifact(
+        &staging,
+        &next.encode(&staging).expect("staged generation bytes"),
+    );
+    fs::hard_link(&staging, &final_path).expect("legacy paired final checkpoint");
+    fs::remove_file(&final_path).expect("replace paired final");
+    write_private_journal_artifact(
+        &final_path,
+        &vec![b'f'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+    );
+    let final_content_read = Cell::new(false);
+
+    repair_recoverable_journal_staging_with_hooks(
+        &filesystem,
+        &transaction.private.journal,
+        &journal_root,
+        &transaction.program,
+        &transaction.program_digest,
+        || {},
+        || final_content_read.set(true),
+        || {},
+    )
+    .expect_err("oversized paired final must fail closed");
+
+    assert!(
+        !final_content_read.get(),
+        "paired final size must be rejected before content I/O"
+    );
+    assert_eq!(
+        fs::metadata(&final_path)
+            .expect("oversized paired final retained")
+            .len(),
+        MAX_JOURNAL_GENERATION_BYTES + 1
+    );
+    assert!(staging.is_file(), "valid durable stage is retained");
+}
+
+#[test]
+fn retry_time_oversized_stage_substitution_is_bounded_and_preserved() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"retry substitution\n")]);
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&migration_id);
+    let transaction =
+        reopen_transaction_v1(&filesystem, &migration_root, None).expect("transaction");
+    let current = transaction.generations.last().expect("prepared generation");
+    let next = current
+        .next_apply_intent(&transaction.program, current.operation_cursor())
+        .expect("next journal generation");
+    let next_name = next.file_name();
+    let next_bytes = next
+        .encode(&PathBuf::from(&next_name))
+        .expect("next generation bytes");
+    let journal_path = root
+        .path()
+        .join(&migration_root)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let staging = journal_path.join(JOURNAL_GENERATION_STAGING_NAME);
+    write_private_journal_artifact(&staging, &next_bytes);
+    let displaced = tempfile::tempdir().expect("displaced stage directory");
+    let displaced_path = displaced.path().join("original-stage");
+    let swapped = Cell::new(false);
+
+    let error = transaction
+        .private
+        .journal
+        .publish_recoverable_new_via_uncommitted_write_with_retry_probe_hook(
+            &next_name,
+            JOURNAL_GENERATION_STAGING_NAME,
+            JOURNAL_GENERATION_WRITE_NAME,
+            &journal_generation_quarantine_name(transaction.generations.len()),
+            &next_bytes,
+            |candidate| {
+                if candidate == OsStr::new(JOURNAL_GENERATION_STAGING_NAME) && !swapped.get() {
+                    swapped.set(true);
+                    fs::rename(&staging, &displaced_path).expect("retain admitted stage");
+                    write_private_journal_artifact(
+                        &staging,
+                        &vec![b'x'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+                    );
+                }
+            },
+        )
+        .expect_err("retry-time oversized substitution must fail closed");
+
+    assert!(
+        matches!(
+            error,
+            FolderbaseError::InvalidRecord { ref message, .. }
+                if message == "private migration file exceeds its byte bound"
+        ),
+        "retry must reject the substituted pathname from metadata: {error:?}"
+    );
+    assert_eq!(
+        fs::metadata(&staging)
+            .expect("foreign oversized stage retained")
+            .len(),
+        MAX_JOURNAL_GENERATION_BYTES + 1
+    );
+    assert_eq!(
+        fs::read(&displaced_path).expect("admitted stage survives displacement"),
+        next_bytes
+    );
+}
+
+#[test]
+fn legacy_paired_stage_foreign_swap_is_retained_for_manual_review() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"paired swap\n")]);
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let migration_root = PathBuf::from(MIGRATIONS_DIR).join(&migration_id);
+    let transaction =
+        reopen_transaction_v1(&filesystem, &migration_root, None).expect("transaction");
+    let current = transaction.generations.last().expect("prepared generation");
+    let next = current
+        .next_apply_intent(&transaction.program, current.operation_cursor())
+        .expect("next journal generation");
+    let journal_root = migration_root.join(TRANSACTION_DIRECTORY).join("journal");
+    let journal_path = root.path().join(&journal_root);
+    let staging = journal_path.join(JOURNAL_GENERATION_STAGING_NAME);
+    let final_path = journal_path.join(next.file_name());
+    write_private_journal_artifact(
+        &staging,
+        &next.encode(&staging).expect("staged generation bytes"),
+    );
+    fs::hard_link(&staging, &final_path).expect("legacy paired final checkpoint");
+    let displaced = tempfile::tempdir().expect("displaced stage directory");
+    let displaced_path = displaced.path().join("original-stage");
+
+    repair_recoverable_journal_staging_with_hooks(
+        &filesystem,
+        &transaction.private.journal,
+        &journal_root,
+        &transaction.program,
+        &transaction.program_digest,
+        || {},
+        || {},
+        || {
+            fs::rename(&staging, &displaced_path).expect("retain admitted paired stage");
+            write_private_journal_artifact(&staging, b"foreign bounded stage");
+        },
+    )
+    .expect_err("legacy paired checkpoints require manual review");
+
+    assert_eq!(
+        fs::read(&staging).expect("foreign stage remains untouched"),
+        b"foreign bounded stage"
+    );
+    assert!(final_path.is_file(), "durable final remains authoritative");
+    assert_eq!(
+        fs::read(&displaced_path).expect("displaced paired stage survives"),
+        fs::read(&final_path).expect("durable final bytes")
+    );
 }
 
 #[test]
@@ -7959,6 +8145,98 @@ fn partial_journal_generation_staging_is_retained_and_reported() {
     assert_eq!(
         fs::read(&staging).expect("partial staging is retained"),
         b"{\"partial\":"
+    );
+}
+
+#[test]
+fn oversized_durable_journal_stage_is_rejected_before_content_read() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"oversized stage\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let stage = root
+        .path()
+        .join(&journal_relative)
+        .join(JOURNAL_GENERATION_STAGING_NAME);
+    write_private_journal_artifact(
+        &stage,
+        &vec![b's'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+    );
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+    let content_read = Cell::new(false);
+
+    journal
+        .observe_relaxed_regular_bounded_with_hook(
+            OsStr::new(JOURNAL_GENERATION_STAGING_NAME),
+            MAX_JOURNAL_GENERATION_BYTES,
+            || content_read.set(true),
+        )
+        .expect_err("oversized durable stage must fail closed");
+
+    assert!(
+        !content_read.get(),
+        "durable stage size must be rejected before content I/O"
+    );
+    assert_eq!(
+        fs::metadata(&stage)
+            .expect("oversized stage retained")
+            .len(),
+        MAX_JOURNAL_GENERATION_BYTES + 1
+    );
+}
+
+#[test]
+fn continually_grown_durable_journal_stage_stops_at_the_read_bound() {
+    let (root, migration_id, _) =
+        prepared_additive_v1_fixture_with_digest(&[("README.md", b"growing stage\n")]);
+    let journal_relative = PathBuf::from(MIGRATIONS_DIR)
+        .join(&migration_id)
+        .join(TRANSACTION_DIRECTORY)
+        .join("journal");
+    let stage = root
+        .path()
+        .join(&journal_relative)
+        .join(JOURNAL_GENERATION_STAGING_NAME);
+    write_private_journal_artifact(&stage, b"{");
+    let state = FolderbaseState::open_existing(root.path()).expect("state");
+    let filesystem = MigrationFilesystem::from_state(&state, root.path()).expect("filesystem");
+    let journal = filesystem
+        .open_private_directory(&journal_relative)
+        .expect("private journal");
+
+    let error = journal
+        .observe_relaxed_regular_bounded_with_hook(
+            OsStr::new(JOURNAL_GENERATION_STAGING_NAME),
+            MAX_JOURNAL_GENERATION_BYTES,
+            || {
+                let mut growing = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&stage)
+                    .expect("open growing durable stage");
+                growing
+                    .write_all(&vec![b'g'; MAX_JOURNAL_GENERATION_BYTES as usize + 1])
+                    .expect("grow durable stage beyond the bound");
+                growing.sync_all().expect("sync grown durable stage");
+            },
+        )
+        .expect_err("a continually grown durable stage must fail closed");
+
+    assert!(
+        matches!(
+            error,
+            FolderbaseError::InvalidRecord { ref message, .. }
+                if message == "private migration file changed while it was read"
+        ),
+        "growth must be detected by the one retained bounded observation: {error:?}"
+    );
+    assert!(
+        fs::metadata(&stage).expect("grown stage retained").len() > MAX_JOURNAL_GENERATION_BYTES
     );
 }
 
@@ -8274,6 +8552,98 @@ fn noncanonical_or_future_journal_quarantine_fails_closed() {
             fs::read(&quarantine).expect("unrecognized evidence retained"),
             b"non-authoritative evidence"
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum UnsafeCanonicalQuarantineShape {
+    Oversized,
+    HardLinkAlias,
+    Directory,
+    #[cfg(unix)]
+    WrongMode,
+    #[cfg(any(unix, windows))]
+    SymlinkOrReparse,
+}
+
+#[test]
+fn canonical_in_range_journal_quarantine_requires_a_bounded_private_regular() {
+    let mut cases = vec![
+        UnsafeCanonicalQuarantineShape::Oversized,
+        UnsafeCanonicalQuarantineShape::HardLinkAlias,
+        UnsafeCanonicalQuarantineShape::Directory,
+    ];
+    #[cfg(unix)]
+    cases.push(UnsafeCanonicalQuarantineShape::WrongMode);
+    #[cfg(any(unix, windows))]
+    cases.push(UnsafeCanonicalQuarantineShape::SymlinkOrReparse);
+
+    for case in cases {
+        let (root, migration_id, _) = prepared_additive_v1_fixture_with_digest(&[(
+            "README.md",
+            b"unsafe canonical quarantine\n",
+        )]);
+        let journal = transaction_v1_root(root.path(), &migration_id).join("journal");
+        let quarantine = journal.join(journal_generation_quarantine_name(1));
+        let mut external_alias = None;
+
+        match case {
+            UnsafeCanonicalQuarantineShape::Oversized => write_private_journal_artifact(
+                &quarantine,
+                &vec![b'q'; MAX_JOURNAL_GENERATION_BYTES as usize + 1],
+            ),
+            UnsafeCanonicalQuarantineShape::HardLinkAlias => {
+                write_private_journal_artifact(&quarantine, b"aliased quarantine");
+                let external = tempfile::tempdir().expect("external alias directory");
+                fs::hard_link(&quarantine, external.path().join("quarantine-alias"))
+                    .expect("hard-link quarantine alias");
+                external_alias = Some(external);
+            }
+            UnsafeCanonicalQuarantineShape::Directory => {
+                fs::create_dir(&quarantine).expect("directory at canonical quarantine name");
+            }
+            #[cfg(unix)]
+            UnsafeCanonicalQuarantineShape::WrongMode => {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::write(&quarantine, b"wrong-mode quarantine").expect("write quarantine");
+                fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o640))
+                    .expect("set non-private quarantine mode");
+            }
+            #[cfg(any(unix, windows))]
+            UnsafeCanonicalQuarantineShape::SymlinkOrReparse => {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink("00000000000000000000.json", &quarantine)
+                    .expect("symlink at canonical quarantine name");
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(
+                    journal.join("00000000000000000000.json"),
+                    &quarantine,
+                )
+                .expect("GitHub Windows runners permit file symlinks");
+            }
+        }
+
+        MigrationExecution::run(
+            RootClaim::Current {
+                display_root: root.path(),
+            },
+            MigrationCommand::Recover {
+                migration_id: &migration_id,
+            },
+        )
+        .expect_err("an unsafe canonical quarantine must fail closed");
+
+        assert!(
+            fs::symlink_metadata(&quarantine).is_ok(),
+            "{case:?} quarantine must be retained"
+        );
+        if let Some(external) = external_alias {
+            assert!(
+                external.path().join("quarantine-alias").is_file(),
+                "hard-link alias must be retained"
+            );
+        }
     }
 }
 

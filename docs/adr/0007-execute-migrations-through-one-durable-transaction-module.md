@@ -363,14 +363,21 @@ synchronized stage whose exact content, identity, fidelity, and link topology
 still prove the pending transaction publication may resume after a process
 exit. A partial, replaced, malformed, or otherwise unprovable stage is retained
 and reported; recovery never treats the reserved filename alone as proof of
-ownership. Before a recoverable private claim reaches a hook or crash edge,
-Core synchronizes a canonical ownership record that binds the exact staged
-physical identity, device, digest, length, and portable fidelity to the pending
-program claim. Restart requires both that durable record and the exact leaf it
-names; equal bytes on a different inode or fidelity-only changes fail closed.
-The final claim retains the same ownership record until its transaction
-obligation ends. Legacy final-plus-stage hard-link checkpoints are retired only
-after both names are proven to reference the same exact two-link publication.
+ownership. Every retry observes a stage or final claim through one retained
+no-follow regular-file handle: it rejects an oversized metadata fact before
+content I/O, reads at most the admitted bound plus one byte, and then rechecks
+identity, length, fidelity, and link topology on that same handle. It does not
+reopen the pathname to obtain an unbounded digest. Before a recoverable private
+claim reaches a hook or crash edge, Core synchronizes a canonical ownership
+record that binds the exact staged physical identity, device, digest, length,
+and portable fidelity to the pending program claim. Restart requires both that
+durable record and the exact leaf it names; equal bytes on a different inode or
+fidelity-only changes fail closed. The final claim retains the same ownership
+record until its transaction obligation ends. Current publication moves the
+one synchronized staging leaf to the final name with atomic no-clobber rename;
+it never creates a final-plus-stage pair. A legacy or fault-injected pair is
+therefore retained in place for manual review, even when both names are exact
+hard links. Recovery does not move or unlink either name.
 
 Journal generation publication does not expose its recoverable
 `.next-generation.preparing` name until the complete generation bytes have been
@@ -393,8 +400,12 @@ existing quarantine and the new `.writing` leaf remain for manual review. This
 is the deliberately bounded automated-recovery limit. An oversized, aliased,
 non-regular, non-owner-only, malformed-name, or out-of-range quarantine or
 scratch fails closed. Once the durable staging name is visible, the ordinary
-staging rule above applies, so malformed or partial durable stages remain
-retained and reported rather than discarded.
+staging rule above applies. Core bounded-reads both the durable
+`.next-generation.preparing` stage and any paired final through their retained
+handles before decoding or comparison. Oversized, growing, malformed, or
+partial durable stages and finals remain retained and reported rather than
+discarded. A final-plus-stage journal pair is legacy or fault evidence and
+requires manual review; Core retains both names without cleanup.
 
 Conflict records include a retained no-follow fingerprint of the affected
 ordinary leaves. Repeating an unchanged conflict returns the existing record

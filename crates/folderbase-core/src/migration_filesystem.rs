@@ -220,10 +220,12 @@ pub(crate) struct VerifiedPrivateDirectory {
     display: PathBuf,
 }
 
-struct BoundedPrivateRegularObservation {
+#[derive(Debug)]
+pub(crate) struct BoundedPrivateRegularObservation {
     _file: std::fs::File,
-    fact: MigrationRegularFact,
-    sha256: String,
+    pub(crate) fact: MigrationRegularFact,
+    pub(crate) sha256: String,
+    pub(crate) bytes: Vec<u8>,
 }
 
 pub(crate) struct VerifiedVisibleDirectory {
@@ -751,6 +753,71 @@ impl VerifiedPrivateDirectory {
         Ok(bytes)
     }
 
+    pub(crate) fn observe_relaxed_regular_bounded(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+    ) -> Result<BoundedPrivateRegularObservation> {
+        self.observe_relaxed_regular_bounded_with_hook(name, maximum_bytes, || {})
+    }
+
+    pub(crate) fn observe_relaxed_regular_bounded_with_hook(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        before_content_read: impl FnOnce(),
+    ) -> Result<BoundedPrivateRegularObservation> {
+        let (mut file, metadata, display) = self.open_regular_relaxed(name)?;
+        let identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let link_count = private_regular_link_count(&file, &metadata, &display)?;
+        if metadata.len() > maximum_bytes {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file exceeds its byte bound".to_owned(),
+            });
+        }
+        before_content_read();
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        let final_metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&display, source))?;
+        if bytes.len() as u64 > maximum_bytes
+            || bytes.len() as u64 != metadata.len()
+            || final_metadata.len() != metadata.len()
+            || crate::physical_identity::PhysicalIdentity::from_file(&file)
+                .map_err(|source| FolderbaseError::io(&display, source))?
+                != identity
+            || private_regular_link_count(&file, &final_metadata, &display)? != link_count
+            || portable_read_only(&final_metadata) != portable_read_only(&metadata)
+            || private_unix_mode(&final_metadata) != private_unix_mode(&metadata)
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display,
+                message: "private migration file changed while it was read".to_owned(),
+            });
+        }
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let fact = MigrationRegularFact {
+            physical_identity_sha256: identity.stable_sha256(),
+            device_sha256: identity.device_sha256(),
+            bytes: metadata.len(),
+            read_only: portable_read_only(&metadata),
+            unix_mode: private_unix_mode(&metadata),
+            link_count,
+        };
+        Ok(BoundedPrivateRegularObservation {
+            _file: file,
+            fact,
+            sha256,
+            bytes,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn read_regular_bounded_with_hook(
         &self,
@@ -816,8 +883,10 @@ impl VerifiedPrivateDirectory {
         let expected_sha256 = format!("{:x}", Sha256::digest(bytes));
         let expected_bytes = bytes.len() as u64;
 
-        match self.relaxed_regular_fact(name, &expected_sha256) {
-            Ok(fact) if fact.bytes == expected_bytes => {
+        match self.observe_relaxed_regular_bounded(name, expected_bytes) {
+            Ok(observed)
+                if observed.fact.bytes == expected_bytes && observed.sha256 == expected_sha256 =>
+            {
                 return install_prepared_private_claim(
                     self,
                     staging_name,
@@ -837,8 +906,15 @@ impl VerifiedPrivateDirectory {
             Err(error) => return Err(error),
         }
 
-        let staging_ready = match self.relaxed_regular_fact(staging_name, &expected_sha256) {
-            Ok(fact) if fact.bytes == expected_bytes && fact.link_count == 1 => true,
+        let staging_ready = match self.observe_relaxed_regular_bounded(staging_name, expected_bytes)
+        {
+            Ok(observed)
+                if observed.fact.bytes == expected_bytes
+                    && observed.fact.link_count == 1
+                    && observed.sha256 == expected_sha256 =>
+            {
+                true
+            }
             Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
                 return Err(FolderbaseError::MigrationVerificationFailed(
                     self.display.join(staging_name),
@@ -885,6 +961,45 @@ impl VerifiedPrivateDirectory {
         quarantine_name: &str,
         bytes: &[u8],
     ) -> Result<()> {
+        self.publish_recoverable_new_via_uncommitted_write_with_hook(
+            name,
+            staging_name,
+            writing_name,
+            quarantine_name,
+            bytes,
+            |_| {},
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_recoverable_new_via_uncommitted_write_with_retry_probe_hook(
+        &self,
+        name: &str,
+        staging_name: &str,
+        writing_name: &str,
+        quarantine_name: &str,
+        bytes: &[u8],
+        before_retry_probe_content_read: impl FnMut(&OsStr),
+    ) -> Result<()> {
+        self.publish_recoverable_new_via_uncommitted_write_with_hook(
+            name,
+            staging_name,
+            writing_name,
+            quarantine_name,
+            bytes,
+            before_retry_probe_content_read,
+        )
+    }
+
+    fn publish_recoverable_new_via_uncommitted_write_with_hook(
+        &self,
+        name: &str,
+        staging_name: &str,
+        writing_name: &str,
+        quarantine_name: &str,
+        bytes: &[u8],
+        mut before_retry_probe_content_read: impl FnMut(&OsStr),
+    ) -> Result<()> {
         validate_private_name(name)?;
         validate_private_name(staging_name)?;
         validate_private_name(writing_name)?;
@@ -909,7 +1024,11 @@ impl VerifiedPrivateDirectory {
         )?;
         let publication_already_started = [name_os, staging_name_os].into_iter().try_fold(
             false,
-            |present, candidate| match self.relaxed_regular_fact_observed(candidate) {
+            |present, candidate| match self.observe_relaxed_regular_bounded_with_hook(
+                candidate,
+                expected_bytes,
+                || before_retry_probe_content_read(candidate),
+            ) {
                 Ok(_) => Ok(true),
                 Err(FolderbaseError::Io { source, .. })
                     if source.kind() == std::io::ErrorKind::NotFound =>
@@ -1076,8 +1195,9 @@ impl VerifiedPrivateDirectory {
             });
         }
         before_content_read();
-        let (observed_bytes, digest) = {
+        let (observed_bytes, digest, bytes) = {
             let mut digest = Sha256::new();
+            let mut bytes = Vec::new();
             let mut observed_bytes = 0_u64;
             let mut buffer = [0_u8; 64 * 1024];
             let mut bounded = Read::by_ref(&mut file).take(maximum_bytes.saturating_add(1));
@@ -1089,11 +1209,12 @@ impl VerifiedPrivateDirectory {
                     break;
                 }
                 digest.update(&buffer[..read]);
+                bytes.extend_from_slice(&buffer[..read]);
                 observed_bytes = observed_bytes
                     .checked_add(read as u64)
                     .ok_or_else(|| FolderbaseError::MigrationVerificationFailed(display.clone()))?;
             }
-            (observed_bytes, digest)
+            (observed_bytes, digest, bytes)
         };
         let final_metadata = file
             .metadata()
@@ -1126,6 +1247,7 @@ impl VerifiedPrivateDirectory {
             _file: file,
             fact,
             sha256,
+            bytes,
         }))
     }
 
@@ -3169,31 +3291,33 @@ fn install_prepared_private_claim(
     expected_bytes: u64,
 ) -> Result<MigrationRegularFact> {
     let destination_display = destination.display.join(destination_name);
-    match destination.relaxed_regular_fact(destination_name, expected_sha256) {
-        Ok(final_fact) if final_fact.bytes == expected_bytes => {
-            match destination.relaxed_regular_fact(preparing_name, expected_sha256) {
+    match destination.observe_relaxed_regular_bounded(destination_name, expected_bytes) {
+        Ok(final_observation)
+            if final_observation.fact.bytes == expected_bytes
+                && final_observation.sha256 == expected_sha256 =>
+        {
+            match destination.observe_relaxed_regular_bounded(preparing_name, expected_bytes) {
                 Err(FolderbaseError::Io { source, .. })
                     if source.kind() == std::io::ErrorKind::NotFound
-                        && final_fact.link_count == 1 =>
+                        && final_observation.fact.link_count == 1 =>
                 {
-                    return Ok(final_fact);
+                    return Ok(final_observation.fact);
                 }
-                Ok(preparing_fact)
-                    if preparing_fact.bytes == expected_bytes
-                        && preparing_fact.physical_identity_sha256
-                            == final_fact.physical_identity_sha256
-                        && preparing_fact.device_sha256 == final_fact.device_sha256
-                        && preparing_fact.link_count == 2
-                        && final_fact.link_count == 2 =>
+                Ok(preparing_observation)
+                    if preparing_observation.fact.bytes == expected_bytes
+                        && preparing_observation.sha256 == expected_sha256
+                        && preparing_observation.fact.physical_identity_sha256
+                            == final_observation.fact.physical_identity_sha256
+                        && preparing_observation.fact.device_sha256
+                            == final_observation.fact.device_sha256
+                        && preparing_observation.fact.link_count == 2
+                        && final_observation.fact.link_count == 2 =>
                 {
-                    destination.remove_exact_regular(
-                        preparing_name,
-                        exact_regular_leaf(&preparing_fact, expected_sha256, 2),
-                    )?;
-                    return destination.exact_regular_fact(
-                        destination_name,
-                        exact_regular_leaf(&final_fact, expected_sha256, 1),
-                    );
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: destination.display.join(preparing_name),
+                        message: "legacy final-plus-staging publication requires manual review"
+                            .to_owned(),
+                    });
                 }
                 Ok(_) | Err(FolderbaseError::MigrationVerificationFailed(_)) => {
                     return Err(FolderbaseError::InvalidRecord {
@@ -3216,14 +3340,16 @@ fn install_prepared_private_claim(
         Err(error) => return Err(error),
     }
 
-    let preparing_fact = destination.relaxed_regular_fact(preparing_name, expected_sha256)?;
-    if preparing_fact.bytes != expected_bytes || preparing_fact.link_count != 1 {
+    let preparing_observation =
+        destination.observe_relaxed_regular_bounded(preparing_name, expected_bytes)?;
+    if preparing_observation.fact.bytes != expected_bytes
+        || preparing_observation.fact.link_count != 1
+        || preparing_observation.sha256 != expected_sha256
+    {
         return Err(FolderbaseError::MigrationVerificationFailed(
             destination.display.join(preparing_name),
         ));
     }
-    let preparing_exact = exact_regular_leaf(&preparing_fact, expected_sha256, 1);
-    destination.exact_regular_fact(preparing_name, preparing_exact)?;
     rename_noreplace(
         &destination.directory,
         preparing_name,
@@ -3232,10 +3358,16 @@ fn install_prepared_private_claim(
     )
     .map_err(|source| map_rename_noreplace_error(&destination_display, source))?;
     sync_directory(&destination.directory, &destination_display)?;
-    destination.exact_regular_fact(
-        destination_name,
-        exact_regular_leaf(&preparing_fact, expected_sha256, 1),
-    )
+    let final_observation =
+        destination.observe_relaxed_regular_bounded(destination_name, expected_bytes)?;
+    require_exact_regular_fact(
+        &final_observation.fact,
+        &final_observation.sha256,
+        exact_regular_leaf(&preparing_observation.fact, expected_sha256, 1),
+        &destination_display,
+        ExactFactLocation::Private,
+    )?;
+    Ok(final_observation.fact)
 }
 
 fn private_publication_ownership_name(destination_name: &OsStr) -> OsString {

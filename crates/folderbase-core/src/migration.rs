@@ -8322,6 +8322,29 @@ fn repair_recoverable_journal_staging(
     program: &MutationProgramV1,
     program_digest: &str,
 ) -> Result<()> {
+    repair_recoverable_journal_staging_with_hooks(
+        filesystem,
+        journal,
+        journal_root,
+        program,
+        program_digest,
+        || {},
+        || {},
+        || {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_recoverable_journal_staging_with_hooks(
+    filesystem: &MigrationFilesystem,
+    journal: &VerifiedPrivateDirectory,
+    journal_root: &Path,
+    program: &MutationProgramV1,
+    program_digest: &str,
+    before_stage_content_read: impl FnOnce(),
+    before_final_content_read: impl FnOnce(),
+    before_pair_retirement: impl FnOnce(),
+) -> Result<()> {
     let staging_name = OsStr::new(JOURNAL_GENERATION_STAGING_NAME);
     let maximum_generations = program.maximum_journal_generations();
     let maximum_entries = maximum_journal_directory_entries(maximum_generations);
@@ -8354,12 +8377,17 @@ fn repair_recoverable_journal_staging(
         return Ok(());
     }
 
-    let (staged_fact, staged_sha256) = journal.relaxed_regular_fact_observed(staging_name)?;
-    let staged_bytes =
-        journal.read_relaxed_regular_bounded(staging_name, MAX_JOURNAL_GENERATION_BYTES)?;
+    let staged_observation = journal.observe_relaxed_regular_bounded_with_hook(
+        staging_name,
+        MAX_JOURNAL_GENERATION_BYTES,
+        before_stage_content_read,
+    )?;
+    let staged_fact = &staged_observation.fact;
+    let staged_sha256 = &staged_observation.sha256;
+    let staged_bytes = &staged_observation.bytes;
     let staging_path = journal_root.join(staging_name);
     let staged =
-        TransactionJournalGenerationV1::decode(&filesystem.display(&staging_path), &staged_bytes)?;
+        TransactionJournalGenerationV1::decode(&filesystem.display(&staging_path), staged_bytes)?;
     let destination_name = staged.file_name();
     let destination_name_os = OsStr::new(&destination_name);
     let final_exists = classified
@@ -8403,15 +8431,18 @@ fn repair_recoverable_journal_staging(
     }
 
     if final_exists {
-        let (final_fact, final_sha256) =
-            journal.relaxed_regular_fact_observed(destination_name_os)?;
-        if staged_fact.physical_identity_sha256 != final_fact.physical_identity_sha256
-            || staged_fact.device_sha256 != final_fact.device_sha256
-            || staged_fact.bytes != final_fact.bytes
+        let final_observation = journal.observe_relaxed_regular_bounded_with_hook(
+            destination_name_os,
+            MAX_JOURNAL_GENERATION_BYTES,
+            before_final_content_read,
+        )?;
+        if staged_fact.physical_identity_sha256 != final_observation.fact.physical_identity_sha256
+            || staged_fact.device_sha256 != final_observation.fact.device_sha256
+            || staged_fact.bytes != final_observation.fact.bytes
             || staged_fact.bytes != staged_bytes.len() as u64
             || staged_fact.link_count != 2
-            || final_fact.link_count != 2
-            || staged_sha256 != final_sha256
+            || final_observation.fact.link_count != 2
+            || staged_sha256 != &final_observation.sha256
         {
             return Err(FolderbaseError::InvalidRecord {
                 path: filesystem.display(&journal_root.join(destination_name_os)),
@@ -8419,9 +8450,12 @@ fn repair_recoverable_journal_staging(
                     .to_owned(),
             });
         }
-        journal.retire_exact_recoverable_regular(staging_name, &staged_fact, &staged_sha256, 2)?;
-        journal.verify_regular(destination_name_os)?;
-        return Ok(());
+        before_pair_retirement();
+        return Err(FolderbaseError::InvalidRecord {
+            path: filesystem.display(&staging_path),
+            message: "legacy final-plus-staging journal checkpoint requires manual review"
+                .to_owned(),
+        });
     }
     if staged_fact.link_count != 1 || staged_fact.bytes != staged_bytes.len() as u64 {
         return Err(FolderbaseError::InvalidRecord {
@@ -8432,7 +8466,7 @@ fn repair_recoverable_journal_staging(
     journal.install_recoverable_regular(
         staging_name,
         destination_name_os,
-        &staged_sha256,
+        staged_sha256,
         staged_bytes.len() as u64,
     )
 }
