@@ -295,10 +295,13 @@ physical identities of the retained source and destination parents and passes
 kernel rename contract. Core uses the native handle-relative call because the
 Win32 wrapper resolves a NULL-root simple name against process current working
 directory. Core does not try to widen or ambiently reopen a directory while
-publishing. Source leaves request `DELETE`,
-`FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`. The rename buffer uses the complete
-`FILE_RENAME_INFORMATION` structure size plus the filename bytes. Core never recovers
-rights by reopening `.` or an ambient pathname.
+publishing. Source leaves request `DELETE`, `FILE_READ_ATTRIBUTES`, and
+`SYNCHRONIZE`, but omit `FILE_SHARE_DELETE` so their directory entries remain
+pinned from the verified open through the native rename. A pre-existing or new
+competing delete/rename handle therefore causes a safe sharing failure instead
+of moving the opened leaf outside its retained parent. The rename buffer uses
+the complete `FILE_RENAME_INFORMATION` structure size plus the filename bytes.
+Core never recovers rights by reopening `.` or an ambient pathname.
 
 ### Claim and publish one leaf at a time
 

@@ -3659,6 +3659,23 @@ fn rename_noreplace(
     destination_parent: &Dir,
     destination_name: &OsStr,
 ) -> std::io::Result<()> {
+    rename_noreplace_with_hook(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        || {},
+    )
+}
+
+#[cfg(windows)]
+fn rename_noreplace_with_hook(
+    source_parent: &Dir,
+    source_name: &OsStr,
+    destination_parent: &Dir,
+    destination_name: &OsStr,
+    before_native_rename: impl FnOnce(),
+) -> std::io::Result<()> {
     use cap_std::fs::OpenOptionsExt;
     use std::{
         mem::size_of,
@@ -3673,8 +3690,7 @@ fn rename_noreplace(
             Foundation::{HANDLE, RtlNtStatusToDosError},
             Storage::FileSystem::{
                 DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-                FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-                SYNCHRONIZE,
+                FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
             },
             System::IO::IO_STATUS_BLOCK,
         },
@@ -3694,7 +3710,10 @@ fn rename_noreplace(
     source_options
         .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        // Pin this directory entry until the native rename completes. If a
+        // competing delete/rename handle already exists, opening fails safely;
+        // after this open, new delete/rename access receives a sharing error.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .follow(FollowSymlinks::No);
     let source = source_parent
         .open_with(source_name, &source_options)
@@ -3747,6 +3766,7 @@ fn rename_noreplace(
     let words = total_bytes.div_ceil(size_of::<usize>());
     let mut storage = vec![0_usize; words];
     let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    before_native_rename();
     unsafe {
         (*information).Anonymous.ReplaceIfExists = false;
         (*information).RootDirectory = if same_parent {
@@ -4056,6 +4076,8 @@ mod rename_noreplace_error_tests {
 
     use cap_std::fs::Dir;
 
+    #[cfg(windows)]
+    use super::rename_noreplace_with_hook;
     use super::{map_rename_noreplace_error, rename_noreplace};
     use crate::FolderbaseError;
 
@@ -4182,6 +4204,39 @@ mod rename_noreplace_error_tests {
         assert_eq!(
             fs::read(root.path().join("destination.bin")).expect("destination bytes"),
             b"source bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_no_replace_pins_the_opened_source_against_a_concurrent_move() {
+        let root = tempfile::tempdir().expect("retained no-replace fixture");
+        let source_path = root.path().join("source.bin");
+        let competing_path = root.path().join("competing.bin");
+        let destination_path = root.path().join("destination.bin");
+        fs::write(&source_path, b"approved source bytes").expect("source");
+        let directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("retained directory");
+
+        rename_noreplace_with_hook(
+            &directory,
+            OsStr::new("source.bin"),
+            &directory,
+            OsStr::new("destination.bin"),
+            || {
+                fs::rename(&source_path, &competing_path)
+                    .expect_err("the opened source must reject a competing move");
+                assert!(source_path.exists());
+                assert!(!competing_path.exists());
+            },
+        )
+        .expect("native no-replace publishes the pinned approved leaf");
+
+        assert!(!source_path.exists());
+        assert!(!competing_path.exists());
+        assert_eq!(
+            fs::read(destination_path).expect("destination bytes"),
+            b"approved source bytes"
         );
     }
 
