@@ -244,7 +244,7 @@
     },
     {
       "path": "crates/folderbase-core/src/validation.rs",
-      "sha256": "e8bdb2ac93627368eaebb5fe09abf6ee40a329aa7ac2ac825003c3c0579765ce"
+      "sha256": "e7c76b7d9d68987b87e6c915d63ce376656e7615655e31d2652009f88ff0fd5c"
     },
     {
       "path": "crates/folderbase-core/src/workspace.rs",

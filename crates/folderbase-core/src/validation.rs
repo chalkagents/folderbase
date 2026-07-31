@@ -18,7 +18,7 @@ use crate::{
     ValidationSeverity,
     root_attestation::{
         MAX_FOLDERBASE_MANIFEST_BYTES, ManifestProtocolProfile, attest_folderbase_root,
-        decode_manifest_protocol_profile,
+        decode_manifest_protocol_profile, metadata_is_link_or_reparse,
     },
 };
 
@@ -27,8 +27,7 @@ const MANIFEST: &str = ".folderbase/manifest.json";
 /// Validate a folderbase without modifying or repairing it.
 pub fn validate(root: impl AsRef<Path>, level: ValidationLevel) -> Result<ValidationReport> {
     let root = canonical_directory(root.as_ref())?;
-    let root_file = fs::File::open(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    let root_dir = Dir::from_std_file(root_file);
+    let root_dir = open_root_directory_nofollow(&root)?;
     let mut findings = Findings::default();
 
     let manifest_path = Path::new(MANIFEST);
@@ -149,6 +148,40 @@ pub fn validate(root: impl AsRef<Path>, level: ValidationLevel) -> Result<Valida
         valid,
         findings: findings.items,
     })
+}
+
+fn open_root_directory_nofollow(root: &Path) -> Result<Dir> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+
+        options
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = options
+        .open(root)
+        .map_err(|source| FolderbaseError::io(root, source))?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(root, source))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
+    }
+    Ok(Dir::from_std_file(file))
 }
 
 fn validate_legacy_root_files(root: &Path, root_dir: &Dir, findings: &mut Findings) -> Result<()> {
