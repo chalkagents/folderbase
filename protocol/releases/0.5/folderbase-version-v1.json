@@ -156,7 +156,7 @@
     },
     {
       "path": "crates/folderbase-core/src/initialization.rs",
-      "sha256": "448089042ba4dc3b5e78bbdbe2f8ab372cc46be690bde01bd4f7eb693de0d80a"
+      "sha256": "8b67c5b7fa8b71367b916415e7540dc4c09b876870a88df77d26a4837679103d"
     },
     {
       "path": "crates/folderbase-core/src/inspection.rs",

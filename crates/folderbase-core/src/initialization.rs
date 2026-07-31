@@ -18,7 +18,7 @@ use crate::model::{
     InitializationDestinationEntry, InitializationDestinationKind, InitializationRequest,
 };
 use crate::physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity};
-use crate::root_attestation::DEFAULT_V05_CAPTURE_IGNORE_RULES;
+use crate::root_attestation::{DEFAULT_V05_CAPTURE_IGNORE_RULES, metadata_is_link_or_reparse};
 use crate::template::template_package_sha256;
 use crate::traversal_policy::{
     NestedFolderbaseBoundaryKind, classify_nested_folderbase_boundary_with_observer,
@@ -1068,11 +1068,33 @@ struct OpenedRootCapability {
 }
 
 fn open_root_capability(root: &Path) -> Result<OpenedRootCapability> {
-    let file = fs::File::open(root).map_err(|source| FolderbaseError::io(root, source))?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    let file = options
+        .open(root)
+        .map_err(|source| FolderbaseError::io(root, source))?;
     let metadata = file
         .metadata()
         .map_err(|source| FolderbaseError::io(root, source))?;
-    if !metadata.is_dir() {
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(FolderbaseError::InvalidRoot(root.to_path_buf()));
     }
     let digest_identity = root_digest_identity(&file, &metadata, root)?;
