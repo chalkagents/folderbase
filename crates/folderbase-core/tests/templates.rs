@@ -71,12 +71,12 @@ fn each_kind_renders_distinct_useful_folderbase_entry() {
             "0.2.0",
             "customer",
             [
-                ("folderbase_name", "Okada Customer Context"),
-                ("purpose", "Understand and serve the Okada account."),
+                ("folderbase_name", "Project 2 Customer Context"),
+                ("purpose", "Understand and serve the Project 2 account."),
                 ("current_state", "Several projects share account context."),
                 ("next_action", "Consolidate the approved account record."),
             ],
-            ["# Okada Customer Context", "Account/", "customer"],
+            ["# Project 2 Customer Context", "Account/", "customer"],
         ),
         (
             "folderbase.temporary",

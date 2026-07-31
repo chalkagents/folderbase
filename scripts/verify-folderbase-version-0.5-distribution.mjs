@@ -155,9 +155,16 @@ const requiredNonConformanceFiles = [
   "scripts/verify-folderbase-version-0.5-digest-vectors.mjs",
   "scripts/verify-folderbase-version-0.5-distribution.mjs",
 ];
+const exactGoldenFixtureFiles = [
+  "fixtures/client-company-2-shaped-unmanaged.expected.json",
+  ...walk(
+    join(repositoryRoot, "fixtures", "client-company-2-shaped-unmanaged"),
+  ),
+].sort();
 const expectedPaths = [
   ...exactConformanceFiles,
   ...completeRuntimePackageClosure,
+  ...exactGoldenFixtureFiles,
   ...requiredNonConformanceFiles,
 ];
 const uniqueExpectedPaths = [...new Set(expectedPaths)].sort();

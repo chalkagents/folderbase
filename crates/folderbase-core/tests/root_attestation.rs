@@ -663,7 +663,7 @@ fn exact_maximum_manifest_is_accepted_and_hashed_as_raw_bytes() {
 #[test]
 fn nested_roots_attest_independently_and_never_fall_back_to_an_ancestor() {
     let parent = root_with_manifest(MANIFEST);
-    let valid_child = parent.path().join("Clients/Prosperna/Okada");
+    let valid_child = parent.path().join("Clients/Prosperna/Project 2");
     write_root(&valid_child, MANIFEST);
 
     let parent_receipt = attest_folderbase_root(parent.path()).expect("valid parent");

@@ -1,7 +1,7 @@
 # Synthetic ChalkAgents–Prosperna engagement provenance
 
 This invented record explains that ChalkAgents performs the represented work
-through a Prosperna engagement for the Okada account.
+through a Prosperna engagement for the Project 2 account.
 
 It intentionally contains no contract terms, contacts, credentials, invoices,
 or customer data. The relationship must never be interpreted as inherited
@@ -21,7 +21,7 @@ human or agent access.
   "folderbases": {
     "chalkagents": "folderbase_019f9c00-0000-7000-8000-000000000001",
     "prosperna": "folderbase_019f9c00-0000-7000-8000-000000000002",
-    "okada": "folderbase_019f9c00-0000-7000-8000-000000000003"
+    "project_2": "folderbase_019f9c00-0000-7000-8000-000000000003"
   },
   "workspace_id": "workspace_019f9c00-0000-7000-8000-000000000004",
   "shared_object_id": "obj_019f9c00-0000-7000-8000-000000000005",
@@ -68,7 +68,7 @@ human or agent access.
       "relationship": "filesystem_parent",
       "object": {
         "type": "folder",
-        "id": "Prosperna/Okada"
+        "id": "Prosperna/Project 2"
       }
     },
     {

@@ -64,7 +64,7 @@
     },
     {
       "path": "crates/folderbase-cli/tests/transform_fixture.rs",
-      "sha256": "73c1ce100b4da1609ac73b8fa0981e3eb4c3d9ce943422b008710bd188ae4ba8"
+      "sha256": "f551c9f2cda66871422c4baae4aacb3c2940eed98f937856e9004ca2a9ec2a91"
     },
     {
       "path": "crates/folderbase-core/Cargo.toml",
@@ -312,7 +312,7 @@
     },
     {
       "path": "crates/folderbase-core/tests/root_attestation.rs",
-      "sha256": "b53c33885404531dbd3e0e32138ed03f0a733f2c39b45413b691295b356bd5f7"
+      "sha256": "02ae9f2dd80a1c4f1ba987cd05b84e7845d5aca7e343251025d45d38d3df95c5"
     },
     {
       "path": "crates/folderbase-core/tests/sharing.rs",
@@ -332,7 +332,7 @@
     },
     {
       "path": "crates/folderbase-core/tests/templates.rs",
-      "sha256": "233d0e2db93f460e285a658bb667a2b58e62c11be65dcd0fa3237827ec326c0b"
+      "sha256": "2c0b4a8025a209655dba920b9d7561ba6e6c16a66582a6fa7fe45a2360f6ae52"
     },
     {
       "path": "crates/folderbase-core/tests/transfer_manifest_conformance.rs",
@@ -377,6 +377,186 @@
     {
       "path": "docs/template-protocol.md",
       "sha256": "9de706b5208d1bec5563fe34eac17b218a9617e61098121995aa8d612dfb82b8"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged.expected.json",
+      "sha256": "5f99bec6d300a1b01d5100a7556a5468375ba5d3aa199cc1a3d9525f812d370c"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/AGENTS.md",
+      "sha256": "76c480c4ab249529dd896085ae69fea88c8c36bb06e96f5d9ad50a05feb27a45"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Account/README.md",
+      "sha256": "bfd0401f2c8ed572f89f1a4d56c3fbb1e3a7b09fde3b4999bf290e4a95d8105a"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Client-Shared/Candidate-Scope.md",
+      "sha256": "070c1d5cf6562e93ba87e31efd3815b04c5cb558cda1d49355ac2acf9d666c3d"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Client-Shared/Project-Overview.md",
+      "sha256": "cf50ba7b89032435644bb53e8e69be062d96ed5155e25b932e6c227c0ee9d868"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Commercial-Restricted/Access-Scope.md",
+      "sha256": "88f4be48dbc006d12c76e0eec3927747d21b8a45204a932d8eb0e859fe14f19c"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Commercial-Restricted/Agreement_Draft_v2.md",
+      "sha256": "e3923c92cd5b66a49fe2501050d98638e26704098ac764c9e5d59a43107df820"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Commercial-Restricted/Agreement_Final_v4.md",
+      "sha256": "6a10b4195da57af4568c102e39affa6dd107801f6adf7c8ce335ade8bbc27eda"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Commercial-Restricted/Agreement_Revised_v3.md",
+      "sha256": "b8b363fa4065f76178241019dd4ae5c38c8719e9f1f2e050eb3a9d6c55b0f837"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Commercial-Restricted/Invoices/Synthetic-Invoice.pdf",
+      "sha256": "e6df8a14191bffeae112b6e3bdcee34a7e69c9d4bedf1a5c76c2c83c760fa577"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Engagement-Provenance/README.md",
+      "sha256": "b0af259b0c4a7bf33be206a57ddd6cbfdd1a64af3b762de265d6f4f2406da2bd"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Evidence/Curated/README.md",
+      "sha256": "609f4fb228f06c898e1886765efa04f5613fb0ae6978f706b1bcc6d7d78d2ea2"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Evidence/Raw/Attachments/remediation-evidence.zip",
+      "sha256": "24c2b693929b4a516b7eff2da52e27fe0481514e3c2247b91278f62ae9a31de4"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Evidence/Raw/Emails/thread-001.eml",
+      "sha256": "af345bf6910a6b9c5a27ef64738092944df3df4a5313a0d7280cdb4abd2059b6"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Data/loyalty-reference.sqlite",
+      "sha256": "2d2e45241baf1b8109a076cef639927f03f5632c3b964484edefc13749fb65aa"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Proposals/Loyalty_Proposal_Draft_v2.md",
+      "sha256": "04cfb8bc54adf77ba219c71c19cccd5401df33a929f193e4e689a2b0808fc3b8"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Proposals/Loyalty_Proposal_Final_v4.md",
+      "sha256": "a0bff43fa4b068a30c8af9adfe77e06a317f2196e075043147cd8f4be59ed092"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Proposals/Loyalty_Proposal_Revised_v3.md",
+      "sha256": "196572dc9126a55e0296df82e8d532f1f9b40b3fb4e0bd66356daae867c5c215"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/README.md",
+      "sha256": "cf1e625709f6c69c403bef495b642023da436cd4aaa6e12d0378760c352621cf"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Reference-App/.gitmodules",
+      "sha256": "84741f3db144a9a3ab5f61cf00d02a4be88ca2fb189b8932b381321ed8435228"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Reference-App/README.md",
+      "sha256": "23ffb65d7c0e13caab541878cfc9f2645612b8e77ba583ec74260f552b3fa20b"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Reference-App/dist/bundle.js",
+      "sha256": "bfd1950bfe55aa84fbe5d281985299aa7286430785eda0b4cc9b45cae9e659c9"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Loyalty-Revamp/Requirements/CR-SYNTHETIC.md",
+      "sha256": "61cbc9a8ec9f45dadc67323e5bdc907d82a2b54b5b2361f38e766c0ede25f20a"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/README.md",
+      "sha256": "9eecbb0dd1e066537f1ada16454081bddfbdb99c21a394936a9d479f589d5ea5"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/.chalk/README.md",
+      "sha256": "9b718eaaffc83e9a7d6a46963b313d79479555dfd3f7dffbb059feb1fa3838b2"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/.gitignore",
+      "sha256": "fd58fc302f854dc273a81aa53c83ac8dbe73f162ed674dc9b20c3588f86b6d5e"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/.gitmodules",
+      "sha256": "1fdb9a1bf3cba92eaf43a645dcf698a88dfdd0147bd321cfea9b30394cf1ac37"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/README.md",
+      "sha256": "a5965e66878f86f981496998bcdc4d2055027d381b4b0a6fb126b4e4035c8c82"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/config/.env.synthetic",
+      "sha256": "a4ec078b7b5172bcd25ff73a071bb208e17359c5cc98087454834cfbbeb61737"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/config/api_key.txt",
+      "sha256": "4fb73f4d17de5e41f9af2d3ef5d6337d57944295c6a931cf17c048f63efae207"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Client Company 2-dev/mobile/.dart_tool/package_config.json",
+      "sha256": "c205d562a3b349b59dc744004e6372c81e6bc0293fc5423ed345267b3ec88b4c"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Media/Architecture-Overview.pdf",
+      "sha256": "197546e86fed6250563934cccc4693c376951d84557377655f41650c05d815a1"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Reference/Media/Walkthrough-LARGE-PLACEHOLDER.mp4",
+      "sha256": "f81adaf24403fa834e744b3eacdd2558da34840a8104920d8404030b48914346"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Security-Remediation/Client-Deliverables/Completion-Note.md",
+      "sha256": "1c373a1dbf7001c35f73b9dea05405824ceccc79e0c1ea0932d2b479df7c50f2"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Security-Remediation/Finding-001.md",
+      "sha256": "193ae75bb5c70883a0e39b61be5fbc17812845a9d87c1ef32828000220e07f8a"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Security-Remediation/README.md",
+      "sha256": "8dfec29508c1d54fa5ae34618b29eddb4b92f04f4217c85ec568aebeefaabf60"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Security-Remediation/Tooling/.gitmodules",
+      "sha256": "b4adcd5b09642c725eb9faca706987639389dbf2dd8cf22adf6a8f9defd4b2d2"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Security-Remediation/Tooling/README.md",
+      "sha256": "7d2d868634db972844992009d5571d44b2afb30d6e6942f769aca82279fd846b"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Security-Remediation/Tooling/target/debug/tool-output.bin",
+      "sha256": "ac83f02fff4725c88c3cd62e97ff06ce6e8b7a69a43c2dee2aa94628217e4e5a"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Support-and-Maintenance/README.md",
+      "sha256": "58d18d1f705fb2b2e426a6a015e8de15e0b8b28847b92005a9e8101a87b44fde"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/Support-and-Maintenance/Reports/Weekly-Status.md",
+      "sha256": "7ddaff3817fe1d8641eb0b267388c0f1c223a2062e9a914e8acf55e688e440ce"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/dashboard/.next/build-manifest.json",
+      "sha256": "c205d562a3b349b59dc744004e6372c81e6bc0293fc5423ed345267b3ec88b4c"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/dashboard/node_modules/example-package/package.json",
+      "sha256": "4e471043c1b83c51c22916a78ea536431368cfc079d6f7ae0c13cebc7b434e42"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/emails/README.md",
+      "sha256": "e376489899e8b78eecc7aa1a6b5a5d97c66319d333b14e0693ec24afc3965a44"
+    },
+    {
+      "path": "fixtures/client-company-2-shaped-unmanaged/tmp/render-preview.tmp",
+      "sha256": "10b947c456a103cea425a59d7b09a61935d9d50c941ea795a5023374b011223f"
     },
     {
       "path": "protocol/README.md",
@@ -612,7 +792,7 @@
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-distribution.mjs",
-      "sha256": "0491b41f27a4ca845f54d6ce4d089c61224bfde7d139a3a3ba245ac9281125a0"
+      "sha256": "c90f575b0a2a853df7caa8d546b752a06ab9018031ea6a3318687e0c8d849d61"
     }
   ]
 }

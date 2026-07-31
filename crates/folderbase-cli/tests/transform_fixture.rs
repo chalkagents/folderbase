@@ -555,7 +555,6 @@ fn rollback_is_idempotent_after_restart() {
     assert!(root.path().join("README.md").exists());
 }
 
-const LIVE_OKADA_PATH: &str = "/Users/jerel/Work/Chalk/Okada";
 const GOLDEN_BOUNDARIES: &[&str] = &[
     "ChalkAgents-Prosperna-Client-Engagement",
     "Client-Shared",
@@ -593,14 +592,14 @@ fn committed_golden_expectations() -> serde_json::Value {
 }
 
 fn guarded_fixture_source(source: &Path) -> Result<PathBuf, String> {
-    let live = Path::new(LIVE_OKADA_PATH);
-    if source == live || source.starts_with(live) {
-        return Err("live Okada path is forbidden in the golden test harness".to_owned());
+    let allowed = committed_golden_fixture();
+    if source != allowed {
+        return Err("golden tests accept only the committed synthetic fixture".to_owned());
     }
     let canonical = source
         .canonicalize()
         .map_err(|error| format!("fixture source is unavailable: {error}"))?;
-    if canonical != committed_golden_fixture() {
+    if canonical != allowed {
         return Err(format!(
             "golden tests accept only the committed synthetic fixture: {}",
             canonical.display()
@@ -636,7 +635,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 fn golden_fixture() -> GoldenFixture {
     let source = guarded_fixture_source(&committed_golden_fixture()).unwrap();
     let temp = tempfile::tempdir().expect("temporary golden fixture");
-    let root = temp.path().join("Okada-Account");
+    let root = temp.path().join("Project-2-Account");
     copy_tree(&source, &root);
     for (source, boundary) in [
         (
@@ -788,7 +787,7 @@ fn source_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn okada_shaped_fixture_produces_expected_questions_without_writes() {
+fn project_2_fixture_produces_expected_questions_without_writes() {
     let fixture = golden_fixture();
     let before = source_snapshot(&fixture.root);
     let analysis = analyze(&fixture.root);
@@ -823,7 +822,29 @@ fn okada_shaped_fixture_produces_expected_questions_without_writes() {
 }
 
 #[test]
-fn okada_shaped_fixture_groups_every_assignment_into_twenty_bounded_questions() {
+fn project_2_expectations_preserve_account_topology_and_provenance() {
+    let expected = committed_golden_expectations();
+
+    assert_eq!(
+        expected["provenance_labels"],
+        serde_json::json!(["ChalkAgents", "Prosperna", "Project 2"])
+    );
+    assert_eq!(
+        expected["expected_topology"]["workspace"],
+        "Project 2 Account Workspace"
+    );
+    assert_eq!(
+        expected["expected_topology"]["folderbases"][0],
+        "Project 2 Account Folderbase"
+    );
+    assert_eq!(
+        expected["expected_topology"]["permission_inheritance"],
+        false
+    );
+}
+
+#[test]
+fn project_2_fixture_groups_every_assignment_into_twenty_bounded_questions() {
     let fixture = golden_fixture();
     let analysis = analyze(&fixture.root);
     let questions = analysis["questions"].as_array().unwrap();
@@ -1282,14 +1303,17 @@ fn full_rollback_restores_original_fixture_tree() {
 }
 
 #[test]
-fn test_harness_rejects_live_okada_path() {
-    let live = Path::new(LIVE_OKADA_PATH);
-    let error = guarded_fixture_source(live).unwrap_err();
-    assert!(error.contains("live Okada path is forbidden"));
+fn test_harness_rejects_every_external_path_before_canonicalizing_it() {
+    let external = Path::new("/private/external/project-2-account");
+    let error = guarded_fixture_source(external).unwrap_err();
+    assert_eq!(
+        error,
+        "golden tests accept only the committed synthetic fixture"
+    );
 }
 
 #[test]
-fn okada_shaped_folder_to_folderbase_journey_preserves_restart_and_agent_entry_contract() {
+fn project_2_folder_to_folderbase_journey_preserves_restart_and_agent_entry_contract() {
     let fixture = golden_fixture();
     let source_before = source_snapshot(&fixture.root);
     let started = Instant::now();
