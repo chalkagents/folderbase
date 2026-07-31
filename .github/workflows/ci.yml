@@ -96,11 +96,14 @@ jobs:
       - name: Test Folderbase sealing and Local Head recovery
         run: cargo test --package folderbase-core --test folderbase_seal --locked
 
-      - name: Test injected seal crash recovery, state confinement, and independent-handle locking
-        run: |
-          cargo test --package folderbase-core --lib --locked folderbase_seal::tests::
-          cargo test --package folderbase-core --lib --locked folderbase_state::tests::
-          cargo test --package folderbase-core --lib --locked local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
+      - name: Test injected seal crash recovery
+        run: cargo test --package folderbase-core --lib --locked folderbase_seal::tests::
+
+      - name: Test state confinement
+        run: cargo test --package folderbase-core --lib --locked folderbase_state::tests::
+
+      - name: Test independent-handle locking
+        run: cargo test --package folderbase-core --lib --locked local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 
       - name: Test the public migration transaction contract
         run: cargo test --package folderbase-core --test migration_transaction_contract --locked

@@ -3147,15 +3147,14 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, _display: &Path) -> std::
 #[cfg(windows)]
 fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
-    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
     let mut options = OpenOptions::new();
-    options.read(true).write(true).follow(FollowSymlinks::No);
     options
-        .access_mode(GENERIC_READ | GENERIC_WRITE)
+        .access_mode(0)
+        .follow(FollowSymlinks::No)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     let file = parent.open_with(name, &options)?.into_std();

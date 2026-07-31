@@ -10696,14 +10696,13 @@ fn open_migration_root_nofollow(root: &Path) -> Result<Dir> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
             FILE_SHARE_WRITE,
         };
 
         options
-            .access_mode(GENERIC_READ | GENERIC_WRITE)
+            .access_mode(0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
@@ -10755,16 +10754,13 @@ fn open_migration_directory_nofollow(
     display: &Path,
 ) -> io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
-    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
     let mut options = CapOpenOptions::new();
     options
-        .read(true)
-        .write(true)
-        .access_mode(GENERIC_READ | GENERIC_WRITE)
+        .access_mode(0)
         .follow(FollowSymlinks::No)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
