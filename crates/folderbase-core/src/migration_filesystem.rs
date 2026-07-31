@@ -2455,6 +2455,8 @@ fn install_prepared_private_claim(
     expected_bytes: u64,
 ) -> Result<MigrationRegularFact> {
     let destination_display = destination.display.join(destination_name);
+    #[cfg(target_os = "linux")]
+    eprintln!("[DEBUG-fb41h-claim] before hard_link");
     match destination
         .directory
         .hard_link(preparing_name, &destination.directory, destination_name)
@@ -2470,12 +2472,18 @@ fn install_prepared_private_claim(
         }
         Err(source) => return Err(FolderbaseError::io(&destination_display, source)),
     }
+    #[cfg(target_os = "linux")]
+    eprintln!("[DEBUG-fb41h-claim] after hard_link");
     remove_private_regular_if_present(
         destination,
         preparing_name,
         &destination.display.join(preparing_name),
     )?;
+    #[cfg(target_os = "linux")]
+    eprintln!("[DEBUG-fb41h-claim] after preparing removal");
     let fact = destination.relaxed_regular_fact(destination_name, expected_sha256)?;
+    #[cfg(target_os = "linux")]
+    eprintln!("[DEBUG-fb41h-claim] after final verification");
     if fact.bytes != expected_bytes {
         return Err(FolderbaseError::MigrationVerificationFailed(
             destination_display,
