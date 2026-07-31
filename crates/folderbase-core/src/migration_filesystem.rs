@@ -391,7 +391,9 @@ impl VerifiedPrivateDirectory {
         self.directory
             .create_dir(name)
             .map_err(|source| FolderbaseError::io(&display, source))?;
-        let directory = open_directory_nofollow(&self.directory, name, &display)
+        // This exact child capability carries only the short-lived authority
+        // needed to apply fidelity; it is never stored or returned.
+        let directory = open_directory_nofollow_for_fidelity(&self.directory, name, &display)
             .map_err(|source| FolderbaseError::io(&display, source))?;
         set_directory_fidelity(&directory, read_only, executable, &display)?;
         sync_directory(&directory, &display)?;
@@ -3462,44 +3464,10 @@ fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::Fil
 
 #[cfg(windows)]
 fn reopen_directory_file(directory: &Dir, display: &Path) -> Result<std::fs::File> {
-    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES};
-
-    reopen_windows_directory_with_access(directory, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+    directory
+        .try_clone()
+        .map(Dir::into_std_file)
         .map_err(|source| FolderbaseError::io(display, source))
-}
-
-#[cfg(windows)]
-fn reopen_windows_directory_with_access(
-    directory: &Dir,
-    desired_access: u32,
-) -> std::io::Result<std::fs::File> {
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows_sys::Win32::{
-        Foundation::{HANDLE, INVALID_HANDLE_VALUE},
-        Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
-        },
-    };
-
-    let original = directory.try_clone()?.into_std_file();
-    let reopened = unsafe {
-        ReOpenFile(
-            original.as_raw_handle() as HANDLE,
-            desired_access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        )
-    };
-    if reopened == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
-    }
-    let file = unsafe { std::fs::File::from_raw_handle(reopened as _) };
-    let metadata = file.metadata()?;
-    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-    }
-    Ok(file)
 }
 
 #[cfg(unix)]
@@ -4016,17 +3984,56 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, _display: &Path) -> std::
     parent.open_dir_nofollow(name)
 }
 
+#[cfg(not(windows))]
+fn open_directory_nofollow_for_fidelity(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> std::io::Result<Dir> {
+    open_directory_nofollow(parent, name, display)
+}
+
 #[cfg(windows)]
 fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::io::Result<Dir> {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, FILE_TRAVERSE};
+
+    open_windows_directory_nofollow(parent, name, display, FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
+}
+
+#[cfg(windows)]
+fn open_directory_nofollow_for_fidelity(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+) -> std::io::Result<Dir> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    open_windows_directory_nofollow(
+        parent,
+        name,
+        display,
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+    )
+}
+
+#[cfg(windows)]
+fn open_windows_directory_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    display: &Path,
+    desired_access: u32,
+) -> std::io::Result<Dir> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
     let mut options = OpenOptions::new();
     options
-        .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
+        .access_mode(desired_access)
         .follow(FollowSymlinks::No)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
@@ -4116,7 +4123,7 @@ mod windows_directory_fidelity_tests {
 
     use super::{
         ExactDirectoryLeaf, ExactRegularLeaf, MigrationFilesystem, VerifiedPrivateDirectory,
-        open_directory_nofollow, set_directory_fidelity,
+        open_directory_nofollow, open_directory_nofollow_for_fidelity, set_directory_fidelity,
     };
     use crate::FolderbaseError;
 
@@ -4229,13 +4236,22 @@ mod windows_directory_fidelity_tests {
     }
 
     #[test]
-    fn retained_directory_reopens_with_write_attributes_for_fidelity() {
+    fn directory_fidelity_requires_an_explicit_write_attribute_capability() {
         let root = tempfile::tempdir().expect("temporary root");
         let private_path = root.path().join("private");
         fs::create_dir(&private_path).expect("private directory");
         let ambient = Dir::open_ambient_dir(root.path(), ambient_authority()).expect("root");
-        let retained =
+        let narrow =
             open_directory_nofollow(&ambient, OsStr::new("private"), &private_path).expect("child");
+        assert!(matches!(
+            set_directory_fidelity(&narrow, true, false, &private_path),
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+
+        let retained =
+            open_directory_nofollow_for_fidelity(&ambient, OsStr::new("private"), &private_path)
+                .expect("write-attribute child capability");
 
         set_directory_fidelity(&retained, true, false, &private_path)
             .expect("set readonly fidelity");
@@ -4271,7 +4287,7 @@ mod windows_directory_fidelity_tests {
 
         let claim = claims
             .prepare_directory_claim("00000000.publish.claim", false, true)
-            .expect("directory claim fidelity retains read and write attribute access");
+            .expect("directory claim fidelity uses a child capability");
 
         claims
             .exact_empty_directory_fact(
