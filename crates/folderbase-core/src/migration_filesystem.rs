@@ -3139,14 +3139,63 @@ fn open_directory_nofollow(parent: &Dir, name: &OsStr, display: &Path) -> std::i
     Ok(Dir::from_std_file(file))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    directory
-        .open_with(Path::new("."), &options)
-        .and_then(|file| file.into_std().sync_all())
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // cap-std intentionally retains Linux directories with O_PATH. That is
+    // sufficient for capability-relative traversal but Linux rejects fsync on
+    // an O_PATH descriptor with EBADF. Reopen only the fixed "." component
+    // through the retained capability so durability never falls back to the
+    // mutable ambient pathname.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(FolderbaseError::io(
+            display,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    file.sync_all()
         .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sync_directory(directory: &Dir, display: &Path) -> Result<()> {
+    directory
+        .try_clone()
+        .and_then(|directory| directory.into_std_file().sync_all())
+        .map_err(|source| FolderbaseError::io(display, source))
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+mod linux_directory_sync_tests {
+    use std::fs;
+
+    use cap_fs_ext::DirExt;
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::sync_directory;
+
+    #[test]
+    fn retained_o_path_directory_is_reopened_before_fsync() {
+        let root = tempfile::tempdir().expect("temporary root");
+        fs::create_dir(root.path().join("private")).expect("private directory");
+        let ambient = Dir::open_ambient_dir(root.path(), ambient_authority()).expect("root");
+        let retained = ambient
+            .open_dir_nofollow("private")
+            .expect("retained no-follow directory");
+
+        sync_directory(&retained, &root.path().join("private"))
+            .expect("O_PATH authority must be reopened as an fsyncable descriptor");
+    }
 }
 
 #[cfg(windows)]
