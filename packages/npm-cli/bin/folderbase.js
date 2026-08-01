@@ -10,7 +10,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -40,18 +40,41 @@ function targetFor(platform, architecture) {
   return target;
 }
 
-function cacheRoot() {
+function cacheRoot(platform) {
   if (process.env.FOLDERBASE_CLI_CACHE_DIR) {
     return process.env.FOLDERBASE_CLI_CACHE_DIR;
   }
-  if (process.platform === "darwin") {
+  if (platform === "darwin") {
     return join(homedir(), "Library", "Caches", "folderbase", "cli");
   }
+  const xdgCacheHome = process.env.XDG_CACHE_HOME;
   return join(
-    process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
+    xdgCacheHome && isAbsolute(xdgCacheHome)
+      ? xdgCacheHome
+      : join(homedir(), ".cache"),
     "folderbase",
     "cli",
   );
+}
+
+function binaryDownloadLimit() {
+  const override = process.env.FOLDERBASE_CLI_TEST_MAX_BINARY_BYTES;
+  if (
+    process.env.FOLDERBASE_CLI_TEST_ALLOW_HTTP !== "1" ||
+    override === undefined
+  ) {
+    return maximumBinaryBytes;
+  }
+  if (!/^[1-9][0-9]*$/.test(override)) {
+    throw new Error("test binary byte limit must be a positive safe integer");
+  }
+  const parsed = Number(override);
+  if (!Number.isSafeInteger(parsed) || parsed > maximumBinaryBytes) {
+    throw new Error(
+      `test binary byte limit must not exceed ${maximumBinaryBytes}`,
+    );
+  }
+  return parsed;
 }
 
 function permitsDownloadUrl(url) {
@@ -161,8 +184,13 @@ function expectedDigest(checksums, assetName) {
     }
     digests.set(name, digest);
   }
-  if (!digests.has(assetName)) {
-    throw new Error(`release checksums do not contain ${assetName}`);
+  const missingAssetNames = [...allowedAssetNames].filter(
+    (name) => !digests.has(name),
+  );
+  if (missingAssetNames.length > 0) {
+    throw new Error(
+      `release checksums do not contain ${missingAssetNames.join(", ")}`,
+    );
   }
   return digests.get(assetName);
 }
@@ -177,8 +205,9 @@ async function resolveNativeCli() {
     process.env.FOLDERBASE_CLI_TEST_PLATFORM || process.platform;
   const architecture = process.env.FOLDERBASE_CLI_TEST_ARCH || process.arch;
   const target = targetFor(platform, architecture);
+  const maximumDownloadBytes = binaryDownloadLimit();
   const assetName = `folderbase-${releaseTag}-${target}`;
-  const versionCache = join(cacheRoot(), releaseTag);
+  const versionCache = join(cacheRoot(platform), releaseTag);
   const checksumPath = join(versionCache, "SHA256SUMS");
   const binaryPath = join(versionCache, assetName);
   const releaseUrl = `${releaseBaseUrl()}/${releaseTag}`;
@@ -215,7 +244,7 @@ async function resolveNativeCli() {
 
   const downloaded = await download(
     `${releaseUrl}/${assetName}`,
-    maximumBinaryBytes,
+    maximumDownloadBytes,
   );
   const actual = createHash("sha256").update(downloaded).digest("hex");
   if (actual !== expected) {

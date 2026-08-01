@@ -35,6 +35,13 @@ are never silently replaced: a repeated release job may accept an exact
 byte-for-byte existing asset, but a different artifact under the same name
 fails the release.
 
+Native installer releases are published only after GitHub release immutability
+is enabled for the repository. The workflow creates a draft, attaches the
+complete closed asset set, publishes it, and verifies that GitHub reports the
+result as immutable. A published mutable release is rejected rather than
+backfilled in place. Historical source-only releases created before this
+decision are not retroactively described as immutable.
+
 `@folderbase/cli` is a public, dependency-free npm launcher whose version
 matches the native Core release. It:
 
@@ -58,6 +65,12 @@ The npm package is published from a public GitHub-hosted workflow through npm
 trusted publishing with short-lived OIDC credentials and provenance. No
 long-lived npm write token is stored in the repository.
 
+Exact npm versions are immutable while `latest` and `next` are mutable discovery
+channels. Rerunning an already-published exact version verifies its integrity
+without requiring that it still owns a channel. Publishing an older missing
+version uses and then removes a temporary backfill tag so neither public
+channel can move backward.
+
 The macOS App will separately bundle a compatible native Core inside its
 signed, notarized application boundary. Homebrew may provide a persistent CLI
 installation. Both must execute the same released CLI behavior and protocol
@@ -74,6 +87,10 @@ version rather than fork Core.
 - GitHub release availability is part of the initial `npx` installation path.
   A future mirror may be added only with equivalent immutable identity and
   verification.
+- GitHub release immutability is a repository-level operational prerequisite.
+  Because GitHub applies it only to future releases, an empty mutable release
+  that predates native distribution must be removed before the same tag is
+  assembled and published through the immutable draft workflow.
 - SHA-256 and HTTPS detect accidental corruption and bind the cache to the
   published release record. They do not substitute for platform code signing
   or protect against a hostile same-user account that can alter the launcher

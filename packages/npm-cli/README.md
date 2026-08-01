@@ -35,6 +35,10 @@ The default cache is:
 - `~/Library/Caches/folderbase/cli` on macOS
 - `$XDG_CACHE_HOME/folderbase/cli` or `~/.cache/folderbase/cli` on Linux
 
+Linux honors `XDG_CACHE_HOME` only when it is an absolute path, as required by
+the XDG base-directory contract. A relative value falls back to `~/.cache` so
+the launcher never writes its cache into the current project.
+
 No npm installation lifecycle script runs and no shell evaluates CLI
 arguments. Standard input, output, error, arguments, and exit status are
 forwarded directly to the native executable.
@@ -46,6 +50,7 @@ From the repository root:
 ```sh
 npm test --prefix packages/npm-cli
 node scripts/test-npm-cli-package.mjs
+node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs
 ```
 
 The tests use local fixture binaries and never execute a downloaded production

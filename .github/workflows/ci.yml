@@ -33,6 +33,9 @@ jobs:
       - name: Test the packed npm command
         run: node scripts/test-npm-cli-package.mjs
 
+      - name: Test release publication policy
+        run: node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs
+
       - name: Verify packaged legal notices
         run: |
           cmp LICENSE packages/npm-cli/LICENSE

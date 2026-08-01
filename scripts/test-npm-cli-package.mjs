@@ -19,6 +19,12 @@ const packageMetadata = JSON.parse(
   await readFile(join(packageRoot, "package.json"), "utf8"),
 );
 const releaseTag = `v${packageMetadata.version}`;
+const releaseTargets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-gnu",
+];
 
 function run(command, arguments_, options = {}) {
   return new Promise((resolve, reject) => {
@@ -93,8 +99,16 @@ try {
     `#!/bin/sh\nprintf 'folderbase ${packageMetadata.version}\\n'\n`,
   );
   const digest = createHash("sha256").update(fixtureCli).digest("hex");
+  const checksums = `${releaseTargets
+    .map((releaseTarget, index) => {
+      const releaseAssetName = `folderbase-${releaseTag}-${releaseTarget}`;
+      const releaseDigest =
+        releaseAssetName === assetName ? digest : String(index).repeat(64);
+      return `${releaseDigest}  ${releaseAssetName}`;
+    })
+    .join("\n")}\n`;
   await mkdir(versionCache, { recursive: true });
-  await writeFile(join(versionCache, "SHA256SUMS"), `${digest}  ${assetName}\n`);
+  await writeFile(join(versionCache, "SHA256SUMS"), checksums);
   await writeFile(join(versionCache, assetName), fixtureCli);
   await chmod(join(versionCache, assetName), 0o700);
 

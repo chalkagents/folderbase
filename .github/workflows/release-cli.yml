@@ -190,6 +190,7 @@ jobs:
         run: |
           npm test --prefix packages/npm-cli
           node scripts/test-npm-cli-package.mjs
+          node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs
 
       - name: Publish GitHub release artifacts
         env:
@@ -198,19 +199,47 @@ jobs:
         shell: bash
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            existing_prerelease="$(
-              gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease'
+            release_metadata="$(
+              gh release view "$RELEASE_TAG" \
+                --json isDraft,isImmutable,isPrerelease
             )"
+            existing_draft="$(printf '%s' "$release_metadata" | jq -r '.isDraft')"
+            existing_immutable="$(printf '%s' "$release_metadata" | jq -r '.isImmutable')"
+            existing_prerelease="$(printf '%s' "$release_metadata" | jq -r '.isPrerelease')"
             test "$existing_prerelease" = "$GITHUB_PRERELEASE"
-            remote_assets="$(mktemp -d)"
-            trap 'rm -rf "$remote_assets"' EXIT
+            if [[ "$existing_draft" != true ]]; then
+              test "$existing_immutable" = true
+            fi
+          else
+            existing_draft=true
+            github_release_flags=(--draft)
+            if [[ "$GITHUB_PRERELEASE" == true ]]; then
+              github_release_flags+=(--prerelease --latest=false)
+            fi
+            gh release create "$RELEASE_TAG" \
+              --generate-notes \
+              --title "Folderbase Core $RELEASE_TAG" \
+              --verify-tag \
+              "${github_release_flags[@]}"
+          fi
+
+          remote_assets="$(mktemp -d)"
+          trap 'rm -rf "$remote_assets"' EXIT
+          expected_assets="$(find dist -maxdepth 1 -type f -exec basename {} \; | sort)"
+          published_assets="$(
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort
+          )"
+          if [[ "$existing_draft" == true ]]; then
+            while IFS= read -r published_asset; do
+              [[ -z "$published_asset" ]] && continue
+              if ! grep -Fqx "$published_asset" <<<"$expected_assets"; then
+                echo "Draft release contains unexpected asset $published_asset." >&2
+                exit 1
+              fi
+            done <<<"$published_assets"
             for asset in dist/*; do
               asset_name="$(basename "$asset")"
-              if gh release view "$RELEASE_TAG" \
-                --json assets \
-                --jq '.assets[].name' |
-                grep -Fqx "$asset_name"
-              then
+              if grep -Fqx "$asset_name" <<<"$published_assets"; then
                 gh release download "$RELEASE_TAG" \
                   --dir "$remote_assets" \
                   --pattern "$asset_name"
@@ -219,18 +248,27 @@ jobs:
                 gh release upload "$RELEASE_TAG" "$asset"
               fi
             done
-          else
-            github_release_flags=()
+            release_edit_flags=(--draft=false)
             if [[ "$GITHUB_PRERELEASE" == true ]]; then
-              github_release_flags+=(--prerelease --latest=false)
+              release_edit_flags+=(--prerelease=true --latest=false)
+            else
+              release_edit_flags+=(--prerelease=false)
             fi
-            gh release create "$RELEASE_TAG" \
-              dist/* \
-              --generate-notes \
-              --title "Folderbase Core $RELEASE_TAG" \
-              --verify-tag \
-              "${github_release_flags[@]}"
+            gh release edit "$RELEASE_TAG" "${release_edit_flags[@]}"
+          else
+            test "$published_assets" = "$expected_assets"
+            for asset in dist/*; do
+              asset_name="$(basename "$asset")"
+              gh release download "$RELEASE_TAG" \
+                --dir "$remote_assets" \
+                --pattern "$asset_name"
+              cmp "$asset" "$remote_assets/$asset_name"
+            done
           fi
+
+          test "$(
+            gh release view "$RELEASE_TAG" --json isImmutable --jq '.isImmutable'
+          )" = true
 
       - name: Use an OIDC-capable npm client
         if: github.event_name == 'push' || inputs.publish_npm
@@ -251,6 +289,8 @@ jobs:
             npm pack --dry-run --json |
               node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input)[0].integrity));'
           )"
+          published_version=""
+          published_integrity=""
           view_error="$(mktemp)"
           trap 'rm -f "$view_error"' EXIT
           if published_metadata="$(
@@ -264,42 +304,53 @@ jobs:
               printf '%s' "$published_metadata" |
                 node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input)["dist.integrity"] || ""));'
             )"
-            if [[ "$published_version" != "$package_version" \
-              || -z "$published_integrity" \
-              || "$published_integrity" != "$local_integrity" ]]
-            then
-              echo "Published $package_spec does not match the exact release npm package." >&2
-              exit 1
-            fi
-
-            dist_tags="$(npm view "$package_name" dist-tags --json)"
-            selected_dist_tag_version="$(
-              printf '%s' "$dist_tags" |
-                NPM_DIST_TAG="$NPM_DIST_TAG" node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input)[process.env.NPM_DIST_TAG] || ""));'
-            )"
-            latest_version="$(
-              printf '%s' "$dist_tags" |
-                node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).latest || ""));'
-            )"
-            if [[ "$selected_dist_tag_version" != "$package_version" \
-              || ( "$NPM_DIST_TAG" != latest && "$latest_version" == "$package_version" ) ]]
-            then
-              echo "Published $package_spec does not have the required $NPM_DIST_TAG channel state." >&2
-              exit 1
-            fi
-            echo "skip_publish=true" >> "$GITHUB_OUTPUT"
           else
-            if grep -Eq 'E404|404 Not Found' "$view_error"; then
-              echo "skip_publish=false" >> "$GITHUB_OUTPUT"
-            else
+            if ! grep -Eq 'E404|404 Not Found' "$view_error"; then
               cat "$view_error" >&2
               exit 1
             fi
           fi
 
+          if ! dist_tags="$(npm view "$package_name" dist-tags --json 2>"$view_error")"; then
+            if grep -Eq 'E404|404 Not Found' "$view_error"; then
+              dist_tags='{}'
+            else
+              cat "$view_error" >&2
+              exit 1
+            fi
+          fi
+          decision="$(
+            jq -n \
+              --arg packageVersion "$package_version" \
+              --arg channel "$NPM_DIST_TAG" \
+              --arg localIntegrity "$local_integrity" \
+              --arg publishedVersion "$published_version" \
+              --arg publishedIntegrity "$published_integrity" \
+              --argjson distTags "$dist_tags" \
+              '{
+                packageVersion: $packageVersion,
+                channel: $channel,
+                localIntegrity: $localIntegrity,
+                publishedVersion: (if $publishedVersion == "" then null else $publishedVersion end),
+                publishedIntegrity: (if $publishedIntegrity == "" then null else $publishedIntegrity end),
+                distTags: $distTags
+              }' |
+              node ../../scripts/npm-publication-policy.mjs
+          )"
+          echo "skip_publish=$(printf '%s' "$decision" | jq -r '.skipPublish')" >> "$GITHUB_OUTPUT"
+          echo "publish_tag=$(printf '%s' "$decision" | jq -r '.publishTag // ""')" >> "$GITHUB_OUTPUT"
+          echo "cleanup_tag=$(printf '%s' "$decision" | jq -r '.cleanupTag // ""')" >> "$GITHUB_OUTPUT"
+
       - name: Publish the public npm launcher
         if: (github.event_name == 'push' || inputs.publish_npm) && steps.npm-publication.outputs.skip_publish != 'true'
         env:
-          NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
+          PUBLISH_TAG: ${{ steps.npm-publication.outputs.publish_tag }}
         working-directory: packages/npm-cli
-        run: npm publish --access public --tag "$NPM_DIST_TAG"
+        run: npm publish --access public --tag "$PUBLISH_TAG"
+
+      - name: Remove the temporary npm backfill tag
+        if: (github.event_name == 'push' || inputs.publish_npm) && steps.npm-publication.outputs.cleanup_tag != ''
+        env:
+          CLEANUP_TAG: ${{ steps.npm-publication.outputs.cleanup_tag }}
+        working-directory: packages/npm-cli
+        run: npm dist-tag rm @folderbase/cli "$CLEANUP_TAG"

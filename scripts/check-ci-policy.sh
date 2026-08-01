@@ -28,6 +28,31 @@ require_release_fragment_minimum_count() {
   fi
 }
 
+require_release_step_fragment() {
+  local step_name=$1
+  local fragment=$2
+  local message=$3
+
+  if ! awk -v step_name="$step_name" -v fragment="$fragment" '
+    $0 == "      - name: " step_name {
+      in_step = 1
+      next
+    }
+    in_step && $0 ~ /^      - name:/ {
+      exit
+    }
+    in_step && index($0, fragment) {
+      found = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$release_workflow"; then
+    printf '%s\n' "$message" >&2
+    exit 1
+  fi
+}
+
 if ! grep -Fqx "  pull_request:" "$workflow"; then
   echo "CI must run for pull requests." >&2
   exit 1
@@ -92,26 +117,40 @@ require_release_fragment \
 require_release_fragment \
   '"$binary" validate "$smoke_root" --json' \
   "The exact tagged native CLI must validate its ordinary-folder result before publication."
-require_release_fragment \
+require_release_step_fragment \
+  "Publish GitHub release artifacts" \
   'github_release_flags+=(--prerelease --latest=false)' \
   "Semver prereleases must create a GitHub prerelease that cannot become latest."
 require_release_fragment \
   'npm_dist_tag=next' \
   "Semver prereleases must use a non-latest npm dist-tag."
-require_release_fragment \
+require_release_step_fragment \
+  "Publish GitHub release artifacts" \
+  "--json isImmutable --jq '.isImmutable'" \
+  "The publication step must prove the final GitHub release is immutable."
+require_release_step_fragment \
+  "Publish GitHub release artifacts" \
+  'github_release_flags=(--draft)' \
+  "New GitHub releases must be assembled as drafts before publication."
+require_release_step_fragment \
+  "Check immutable npm publication state" \
   'npm pack --dry-run --json' \
   "npm reruns must compute the exact local package integrity."
-require_release_fragment \
+require_release_step_fragment \
+  "Check immutable npm publication state" \
   'npm view "$package_spec" version dist.integrity --json' \
   "npm reruns must inspect the immutable published package version."
-require_release_fragment \
-  'published_integrity" != "$local_integrity' \
-  "npm reruns must fail closed when published and local package integrities differ."
-require_release_fragment \
-  'echo "skip_publish=true" >> "$GITHUB_OUTPUT"' \
-  "Matching npm reruns must explicitly skip immutable-version publication."
-require_release_fragment \
-  'npm publish --access public --tag "$NPM_DIST_TAG"' \
-  "npm publication must use the release-selected dist-tag."
+require_release_step_fragment \
+  "Check immutable npm publication state" \
+  'node ../../scripts/npm-publication-policy.mjs' \
+  "The immutable npm check must apply the tested monotonic publication policy."
+require_release_step_fragment \
+  "Publish the public npm launcher" \
+  'npm publish --access public --tag "$PUBLISH_TAG"' \
+  "npm publication must use the policy-selected non-regressing tag."
+require_release_step_fragment \
+  "Remove the temporary npm backfill tag" \
+  'npm dist-tag rm @folderbase/cli "$CLEANUP_TAG"' \
+  "Older npm backfills must remove their temporary non-channel tag."
 
 echo "CI and release workflow policy is valid."
