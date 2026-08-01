@@ -920,12 +920,12 @@ Ordinary `.folderbase/**` bindings remain forbidden, including the named
 optional `.folderbase/summary.md` and `.folderbase/questions.jsonl` hints.
 
 The immutable 0.4 release inventory, conformance bytes, reference encoder, and
-verifier semantics do not change. Protocol 0.5 has a separate candidate schema,
+verifier semantics do not change. Protocol 0.5 has a separate released schema,
 conformance tree, reference encoder, member-hashed inventory, release-manifest
 sidecar, and verifier under `protocol/releases/0.5/`. ADR-0006 records the
 accepted ordinary-folder and optional-narrative transition. Repository CI and
 package-install validation run both 0.5 verifiers while retaining the frozen
-0.4 digest and distribution gates. The candidate inventory deterministically
+0.4 digest and distribution gates. The released 0.5 inventory deterministically
 seals the complete Core and CLI crate trees plus workspace Cargo manifest and
 lockfile; the release manifest's external sidecar is its non-circular root
 proof. Extracted-package validation compares every packaged Rust source and
@@ -1357,23 +1357,26 @@ authority.
 
 ## Protocol compatibility
 
-The protocol uses semantic versioning:
+Compatibility is explicit rather than inferred from SemVer. Compatibility
+Contract v1 names exact supported profiles: native root manifest `0.5.0`,
+Folderbase Version v1 profiles `0.4` and `0.5`, and Chunk Manifest
+`folderbase-chunk-manifest-v1`. A client must not accept `0.5.1` merely because
+it accepts `0.5.0`; a later compatible profile is added by a later contract
+revision.
 
-- patch: compatible clarification or optional field
-- minor: backward-compatible capability
-- major: incompatible representation or invariant
+The normative compatibility policy, record taxonomy, identifier rules, upgrade
+behavior, stable CLI JSON interface, and independently runnable proof are in
+[`compatibility-v1.md`](compatibility-v1.md) and
+[`../protocol/compatibility/v1/contract.json`](../protocol/compatibility/v1/contract.json).
 
-Clients must:
-
-- reject unsupported major versions
-- keep version 0.1 folderbases readable when adding 0.2 template support
-- preserve unknown fields
-- warn about unsupported optional capabilities
-- avoid rewriting records they cannot safely round-trip
+Clients must preserve fields and records they cannot safely reinterpret, reject
+unsupported exact profiles, and refuse unsafe takeover of nonterminal
+engine-owned recovery state. Root upgrades are explicit, digest-bound, and
+never automatic. Downgrades are unsupported.
 
 ## Open artifacts
 
-The protocol project will publish:
+The protocol project publishes:
 
 - JSON Schemas
 - Markdown templates

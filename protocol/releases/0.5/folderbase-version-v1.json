@@ -1,9 +1,9 @@
 {
   "format": "folderbase-protocol-source-release-v2",
-  "status": "candidate",
+  "status": "released",
   "protocol_version": "0.5",
   "contract": "folderbase-version-v1",
-  "distribution": "repository-candidate-source-tree",
+  "distribution": "repository-tag-source-archive",
   "repository": "https://github.com/chalkagents/folderbase",
   "files": [
     {
@@ -12,15 +12,15 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "164616ddb0a37977ef80ca63383a6cf4f15fe1a72824b4641695d31d6dce8a40"
+      "sha256": "94190a7740e4b8be46bbc832ceb021f540dcd3be82629aeeb5c94eb08e8e1142"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "59fa0a675930bb1be43f0246c6d1455d73fc444a41c32f67c323e81abbf0e28a"
+      "sha256": "26e9af7c1f07e1e9416ce14ef17f4da886204b716a38b479dad6924fb14caed3"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "50e33ce0a8df824a8200380a8357e722e49858a136926c85b3be77cdefd3e619"
+      "sha256": "216600374b81365203f4067a359278a0fad985952ab3b66aada5ed57d9747c97"
     },
     {
       "path": "LICENSE",
@@ -32,11 +32,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "b53fc1067b532396b2a47b90ec6a29cf1257748488791cda05ef2561bc266b68"
+      "sha256": "164ea7e6564819fb4cb39ef7b10a400d8d109596ef678ef84ff454f9c99a1922"
     },
     {
       "path": "crates/folderbase-cli/Cargo.toml",
-      "sha256": "b270236fa91859a804d20417163c8687202af724935dedbeac62c4347232f853"
+      "sha256": "f4e037259c9a959ad1992678ade59799b55e75ceed3924727f90d3a34e89dda3"
     },
     {
       "path": "crates/folderbase-cli/LICENSE",
@@ -48,7 +48,7 @@
     },
     {
       "path": "crates/folderbase-cli/src/main.rs",
-      "sha256": "a61928e878453991710ea75a7d6a05e15280eeb2a5a93614f828e1a32a11b2c8"
+      "sha256": "351a89258ac7d84c3fb74c7a6651c9a2a77996536466432ac48cf07d55373c0f"
     },
     {
       "path": "crates/folderbase-cli/tests/attest.rs",
@@ -56,11 +56,27 @@
     },
     {
       "path": "crates/folderbase-cli/tests/cli.rs",
-      "sha256": "f616bc0cb9855dbbf086ad1c9b7693d4bb0bd0f07d90c305d88c99c1bf8532f8"
+      "sha256": "6aa41619d1fd7a0f12f350919bbbf6eded5f05cc93802dd16a64f205cfd842ff"
+    },
+    {
+      "path": "crates/folderbase-cli/tests/fixtures/protocol/minimal-folderbase-version-0.5.json",
+      "sha256": "019d074fc22d31b028ceb7871ff615b53b7bca74e49de9f10004a94aafbf9c40"
+    },
+    {
+      "path": "crates/folderbase-cli/tests/fixtures/protocol/unknown-chunk-manifest-format.json",
+      "sha256": "4ee6c51871875e2bee280d8a576593efbc98e6b6975e5d8cb8543a07e1c7d6e7"
     },
     {
       "path": "crates/folderbase-cli/tests/folderbase_full_eclipse.rs",
-      "sha256": "27a183c17070eb8c9b12690ffdd1467c2c3dc21acd12cb3a0a5f3f3e6ce5a73c"
+      "sha256": "b90c3a09bf72108c619c6bbe8c41ba88f54a85a56ad41940ce51c725e3d6bd79"
+    },
+    {
+      "path": "crates/folderbase-cli/tests/protocol_check.rs",
+      "sha256": "c26289fdbe964e3e820fdec4c0bde43a873bff5dd6469c9bdfe4f20354b21d10"
+    },
+    {
+      "path": "crates/folderbase-cli/tests/public_conformance.rs",
+      "sha256": "a262f9789ccec10859b8588d33e9f9017f8032c7f29c78271360dbee10989c21"
     },
     {
       "path": "crates/folderbase-cli/tests/transform_fixture.rs",
@@ -68,7 +84,7 @@
     },
     {
       "path": "crates/folderbase-core/Cargo.toml",
-      "sha256": "77a8ea555d9ce43948859b0579fd27f5099532e802c9ac8a542288abfcf5da70"
+      "sha256": "0e868b75a366586340f0ccc38b777927a7a129cf9cf9837210679135ed3374ac"
     },
     {
       "path": "crates/folderbase-core/LICENSE",
@@ -367,8 +383,28 @@
       "sha256": "248dc9c33c967fa7a8acfae75c886693e00fdf9307443fd20e423d52b06295db"
     },
     {
+      "path": "docs/adr/0008-distribute-native-core-through-thin-installers.md",
+      "sha256": "e5745bb727a8ff6f2c3b13a6bfd329640a9f155a021059b3cde4ec7da32dc7f5"
+    },
+    {
+      "path": "docs/adr/0009-freeze-the-minimal-core-compatibility-contract.md",
+      "sha256": "1cdd6cce33e477e33dc83aeda0a586b76b0c25ac3664f546d5a7710033953884"
+    },
+    {
+      "path": "docs/cli-json-v1.md",
+      "sha256": "280388bee1db7a07e5274f69601882abcfd2ff82159f96e7a19c0a76abfefaad"
+    },
+    {
+      "path": "docs/compatibility-v1.md",
+      "sha256": "addef5f5bee9704553161869ca283b1e8651657a7ec423544c189dc7344dc676"
+    },
+    {
       "path": "docs/protocol-spec.md",
-      "sha256": "d3d5a849015c11393a67d223d66808c1de67eda7bb9cff2c52b94ab2e5c142f5"
+      "sha256": "cb8d9d727dd6819800dfd28ca934feaa5d16c95031a92d8f7b2b26d069789dc0"
+    },
+    {
+      "path": "docs/releasing.md",
+      "sha256": "02ff9c6f7abbcf69a04996edca416678e6712f519bd647d8720afc45e4bf75e2"
     },
     {
       "path": "docs/reorganization-protocol.md",
@@ -560,11 +596,183 @@
     },
     {
       "path": "protocol/README.md",
-      "sha256": "ffa9e6d6a6550447b843690debec131e6e6b2a59fcde83f49440c02547ffdbf2"
+      "sha256": "a32f51838ed9cc1198c9181344051a7786a6cbd95c0dc11120c3794f3e0f1e30"
+    },
+    {
+      "path": "protocol/compatibility/v1/contract.json",
+      "sha256": "51229ee7645f8f211e8da1c2a6ec94c00865140d338d175bf7cc832e65afa39a"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/README.md",
+      "sha256": "d9d6de677127c18e27c0574fd350193529195beb7b10c88c597f7a93f85179a0"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/chunk-exceeds-profile-maximum.json",
+      "sha256": "8f30bcb002d0b3e909422b20f4552a7ad904ca7d1e6a9a6b6e028d0e6a85e1cc"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/chunk-index-out-of-range.json",
+      "sha256": "a8317650355affb7c6dc918f1f787668145a8415f139b17ccdf7f84ebdb93e13"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/empty-object-with-chunk.json",
+      "sha256": "7b998e283a75f2cec16587faf692a80e3ae389f0d7f486a617e7440c115eb862"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/empty-object-wrong-digest.json",
+      "sha256": "e0842ce0de22554da0c66753e9b663e85c44cc96c9a56b44fa0e468c3110b990"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/fractional-chunk-index.json",
+      "sha256": "5654ad9a4003ec3c5c6ed48600d54c932b10aac0c481ab4bf1375c3f1c11b419"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/fractional-chunk-length.json",
+      "sha256": "0018be263a692f14dea6cb3dc10fa5aa0cc2efc825c9a91c85bd3b768425a0fa"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/fractional-chunk-offset.json",
+      "sha256": "bcc42fa7c0fced9887d23ec4173dfca4eae0ac766d9a3c4ca5e6ea0fe11fd440"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/fractional-object-length.json",
+      "sha256": "0d81d26bb34d813d1fef55a78d90c7a13e19b511ce4947c1ae59c3b901dea131"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/large-profile-parameter-mismatch.json",
+      "sha256": "79e849caa59f0a31085ab659fdf1ab8730076825e52661c33d12ed63573a5ddf"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/nonempty-object-without-chunks.json",
+      "sha256": "85757880225fa0e0a43ed9cefb5f7dbf3c66f80e24048ac20f43d35bc7147812"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/nonfinal-chunk-below-minimum.json",
+      "sha256": "3a2213ce634a16f6e0a5bd50a43aa80fcc6ca2973fc055eb3ac9f568ccf99592"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/nonhex-object-digest.json",
+      "sha256": "23dcd51592c8bc0c810c98f0e6319fdfb97bec0d5c94a38e1a5ad1cf68b1502e"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/nonsequential-index.json",
+      "sha256": "3ef1c935e4cdca5301135a736a43f70459d99000e472e8c31da8acfd3c13223e"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/object-exceeds-v1-maximum.json",
+      "sha256": "3c2675bc7ce478b328323e02d342394cd59cde8298404065e5dabf4fd83e5e09"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/object-length-mismatch.json",
+      "sha256": "10c52abe1438621f1b3028f9d69a61e3b00a90e3f5e20e25c3eb8a6585d18c32"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/offset-exceeds-v1-maximum.json",
+      "sha256": "81a3830c6853f3e8835c47d151d7e1cc830dbc7905fbe29243e1716ec7864bcb"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/offset-gap.json",
+      "sha256": "14db6bd9b52e75603135f27439a8b47943eda188385cc4c2e53c061407a7fcf9"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/offset-overlap.json",
+      "sha256": "98b8546e8d9c7b9082607127ba3a6cdcd04104c4614700de2a1aa0cd3f4c047e"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/short-chunk-digest.json",
+      "sha256": "18fcfd8adcde51441f6eb895bd482ec92e850833336e9f08d6154bea4234266d"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/standard-profile-parameter-mismatch.json",
+      "sha256": "a9849285817ff80fa8e50f02b1d85670d7bd64a8dc326cbf4afac572f9d45f87"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/unknown-algorithm.json",
+      "sha256": "7a6af369569c160ed5bdc250a83d43c61e90c377cceaae8125efa546e6db7b59"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/unknown-descriptor-field.json",
+      "sha256": "0c28126af9cd0a810cb064f1c876d845b2a1cb3a74c646f117766b4f65be4f9f"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/unknown-format.json",
+      "sha256": "4ee6c51871875e2bee280d8a576593efbc98e6b6975e5d8cb8543a07e1c7d6e7"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/unknown-manifest-field.json",
+      "sha256": "cc18197829d5e645e4c0fc3aa8c8056a2eec8f88647394fc1d5adbce9cd04aee"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/unknown-profile.json",
+      "sha256": "bd14ebffc8d7bcdd2373ab7e69e70c1ce8eb37576b7bbb7292cbff72f71e9be7"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/uppercase-object-digest.json",
+      "sha256": "5b31de2ba31c5c1e99915a05d222203a1fb97713ca340f43f84e50bd3e16ec9a"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/invalid/zero-length-chunk.json",
+      "sha256": "3bbf4ad977279253282b9603098d4611949d1f0396ff5c13dd4e2a0d1d48e8c8"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/reference-digest.mjs",
+      "sha256": "47c0aff0d3d5d2874ac3bac442999b8dc7a10094046fc0a5b656a35abaf3cc72"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/empty-standard-v1.json",
+      "sha256": "d47e32ac0aec7f33899c9006a401e46275e415057347cba0b341fbe9e4f2ea25"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/integral-decimal-standard-v1.json",
+      "sha256": "d49a1755ee3fe359bbcbcd995a69345bdc3f8c6da494416ead278499159d56f2"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/integral-exponent-standard-v1.json",
+      "sha256": "c49b032e4ca6de0f1c31f1a2fb3f26f5363ca5484e72a61a70c635a26682db62"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/large-offset-large-v1.json",
+      "sha256": "2b5c446a0343d7fd5adabf6f1842335f017a3e1eacbd03ad188443306940ea6c"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/large-offset-large-v1.sha256",
+      "sha256": "5e738f1623039592d2e440ccf65867304d1819615b94823250cf24a5bf99600f"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/single-chunk-large-v1.json",
+      "sha256": "517e814e3dc49cd77e4edac7bef79e0c936c784ae342c53327c92962a792cbf9"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/two-chunk-standard-v1.json",
+      "sha256": "c6e7a737ce04529703096a3441cfb1467170d853b8790735ca29c8a5859ba9f3"
+    },
+    {
+      "path": "protocol/conformance/chunk-manifest/valid/two-chunk-standard-v1.sha256",
+      "sha256": "16c84f1c14cdd6372c67efa54826f9e4d7db30b1831f4b71c13183d32b202d79"
+    },
+    {
+      "path": "protocol/conformance/cli-json-v1/README.md",
+      "sha256": "596fafa121b67f7c8d5d8edca1fd5931b6c53e453ad7617880531f405ccd69a7"
+    },
+    {
+      "path": "protocol/conformance/cli-json-v1/run.mjs",
+      "sha256": "2571763e07def60e7c376629dac54a77e00223d905c498349707f5aaed036779"
+    },
+    {
+      "path": "protocol/conformance/cli-json-v1/schema.mjs",
+      "sha256": "ff9a554eed7fb6042c0a3ac10ca796cad489c274c857e62a420314eac911bc9f"
+    },
+    {
+      "path": "protocol/conformance/cli-json-v1/schema.test.mjs",
+      "sha256": "5b802b2d0b27ddfe8e44f77916179d6f9e7c95f96db42fbb8d860806781d3d86"
+    },
+    {
+      "path": "protocol/conformance/cli-json-v1/suite.json",
+      "sha256": "8775685dc695b7b5c4a54fe687b6dde3a2679732e8effff7bf23984a3167a8c6"
     },
     {
       "path": "protocol/conformance/folderbase-version-0.5/README.md",
-      "sha256": "bd8680ad378941e31404797694b8ee363f770403eee575f3d258cf130ab5e7d7"
+      "sha256": "836c5a179cf1197eafaf53da1448496047b496a17af8aacc5a79aa4d67279e68"
     },
     {
       "path": "protocol/conformance/folderbase-version-0.5/invalid/private-summary-binding.json",
@@ -759,12 +967,120 @@
       "sha256": "2e3422fd94bba81c45787400817e562b0a48a541136f049986af3e81cfa29f4c"
     },
     {
+      "path": "protocol/conformance/folderbase-version/README.md",
+      "sha256": "e1ea22d58006df4edfcdf22f0c824dd64ad8c7a79f7bb7a1c64e7846e297cd05"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/casefold-collision.json",
+      "sha256": "d50e9d542c29afcb529b083e2bb90364fc8469a81fe32f1eddbfb8b2b9ba5b08"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/casefold-unicode9-osage-collision.json",
+      "sha256": "70cd6f0b94d1be98df4a3bb133ecc03feb38183e7979939489846c7247bbc145"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/generate-runtime-limit-vector.mjs",
+      "sha256": "a9f8d88fcdc0ba750b8a0615a88a8733a25d50eb33c683d0c13e67d3ff234e24"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/missing-folderbase-entry.json",
+      "sha256": "547ef806777c0d1965613f52d40a695f81508f18f25e9f3857003e2d73a25223"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/missing-folderbaseignore.json",
+      "sha256": "7a6fd3c80861f280b016d339fae6e8922e945df081afb80334e59af385e94198"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/nested-boundary-descendant.json",
+      "sha256": "d085b69b2702bdd061630f60fd453a95c85e64a87113d9f633113a0045baf2dd"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/nested-boundary-overlap.json",
+      "sha256": "b05b44e1842a88b34187d3143af40cd26eb0427386a9a968baf0fd0ba4f805c9"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/nfc-collision.json",
+      "sha256": "2cc9967d226774870e3edd6c4f619532f433eb6f35ca936ea783b369d658140f"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/nfc-unicode17-combining-collision.json",
+      "sha256": "d0410b4770b7a426ee8fff91c45b42f4ed76eeab722f92ba96e2860a2f53ffdd"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/object-version-owner-collision.json",
+      "sha256": "4d6f5854725732a6f31e2bf2c55dfc370cf6fb5adcda864eb886f33e8a071cff"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/root-object-version-reuse.json",
+      "sha256": "b0b5b7884eb7b845e9eebda5d32025e2cd216cfe913300c57e27625bd38ad630"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/same-object-recreation.json",
+      "sha256": "b12f3635327e1c624f181362a8503303a940fffdfcfe2cc9d86d8cde3191fc80"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/self-capture.json",
+      "sha256": "b367481a4a00b77c2c0b7d28567728299d05c9ca76a2a36095f3e0d5e03e6249"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/self-parent.json",
+      "sha256": "8e740d6b767c4aea38f378021b5e032af6202dd191332880202c15d9822aabce"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/unknown-top-level-field.json",
+      "sha256": "b8385075da018aa9555914e9ba7a0d0dc261dc051ba8383f4f017cbdf03db401"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/unsafe-symlink-target.json",
+      "sha256": "4c8a1234ec7cda0ceb2bdcb6c7fdaa6d570e7701d15c48dca7bc5602af6bb732"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/unsorted-bindings.json",
+      "sha256": "5297c6b0068d05822b2a2ec6ae6d43bfbfd4680ee7d2de92119ad2de5c41ae5d"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/unsupported-exclusion-reason.json",
+      "sha256": "39de060f2fcf54bcc7c7b2c3ea7fd397fabaea76ada239cacde8d587f07c7f4d"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/invalid/windows-dos-superscript-device.json",
+      "sha256": "dfdca62e59b83d04f5b0d58d70cacd3ffa61eec5a7a069a9c7bb1431ac01a861"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/reference-digest.mjs",
+      "sha256": "1ad9518768d2b7179f23e09081ac36cdb3bf41c4f6e182dc106c5d8a40697df6"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/valid/fidelity-and-lifecycle-v1.json",
+      "sha256": "ab831aa6526e0ac163730bf8e61c24c80466b398ef57bcb8cad92776d5313756"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/valid/fidelity-and-lifecycle-v1.sha256",
+      "sha256": "71f90fd62b243ef3ab601695ce73e0f4b9c895924d8fda75df9bf6bac80f6b50"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/valid/minimal-restorable-v1.json",
+      "sha256": "eb2ceca5e5f0b63e6b49eaac468ee41c5ce6d0065859223c0989214927ac1669"
+    },
+    {
+      "path": "protocol/conformance/folderbase-version/valid/minimal-restorable-v1.sha256",
+      "sha256": "f90de0074f1c420dab8ea4a2ce45a749d0a9e7da67d4cf78e5479276ce0838e6"
+    },
+    {
       "path": "protocol/schemas/0.2/template-application.schema.json",
       "sha256": "e5df25cf1b435804fb91cbdb0a84f2bd937f1d0d204c45638a859eb5b20e6111"
     },
     {
+      "path": "protocol/schemas/0.3/chunk-manifest.schema.json",
+      "sha256": "d48a774e04cbcba46fb6bbaddfbcff07d72180e55ac40bdd8328155cd463d429"
+    },
+    {
       "path": "protocol/schemas/0.3/reorganization-draft.schema.json",
       "sha256": "cc1df781a335876580c3ae1ee66d2ffc7afd4811f10c4fd5a05da5d94effea04"
+    },
+    {
+      "path": "protocol/schemas/0.4/folderbase-version.schema.json",
+      "sha256": "2327e2c795cc67123f227bd9ab98e7d7d2ba0bef540cb1c493d910172a38597b"
     },
     {
       "path": "protocol/schemas/0.5/folderbase-version.schema.json",
@@ -775,16 +1091,28 @@
       "sha256": "a3c287482cea76da2feacddcf6733284b12329e60c446f9476784871cb07ccee"
     },
     {
+      "path": "protocol/schemas/cli/1/folderbase-cli-json.schema.json",
+      "sha256": "1664975ee02fc329c52f5dbfbac46998181d2dc11548893c03ec4cc1fbdd33d5"
+    },
+    {
       "path": "scripts/test-extracted-package-source-sensitivity.sh",
       "sha256": "e256a9eea611fbecc8fe86889710799d7adbd63e3f810324af1a790813aaeaa4"
     },
     {
       "path": "scripts/test-extracted-packages.sh",
-      "sha256": "c0b4f45e0978c982cd8c63f4c11d61b3c76c964c83a3340dd122a7c0c255fad6"
+      "sha256": "70d449eb3dee5576fd3ce645a565e2f59cadd3b4d7ee0c7ee4e44044a90d6678"
     },
     {
       "path": "scripts/test-package-install.sh",
-      "sha256": "4a4c267d72a67f948e361c72eb95e5263b1c16c51ae0fe98c4e84b00fb4ede9f"
+      "sha256": "9088c7ecb237f391fd9fb671c17f9843a0a60b44505b3880343d70a2f510bd30"
+    },
+    {
+      "path": "scripts/tests/compatibility-contract.test.mjs",
+      "sha256": "476923b6dcd669c154495248cb4b008d0b4becea86d9bfc8d1eb9f742b806c1e"
+    },
+    {
+      "path": "scripts/update-folderbase-version-0.5-release.mjs",
+      "sha256": "18e24e0d89e9087a1b80d07597f91b79b04d4399cc752b8da2fad4db696b9fea"
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-digest-vectors.mjs",
@@ -792,7 +1120,7 @@
     },
     {
       "path": "scripts/verify-folderbase-version-0.5-distribution.mjs",
-      "sha256": "c90f575b0a2a853df7caa8d546b752a06ab9018031ea6a3318687e0c8d849d61"
+      "sha256": "40d535160cb40924bce201521ae7382b2918dc5d9f79c6455ee43cc88fe38638"
     }
   ]
 }

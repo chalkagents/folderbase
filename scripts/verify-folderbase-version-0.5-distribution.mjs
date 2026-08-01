@@ -73,10 +73,10 @@ if (
 }
 const expectedHeader = {
   format: "folderbase-protocol-source-release-v2",
-  status: "candidate",
+  status: "released",
   protocol_version: "0.5",
   contract: "folderbase-version-v1",
-  distribution: "repository-candidate-source-tree",
+  distribution: "repository-tag-source-archive",
   repository: "https://github.com/chalkagents/folderbase",
 };
 for (const [key, value] of Object.entries(expectedHeader)) {
@@ -87,7 +87,7 @@ for (const [key, value] of Object.entries(expectedHeader)) {
 
 if (readFileSync(attributesPath, "utf8") !== "* text=auto eol=lf\n") {
   throw new Error(
-    "repository checkout policy must keep the candidate byte surface LF-exact",
+    "repository checkout policy must keep the released byte surface LF-exact",
   );
 }
 
@@ -124,6 +124,15 @@ if (
 }
 
 const exactConformanceFiles = walk(conformanceRoot).sort();
+const exactChunkManifestConformanceFiles = walk(
+  join(repositoryRoot, "protocol", "conformance", "chunk-manifest"),
+).sort();
+const exactFolderbaseVersion04ConformanceFiles = walk(
+  join(repositoryRoot, "protocol", "conformance", "folderbase-version"),
+).sort();
+const exactCliConformanceFiles = walk(
+  join(repositoryRoot, "protocol", "conformance", "cli-json-v1"),
+).sort();
 const completeRuntimePackageClosure = [
   "Cargo.lock",
   "Cargo.toml",
@@ -141,17 +150,28 @@ const requiredNonConformanceFiles = [
   "docs/adr/0004-seal-portable-folderbase-versions-as-bounded-full-state.md",
   "docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md",
   "docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md",
+  "docs/adr/0008-distribute-native-core-through-thin-installers.md",
+  "docs/adr/0009-freeze-the-minimal-core-compatibility-contract.md",
+  "docs/cli-json-v1.md",
+  "docs/compatibility-v1.md",
   "docs/protocol-spec.md",
+  "docs/releasing.md",
   "docs/reorganization-protocol.md",
   "docs/template-protocol.md",
   "protocol/README.md",
+  "protocol/compatibility/v1/contract.json",
   "protocol/schemas/0.2/template-application.schema.json",
+  "protocol/schemas/0.3/chunk-manifest.schema.json",
   "protocol/schemas/0.3/reorganization-draft.schema.json",
+  "protocol/schemas/0.4/folderbase-version.schema.json",
   "protocol/schemas/0.5/folderbase-version.schema.json",
   "protocol/schemas/0.5/folderbase.schema.json",
+  "protocol/schemas/cli/1/folderbase-cli-json.schema.json",
   "scripts/test-extracted-package-source-sensitivity.sh",
   "scripts/test-extracted-packages.sh",
   "scripts/test-package-install.sh",
+  "scripts/tests/compatibility-contract.test.mjs",
+  "scripts/update-folderbase-version-0.5-release.mjs",
   "scripts/verify-folderbase-version-0.5-digest-vectors.mjs",
   "scripts/verify-folderbase-version-0.5-distribution.mjs",
 ];
@@ -163,6 +183,9 @@ const exactGoldenFixtureFiles = [
 ].sort();
 const expectedPaths = [
   ...exactConformanceFiles,
+  ...exactChunkManifestConformanceFiles,
+  ...exactFolderbaseVersion04ConformanceFiles,
+  ...exactCliConformanceFiles,
   ...completeRuntimePackageClosure,
   ...exactGoldenFixtureFiles,
   ...requiredNonConformanceFiles,
@@ -175,7 +198,7 @@ if (JSON.stringify(declaredPaths) !== JSON.stringify(uniqueExpectedPaths)) {
   const unexpected = declaredPaths.filter((path) => !expected.has(path));
   throw new Error(
     [
-      "protocol 0.5 release manifest does not enumerate the exact candidate surface",
+      "protocol 0.5 release manifest does not enumerate the exact released surface",
       `missing: ${missing.join(", ") || "(none)"}`,
       `unexpected: ${unexpected.join(", ") || "(none)"}`,
     ].join("\n"),
@@ -187,11 +210,15 @@ const coreCargoManifest = readFileSync(
   "utf8",
 );
 if (
+  !coreCargoManifest.includes(
+    'compatibility-contract = "folderbase-compatibility-contract-v1"',
+  ) ||
   !coreCargoManifest.includes('protocol-version = "0.4"') ||
-  !coreCargoManifest.includes('candidate-protocol-version = "0.5"')
+  !coreCargoManifest.includes('additional-protocol-version = "0.5"') ||
+  !coreCargoManifest.includes('native-root-protocol-version = "0.5.0"')
 ) {
   throw new Error(
-    "folderbase-core package metadata must distinguish released 0.4 from candidate 0.5",
+    "folderbase-core package metadata must name released Version profiles, native root 0.5.0, and Compatibility Contract v1",
   );
 }
 
@@ -590,5 +617,5 @@ execFileSync(
   { stdio: "inherit" },
 );
 console.log(
-  `Folderbase protocol 0.5 candidate distribution verified: ${release.files.length} files`,
+  `Folderbase protocol 0.5 released distribution verified: ${release.files.length} files`,
 );

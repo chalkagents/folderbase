@@ -1,0 +1,41 @@
+{
+  "format": "folderbase-cli-conformance-suite-v1",
+  "contract": "../../compatibility/v1/contract.json",
+  "interface": "folderbase-cli-json-v1",
+  "artifact_groups": [
+    {
+      "artifact": "root-manifest",
+      "valid": "../folderbase-version-0.5/root-manifest/valid",
+      "invalid": "../folderbase-version-0.5/root-manifest/invalid"
+    },
+    {
+      "artifact": "chunk-manifest",
+      "valid": "../chunk-manifest/valid",
+      "invalid": "../chunk-manifest/invalid"
+    },
+    {
+      "artifact": "folderbase-version",
+      "valid": "../folderbase-version/valid",
+      "invalid": "../folderbase-version/invalid"
+    },
+    {
+      "artifact": "folderbase-version",
+      "valid": "../folderbase-version-0.5/valid",
+      "invalid": "../folderbase-version-0.5/invalid"
+    }
+  ],
+  "cases": [
+    { "id": "discover-compatibility-contract", "command": "protocol.contract" },
+    { "id": "inspect-ordinary-folder", "command": "inspect" },
+    { "id": "plan-read-only-initialization", "command": "init.plan" },
+    { "id": "apply-reviewed-initialization", "command": "init.apply" },
+    { "id": "plan-reviewed-upgrade", "command": "upgrade.plan" },
+    { "id": "apply-reviewed-upgrade", "command": "upgrade.apply" },
+    { "id": "attest-exact-root", "command": "attest" },
+    { "id": "validate-shallow", "command": "validate.shallow" },
+    { "id": "list-workspace", "command": "workspace.list" },
+    { "id": "read-workspace-text", "command": "workspace.read" },
+    { "id": "save-workspace-text", "command": "workspace.save" },
+    { "id": "encode-operational-error", "command": "inspect" }
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "format": "folderbase-compatibility-contract-v1",
+  "contract_version": "1.0.0",
+  "protocol_profiles": {
+    "root_manifest": [
+      "0.5.0"
+    ],
+    "folderbase_version": [
+      "0.4",
+      "0.5"
+    ],
+    "chunk_manifest": [
+      "folderbase-chunk-manifest-v1"
+    ]
+  },
+  "record_classes": {
+    "portable": [
+      ".folderbase/manifest.json",
+      ".folderbase/versions/folderbase/*.json"
+    ],
+    "extension_preserving": [
+      ".folderbase/objects/*.json",
+      ".folderbase/template-applications/**",
+      ".folderbase/changesets/**",
+      ".folderbase/reorganizations/**"
+    ],
+    "engine_owned": [
+      ".folderbase/local/**",
+      ".folderbase/transactions/**",
+      ".folderbase/versions/records/**",
+      ".folderbase/versions/blobs/**",
+      ".folderbase/journal/**",
+      ".folderbase/locks/**",
+      ".folderbase/history-transfers/**",
+      ".folderbase/migrations/**",
+      ".folderbase/reorganizations/active.json"
+    ],
+    "engine_owned_default": "all-unclassified-.folderbase-records",
+    "optional_hints": [
+      ".folderbase/summary.md",
+      ".folderbase/questions.jsonl"
+    ]
+  },
+  "identifiers": {
+    "folderbase_id": "folderbase_<canonical-lowercase-uuid>",
+    "object_id": "obj_<canonical-lowercase-uuid>",
+    "object_version_id": "version_<canonical-lowercase-uuid>",
+    "folderbase_version_id": "fbversion_<canonical-lowercase-uuid>",
+    "semantics": "opaque-durable-identifiers"
+  },
+  "upgrades": {
+    "automatic": false,
+    "supported": [
+      "root-manifest-0.1-or-0.2-to-0.5.0"
+    ],
+    "requires_reviewed_plan_digest": true,
+    "preserves_folderbase_id": true,
+    "preserves_unknown_non_reserved_fields": true,
+    "downgrades": "unsupported"
+  },
+  "cli_json": {
+    "format": "folderbase-cli-json-v1",
+    "transport": {
+      "success_or_attention": "one-json-document-on-stdout-and-empty-stderr",
+      "operational_error": "empty-stdout-and-one-json-error-document-on-stderr"
+    },
+    "commands": [
+      "inspect",
+      "attest",
+      "init.plan",
+      "init.apply",
+      "upgrade.plan",
+      "upgrade.apply",
+      "validate.shallow",
+      "protocol.contract",
+      "protocol.check.chunk-manifest",
+      "protocol.check.folderbase-version",
+      "workspace.list",
+      "workspace.read",
+      "workspace.save"
+    ],
+    "exit_codes": {
+      "success": 0,
+      "attention_required": 1,
+      "operational_error": 2
+    },
+    "error_codes": [
+      "attestation_io",
+      "capture_error",
+      "conflicting_transaction",
+      "initialization_inventory_limit_exceeded",
+      "initialization_plan_changed",
+      "invalid_capture_ignore_policy",
+      "invalid_folderbase_id",
+      "invalid_initialization_plan_digest",
+      "invalid_manifest_shape",
+      "invalid_migration_state",
+      "invalid_protocol_upgrade_plan_digest",
+      "invalid_protocol_upgrade_receipt",
+      "invalid_protocol_version",
+      "invalid_record",
+      "invalid_restore_ancestry",
+      "invalid_restore_transaction",
+      "invalid_root",
+      "io_error",
+      "json_error",
+      "manifest_duplicate_field",
+      "manifest_field_missing",
+      "manifest_field_wrong_type",
+      "manifest_invalid_json",
+      "manifest_too_large",
+      "marker_missing",
+      "marker_symlink",
+      "marker_wrong_type",
+      "migration_approval_mismatch",
+      "migration_source_changed",
+      "migration_verification_failed",
+      "missing_local_head",
+      "nested_boundary_work_limit_exceeded",
+      "output_serialization",
+      "physical_identity_unavailable",
+      "plan_precondition_changed",
+      "plan_root_identity_changed",
+      "plan_root_mismatch",
+      "protocol_upgrade_blocked",
+      "protocol_upgrade_plan_changed",
+      "protocol_upgrade_recovery_required",
+      "provider_controlled",
+      "recovery_required",
+      "restore_authority_maintenance_required",
+      "restore_namespace_repair_required",
+      "restore_target_occupied",
+      "root_changed_during_attestation",
+      "root_not_directory",
+      "root_not_found",
+      "root_symlink",
+      "structural_template_change_requires_approval",
+      "template_expansion_blocked",
+      "tombstone_not_found",
+      "unsafe_path",
+      "unsupported_migration_filesystem",
+      "unsupported_protocol_version",
+      "unsupported_tombstone_kind",
+      "workspace_content_changed",
+      "would_overwrite"
+    ],
+    "compatibility": {
+      "required_object_fields": "stable",
+      "additional_object_fields": "allowed",
+      "existing_error_code_meanings": "stable",
+      "new_error_codes": "allowed",
+      "field_removal_rename_or_type_change": "breaking",
+      "array_order": "significant",
+      "invocation_errors": "outside-folderbase-cli-json-v1"
+    },
+    "schema": "../../schemas/cli/1/folderbase-cli-json.schema.json"
+  },
+  "experimental": [
+    "migrate",
+    "transform",
+    "version-cli-json",
+    "templates",
+    "reorganization",
+    "sharing",
+    "sync",
+    "cloud",
+    "cloud-agents"
+  ]
+}

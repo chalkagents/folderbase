@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/cli/1/folderbase-cli-json.schema.json",
+  "title": "Folderbase CLI JSON v1",
+  "description": "Stable JSON documents emitted by the Folderbase CLI v1 integration surface. The caller selects the applicable result definition from the command it invoked.",
+  "oneOf": [
+    { "$ref": "#/$defs/compatibilityDescriptor" },
+    { "$ref": "#/$defs/inspection" },
+    { "$ref": "#/$defs/attestation" },
+    { "$ref": "#/$defs/initializationPlan" },
+    { "$ref": "#/$defs/initializationResult" },
+    { "$ref": "#/$defs/upgradePlan" },
+    { "$ref": "#/$defs/upgradeResult" },
+    { "$ref": "#/$defs/validation" },
+    { "$ref": "#/$defs/protocolCheck" },
+    { "$ref": "#/$defs/workspaceListing" },
+    { "$ref": "#/$defs/workspaceRead" },
+    { "$ref": "#/$defs/workspaceSave" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "compatibilityDescriptor": {
+      "type": "object",
+      "required": ["format", "contract_version", "cli_json", "protocol_profiles"],
+      "properties": {
+        "format": { "const": "folderbase-compatibility-contract-v1" },
+        "contract_version": { "const": "1.0.0" },
+        "cli_json": { "const": "folderbase-cli-json-v1" },
+        "protocol_profiles": {
+          "type": "object",
+          "required": ["root_manifest", "folderbase_version", "chunk_manifest"],
+          "properties": {
+            "root_manifest": { "type": "array", "items": { "type": "string" } },
+            "folderbase_version": { "type": "array", "items": { "type": "string" } },
+            "chunk_manifest": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "inspection": {
+      "type": "object",
+      "required": [
+        "root",
+        "inventory",
+        "classified_paths",
+        "git_repositories",
+        "context_files",
+        "boundary_hints",
+        "reconstructable_trees",
+        "nested_folderbases",
+        "warnings"
+      ],
+      "properties": {
+        "root": { "type": "string" },
+        "inventory": {
+          "type": "object",
+          "required": [
+            "file_count",
+            "total_bytes",
+            "generated_file_count",
+            "reconstructable_tree_count",
+            "secret_shaped_file_count",
+            "temporary_file_count",
+            "large_file_count",
+            "versioned_file_count"
+          ],
+          "properties": {
+            "file_count": { "type": "integer", "minimum": 0 },
+            "total_bytes": { "type": "integer", "minimum": 0 },
+            "generated_file_count": { "type": "integer", "minimum": 0 },
+            "reconstructable_tree_count": { "type": "integer", "minimum": 0 },
+            "secret_shaped_file_count": { "type": "integer", "minimum": 0 },
+            "temporary_file_count": { "type": "integer", "minimum": 0 },
+            "large_file_count": { "type": "integer", "minimum": 0 },
+            "versioned_file_count": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        },
+        "classified_paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "classification", "reason", "bytes"],
+            "properties": {
+              "path": { "type": "string" },
+              "classification": { "enum": ["generated", "secret_shaped", "temporary", "large", "versioned"] },
+              "reason": { "type": "string" },
+              "bytes": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          }
+        },
+        "git_repositories": { "type": "array", "items": { "type": "string" } },
+        "context_files": { "type": "array", "items": { "type": "string" } },
+        "boundary_hints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "kind", "reason"],
+            "properties": {
+              "path": { "type": "string" },
+              "kind": { "type": "string" },
+              "reason": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "reconstructable_trees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": { "path": { "type": "string" } },
+            "additionalProperties": true
+          }
+        },
+        "nested_folderbases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "state"],
+            "properties": {
+              "path": { "type": "string" },
+              "state": { "const": "unchecked" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "attestation": {
+      "type": "object",
+      "required": [
+        "root",
+        "folderbase_id",
+        "protocol_version",
+        "manifest_sha256",
+        "root_instance_sha256"
+      ],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "protocol_version": { "const": "0.5.0" },
+        "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "root_instance_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": true
+    },
+    "initializationPlan": {
+      "type": "object",
+      "required": [
+        "root",
+        "folderbase_id",
+        "folderbase_name",
+        "folderbase_kind",
+        "directories",
+        "writes",
+        "template_preconditions",
+        "preserved_paths",
+        "warnings",
+        "plan_digest"
+      ],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "folderbase_name": { "type": "string" },
+        "folderbase_kind": { "enum": ["person", "organization", "engagement", "project", "customer", "temporary", "custom"] },
+        "directories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "purpose"],
+            "properties": {
+              "path": { "type": "string" },
+              "purpose": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "writes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "purpose", "content"],
+            "properties": {
+              "path": { "type": "string" },
+              "purpose": { "type": "string" },
+              "content": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "template_preconditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "kind"],
+            "properties": {
+              "path": { "type": "string" },
+              "kind": { "enum": ["directory", "text"] }
+            },
+            "additionalProperties": true
+          }
+        },
+        "preserved_paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": { "path": { "type": "string" } },
+            "additionalProperties": true
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "plan_digest": {
+          "type": "object",
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "initializationResult": {
+      "type": "object",
+      "required": [
+        "root",
+        "folderbase_id",
+        "created_paths",
+        "preserved_paths",
+        "applied_plan_digest"
+      ],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "created_paths": { "type": "array", "items": { "type": "string" } },
+        "preserved_paths": { "type": "array", "items": { "type": "string" } },
+        "applied_plan_digest": {
+          "type": "object",
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "upgradePlan": {
+      "type": "object",
+      "required": ["root", "folderbase_id", "from_protocol_version", "to_protocol_version", "changed_paths", "plan_digest"],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "from_protocol_version": { "enum": ["0.1.0", "0.2.0"] },
+        "to_protocol_version": { "const": "0.5.0" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } },
+        "plan_digest": {
+          "type": "object",
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "upgradeResult": {
+      "type": "object",
+      "required": ["root", "folderbase_id", "from_protocol_version", "to_protocol_version", "changed_paths", "applied_plan_digest"],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "from_protocol_version": { "enum": ["0.1.0", "0.2.0"] },
+        "to_protocol_version": { "const": "0.5.0" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } },
+        "applied_plan_digest": {
+          "type": "object",
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "validation": {
+      "type": "object",
+      "required": ["root", "level", "valid", "findings"],
+      "properties": {
+        "root": { "type": "string" },
+        "level": { "const": "shallow" },
+        "valid": { "type": "boolean" },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "severity", "path", "message"],
+            "properties": {
+              "code": { "type": "string", "minLength": 1 },
+              "severity": { "enum": ["error", "warning"] },
+              "path": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+              "message": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "protocolCheck": {
+      "type": "object",
+      "required": ["artifact", "valid"],
+      "properties": {
+        "artifact": { "enum": ["chunk-manifest", "folderbase-version"] },
+        "valid": { "type": "boolean" },
+        "profile": { "type": "string" },
+        "canonical_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": "invalid_artifact" },
+            "message": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "oneOf": [
+        {
+          "properties": { "valid": { "const": true } },
+          "required": ["profile", "canonical_digest"]
+        },
+        {
+          "properties": { "valid": { "const": false } },
+          "required": ["error"]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "workspaceListing": {
+      "type": "object",
+      "required": ["root", "entries"],
+      "properties": {
+        "root": { "type": "string" },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "name", "kind", "bytes", "editable", "reconstructable"],
+            "properties": {
+              "path": { "type": "string" },
+              "name": { "type": "string" },
+              "kind": { "enum": ["file", "directory", "folderbase", "symlink"] },
+              "bytes": { "type": "integer", "minimum": 0 },
+              "editable": { "type": "boolean" },
+              "reconstructable": { "type": "boolean" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "workspaceRead": {
+      "type": "object",
+      "required": ["path", "content", "sha256", "bytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "content": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "workspaceSave": {
+      "type": "object",
+      "required": ["path", "previous_sha256", "document", "object_id", "version_id"],
+      "properties": {
+        "path": { "type": "string" },
+        "previous_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "document": {
+          "type": "object",
+          "required": ["path", "sha256", "bytes"],
+          "properties": {
+            "path": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "bytes": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        },
+        "object_id": { "type": "string", "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "version_id": { "type": "string", "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

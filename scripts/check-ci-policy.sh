@@ -460,7 +460,7 @@ require_script_fragment \
 # escapes, or policy-script changes cannot silently alter release authority.
 require_sealed_release_control \
   "$release_workflow" \
-  "f859862424d49d33dc563f1a1f294704329fa96d752ae08444269009f1259f64"
+  "347009be2705c316084e0bedc505662ef9d09855225414b35ea92bb44430f733"
 require_sealed_release_control \
   "$immutable_script" \
   "1898cdb0efcb49cbf346d7057cac0dc34e838305ec8b14a7bd42082e20ffe627"

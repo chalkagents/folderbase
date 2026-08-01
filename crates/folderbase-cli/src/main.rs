@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use folderbase_core::ROOT_INSTANCE_FORMAT_V1 as CURRENT_ROOT_INSTANCE_FORMAT;
 #[cfg(windows)]
 use folderbase_core::ROOT_INSTANCE_FORMAT_V2 as CURRENT_ROOT_INSTANCE_FORMAT;
+use folderbase_core::folderbase_version::FolderbaseVersion;
+use folderbase_core::transfer_manifest::ChunkManifest;
 use folderbase_core::{
     FolderbaseCaptureError, FolderbaseError, FolderbaseKind, FolderbaseVersionStore,
     InitializationOptions, InitializationPlan, InitializationPlanDigest, InitializationResult,
@@ -169,6 +171,37 @@ enum Command {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
+
+    /// Check portable protocol records through a bounded implementation-neutral interface.
+    Protocol {
+        #[command(subcommand)]
+        command: ProtocolCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProtocolCommand {
+    /// Print the stable compatibility contract implemented by this executable.
+    Contract {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Validate and digest one portable JSON artifact read from standard input.
+    Check {
+        #[arg(value_enum)]
+        artifact: ProtocolArtifactArg,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProtocolArtifactArg {
+    FolderbaseVersion,
+    ChunkManifest,
 }
 
 #[derive(Debug, Subcommand)]
@@ -883,6 +916,88 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
             Ok(EXIT_SUCCESS)
         }
+        Command::Protocol { command } => match command {
+            ProtocolCommand::Contract { json } => {
+                if json {
+                    print_json(&serde_json::json!({
+                        "format": "folderbase-compatibility-contract-v1",
+                        "contract_version": "1.0.0",
+                        "cli_json": "folderbase-cli-json-v1",
+                        "protocol_profiles": {
+                            "root_manifest": ["0.5.0"],
+                            "folderbase_version": ["0.4", "0.5"],
+                            "chunk_manifest": ["folderbase-chunk-manifest-v1"],
+                        },
+                    }))?;
+                } else {
+                    println!("Folderbase Compatibility Contract v1.0.0");
+                    println!("CLI JSON: folderbase-cli-json-v1");
+                }
+                Ok(EXIT_SUCCESS)
+            }
+            ProtocolCommand::Check {
+                artifact,
+                stdin: _,
+                json,
+            } => run_protocol_check(artifact, json),
+        },
+    }
+}
+
+fn run_protocol_check(artifact: ProtocolArtifactArg, json: bool) -> Result<u8, CliError> {
+    let (artifact_name, result): (&str, Result<(String, String), String>) = match artifact {
+        ProtocolArtifactArg::FolderbaseVersion => {
+            let result = FolderbaseVersion::decode_bounded(std::io::stdin().lock())
+                .and_then(|version| {
+                    let profile = version.protocol_version().to_owned();
+                    let canonical_digest = version.canonical_digest()?;
+                    Ok((profile, canonical_digest))
+                })
+                .map_err(|error| error.to_string());
+            ("folderbase-version", result)
+        }
+        ProtocolArtifactArg::ChunkManifest => {
+            let result = ChunkManifest::decode_bounded(std::io::stdin().lock())
+                .and_then(|manifest| {
+                    let profile = manifest.profile.clone();
+                    let canonical_digest = manifest.canonical_digest()?;
+                    Ok((profile, canonical_digest))
+                })
+                .map_err(|error| error.to_string());
+            ("chunk-manifest", result)
+        }
+    };
+
+    match result {
+        Ok((profile, canonical_digest)) => {
+            if json {
+                print_json(&serde_json::json!({
+                    "artifact": artifact_name,
+                    "profile": profile,
+                    "valid": true,
+                    "canonical_digest": canonical_digest,
+                }))?;
+            } else {
+                println!("Valid {artifact_name} ({profile})");
+                println!("Canonical SHA-256: {canonical_digest}");
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        Err(message) => {
+            if json {
+                print_json(&serde_json::json!({
+                    "artifact": artifact_name,
+                    "valid": false,
+                    "error": {
+                        "code": "invalid_artifact",
+                        "message": message,
+                    },
+                }))?;
+            } else {
+                println!("Invalid {artifact_name}: {message}");
+            }
+            Ok(EXIT_INVALID)
+        }
     }
 }
 
@@ -893,35 +1008,37 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), CliError> {
 }
 
 fn command_emits_json_errors(command: &Command) -> bool {
-    if let Command::Attest { json, .. } = command {
-        return *json;
-    }
-    if let Command::Init { json, .. } = command {
-        return *json;
-    }
-    if let Command::Upgrade { json, .. } = command {
-        return *json;
-    }
-    if let Command::Version { command } = command {
-        return match command {
+    match command {
+        Command::Inspect { json, .. }
+        | Command::Attest { json, .. }
+        | Command::Init { json, .. }
+        | Command::Upgrade { json, .. }
+        | Command::Validate { json, .. }
+        | Command::Migrate { json, .. } => *json,
+        Command::Version { command } => match command {
             VersionCommand::Capture { json, .. }
             | VersionCommand::Restore { json, .. }
             | VersionCommand::RestoreTombstone { json, .. }
             | VersionCommand::History { json, .. } => *json,
-        };
-    }
-    let Command::Transform { command } = command else {
-        return false;
-    };
-    match command {
-        TransformCommand::Analyze { json, .. }
-        | TransformCommand::Plan { json, .. }
-        | TransformCommand::Preview { json, .. }
-        | TransformCommand::Approve { json, .. }
-        | TransformCommand::Apply { json, .. }
-        | TransformCommand::Reopen { json, .. }
-        | TransformCommand::Recover { json, .. }
-        | TransformCommand::Rollback { json, .. } => *json,
+        },
+        Command::Transform { command } => match command {
+            TransformCommand::Analyze { json, .. }
+            | TransformCommand::Plan { json, .. }
+            | TransformCommand::Preview { json, .. }
+            | TransformCommand::Approve { json, .. }
+            | TransformCommand::Apply { json, .. }
+            | TransformCommand::Reopen { json, .. }
+            | TransformCommand::Recover { json, .. }
+            | TransformCommand::Rollback { json, .. } => *json,
+        },
+        Command::Workspace { command } => match command {
+            WorkspaceCommand::List { json, .. }
+            | WorkspaceCommand::Read { json, .. }
+            | WorkspaceCommand::Save { json, .. } => *json,
+        },
+        Command::Protocol { command } => match command {
+            ProtocolCommand::Contract { json } | ProtocolCommand::Check { json, .. } => *json,
+        },
     }
 }
 

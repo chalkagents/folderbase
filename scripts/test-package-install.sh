@@ -37,6 +37,13 @@ do
     "crates/folderbase-core/assets/templates/0.2/$template/template.json"
 done
 
+cmp \
+  "protocol/conformance/folderbase-version-0.5/valid/minimal-ordinary-v1.json" \
+  "crates/folderbase-cli/tests/fixtures/protocol/minimal-folderbase-version-0.5.json"
+cmp \
+  "protocol/conformance/chunk-manifest/invalid/unknown-format.json" \
+  "crates/folderbase-cli/tests/fixtures/protocol/unknown-chunk-manifest-format.json"
+
 for package in folderbase-core folderbase-cli
 do
   for legal_file in LICENSE NOTICE

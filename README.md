@@ -79,19 +79,23 @@ materialization, mutation, transfer, and restore operations reject them.
 
 ## Install
 
-Folderbase currently requires Rust 1.96 or newer.
+Run once from any Node 22.14+ environment, including a remote agent VM:
 
 ```sh
-cargo install --path crates/folderbase-cli --locked
-folderbase --version
-# folderbase 0.5.0-rc.1
+npx --yes @folderbase/cli init .
 ```
 
-Once the first crates.io release is published:
+Install the same native CLI persistently with Homebrew or Cargo:
 
 ```sh
+brew install chalkagents/tap/folderbase
+# or, with Rust 1.96+
 cargo install folderbase-cli --locked
 ```
+
+Native macOS and Linux binaries and their closed `SHA256SUMS` record are also
+published on the [GitHub Releases page](https://github.com/chalkagents/folderbase/releases/latest).
+Every channel runs the same released executable and Compatibility Contract.
 
 ## Turn a folder into a Folderbase
 
@@ -201,6 +205,8 @@ chunk range has been streamed and checked.
 ## Protocol
 
 - [Domain language](CONTEXT.md)
+- [Compatibility Contract v1](docs/compatibility-v1.md)
+- [Stable CLI JSON v1](docs/cli-json-v1.md)
 - [Protocol specification](docs/protocol-spec.md)
 - [Template protocol](docs/template-protocol.md)
 - [Reorganization Protocol 0.3](docs/reorganization-protocol.md)
@@ -211,9 +217,13 @@ chunk range has been streamed and checked.
 - [Proposed metadata-first capture transaction](docs/adr/0005-plan-capture-before-sealing-or-moving-local-head.md)
 - [Accepted ordinary-folder and optional-narrative decision](docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md)
 - [Proposed durable migration transaction module](docs/adr/0007-execute-migrations-through-one-durable-transaction-module.md)
+- [Accepted native distribution decision](docs/adr/0008-distribute-native-core-through-thin-installers.md)
+- [Accepted minimal compatibility decision](docs/adr/0009-freeze-the-minimal-core-compatibility-contract.md)
 
-Protocol `0.x` and crate `0.x` releases are pre-stable. Wire and filesystem
-contracts may change between minor versions until 1.0.
+Cargo packages remain below 1.0, but the surfaces named by Compatibility
+Contract v1 are stable. Experimental surfaces may change between minor Cargo
+versions. Breaking the named portable records, identifiers, CLI JSON fields,
+exit meanings, or conformance behavior requires a new compatibility contract.
 
 ## Development
 
@@ -226,6 +236,10 @@ node scripts/verify-folderbase-version-digest-vectors.mjs
 node scripts/verify-folderbase-version-distribution.mjs
 node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 node scripts/verify-folderbase-version-0.5-distribution.mjs
+node --test scripts/tests/compatibility-contract.test.mjs
+cargo build --package folderbase-cli --locked
+node protocol/conformance/cli-json-v1/run.mjs \
+  --implementation ./target/debug/folderbase
 bash scripts/test-package-install.sh
 ```
 
