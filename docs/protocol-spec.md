@@ -920,12 +920,12 @@ Ordinary `.folderbase/**` bindings remain forbidden, including the named
 optional `.folderbase/summary.md` and `.folderbase/questions.jsonl` hints.
 
 The immutable 0.4 release inventory, conformance bytes, reference encoder, and
-verifier semantics do not change. Protocol 0.5 has a separate candidate schema,
+verifier semantics do not change. Protocol 0.5 has a separate released schema,
 conformance tree, reference encoder, member-hashed inventory, release-manifest
 sidecar, and verifier under `protocol/releases/0.5/`. ADR-0006 records the
 accepted ordinary-folder and optional-narrative transition. Repository CI and
 package-install validation run both 0.5 verifiers while retaining the frozen
-0.4 digest and distribution gates. The candidate inventory deterministically
+0.4 digest and distribution gates. The released 0.5 inventory deterministically
 seals the complete Core and CLI crate trees plus workspace Cargo manifest and
 lockfile; the release manifest's external sidecar is its non-circular root
 proof. Extracted-package validation compares every packaged Rust source and

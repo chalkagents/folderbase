@@ -26,7 +26,7 @@ content remains private and inert without becoming a named hint format.
 Each valid Version fixture has a `.sha256` sidecar containing its canonical
 Folderbase Version digest, as produced by `reference-digest.mjs`. Each valid
 root-manifest fixture has a `.sha256` sidecar containing the SHA-256 digest of
-its exact bytes. The separately inventoried candidate distribution verifies
+its exact bytes. The separately inventoried released distribution verifies
 both kinds.
 
 The root-manifest negatives cover an unsupported live protocol; missing and

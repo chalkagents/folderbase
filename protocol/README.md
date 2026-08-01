@@ -130,9 +130,9 @@ The source repository/tag is the normative cross-language protocol bundle. The
 `folderbase-core` crate is the Rust runtime implementation and intentionally
 does not duplicate workspace-level schemas, fixtures, or independent reference
 encoders. The immutable released 0.4 manifest remains
-`releases/0.4/folderbase-version-v1.json`. The separately hashed 0.5 candidate
+`releases/0.4/folderbase-version-v1.json`. The separately hashed released 0.5
 inventory is `releases/0.5/folderbase-version-v1.json`. That inventory binds the
-candidate schemas, fixtures, independent digest encoders, implementing Rust
+released schemas, fixtures, independent digest encoders, implementing Rust
 sources, Rust conformance test, package metadata, package proof scripts, and CI
 gates as one exact source surface. The verifier deterministically walks both
 complete Rust crate trees and seals their sources, embedded assets, tests,
@@ -143,7 +143,7 @@ and embedded asset with the sealed checkout bytes. The Rust conformance test
 decodes both valid 0.5 Version vectors and compares each runtime digest with its
 independently generated `.sha256` sidecar. The release manifest is not a member
 of its own inventory; its external `.sha256` sidecar remains the non-circular
-root proof. The candidate verifier does not reinterpret or mutate any 0.4
+root proof. The 0.5 release verifier does not reinterpret or mutate any 0.4
 release or conformance bytes. The
 accepted profile decision is
 `../docs/adr/0006-version-ordinary-folder-roots-and-optional-narratives.md`.

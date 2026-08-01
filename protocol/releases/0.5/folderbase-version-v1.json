@@ -400,7 +400,7 @@
     },
     {
       "path": "docs/protocol-spec.md",
-      "sha256": "d5a47ed5189ee3c8d425c3790cfc6f4c97c69f4cc020f512d932d7a833a6a468"
+      "sha256": "cb8d9d727dd6819800dfd28ca934feaa5d16c95031a92d8f7b2b26d069789dc0"
     },
     {
       "path": "docs/releasing.md",
@@ -596,7 +596,7 @@
     },
     {
       "path": "protocol/README.md",
-      "sha256": "3a07e2650778e5d110b0980cc3988b72a4d4a3d5844d3fbd9a79d471b905af53"
+      "sha256": "a32f51838ed9cc1198c9181344051a7786a6cbd95c0dc11120c3794f3e0f1e30"
     },
     {
       "path": "protocol/compatibility/v1/contract.json",
@@ -772,7 +772,7 @@
     },
     {
       "path": "protocol/conformance/folderbase-version-0.5/README.md",
-      "sha256": "bd8680ad378941e31404797694b8ee363f770403eee575f3d258cf130ab5e7d7"
+      "sha256": "836c5a179cf1197eafaf53da1448496047b496a17af8aacc5a79aa4d67279e68"
     },
     {
       "path": "protocol/conformance/folderbase-version-0.5/invalid/private-summary-binding.json",
