@@ -74,7 +74,9 @@ channels. Rerunning an already-published exact version verifies its integrity
 without requiring that it still owns a channel. Publishing an older missing
 version uses and then removes a temporary backfill tag so neither public
 channel can move backward. One tested SemVer parser owns stable/prerelease
-classification, including versions with build metadata.
+classification. Published versions containing SemVer build metadata are
+rejected because different exact versions can have equal SemVer precedence,
+making discovery-channel advancement ambiguous.
 
 GitHub and npm discovery state may differ after manual or partially completed
 publication. Under the same lock, the workflow therefore reads each registry's
@@ -84,14 +86,18 @@ move backward because the other one is behind. One repository-wide,
 non-cancelling `queue: max` publication concurrency group encloses the GitHub
 preflight and both registry decisions, publication, verification, and
 temporary-tag cleanup. Each decision is made only after the publication lock is
-acquired.
+acquired. A rerun that finds an existing immutable release verifies that its
+relationship to GitHub Latest matches the independent decision; divergent
+state fails closed instead of returning a false success.
 
 The immutable-release preflight, registry-state decision, and GitHub release
 publication are dedicated, tested script entrypoints. Their workflow steps each
-contain exactly one one-line `run` key, and policy enforces their order. Raw
-GitHub release commands and duplicate or overriding critical `run` keys are
-rejected in the workflow, so release safety does not depend on heuristically
-parsing arbitrary inline shell.
+contain exactly one one-line `run` key, and policy enforces their order. The
+complete release workflow and its four policy/publication entrypoints are also
+sealed by exact SHA-256 digests in CI policy. Any byte-level release-control
+change therefore requires an explicit reviewed seal update. Raw GitHub release
+commands, conditional bypasses, and duplicate or overriding critical keys
+cannot be accepted through heuristic text parsing alone.
 
 The macOS App will separately bundle a compatible native Core inside its
 signed, notarized application boundary. Homebrew may provide a persistent CLI

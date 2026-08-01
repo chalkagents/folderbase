@@ -228,6 +228,66 @@ test("the immutable-release preflight cannot continue on error", async () => {
   }
 });
 
+test("the immutable-release preflight cannot be conditionally disabled", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(boundary, `${boundary}\n        if: false`),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /sealed release control/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a quoted duplicate run key cannot override the immutable preflight", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = `        run: ${immutableEntrypoint}`;
+    assert(source.includes(critical));
+    await writeFile(
+      fixture,
+      source.replace(critical, `${critical}\n        "run": true`),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /sealed release control/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("an escaped raw GitHub command cannot bypass release controls", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Escaped raw release command\n        run: g\\h release view "$RELEASE_TAG"\n\n${boundary}`,
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /sealed release control/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("critical release entrypoints must remain in fail-closed order", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {

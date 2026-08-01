@@ -3,6 +3,7 @@ set -euo pipefail
 
 : "${GITHUB_LATEST:?GITHUB_LATEST is required}"
 : "${GITHUB_PRERELEASE:?GITHUB_PRERELEASE is required}"
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${RELEASE_TAG:?RELEASE_TAG is required}"
 
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +40,8 @@ else
 fi
 
 remote_assets="$(mktemp -d)"
-trap 'rm -rf "$remote_assets"' EXIT
+latest_error="$(mktemp)"
+trap 'rm -rf "$remote_assets"; rm -f "$latest_error"' EXIT
 expected_assets="$(find dist -maxdepth 1 -type f -exec basename {} \; | sort)"
 published_assets="$(
   gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort
@@ -84,3 +86,23 @@ fi
 test "$(
   gh release view "$RELEASE_TAG" --json isImmutable --jq '.isImmutable'
 )" = true
+
+latest_tag=""
+if latest_tag="$(
+  gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' \
+    2>"$latest_error"
+)"; then
+  if [[ "$GITHUB_LATEST" == true && "$latest_tag" != "$RELEASE_TAG" ]] ||
+    [[ "$GITHUB_LATEST" == false && "$latest_tag" == "$RELEASE_TAG" ]]; then
+    printf 'GitHub Latest state diverges: expected %s latest=%s, found %s.\n' \
+      "$RELEASE_TAG" "$GITHUB_LATEST" "$latest_tag" >&2
+    exit 1
+  fi
+elif ! grep -Eq 'HTTP 404|Not Found' "$latest_error"; then
+  cat "$latest_error" >&2
+  exit 1
+elif [[ "$GITHUB_LATEST" == true ]]; then
+  printf 'GitHub Latest state diverges: expected %s to be Latest.\n' \
+    "$RELEASE_TAG" >&2
+  exit 1
+fi

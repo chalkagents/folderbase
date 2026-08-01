@@ -231,6 +231,30 @@ require_release_script() {
   bash -n "$script"
 }
 
+require_sealed_release_control() {
+  local file=$1
+  local expected_sha256=$2
+  local actual_sha256
+
+  if [[ ! -f "$file" ]]; then
+    printf 'Missing sealed release control: %s\n' "$file" >&2
+    exit 1
+  fi
+  actual_sha256="$(
+    node -e '
+      const { createHash } = require("node:crypto");
+      const { readFileSync } = require("node:fs");
+      process.stdout.write(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"));
+    ' "$file"
+  )"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    printf 'Unreviewed sealed release control bytes: %s\n' "$file" >&2
+    printf 'Expected SHA-256 %s, found %s.\n' \
+      "$expected_sha256" "$actual_sha256" >&2
+    exit 1
+  fi
+}
+
 if ! grep -Fqx "  pull_request:" "$workflow"; then
   echo "CI must run for pull requests." >&2
   exit 1
@@ -430,5 +454,24 @@ require_script_fragment \
   "$publication_script" \
   "--json isImmutable --jq '.isImmutable'" \
   "The publication entrypoint must prove the final release is immutable."
+
+# The text checks above retain focused diagnostics. This exact-byte seal is the
+# fail-closed boundary: YAML aliases, quoted duplicate keys, conditionals, shell
+# escapes, or policy-script changes cannot silently alter release authority.
+require_sealed_release_control \
+  "$release_workflow" \
+  "f859862424d49d33dc563f1a1f294704329fa96d752ae08444269009f1259f64"
+require_sealed_release_control \
+  "$immutable_script" \
+  "1898cdb0efcb49cbf346d7057cac0dc34e838305ec8b14a7bd42082e20ffe627"
+require_sealed_release_control \
+  "$decision_script" \
+  "2210a59d942bbd49132c3ddb639379ecb8498e1e45177b81af5cb712d3080e9c"
+require_sealed_release_control \
+  "$publication_script" \
+  "5a9e8cc98c5b250a36180be1beb29b2657cd77f7bbbe2980040e5a9ac9fd63bb"
+require_sealed_release_control \
+  "scripts/npm-publication-policy.mjs" \
+  "7d3682901f38b1fba7afe066ed479cd41bb4279de0ad56872c9d7f13ca8cd643"
 
 echo "CI and release workflow policy is valid."

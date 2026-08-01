@@ -223,6 +223,10 @@ case "$*" in
   "release view v0.4.0 --json isImmutable --jq .isImmutable")
     printf '%s\n' 'true'
     ;;
+  "api repos/chalkagents/folderbase/releases/latest --jq .tag_name")
+    printf '%s\n' 'HTTP 404: Not Found' >&2
+    exit 1
+    ;;
   "release create "*|"release upload "*|"release edit "*)
     exit 0
     ;;
@@ -240,6 +244,7 @@ esac
         GH_TOKEN: "workflow-token",
         GITHUB_LATEST: "false",
         GITHUB_PRERELEASE: "false",
+        GITHUB_REPOSITORY: "chalkagents/folderbase",
         PATH: `${bin}:${process.env.PATH}`,
         RELEASE_TAG: "v0.4.0",
       },
@@ -260,6 +265,85 @@ esac
       commands,
       /release view v0\.4\.0 --json isImmutable --jq \.isImmutable/,
     );
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("an existing immutable release rejects divergent GitHub Latest state", async () => {
+  const temporaryRoot = await mkdtemp(
+    join(tmpdir(), "folderbase-release-script-"),
+  );
+  try {
+    const repository = join(temporaryRoot, "repository");
+    const copiedScript = join(
+      repository,
+      "scripts",
+      "release",
+      "publish-github-release.sh",
+    );
+    const dist = join(repository, "dist");
+    const bin = join(temporaryRoot, "bin");
+    await mkdir(dirname(copiedScript), { recursive: true });
+    await mkdir(dist, { recursive: true });
+    await mkdir(bin);
+    await copyFile(publicationScript, copiedScript);
+    await chmod(copiedScript, 0o755);
+    await writeFile(join(dist, "SHA256SUMS"), "checksums\n");
+    await writeFile(join(dist, "folderbase-v0.4.0-test-target"), "binary\n");
+    await writeExecutable(
+      join(bin, "gh"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "release view v0.4.0")
+    exit 0
+    ;;
+  "release view v0.4.0 --json isDraft,isImmutable,isPrerelease")
+    printf '%s\n' '{"isDraft":false,"isImmutable":true,"isPrerelease":false}'
+    ;;
+  "release view v0.4.0 --json assets --jq .assets[].name")
+    printf '%s\n' 'SHA256SUMS' 'folderbase-v0.4.0-test-target'
+    ;;
+  "release download v0.4.0 --dir "*)
+    destination=""
+    pattern=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --dir) destination=$2; shift 2 ;;
+        --pattern) pattern=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    cp "$ASSET_ROOT/$pattern" "$destination/$pattern"
+    ;;
+  "release view v0.4.0 --json isImmutable --jq .isImmutable")
+    printf '%s\n' 'true'
+    ;;
+  "api repos/chalkagents/folderbase/releases/latest --jq .tag_name")
+    printf '%s\n' 'v0.3.0'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+`,
+    );
+
+    const result = await runScript(copiedScript, {
+      cwd: repository,
+      env: {
+        ASSET_ROOT: dist,
+        GH_TOKEN: "workflow-token",
+        GITHUB_LATEST: "true",
+        GITHUB_PRERELEASE: "false",
+        GITHUB_REPOSITORY: "chalkagents/folderbase",
+        PATH: `${bin}:${process.env.PATH}`,
+        RELEASE_TAG: "v0.4.0",
+      },
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /GitHub Latest state diverges/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

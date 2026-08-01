@@ -288,6 +288,22 @@ test("stable build metadata stays on stable release channels", () => {
   });
 });
 
+test("publication rejects build metadata with ambiguous channel precedence", () => {
+  assert.throws(
+    () =>
+      decideNpmPublication({
+        packageVersion: "1.2.3+build.2",
+        channel: "latest",
+        localIntegrity: integrity,
+        publishedVersion: null,
+        publishedIntegrity: null,
+        distTags: { latest: "1.2.3+build.1" },
+        githubLatestVersion: "1.2.3+build.1",
+      }),
+    /build metadata is not supported/,
+  );
+});
+
 test("prerelease classification ignores hyphens in build metadata", () => {
   assert.deepEqual(classifyRelease("1.2.3-rc.1+build-x"), {
     channel: "next",
@@ -299,7 +315,7 @@ test("publication rejects a channel that disagrees with parsed SemVer", () => {
   assert.throws(
     () =>
       decideNpmPublication({
-        packageVersion: "1.2.3+build-x",
+        packageVersion: "1.2.3",
         channel: "next",
         localIntegrity: integrity,
         publishedVersion: null,

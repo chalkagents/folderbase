@@ -104,6 +104,11 @@ export function decideNpmPublication(input) {
     githubLatestVersion = null,
   } = input;
   const parsed = parseSemver(packageVersion);
+  if (packageVersion.includes("+")) {
+    throw new Error(
+      `build metadata is not supported for published versions: ${packageVersion}`,
+    );
+  }
   if (!["latest", "next"].includes(channel)) {
     throw new Error(`unsupported npm publication channel: ${channel}`);
   }
