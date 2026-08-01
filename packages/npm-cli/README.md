@@ -55,3 +55,17 @@ node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-polic
 
 The tests use local fixture binaries and never execute a downloaded production
 artifact.
+
+## Release operations
+
+Repository immutable releases must be enabled before native binaries are
+published. The release environment must provide
+`FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN`, a fine-grained token scoped to this
+repository with Administration read access only. It checks that setting and is
+never used to write a release; GitHub's short-lived workflow token performs
+release writes.
+
+All GitHub and npm publication work shares one non-cancelling `queue: max`
+concurrency group so the `latest` and `next` decisions are recalculated
+serially and cannot race backward. The same decision drives GitHub's stable
+Latest marker; prereleases and older backfills explicitly set it false.

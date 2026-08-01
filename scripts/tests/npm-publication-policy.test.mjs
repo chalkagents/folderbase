@@ -15,7 +15,31 @@ test("an exact stable rerun stays idempotent after latest advances", () => {
       publishedIntegrity: integrity,
       distTags: { latest: "0.6.0" },
     }),
-    { skipPublish: true, publishTag: null, cleanupTag: null },
+    {
+      skipPublish: true,
+      publishTag: null,
+      cleanupTag: null,
+      advanceChannel: false,
+    },
+  );
+});
+
+test("an exact stable rerun may retain the channel it already owns", () => {
+  assert.deepEqual(
+    decideNpmPublication({
+      packageVersion: "0.4.0",
+      channel: "latest",
+      localIntegrity: integrity,
+      publishedVersion: "0.4.0",
+      publishedIntegrity: integrity,
+      distTags: { latest: "0.4.0" },
+    }),
+    {
+      skipPublish: true,
+      publishTag: null,
+      cleanupTag: null,
+      advanceChannel: true,
+    },
   );
 });
 
@@ -36,6 +60,7 @@ test("an exact rerun cleans up a temporary tag left by an interrupted backfill",
       skipPublish: true,
       publishTag: null,
       cleanupTag: "folderbase-backfill-0-4-0",
+      advanceChannel: false,
     },
   );
 });
@@ -50,7 +75,12 @@ test("an exact prerelease rerun stays idempotent after next advances", () => {
       publishedIntegrity: integrity,
       distTags: { latest: "0.4.0", next: "0.5.0-rc.2" },
     }),
-    { skipPublish: true, publishTag: null, cleanupTag: null },
+    {
+      skipPublish: true,
+      publishTag: null,
+      cleanupTag: null,
+      advanceChannel: false,
+    },
   );
 });
 
@@ -64,7 +94,12 @@ test("an unpublished newer stable version advances latest", () => {
       publishedIntegrity: null,
       distTags: { latest: "0.5.1" },
     }),
-    { skipPublish: false, publishTag: "latest", cleanupTag: null },
+    {
+      skipPublish: false,
+      publishTag: "latest",
+      cleanupTag: null,
+      advanceChannel: true,
+    },
   );
 });
 
@@ -82,6 +117,7 @@ test("an unpublished older stable version cannot roll latest backward", () => {
       skipPublish: false,
       publishTag: "folderbase-backfill-0-4-0",
       cleanupTag: "folderbase-backfill-0-4-0",
+      advanceChannel: false,
     },
   );
 });
@@ -96,7 +132,84 @@ test("semver prerelease ordering advances next without touching latest", () => {
       publishedIntegrity: null,
       distTags: { latest: "0.4.0", next: "0.5.0-rc.2" },
     }),
-    { skipPublish: false, publishTag: "next", cleanupTag: null },
+    {
+      skipPublish: false,
+      publishTag: "next",
+      cleanupTag: null,
+      advanceChannel: true,
+    },
+  );
+});
+
+test("semver prerelease identifiers use ASCII ordering", () => {
+  assert.deepEqual(
+    decideNpmPublication({
+      packageVersion: "0.5.0-Ba",
+      channel: "next",
+      localIntegrity: integrity,
+      publishedVersion: null,
+      publishedIntegrity: null,
+      distTags: { latest: "0.4.0", next: "0.5.0-a" },
+    }),
+    {
+      skipPublish: false,
+      publishTag: "folderbase-backfill-0-5-0-Ba",
+      cleanupTag: "folderbase-backfill-0-5-0-Ba",
+      advanceChannel: false,
+    },
+  );
+});
+
+test("semver compares arbitrary-length numeric prerelease identifiers exactly", () => {
+  assert.deepEqual(
+    decideNpmPublication({
+      packageVersion: "0.5.0-rc.9007199254740993",
+      channel: "next",
+      localIntegrity: integrity,
+      publishedVersion: null,
+      publishedIntegrity: null,
+      distTags: { latest: "0.4.0", next: "0.5.0-rc.9007199254740992" },
+    }),
+    {
+      skipPublish: false,
+      publishTag: "next",
+      cleanupTag: null,
+      advanceChannel: true,
+    },
+  );
+});
+
+test("semver compares arbitrary-length core identifiers exactly", () => {
+  assert.deepEqual(
+    decideNpmPublication({
+      packageVersion: "9007199254740993.0.0",
+      channel: "latest",
+      localIntegrity: integrity,
+      publishedVersion: null,
+      publishedIntegrity: null,
+      distTags: { latest: "9007199254740992.0.0" },
+    }),
+    {
+      skipPublish: false,
+      publishTag: "latest",
+      cleanupTag: null,
+      advanceChannel: true,
+    },
+  );
+});
+
+test("semver rejects numeric prerelease identifiers with leading zeroes", () => {
+  assert.throws(
+    () =>
+      decideNpmPublication({
+        packageVersion: "0.5.0-rc.01",
+        channel: "next",
+        localIntegrity: integrity,
+        publishedVersion: null,
+        publishedIntegrity: null,
+        distTags: { latest: "0.4.0", next: "0.5.0-rc.1" },
+      }),
+    /invalid semantic version/,
   );
 });
 

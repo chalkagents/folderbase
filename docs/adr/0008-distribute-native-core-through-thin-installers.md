@@ -37,12 +37,14 @@ fails the release.
 
 Native installer releases are published only after GitHub release immutability
 is enabled for the repository. Before inspecting, creating, uploading to, or
-publishing a release, the workflow reads the repository setting and fails
-closed unless it is enabled. It then creates a draft, attaches the complete
-closed asset set, publishes it, and verifies that GitHub reports the result as
-immutable. A published mutable release is rejected rather than backfilled in
-place. Historical source-only releases created before this decision are not
-retroactively described as immutable.
+publishing a release, the workflow reads the repository setting with a
+repository-scoped fine-grained token that has only Administration read access;
+the ordinary workflow token cannot read this setting. The workflow fails
+closed unless immutability is enabled. It then uses the short-lived workflow
+token to create a draft, attach the complete closed asset set, publish it, and
+verify that GitHub reports the result as immutable. A published mutable release
+is rejected rather than backfilled in place. Historical source-only releases
+created before this decision are not retroactively described as immutable.
 
 `@folderbase/cli` is a public, dependency-free npm launcher whose version
 matches the native Core release. It:
@@ -71,7 +73,12 @@ Exact npm versions are immutable while `latest` and `next` are mutable discovery
 channels. Rerunning an already-published exact version verifies its integrity
 without requiring that it still owns a channel. Publishing an older missing
 version uses and then removes a temporary backfill tag so neither public
-channel can move backward.
+channel can move backward. The same tested decision explicitly controls
+GitHub's stable `Latest` marker; prereleases and older backfills always set it
+false. One repository-wide, non-cancelling `queue: max` publication concurrency
+group encloses the GitHub preflight and npm decision, publication, verification,
+and temporary-tag cleanup. The channel decision is therefore made only after
+the publication lock is acquired.
 
 The macOS App will separately bundle a compatible native Core inside its
 signed, notarized application boundary. Homebrew may provide a persistent CLI
@@ -93,6 +100,10 @@ version rather than fork Core.
   Because GitHub applies it only to future releases, an empty mutable release
   that predates native distribution must be removed before the same tag is
   assembled and published through the immutable draft workflow.
+- Release automation requires the
+  `FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN` secret. It is a fine-grained token
+  scoped to this repository with Administration read access only; release
+  writes continue to use GitHub's short-lived workflow token.
 - SHA-256 and HTTPS detect accidental corruption and bind the cache to the
   published release record. They do not substitute for platform code signing
   or protect against a hostile same-user account that can alter the launcher

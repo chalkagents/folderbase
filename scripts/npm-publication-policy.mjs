@@ -10,31 +10,51 @@ function parseSemver(version) {
   if (!match) {
     throw new Error(`invalid semantic version: ${version}`);
   }
+  const prerelease = match[4]?.split(".") ?? [];
+  if (
+    prerelease.some(
+      (identifier) =>
+        /^\d+$/.test(identifier) &&
+        identifier.length > 1 &&
+        identifier.startsWith("0"),
+    )
+  ) {
+    throw new Error(`invalid semantic version: ${version}`);
+  }
   return {
-    core: match.slice(1, 4).map(Number),
-    prerelease: match[4]?.split(".") ?? [],
+    core: match.slice(1, 4),
+    prerelease,
   };
+}
+
+function compareNumericIdentifier(left, right) {
+  if (left.length !== right.length) return left.length - right.length;
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function compareIdentifier(left, right) {
   const leftNumeric = /^(0|[1-9]\d*)$/.test(left);
   const rightNumeric = /^(0|[1-9]\d*)$/.test(right);
   if (leftNumeric && rightNumeric) {
-    return Number(left) - Number(right);
+    return compareNumericIdentifier(left, right);
   }
   if (leftNumeric !== rightNumeric) {
     return leftNumeric ? -1 : 1;
   }
-  return left.localeCompare(right);
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function compareSemver(leftVersion, rightVersion) {
   const left = parseSemver(leftVersion);
   const right = parseSemver(rightVersion);
   for (let index = 0; index < left.core.length; index += 1) {
-    if (left.core[index] !== right.core[index]) {
-      return left.core[index] - right.core[index];
-    }
+    const comparison = compareNumericIdentifier(
+      left.core[index],
+      right.core[index],
+    );
+    if (comparison !== 0) return comparison;
   }
   if (left.prerelease.length === 0 || right.prerelease.length === 0) {
     if (left.prerelease.length === right.prerelease.length) return 0;
@@ -83,12 +103,22 @@ export function decideNpmPublication(input) {
     }
     const backfillTag = backfillTagFor(packageVersion);
     const cleanupTag = distTags[backfillTag] === packageVersion ? backfillTag : null;
-    return { skipPublish: true, publishTag: null, cleanupTag };
+    return {
+      skipPublish: true,
+      publishTag: null,
+      cleanupTag,
+      advanceChannel: distTags[channel] === packageVersion,
+    };
   }
 
   const selectedVersion = distTags[channel];
   if (!selectedVersion) {
-    return { skipPublish: false, publishTag: channel, cleanupTag: null };
+    return {
+      skipPublish: false,
+      publishTag: channel,
+      cleanupTag: null,
+      advanceChannel: true,
+    };
   }
   const comparison = compareSemver(packageVersion, selectedVersion);
   if (comparison === 0) {
@@ -97,11 +127,21 @@ export function decideNpmPublication(input) {
     );
   }
   if (comparison > 0) {
-    return { skipPublish: false, publishTag: channel, cleanupTag: null };
+    return {
+      skipPublish: false,
+      publishTag: channel,
+      cleanupTag: null,
+      advanceChannel: true,
+    };
   }
 
   const cleanupTag = backfillTagFor(packageVersion);
-  return { skipPublish: false, publishTag: cleanupTag, cleanupTag };
+  return {
+    skipPublish: false,
+    publishTag: cleanupTag,
+    cleanupTag,
+    advanceChannel: false,
+  };
 }
 
 async function readStandardInput() {

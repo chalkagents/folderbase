@@ -8,7 +8,18 @@ require_release_fragment() {
   local fragment=$1
   local message=$2
 
-  if ! grep -Fq -- "$fragment" "$release_workflow"; then
+  if ! awk -v fragment="$fragment" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    line !~ /^#/ && line !~ /^run:[[:space:]]*#/ && index(line, fragment) {
+      found = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
@@ -20,10 +31,104 @@ require_release_fragment_minimum_count() {
   local message=$3
   local actual
 
-  actual=$(grep -Fc -- "$fragment" "$release_workflow" || true)
+  actual=$(awk -v fragment="$fragment" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    line !~ /^#/ && line !~ /^run:[[:space:]]*#/ && index(line, fragment) {
+      count += 1
+    }
+    END {
+      print count + 0
+    }
+  ' "$release_workflow")
   if [[ "$actual" -lt "$minimum" ]]; then
     printf '%s (expected at least %s, found %s)\n' \
       "$message" "$minimum" "$actual" >&2
+    exit 1
+  fi
+}
+
+require_release_step_fragment_minimum_count() {
+  local step_name=$1
+  local fragment=$2
+  local minimum=$3
+  local message=$4
+  local actual
+
+  actual=$(awk -v step_name="$step_name" -v fragment="$fragment" '
+    $0 == "      - name: " step_name {
+      in_step = 1
+      next
+    }
+    in_step && $0 ~ /^      - name:/ {
+      exit
+    }
+    in_step {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    in_step && line !~ /^#/ && line !~ /^run:[[:space:]]*#/ && index(line, fragment) {
+      count += 1
+    }
+    END {
+      print count + 0
+    }
+  ' "$release_workflow")
+  if [[ "$actual" -lt "$minimum" ]]; then
+    printf '%s (expected at least %s, found %s)\n' \
+      "$message" "$minimum" "$actual" >&2
+    exit 1
+  fi
+}
+
+reject_release_step_fragment() {
+  local step_name=$1
+  local fragment=$2
+  local message=$3
+
+  if awk -v step_name="$step_name" -v fragment="$fragment" '
+    $0 == "      - name: " step_name {
+      in_step = 1
+      next
+    }
+    in_step && $0 ~ /^      - name:/ {
+      exit
+    }
+    in_step {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    in_step && line !~ /^#/ && index(line, fragment) {
+      found = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$release_workflow"; then
+    printf '%s\n' "$message" >&2
+    exit 1
+  fi
+}
+
+require_release_step_before() {
+  local first_step=$1
+  local second_step=$2
+  local message=$3
+
+  if ! awk -v first_step="$first_step" -v second_step="$second_step" '
+    $0 == "      - name: " first_step && !first_seen {
+      first_seen = NR
+    }
+    $0 == "      - name: " second_step && !second_seen {
+      second_seen = NR
+    }
+    END {
+      exit first_seen && second_seen && first_seen < second_seen ? 0 : 1
+    }
+  ' "$release_workflow"; then
+    printf '%s\n' "$message" >&2
     exit 1
   fi
 }
@@ -41,7 +146,11 @@ require_release_step_fragment() {
     in_step && $0 ~ /^      - name:/ {
       exit
     }
-    in_step && index($0, fragment) {
+    in_step {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    in_step && line !~ /^#/ && line !~ /^run:[[:space:]]*#/ && index(line, fragment) {
       found = 1
     }
     END {
@@ -53,28 +162,53 @@ require_release_step_fragment() {
   fi
 }
 
-require_release_step_fragment_before() {
-  local step_name=$1
-  local required_fragment=$2
-  local boundary_fragment=$3
-  local message=$4
+require_release_job_fragment() {
+  local job_name=$1
+  local fragment=$2
+  local message=$3
 
-  if ! awk -v step_name="$step_name" -v required="$required_fragment" -v boundary="$boundary_fragment" '
-    $0 == "      - name: " step_name {
-      in_step = 1
+  if ! awk -v job_name="$job_name" -v fragment="$fragment" '
+    $0 == "  " job_name ":" {
+      in_job = 1
       next
     }
-    in_step && $0 ~ /^      - name:/ {
+    in_job && $0 ~ /^  [^ ]/ {
       exit
     }
-    in_step && index($0, required) && !boundary_seen {
-      found = 1
+    in_job {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
     }
-    in_step && index($0, boundary) {
-      boundary_seen = 1
+    in_job && line !~ /^#/ && index(line, fragment) {
+      found = 1
     }
     END {
       exit found ? 0 : 1
+    }
+  ' "$release_workflow"; then
+    printf '%s\n' "$message" >&2
+    exit 1
+  fi
+}
+
+require_release_fragment_only_after_step() {
+  local step_name=$1
+  local fragment=$2
+  local message=$3
+
+  if ! awk -v step_name="$step_name" -v fragment="$fragment" '
+    $0 == "      - name: " step_name {
+      gate_seen = 1
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    line !~ /^#/ && index(line, fragment) && !gate_seen {
+      invalid = 1
+    }
+    END {
+      exit invalid ? 1 : 0
     }
   ' "$release_workflow"; then
     printf '%s\n' "$message" >&2
@@ -148,7 +282,7 @@ require_release_fragment \
   "The exact tagged native CLI must validate its ordinary-folder result before publication."
 require_release_step_fragment \
   "Publish GitHub release artifacts" \
-  'github_release_flags+=(--prerelease --latest=false)' \
+  'github_release_flags+=(--prerelease)' \
   "Semver prereleases must create a GitHub prerelease that cannot become latest."
 require_release_fragment \
   'npm_dist_tag=next' \
@@ -159,13 +293,69 @@ require_release_step_fragment \
   "The publication step must prove the final GitHub release is immutable."
 require_release_step_fragment \
   "Publish GitHub release artifacts" \
-  'github_release_flags=(--draft)' \
-  "New GitHub releases must be assembled as drafts before publication."
-require_release_step_fragment_before \
+  'GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_channel }}' \
+  "GitHub Latest must consume the tested monotonic channel decision."
+require_release_step_fragment_minimum_count \
   "Publish GitHub release artifacts" \
+  '--latest="$GITHUB_LATEST"' \
+  2 \
+  "GitHub Latest must be set explicitly for new and resumed releases."
+require_release_step_fragment \
+  "Publish GitHub release artifacts" \
+  'GITHUB_LATEST=false' \
+  "GitHub prereleases must never become Latest."
+require_release_step_fragment \
+  "Publish GitHub release artifacts" \
+  'github_release_flags=(--draft --latest="$GITHUB_LATEST")' \
+  "New GitHub releases must be assembled as drafts before publication."
+require_release_step_fragment \
+  "Require repository immutable releases" \
   'gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '\''.enabled'\''' \
-  'if gh release view "$RELEASE_TAG"' \
   "Repository immutability must be required before publication begins."
+require_release_step_fragment \
+  "Require repository immutable releases" \
+  'GH_TOKEN: ${{ secrets.FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN }}' \
+  "The immutable-release preflight requires a repository-scoped Administration-read token."
+require_release_step_fragment \
+  "Require repository immutable releases" \
+  ')" = true' \
+  "The immutable-release setting must equal literal true."
+reject_release_step_fragment \
+  "Require repository immutable releases" \
+  "continue-on-error: true" \
+  "The immutable-release preflight must fail closed."
+require_release_step_fragment \
+  "Publish GitHub release artifacts" \
+  'GH_TOKEN: ${{ github.token }}' \
+  "GitHub release writes must use the short-lived workflow token."
+require_release_fragment_only_after_step \
+  "Require repository immutable releases" \
+  "gh release " \
+  "Every GitHub release operation must occur after the immutable-release preflight."
+require_release_job_fragment \
+  "publish" \
+  "group: folderbase-publication" \
+  "GitHub and npm publication must be serialized in one shared concurrency group."
+require_release_job_fragment \
+  "publish" \
+  "cancel-in-progress: false" \
+  "A publication in progress must never be cancelled by another release."
+require_release_job_fragment \
+  "publish" \
+  "queue: max" \
+  "The serialized publication group must retain the maximal waiter queue."
+require_release_step_before \
+  "Check immutable npm publication state" \
+  "Publish GitHub release artifacts" \
+  "The monotonic npm/GitHub channel decision must precede GitHub publication."
+require_release_fragment_only_after_step \
+  "Check immutable npm publication state" \
+  "gh release " \
+  "Every GitHub release operation must follow the monotonic channel decision."
+require_release_step_fragment \
+  "Check immutable npm publication state" \
+  ".advanceChannel" \
+  "The tested publication decision must expose whether the channel may advance."
 require_release_step_fragment \
   "Check immutable npm publication state" \
   'npm pack --dry-run --json' \

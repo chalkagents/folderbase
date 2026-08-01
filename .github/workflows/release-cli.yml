@@ -121,6 +121,10 @@ jobs:
   publish:
     name: Publish release and npm launcher
     needs: build-native
+    concurrency:
+      group: folderbase-publication
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
@@ -192,90 +196,17 @@ jobs:
           node scripts/test-npm-cli-package.mjs
           node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs
 
-      - name: Publish GitHub release artifacts
+      - name: Require repository immutable releases
         env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_PRERELEASE: ${{ steps.release-metadata.outputs.github_prerelease }}
+          GH_TOKEN: ${{ secrets.FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN }}
         shell: bash
         run: |
-          immutable_releases_enabled="$(
-            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'
-          )"
-          if [[ "$immutable_releases_enabled" != true ]]; then
-            echo "Repository immutable releases must be enabled before publication." >&2
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN is required." >&2
             exit 1
           fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            release_metadata="$(
-              gh release view "$RELEASE_TAG" \
-                --json isDraft,isImmutable,isPrerelease
-            )"
-            existing_draft="$(printf '%s' "$release_metadata" | jq -r '.isDraft')"
-            existing_immutable="$(printf '%s' "$release_metadata" | jq -r '.isImmutable')"
-            existing_prerelease="$(printf '%s' "$release_metadata" | jq -r '.isPrerelease')"
-            test "$existing_prerelease" = "$GITHUB_PRERELEASE"
-            if [[ "$existing_draft" != true ]]; then
-              test "$existing_immutable" = true
-            fi
-          else
-            existing_draft=true
-            github_release_flags=(--draft)
-            if [[ "$GITHUB_PRERELEASE" == true ]]; then
-              github_release_flags+=(--prerelease --latest=false)
-            fi
-            gh release create "$RELEASE_TAG" \
-              --generate-notes \
-              --title "Folderbase Core $RELEASE_TAG" \
-              --verify-tag \
-              "${github_release_flags[@]}"
-          fi
-
-          remote_assets="$(mktemp -d)"
-          trap 'rm -rf "$remote_assets"' EXIT
-          expected_assets="$(find dist -maxdepth 1 -type f -exec basename {} \; | sort)"
-          published_assets="$(
-            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort
-          )"
-          if [[ "$existing_draft" == true ]]; then
-            while IFS= read -r published_asset; do
-              [[ -z "$published_asset" ]] && continue
-              if ! grep -Fqx "$published_asset" <<<"$expected_assets"; then
-                echo "Draft release contains unexpected asset $published_asset." >&2
-                exit 1
-              fi
-            done <<<"$published_assets"
-            for asset in dist/*; do
-              asset_name="$(basename "$asset")"
-              if grep -Fqx "$asset_name" <<<"$published_assets"; then
-                gh release download "$RELEASE_TAG" \
-                  --dir "$remote_assets" \
-                  --pattern "$asset_name"
-                cmp "$asset" "$remote_assets/$asset_name"
-              else
-                gh release upload "$RELEASE_TAG" "$asset"
-              fi
-            done
-            release_edit_flags=(--draft=false)
-            if [[ "$GITHUB_PRERELEASE" == true ]]; then
-              release_edit_flags+=(--prerelease=true --latest=false)
-            else
-              release_edit_flags+=(--prerelease=false)
-            fi
-            gh release edit "$RELEASE_TAG" "${release_edit_flags[@]}"
-          else
-            test "$published_assets" = "$expected_assets"
-            for asset in dist/*; do
-              asset_name="$(basename "$asset")"
-              gh release download "$RELEASE_TAG" \
-                --dir "$remote_assets" \
-                --pattern "$asset_name"
-              cmp "$asset" "$remote_assets/$asset_name"
-            done
-          fi
-
           test "$(
-            gh release view "$RELEASE_TAG" --json isImmutable --jq '.isImmutable'
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'
           )" = true
 
       - name: Use an OIDC-capable npm client
@@ -284,7 +215,6 @@ jobs:
 
       - name: Check immutable npm publication state
         id: npm-publication
-        if: github.event_name == 'push' || inputs.publish_npm
         env:
           NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
         shell: bash
@@ -348,6 +278,89 @@ jobs:
           echo "skip_publish=$(printf '%s' "$decision" | jq -r '.skipPublish')" >> "$GITHUB_OUTPUT"
           echo "publish_tag=$(printf '%s' "$decision" | jq -r '.publishTag // ""')" >> "$GITHUB_OUTPUT"
           echo "cleanup_tag=$(printf '%s' "$decision" | jq -r '.cleanupTag // ""')" >> "$GITHUB_OUTPUT"
+          echo "advance_channel=$(printf '%s' "$decision" | jq -r '.advanceChannel')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_PRERELEASE: ${{ steps.release-metadata.outputs.github_prerelease }}
+          GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_channel }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_PRERELEASE" == true ]]; then
+            GITHUB_LATEST=false
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            release_metadata="$(
+              gh release view "$RELEASE_TAG" \
+                --json isDraft,isImmutable,isPrerelease
+            )"
+            existing_draft="$(printf '%s' "$release_metadata" | jq -r '.isDraft')"
+            existing_immutable="$(printf '%s' "$release_metadata" | jq -r '.isImmutable')"
+            existing_prerelease="$(printf '%s' "$release_metadata" | jq -r '.isPrerelease')"
+            test "$existing_prerelease" = "$GITHUB_PRERELEASE"
+            if [[ "$existing_draft" != true ]]; then
+              test "$existing_immutable" = true
+            fi
+          else
+            existing_draft=true
+            github_release_flags=(--draft --latest="$GITHUB_LATEST")
+            if [[ "$GITHUB_PRERELEASE" == true ]]; then
+              github_release_flags+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" \
+              --generate-notes \
+              --title "Folderbase Core $RELEASE_TAG" \
+              --verify-tag \
+              "${github_release_flags[@]}"
+          fi
+
+          remote_assets="$(mktemp -d)"
+          trap 'rm -rf "$remote_assets"' EXIT
+          expected_assets="$(find dist -maxdepth 1 -type f -exec basename {} \; | sort)"
+          published_assets="$(
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort
+          )"
+          if [[ "$existing_draft" == true ]]; then
+            while IFS= read -r published_asset; do
+              [[ -z "$published_asset" ]] && continue
+              if ! grep -Fqx "$published_asset" <<<"$expected_assets"; then
+                echo "Draft release contains unexpected asset $published_asset." >&2
+                exit 1
+              fi
+            done <<<"$published_assets"
+            for asset in dist/*; do
+              asset_name="$(basename "$asset")"
+              if grep -Fqx "$asset_name" <<<"$published_assets"; then
+                gh release download "$RELEASE_TAG" \
+                  --dir "$remote_assets" \
+                  --pattern "$asset_name"
+                cmp "$asset" "$remote_assets/$asset_name"
+              else
+                gh release upload "$RELEASE_TAG" "$asset"
+              fi
+            done
+            release_edit_flags=(--draft=false --latest="$GITHUB_LATEST")
+            if [[ "$GITHUB_PRERELEASE" == true ]]; then
+              release_edit_flags+=(--prerelease=true)
+            else
+              release_edit_flags+=(--prerelease=false)
+            fi
+            gh release edit "$RELEASE_TAG" "${release_edit_flags[@]}"
+          else
+            test "$published_assets" = "$expected_assets"
+            for asset in dist/*; do
+              asset_name="$(basename "$asset")"
+              gh release download "$RELEASE_TAG" \
+                --dir "$remote_assets" \
+                --pattern "$asset_name"
+              cmp "$asset" "$remote_assets/$asset_name"
+            done
+          fi
+
+          test "$(
+            gh release view "$RELEASE_TAG" --json isImmutable --jq '.isImmutable'
+          )" = true
 
       - name: Publish the public npm launcher
         if: (github.event_name == 'push' || inputs.publish_npm) && steps.npm-publication.outputs.skip_publish != 'true'

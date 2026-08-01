@@ -59,26 +59,7 @@ test("a publication-policy call outside its named step cannot satisfy policy", a
   }
 });
 
-test("an immutable check outside the GitHub publication step cannot satisfy policy", async () => {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
-  try {
-    const fixture = join(temporaryRoot, "release.yml");
-    const source = await readFile(releaseWorkflow, "utf8");
-    const critical = "--json isImmutable --jq '.isImmutable'";
-    assert(source.includes(critical));
-    await writeFile(
-      fixture,
-      `${source.replace(critical, "--json isDraft --jq '.isDraft'")}\n# ${critical}\n`,
-    );
-    const result = await runPolicy(fixture);
-    assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /final GitHub release is immutable/);
-  } finally {
-    await rm(temporaryRoot, { recursive: true, force: true });
-  }
-});
-
-test("GitHub immutability must be enabled before release publication begins", async () => {
+test("a commented immutable-release preflight cannot satisfy policy", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "release.yml");
@@ -86,10 +67,188 @@ test("GitHub immutability must be enabled before release publication begins", as
     const critical =
       'gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq \'.enabled\'';
     assert(source.includes(critical));
-    await writeFile(fixture, source.replace(critical, "printf false"));
+    await writeFile(
+      fixture,
+      source.replace(critical, `# ${critical}`),
+    );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /before publication/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a release operation before the immutable preflight is rejected", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Unsafe early release access\n        run: gh release view "$RELEASE_TAG"\n\n${boundary}`,
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /after the immutable-release preflight/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("publications must share one non-cancelling concurrency group", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = "      group: folderbase-publication";
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, "      group: per-ref"));
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /serialized/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("all publication waiters use the maximal FIFO queue", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = "      queue: max";
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, "      queue: single"));
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /queue/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the Administration-read token cannot become a release-write token", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = "GH_TOKEN: ${{ github.token }}";
+    assert(source.includes(critical));
+    await writeFile(
+      fixture,
+      source.replace(
+        critical,
+        "GH_TOKEN: ${{ secrets.FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN }}",
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /workflow token/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the immutable-release preflight cannot use the default workflow token", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical =
+      "GH_TOKEN: ${{ secrets.FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN }}";
+    assert(source.includes(critical));
+    await writeFile(
+      fixture,
+      source.replace(critical, "GH_TOKEN: ${{ github.token }}"),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Administration-read token/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the immutable-release setting must equal literal true", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = ')" = true';
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, ')" != false'));
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /literal true/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the immutable-release preflight cannot continue on error", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(boundary, `${boundary}\n        continue-on-error: true`),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /fail closed/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the monotonic channel decision precedes every GitHub release operation", async () => {
+  const source = await readFile(releaseWorkflow, "utf8");
+  const decision = "      - name: Check immutable npm publication state";
+  const publication = "      - name: Publish GitHub release artifacts";
+  assert(source.includes(decision));
+  assert(source.includes(publication));
+  assert(
+    source.indexOf(decision) < source.indexOf(publication),
+    "npm/GitHub channel policy must run before GitHub publication",
+  );
+});
+
+test("GitHub Latest follows the tested monotonic channel decision", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = '--latest="$GITHUB_LATEST"';
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replaceAll(critical, "--latest=true"));
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /GitHub Latest/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a commented npm publish command cannot satisfy policy", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = 'npm publish --access public --tag "$PUBLISH_TAG"';
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, `# ${critical}`));
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /publication must use/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
