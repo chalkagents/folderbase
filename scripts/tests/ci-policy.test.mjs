@@ -268,6 +268,35 @@ test("a same-step release operation before immutable proof is rejected", async (
   }
 });
 
+test("a semicolon-comment decoy cannot bypass immutable proof ordering", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Semicolon comment decoy
+        shell: bash
+        run: |
+          true;# )" = true
+          true;# echo "advance_github_latest=
+          gh release view "$RELEASE_TAG"
+
+${boundary}`,
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /immutable-release proof/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("a same-step release operation before the channel decision is rejected", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
@@ -278,6 +307,31 @@ test("a same-step release operation before the channel decision is rejected", as
     await writeFile(
       fixture,
       source.replace(marker, `          gh release view "$RELEASE_TAG"\n${marker}`),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /channel decision/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a semicolon-comment decoy cannot bypass channel decision ordering", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const marker =
+      '          package_name="$(node -p "require(\'./package.json\').name")"';
+    assert(source.includes(marker));
+    await writeFile(
+      fixture,
+      source.replace(
+        marker,
+        `          true;# echo "advance_github_latest=
+          gh release view "$RELEASE_TAG"
+${marker}`,
+      ),
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);

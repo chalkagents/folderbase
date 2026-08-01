@@ -28,7 +28,7 @@ awk '
         in_double = !in_double
         continue
       }
-      if (!in_single && !in_double && character == "#" && (i == 1 || previous ~ /[[:space:]]/)) {
+      if (!in_single && !in_double && character == "#" && (i == 1 || previous ~ /[[:space:]|&;()<>]/)) {
         return substr(value, 1, i - 1)
       }
     }
