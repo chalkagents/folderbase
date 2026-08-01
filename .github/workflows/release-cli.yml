@@ -198,6 +198,14 @@ jobs:
           GITHUB_PRERELEASE: ${{ steps.release-metadata.outputs.github_prerelease }}
         shell: bash
         run: |
+          immutable_releases_enabled="$(
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'
+          )"
+          if [[ "$immutable_releases_enabled" != true ]]; then
+            echo "Repository immutable releases must be enabled before publication." >&2
+            exit 1
+          fi
+
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             release_metadata="$(
               gh release view "$RELEASE_TAG" \

@@ -36,11 +36,13 @@ byte-for-byte existing asset, but a different artifact under the same name
 fails the release.
 
 Native installer releases are published only after GitHub release immutability
-is enabled for the repository. The workflow creates a draft, attaches the
-complete closed asset set, publishes it, and verifies that GitHub reports the
-result as immutable. A published mutable release is rejected rather than
-backfilled in place. Historical source-only releases created before this
-decision are not retroactively described as immutable.
+is enabled for the repository. Before inspecting, creating, uploading to, or
+publishing a release, the workflow reads the repository setting and fails
+closed unless it is enabled. It then creates a draft, attaches the complete
+closed asset set, publishes it, and verifies that GitHub reports the result as
+immutable. A published mutable release is rejected rather than backfilled in
+place. Historical source-only releases created before this decision are not
+retroactively described as immutable.
 
 `@folderbase/cli` is a public, dependency-free npm launcher whose version
 matches the native Core release. It:

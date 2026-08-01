@@ -53,6 +53,35 @@ require_release_step_fragment() {
   fi
 }
 
+require_release_step_fragment_before() {
+  local step_name=$1
+  local required_fragment=$2
+  local boundary_fragment=$3
+  local message=$4
+
+  if ! awk -v step_name="$step_name" -v required="$required_fragment" -v boundary="$boundary_fragment" '
+    $0 == "      - name: " step_name {
+      in_step = 1
+      next
+    }
+    in_step && $0 ~ /^      - name:/ {
+      exit
+    }
+    in_step && index($0, required) && !boundary_seen {
+      found = 1
+    }
+    in_step && index($0, boundary) {
+      boundary_seen = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$release_workflow"; then
+    printf '%s\n' "$message" >&2
+    exit 1
+  fi
+}
+
 if ! grep -Fqx "  pull_request:" "$workflow"; then
   echo "CI must run for pull requests." >&2
   exit 1
@@ -132,6 +161,11 @@ require_release_step_fragment \
   "Publish GitHub release artifacts" \
   'github_release_flags=(--draft)' \
   "New GitHub releases must be assembled as drafts before publication."
+require_release_step_fragment_before \
+  "Publish GitHub release artifacts" \
+  'gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '\''.enabled'\''' \
+  'if gh release view "$RELEASE_TAG"' \
+  "Repository immutability must be required before publication begins."
 require_release_step_fragment \
   "Check immutable npm publication state" \
   'npm pack --dry-run --json' \

@@ -77,3 +77,20 @@ test("an immutable check outside the GitHub publication step cannot satisfy poli
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test("GitHub immutability must be enabled before release publication begins", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical =
+      'gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq \'.enabled\'';
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, "printf false"));
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /before publication/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
