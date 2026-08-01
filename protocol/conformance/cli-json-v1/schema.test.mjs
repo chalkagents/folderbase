@@ -41,6 +41,9 @@ test("inspection validation requires the complete stable inventory and permits a
     () => assertJsonSchema(inspection, schema, "inspection"),
     /versioned_file_count/,
   );
+  inspection.inventory.versioned_file_count = 0;
+  inspection.classified_paths = [42];
+  assert.throws(() => assertJsonSchema(inspection, schema, "inspection"));
 });
 
 test("workspace listing accepts symlinks and IDs require canonical UUID text", () => {
@@ -118,6 +121,36 @@ test("protocol checks select exactly one valid or invalid result branch", () => 
       },
       schema,
       "protocolCheck",
+    ),
+  );
+});
+
+test("upgrade plan and result have stable reviewed-digest shapes", () => {
+  const base = {
+    root: "/tmp/project-2",
+    folderbase_id: "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475",
+    from_protocol_version: "0.1.0",
+    to_protocol_version: "0.5.0",
+    changed_paths: [".folderbase/manifest.json"],
+  };
+  assert.doesNotThrow(() =>
+    assertJsonSchema(
+      {
+        ...base,
+        plan_digest: { algorithm: "sha256", digest: "a".repeat(64) },
+      },
+      schema,
+      "upgradePlan",
+    ),
+  );
+  assert.doesNotThrow(() =>
+    assertJsonSchema(
+      {
+        ...base,
+        applied_plan_digest: { algorithm: "sha256", digest: "a".repeat(64) },
+      },
+      schema,
+      "upgradeResult",
     ),
   );
 });

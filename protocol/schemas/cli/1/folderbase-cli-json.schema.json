@@ -9,6 +9,8 @@
     { "$ref": "#/$defs/attestation" },
     { "$ref": "#/$defs/initializationPlan" },
     { "$ref": "#/$defs/initializationResult" },
+    { "$ref": "#/$defs/upgradePlan" },
+    { "$ref": "#/$defs/upgradeResult" },
     { "$ref": "#/$defs/validation" },
     { "$ref": "#/$defs/protocolCheck" },
     { "$ref": "#/$defs/workspaceListing" },
@@ -76,12 +78,56 @@
           },
           "additionalProperties": true
         },
-        "classified_paths": { "type": "array" },
-        "git_repositories": { "type": "array" },
-        "context_files": { "type": "array" },
-        "boundary_hints": { "type": "array" },
-        "reconstructable_trees": { "type": "array" },
-        "nested_folderbases": { "type": "array" },
+        "classified_paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "classification", "reason", "bytes"],
+            "properties": {
+              "path": { "type": "string" },
+              "classification": { "enum": ["generated", "secret_shaped", "temporary", "large", "versioned"] },
+              "reason": { "type": "string" },
+              "bytes": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          }
+        },
+        "git_repositories": { "type": "array", "items": { "type": "string" } },
+        "context_files": { "type": "array", "items": { "type": "string" } },
+        "boundary_hints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "kind", "reason"],
+            "properties": {
+              "path": { "type": "string" },
+              "kind": { "type": "string" },
+              "reason": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "reconstructable_trees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": { "path": { "type": "string" } },
+            "additionalProperties": true
+          }
+        },
+        "nested_folderbases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "state"],
+            "properties": {
+              "path": { "type": "string" },
+              "state": { "const": "unchecked" }
+            },
+            "additionalProperties": true
+          }
+        },
         "warnings": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": true
@@ -122,11 +168,53 @@
         "root": { "type": "string" },
         "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
         "folderbase_name": { "type": "string" },
-        "folderbase_kind": { "type": "string" },
-        "directories": { "type": "array" },
-        "writes": { "type": "array" },
-        "template_preconditions": { "type": "array" },
-        "preserved_paths": { "type": "array" },
+        "folderbase_kind": { "enum": ["person", "organization", "engagement", "project", "customer", "temporary", "custom"] },
+        "directories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "purpose"],
+            "properties": {
+              "path": { "type": "string" },
+              "purpose": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "writes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "purpose", "content"],
+            "properties": {
+              "path": { "type": "string" },
+              "purpose": { "type": "string" },
+              "content": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "template_preconditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "kind"],
+            "properties": {
+              "path": { "type": "string" },
+              "kind": { "enum": ["directory", "text"] }
+            },
+            "additionalProperties": true
+          }
+        },
+        "preserved_paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": { "path": { "type": "string" } },
+            "additionalProperties": true
+          }
+        },
         "warnings": { "type": "array", "items": { "type": "string" } },
         "plan_digest": {
           "type": "object",
@@ -166,6 +254,48 @@
       },
       "additionalProperties": true
     },
+    "upgradePlan": {
+      "type": "object",
+      "required": ["root", "folderbase_id", "from_protocol_version", "to_protocol_version", "changed_paths", "plan_digest"],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "from_protocol_version": { "enum": ["0.1.0", "0.2.0"] },
+        "to_protocol_version": { "const": "0.5.0" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } },
+        "plan_digest": {
+          "type": "object",
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "upgradeResult": {
+      "type": "object",
+      "required": ["root", "folderbase_id", "from_protocol_version", "to_protocol_version", "changed_paths", "applied_plan_digest"],
+      "properties": {
+        "root": { "type": "string" },
+        "folderbase_id": { "type": "string", "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "from_protocol_version": { "enum": ["0.1.0", "0.2.0"] },
+        "to_protocol_version": { "const": "0.5.0" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } },
+        "applied_plan_digest": {
+          "type": "object",
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
     "validation": {
       "type": "object",
       "required": ["root", "level", "valid", "findings"],
@@ -173,7 +303,20 @@
         "root": { "type": "string" },
         "level": { "const": "shallow" },
         "valid": { "type": "boolean" },
-        "findings": { "type": "array" }
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "severity", "path", "message"],
+            "properties": {
+              "code": { "type": "string", "minLength": 1 },
+              "severity": { "enum": ["error", "warning"] },
+              "path": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+              "message": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": true
+          }
+        }
       },
       "additionalProperties": true
     },

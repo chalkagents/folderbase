@@ -19,6 +19,6 @@ fn public_runner_accepts_the_reference_cli_through_only_its_process_interface() 
             "\"format\": \"folderbase-conformance-report-v1\"",
         ))
         .stdout(predicate::str::contains("\"protocol_cases\": 96"))
-        .stdout(predicate::str::contains("\"passed\": 106"))
+        .stdout(predicate::str::contains("\"passed\": 108"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 }

@@ -29,6 +29,8 @@
     { "id": "inspect-ordinary-folder", "command": "inspect" },
     { "id": "plan-read-only-initialization", "command": "init.plan" },
     { "id": "apply-reviewed-initialization", "command": "init.apply" },
+    { "id": "plan-reviewed-upgrade", "command": "upgrade.plan" },
+    { "id": "apply-reviewed-upgrade", "command": "upgrade.apply" },
     { "id": "attest-exact-root", "command": "attest" },
     { "id": "validate-shallow", "command": "validate.shallow" },
     { "id": "list-workspace", "command": "workspace.list" },

@@ -20,6 +20,8 @@ does not advertise.
 - `attest PATH --json`
 - `init PATH --dry-run --json`
 - `init PATH --expected-plan-digest DIGEST --json`
+- `upgrade PATH --dry-run --json`
+- `upgrade PATH --expected-plan-digest DIGEST --json`
 - `validate PATH --level shallow --json`
 - `protocol contract --json`
 - `protocol check chunk-manifest --stdin --json`

@@ -63,6 +63,8 @@ function validate(value, schema, rootSchema, path) {
     if (schema.minimum !== undefined) assert.ok(value >= schema.minimum, `${path} is below its minimum`);
   } else if (schema.type === "boolean") {
     assert.equal(typeof value, "boolean", `${path} must be a boolean`);
+  } else if (schema.type === "null") {
+    assert.equal(value, null, `${path} must be null`);
   }
   if (schema.oneOf) {
     const matching = schema.oneOf.filter((candidate) => matches(value, candidate, rootSchema, path));

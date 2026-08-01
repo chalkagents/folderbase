@@ -96,7 +96,7 @@ node protocol/conformance/cli-json-v1/run.mjs \
   --implementation /path/to/folderbase
 ```
 
-The runner exercises 96 portable protocol fixtures and 10 process/filesystem
+The runner exercises 96 portable protocol fixtures and 12 process/filesystem
 behaviors. A successful report has `failed: 0` and exits `0`.
 
 Every CLI document is checked against the public JSON Schema. The behavior

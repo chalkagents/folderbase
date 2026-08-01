@@ -29,6 +29,25 @@ const NOTE_BYTES = "hello\n";
 const NOTE_SHA256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
 const UPDATED_BYTES = "updated\n";
 const UPDATED_SHA256 = "e06f60fa8cf5bea891e59dc0ed5b7af55b8cccd081ba9cfbca0ff1acadd9a47f";
+const LEGACY_MANIFEST = `{
+  "$schema": "https://folderbase.ai/protocol/0.1/folderbase.schema.json",
+  "protocol_version": "0.1.0",
+  "folderbase": {
+    "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475",
+    "name": "Project 2",
+    "kind": "project",
+    "status": "active",
+    "created_at": "2026-07-26T00:00:00Z",
+    "entry": "FOLDERBASE.md"
+  },
+  "policies": {
+    "availability": "keep_local",
+    "structural_changes": "approve",
+    "archive": "approve",
+    "cloud_sync": "disabled"
+  }
+}
+`;
 
 function implementationArgument(argv) {
   const flag = argv.indexOf("--implementation");
@@ -82,6 +101,9 @@ const cliSchema = JSON.parse(
 );
 const implementation = implementationArgument(process.argv.slice(2));
 const root = await realpath(await mkdtemp(join(tmpdir(), "folderbase-cli-conformance-")));
+const legacyRoot = await realpath(
+  await mkdtemp(join(tmpdir(), "folderbase-upgrade-conformance-")),
+);
 const notePath = join(root, "notes.md");
 const state = {};
 const handlers = {
@@ -105,8 +127,8 @@ const handlers = {
     const output = successJson(implementation, ["inspect", root, "--json"], "inspection");
     assert.equal(output.root, root);
     assertObject(output.inventory, "inspection inventory");
-    assert.equal(output.inventory.file_count, 1);
-    assert.equal(output.inventory.total_bytes, 6);
+    assert.ok(output.inventory.file_count >= 3);
+    assert.ok(output.inventory.total_bytes >= 6);
     for (const field of [
       "classified_paths",
       "git_repositories",
@@ -118,6 +140,10 @@ const handlers = {
     ]) {
       assert.ok(Array.isArray(output[field]), `${field} is an array`);
     }
+    assert.ok(output.classified_paths.length > 0, "classification item contract is exercised");
+    assert.ok(output.git_repositories.length > 0, "Git repository item contract is exercised");
+    assert.ok(output.context_files.length > 0, "context item contract is exercised");
+    assert.ok(output.reconstructable_trees.length > 0, "reconstructable item contract is exercised");
   },
   "plan-read-only-initialization": async () => {
     const output = successJson(
@@ -147,6 +173,44 @@ const handlers = {
     assert.ok(output.created_paths.includes(".folderbase/manifest.json"));
     assert.equal(await exists(join(root, ".folderbase", "manifest.json")), true);
     assert.equal(await readFile(notePath, "utf8"), NOTE_BYTES);
+  },
+  "plan-reviewed-upgrade": async () => {
+    const output = successJson(
+      implementation,
+      ["upgrade", legacyRoot, "--dry-run", "--json"],
+      "upgradePlan",
+    );
+    assert.equal(output.root, legacyRoot);
+    assert.equal(output.folderbase_id, "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c475");
+    assert.equal(output.from_protocol_version, "0.1.0");
+    assert.equal(output.to_protocol_version, "0.5.0");
+    assert.ok(output.changed_paths.includes(".folderbase/manifest.json"));
+    assert.equal(output.plan_digest.algorithm, "sha256");
+    assert.match(output.plan_digest.digest, SHA256);
+    assert.equal(
+      await readFile(join(legacyRoot, ".folderbase/manifest.json"), "utf8"),
+      LEGACY_MANIFEST,
+    );
+    assert.equal(await readFile(join(legacyRoot, "proposal.docx"), "utf8"), "ordinary bytes");
+    state.upgradePlanDigest = output.plan_digest.digest;
+  },
+  "apply-reviewed-upgrade": async () => {
+    assert.match(state.upgradePlanDigest, SHA256);
+    const output = successJson(
+      implementation,
+      ["upgrade", legacyRoot, "--expected-plan-digest", state.upgradePlanDigest, "--json"],
+      "upgradeResult",
+    );
+    assert.equal(output.from_protocol_version, "0.1.0");
+    assert.equal(output.to_protocol_version, "0.5.0");
+    assert.equal(output.applied_plan_digest.digest, state.upgradePlanDigest);
+    assert.equal(await readFile(join(legacyRoot, "FOLDERBASE.md"), "utf8"), "# Project 2\n");
+    assert.equal(await readFile(join(legacyRoot, ".folderbaseignore"), "utf8"), "node_modules/\n");
+    assert.equal(await readFile(join(legacyRoot, "proposal.docx"), "utf8"), "ordinary bytes");
+    const manifest = JSON.parse(
+      await readFile(join(legacyRoot, ".folderbase/manifest.json"), "utf8"),
+    );
+    assert.equal(manifest.protocol_version, "0.5.0");
   },
   "attest-exact-root": async () => {
     const output = successJson(implementation, ["attest", root, "--json"], "attestation");
@@ -334,6 +398,17 @@ async function runProtocolGroup(group) {
 
 try {
   await writeFile(notePath, NOTE_BYTES);
+  await writeFile(join(root, "README.md"), "# Project 2\n");
+  await writeFile(join(root, ".env"), "TOKEN=fixture\n");
+  await mkdir(join(root, "node_modules", "fixture"), { recursive: true });
+  await writeFile(join(root, "node_modules", "fixture", "index.js"), "export {};\n");
+  await mkdir(join(root, ".git"));
+  await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+  await mkdir(join(legacyRoot, ".folderbase"));
+  await writeFile(join(legacyRoot, ".folderbase", "manifest.json"), LEGACY_MANIFEST);
+  await writeFile(join(legacyRoot, "FOLDERBASE.md"), "# Project 2\n");
+  await writeFile(join(legacyRoot, ".folderbaseignore"), "node_modules/\n");
+  await writeFile(join(legacyRoot, "proposal.docx"), "ordinary bytes");
   for (const group of suite.artifact_groups) {
     await runProtocolGroup(group);
   }
@@ -353,6 +428,7 @@ try {
   }
 } finally {
   await rm(root, { recursive: true, force: true });
+  await rm(legacyRoot, { recursive: true, force: true });
 }
 
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

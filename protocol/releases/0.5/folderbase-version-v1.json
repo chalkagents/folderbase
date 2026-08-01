@@ -76,7 +76,7 @@
     },
     {
       "path": "crates/folderbase-cli/tests/public_conformance.rs",
-      "sha256": "2b7d40a7da2fbd5f9cf688822b0daa31d1419d4c36fb386c6b226297c17cee3c"
+      "sha256": "a262f9789ccec10859b8588d33e9f9017f8032c7f29c78271360dbee10989c21"
     },
     {
       "path": "crates/folderbase-cli/tests/transform_fixture.rs",
@@ -392,11 +392,11 @@
     },
     {
       "path": "docs/cli-json-v1.md",
-      "sha256": "a8286695ed201fb8095611262c9611209772123192460aac3eb703d3b6f2d4ec"
+      "sha256": "280388bee1db7a07e5274f69601882abcfd2ff82159f96e7a19c0a76abfefaad"
     },
     {
       "path": "docs/compatibility-v1.md",
-      "sha256": "3e3a7a961babcb3415baf7c3a05f76951ec57eff0c49fc4116aa0d665958fc93"
+      "sha256": "addef5f5bee9704553161869ca283b1e8651657a7ec423544c189dc7344dc676"
     },
     {
       "path": "docs/protocol-spec.md",
@@ -600,7 +600,7 @@
     },
     {
       "path": "protocol/compatibility/v1/contract.json",
-      "sha256": "f8d033f74a60ddcea35f87a5cc2da13f6fc3eefd8a792c4cfab702a103eabf8b"
+      "sha256": "51229ee7645f8f211e8da1c2a6ec94c00865140d338d175bf7cc832e65afa39a"
     },
     {
       "path": "protocol/conformance/chunk-manifest/README.md",
@@ -752,23 +752,23 @@
     },
     {
       "path": "protocol/conformance/cli-json-v1/README.md",
-      "sha256": "31945d1dee59c8abf6fe3ef5aabd5433208503228ca129a5705c4faab2115ce8"
+      "sha256": "596fafa121b67f7c8d5d8edca1fd5931b6c53e453ad7617880531f405ccd69a7"
     },
     {
       "path": "protocol/conformance/cli-json-v1/run.mjs",
-      "sha256": "8fa1f028054251214fbe539e3c7ea510331af96972756c369787f51e4d7e01c4"
+      "sha256": "2571763e07def60e7c376629dac54a77e00223d905c498349707f5aaed036779"
     },
     {
       "path": "protocol/conformance/cli-json-v1/schema.mjs",
-      "sha256": "a7a85c828069e626429e038d3b4bb25a8a347c6997d3b6e0545ea301b482bf27"
+      "sha256": "ff9a554eed7fb6042c0a3ac10ca796cad489c274c857e62a420314eac911bc9f"
     },
     {
       "path": "protocol/conformance/cli-json-v1/schema.test.mjs",
-      "sha256": "8feded76c4735d45265cb7a416a6b1a1169b8552ed95057482b3bd1f5a04e4e1"
+      "sha256": "5b802b2d0b27ddfe8e44f77916179d6f9e7c95f96db42fbb8d860806781d3d86"
     },
     {
       "path": "protocol/conformance/cli-json-v1/suite.json",
-      "sha256": "6808206e94c5db91b4c378cb9947fa020ee2113019d23ad1f45b6b3b724d6809"
+      "sha256": "8775685dc695b7b5c4a54fe687b6dde3a2679732e8effff7bf23984a3167a8c6"
     },
     {
       "path": "protocol/conformance/folderbase-version-0.5/README.md",
@@ -1092,7 +1092,7 @@
     },
     {
       "path": "protocol/schemas/cli/1/folderbase-cli-json.schema.json",
-      "sha256": "bf5c83c46b00dff565f3998c8071ce23fc61e7190a3efa0901dd073ce6d1f716"
+      "sha256": "1664975ee02fc329c52f5dbfbac46998181d2dc11548893c03ec4cc1fbdd33d5"
     },
     {
       "path": "scripts/test-extracted-package-source-sensitivity.sh",
@@ -1108,7 +1108,7 @@
     },
     {
       "path": "scripts/tests/compatibility-contract.test.mjs",
-      "sha256": "af1d34c038626870266157712f9ea208bf0bffa4c7d1fd9e3e018b0fa6a444ab"
+      "sha256": "476923b6dcd669c154495248cb4b008d0b4becea86d9bfc8d1eb9f742b806c1e"
     },
     {
       "path": "scripts/update-folderbase-version-0.5-release.mjs",

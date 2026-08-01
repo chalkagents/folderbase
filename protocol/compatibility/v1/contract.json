@@ -70,6 +70,8 @@
       "attest",
       "init.plan",
       "init.apply",
+      "upgrade.plan",
+      "upgrade.apply",
       "validate.shallow",
       "protocol.contract",
       "protocol.check.chunk-manifest",
@@ -157,7 +159,6 @@
   "experimental": [
     "migrate",
     "transform",
-    "upgrade-cli-json",
     "version-cli-json",
     "templates",
     "reorganization",

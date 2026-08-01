@@ -22,6 +22,7 @@ The suite covers:
 - contract discovery;
 - ordinary-folder inspection;
 - read-only initialization planning and digest-bound apply;
+- legacy root upgrade planning and digest-bound apply with ordinary-byte preservation;
 - root attestation and shallow validation;
 - workspace list, read, and optimistic save; and
 - explicit non-following representation of ordinary symlinks; and
