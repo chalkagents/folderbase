@@ -297,6 +297,66 @@ ${boundary}`,
   }
 });
 
+test("an escaped-quote comment decoy cannot bypass release ordering", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Escaped quote comment decoy
+        shell: bash
+        run: |
+          true \\';# )" = true
+          true \\';# echo "advance_github_latest=
+          gh release view "$RELEASE_TAG"
+
+${boundary}`,
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /immutable-release proof/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a multiline-quote comment decoy cannot bypass release ordering", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Multiline quote comment decoy
+        shell: bash
+        run: |
+          printf '%s\\n' 'noop
+          ';# )" = true
+          printf '%s\\n' 'noop
+          ';# echo "advance_github_latest=
+          gh release view "$RELEASE_TAG"
+
+${boundary}`,
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /immutable-release proof/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("a same-step release operation before the channel decision is rejected", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {

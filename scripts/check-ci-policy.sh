@@ -7,8 +7,20 @@ active_release_workflow="$(mktemp)"
 trap 'rm -f "$active_release_workflow"' EXIT
 
 awk '
-  function without_unquoted_comment(value, i, character, previous, in_single, in_double, escaped, single_quote) {
+  function leading_space_count(value, copy) {
+    copy = value
+    sub(/^[[:space:]]*/, "", copy)
+    return length(value) - length(copy)
+  }
+  function reset_shell_quote_state() {
+    shell_in_single = 0
+    shell_in_double = 0
+  }
+  function without_unquoted_comment(value, preserve_state, i, character, previous, escaped, single_quote) {
     single_quote = sprintf("%c", 39)
+    if (!preserve_state) {
+      reset_shell_quote_state()
+    }
     for (i = 1; i <= length(value); i += 1) {
       character = substr(value, i, 1)
       previous = i == 1 ? "" : substr(value, i - 1, 1)
@@ -16,25 +28,44 @@ awk '
         escaped = 0
         continue
       }
-      if (in_double && character == "\\") {
+      if (!shell_in_single && character == "\\") {
         escaped = 1
         continue
       }
-      if (!in_double && character == single_quote) {
-        in_single = !in_single
+      if (!shell_in_double && character == single_quote) {
+        shell_in_single = !shell_in_single
         continue
       }
-      if (!in_single && character == "\"") {
-        in_double = !in_double
+      if (!shell_in_single && character == "\"") {
+        shell_in_double = !shell_in_double
         continue
       }
-      if (!in_single && !in_double && character == "#" && (i == 1 || previous ~ /[[:space:]|&;()<>]/)) {
+      if (!shell_in_single && !shell_in_double && character == "#" && (i == 1 || previous ~ /[[:space:]|&;()<>]/)) {
         return substr(value, 1, i - 1)
       }
     }
     return value
   }
-  { print without_unquoted_comment($0) }
+  {
+    line = $0
+    indentation = leading_space_count(line)
+    if (in_run_block && line !~ /^[[:space:]]*$/ && indentation <= run_indent) {
+      in_run_block = 0
+      reset_shell_quote_state()
+    }
+
+    print without_unquoted_comment(line, in_run_block)
+
+    if (!in_run_block) {
+      trimmed = line
+      sub(/^[[:space:]]*/, "", trimmed)
+      if (trimmed ~ /^run:[[:space:]]*[|>]/) {
+        in_run_block = 1
+        run_indent = indentation
+        reset_shell_quote_state()
+      }
+    }
+  }
 ' "$release_workflow" > "$active_release_workflow"
 
 require_release_fragment() {
