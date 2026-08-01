@@ -34,7 +34,7 @@ jobs:
         run: node scripts/test-npm-cli-package.mjs
 
       - name: Test release publication policy
-        run: node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs
+        run: node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Verify packaged legal notices
         run: |

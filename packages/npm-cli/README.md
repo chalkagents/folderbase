@@ -50,7 +50,7 @@ From the repository root:
 ```sh
 npm test --prefix packages/npm-cli
 node scripts/test-npm-cli-package.mjs
-node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs
+node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
 ```
 
 The tests use local fixture binaries and never execute a downloaded production
@@ -71,3 +71,8 @@ serially and cannot race backward. GitHub and npm are compared independently so
 a manual or partially completed release cannot let the lagging registry roll
 the other one backward. One tested SemVer parser owns channel classification;
 prereleases and older backfills explicitly leave GitHub Latest false.
+
+The immutable preflight, registry-state decision, and GitHub publication each
+run through one dedicated, tested script entrypoint. CI enforces those exact
+one-line steps and their order, rejecting duplicate run keys and raw GitHub
+release commands in the workflow.

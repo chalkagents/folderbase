@@ -14,6 +14,11 @@ const releaseWorkflow = join(
   "workflows",
   "release-cli.yml",
 );
+const immutableEntrypoint =
+  "scripts/release/require-immutable-releases.sh";
+const decisionEntrypoint = "scripts/release/decide-publication-state.sh";
+const publicationEntrypoint = "scripts/release/publish-github-release.sh";
+const decisionScript = join(repositoryRoot, decisionEntrypoint);
 
 function runPolicy(releaseWorkflowPath) {
   return new Promise((resolve, reject) => {
@@ -35,45 +40,58 @@ function runPolicy(releaseWorkflowPath) {
   });
 }
 
+function moveStepBefore(source, stepName, beforeStepName) {
+  const stepHeader = `      - name: ${stepName}`;
+  const beforeHeader = `      - name: ${beforeStepName}`;
+  const start = source.indexOf(stepHeader);
+  assert.notEqual(start, -1);
+  const next = source.indexOf("\n      - name:", start + stepHeader.length);
+  assert.notEqual(next, -1);
+  const block = source.slice(start, next + 1);
+  const withoutBlock = `${source.slice(0, start)}${source.slice(next + 1)}`;
+  const insertion = withoutBlock.indexOf(beforeHeader);
+  assert.notEqual(insertion, -1);
+  return `${withoutBlock.slice(0, insertion)}${block}${withoutBlock.slice(insertion)}`;
+}
+
 test("the canonical release workflow satisfies scoped policy", async () => {
   const result = await runPolicy(releaseWorkflow);
   assert.equal(result.code, 0, result.stderr);
 });
 
-test("a publication-policy call outside its named step cannot satisfy policy", async () => {
+test("the registry-state step cannot call a different entrypoint", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const critical = "node ../../scripts/npm-publication-policy.mjs";
+    const critical = `        run: ${decisionEntrypoint}`;
     assert(source.includes(critical));
     await writeFile(
       fixture,
-      `${source.replace(critical, "node ../../scripts/removed-policy.mjs")}\n# ${critical}\n`,
+      `${source.replace(critical, "        run: scripts/release/removed-decision.sh")}\n# ${critical}\n`,
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /publication policy/);
+    assert.match(result.stderr, /registry-state decision/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test("a commented immutable-release preflight cannot satisfy policy", async () => {
+test("a commented immutable-release entrypoint cannot satisfy policy", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const critical =
-      'gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq \'.enabled\'';
+    const critical = `        run: ${immutableEntrypoint}`;
     assert(source.includes(critical));
     await writeFile(
       fixture,
-      source.replace(critical, `# ${critical}`),
+      source.replace(critical, `        run: true # ${immutableEntrypoint}`),
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /before publication/);
+    assert.match(result.stderr, /immutable-release preflight/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -95,7 +113,7 @@ test("a release operation before the immutable preflight is rejected", async () 
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /after the immutable-release proof/);
+    assert.match(result.stderr, /Raw workflow/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -175,17 +193,17 @@ test("the immutable-release preflight cannot use the default workflow token", as
   }
 });
 
-test("the immutable-release setting must equal literal true", async () => {
+test("the immutable preflight cannot have a duplicate run override", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const critical = ')" = true';
+    const critical = `        run: ${immutableEntrypoint}`;
     assert(source.includes(critical));
-    await writeFile(fixture, source.replace(critical, ')" != false'));
+    await writeFile(fixture, source.replace(critical, `${critical}\n        run: true`));
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /literal true/);
+    assert.match(result.stderr, /exactly one run key/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -210,16 +228,56 @@ test("the immutable-release preflight cannot continue on error", async () => {
   }
 });
 
-test("the monotonic channel decision precedes every GitHub release operation", async () => {
+test("critical release entrypoints must remain in fail-closed order", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const unsafe = moveStepBefore(
+      source,
+      "Require repository immutable releases",
+      "Publish GitHub release artifacts",
+    );
+    await writeFile(fixture, unsafe);
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /preflight must precede/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the registry decision must remain before GitHub publication", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const unsafe = moveStepBefore(
+      source,
+      "Publish GitHub release artifacts",
+      "Check immutable npm publication state",
+    );
+    await writeFile(fixture, unsafe);
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /decision must precede/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the canonical workflow orders all critical release entrypoints", async () => {
   const source = await readFile(releaseWorkflow, "utf8");
-  const decision = "      - name: Check immutable npm publication state";
-  const publication = "      - name: Publish GitHub release artifacts";
-  assert(source.includes(decision));
-  assert(source.includes(publication));
-  assert(
-    source.indexOf(decision) < source.indexOf(publication),
-    "npm/GitHub channel policy must run before GitHub publication",
+  const preflight = source.indexOf(
+    "      - name: Require repository immutable releases",
   );
+  const decision = source.indexOf(
+    "      - name: Check immutable npm publication state",
+  );
+  const publication = source.indexOf(
+    "      - name: Publish GitHub release artifacts",
+  );
+  assert(preflight < decision && decision < publication);
 });
 
 test("release classification uses the tested SemVer parser", async () => {
@@ -234,7 +292,8 @@ test("release classification uses the tested SemVer parser", async () => {
 
 test("GitHub Latest uses its own registry-state decision", async () => {
   const source = await readFile(releaseWorkflow, "utf8");
-  assert(source.includes(".advanceGithubLatest"));
+  const decisionSource = await readFile(decisionScript, "utf8");
+  assert(decisionSource.includes(".advanceGithubLatest"));
   assert(
     source.includes(
       "GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_github_latest }}",
@@ -242,27 +301,20 @@ test("GitHub Latest uses its own registry-state decision", async () => {
   );
 });
 
-test("a same-step release operation before immutable proof is rejected", async () => {
+test("GitHub publication cannot have a duplicate run override", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const boundary = `      - name: Require repository immutable releases
-        env:
-          GH_TOKEN: \${{ secrets.FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN }}
-        shell: bash
-        run: |`;
-    assert(source.includes(boundary));
+    const critical = `        run: ${publicationEntrypoint}`;
+    assert(source.includes(critical));
     await writeFile(
       fixture,
-      source.replace(
-        boundary,
-        `${boundary}\n          gh release view "$RELEASE_TAG"`,
-      ),
+      source.replace(critical, `${critical}\n        run: true`),
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /immutable-release proof/);
+    assert.match(result.stderr, /GitHub publication must have exactly one run key/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -291,7 +343,7 @@ ${boundary}`,
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /immutable-release proof/);
+    assert.match(result.stderr, /Raw workflow/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -320,7 +372,7 @@ ${boundary}`,
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /immutable-release proof/);
+    assert.match(result.stderr, /Raw workflow/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -351,26 +403,86 @@ ${boundary}`,
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /immutable-release proof/);
+    assert.match(result.stderr, /Raw workflow/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test("a same-step release operation before the channel decision is rejected", async () => {
+test("an ANSI-C quote comment decoy cannot bypass release ordering", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const marker = "          package_name=\"$(node -p \"require('./package.json').name\")\"";
-    assert(source.includes(marker));
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
     await writeFile(
       fixture,
-      source.replace(marker, `          gh release view "$RELEASE_TAG"\n${marker}`),
+      source.replace(
+        boundary,
+        `      - name: ANSI-C quote comment decoy
+        shell: bash
+        run: |
+          true $'noop\\'';# )" = true
+          true $'noop\\'';# echo "advance_github_latest=
+          gh release view "$RELEASE_TAG"
+
+${boundary}`,
+      ),
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /channel decision/);
+    assert.match(result.stderr, /Raw workflow/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a quoted heredoc cannot satisfy release-ordering gates", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const boundary = "      - name: Require repository immutable releases";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Quoted heredoc decoy
+        shell: bash
+        run: |
+          cat <<'POLICY_DECOY'
+          )" = true
+          echo "advance_github_latest=
+          POLICY_DECOY
+          gh release view "$RELEASE_TAG"
+
+${boundary}`,
+      ),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Raw workflow/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the registry-state decision cannot have a duplicate run override", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "release.yml");
+    const source = await readFile(releaseWorkflow, "utf8");
+    const critical = `        run: ${decisionEntrypoint}`;
+    assert(source.includes(critical));
+    await writeFile(
+      fixture,
+      source.replace(critical, `${critical}\n        run: true`),
+    );
+    const result = await runPolicy(fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /registry-state decision must have exactly one run key/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -381,21 +493,24 @@ test("a semicolon-comment decoy cannot bypass channel decision ordering", async 
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const marker =
-      '          package_name="$(node -p "require(\'./package.json\').name")"';
-    assert(source.includes(marker));
+    const boundary = "      - name: Check immutable npm publication state";
+    assert(source.includes(boundary));
     await writeFile(
       fixture,
       source.replace(
-        marker,
-        `          true;# echo "advance_github_latest=
+        boundary,
+        `      - name: Semicolon channel decoy
+        shell: bash
+        run: |
+          true;# echo "advance_github_latest=
           gh release view "$RELEASE_TAG"
-${marker}`,
+
+${boundary}`,
       ),
     );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /channel decision/);
+    assert.match(result.stderr, /Raw workflow/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -406,9 +521,13 @@ test("GitHub Latest follows the tested monotonic channel decision", async () => 
   try {
     const fixture = join(temporaryRoot, "release.yml");
     const source = await readFile(releaseWorkflow, "utf8");
-    const critical = '--latest="$GITHUB_LATEST"';
+    const critical =
+      "          GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_github_latest }}";
     assert(source.includes(critical));
-    await writeFile(fixture, source.replaceAll(critical, "--latest=true"));
+    await writeFile(
+      fixture,
+      source.replace(critical, "          GITHUB_LATEST: true"),
+    );
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /GitHub Latest/);

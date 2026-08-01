@@ -86,6 +86,13 @@ preflight and both registry decisions, publication, verification, and
 temporary-tag cleanup. Each decision is made only after the publication lock is
 acquired.
 
+The immutable-release preflight, registry-state decision, and GitHub release
+publication are dedicated, tested script entrypoints. Their workflow steps each
+contain exactly one one-line `run` key, and policy enforces their order. Raw
+GitHub release commands and duplicate or overriding critical `run` keys are
+rejected in the workflow, so release safety does not depend on heuristically
+parsing arbitrary inline shell.
+
 The macOS App will separately bundle a compatible native Core inside its
 signed, notarized application boundary. Homebrew may provide a persistent CLI
 installation. Both must execute the same released CLI behavior and protocol
