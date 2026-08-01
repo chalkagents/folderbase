@@ -531,6 +531,31 @@ fn operational_error_exits_two() {
 }
 
 #[test]
+fn json_commands_emit_one_machine_readable_operational_error() {
+    let parent = tempfile::tempdir().expect("temporary parent");
+    let missing = parent.path().join("missing");
+    let missing = missing.to_str().expect("UTF-8 test path");
+    let cases = [
+        vec!["inspect", missing, "--json"],
+        vec!["validate", missing, "--json"],
+        vec!["workspace", "list", missing, "--json"],
+    ];
+
+    for arguments in cases {
+        let output = folderbase().args(arguments).output().expect("CLI result");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty(), "JSON failures reserve stdout");
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("one JSON error document on stderr");
+        assert_eq!(error["error"]["code"], "invalid_root");
+        assert!(error["error"]["message"].is_string());
+        assert_eq!(error["error"].as_object().expect("error object").len(), 2);
+        assert_eq!(error.as_object().expect("error envelope").len(), 1);
+    }
+}
+
+#[test]
 fn migrate_without_answers_is_read_only_and_prints_questions() {
     let root = tempfile::tempdir().expect("temporary source");
     std::fs::write(root.path().join("README.md"), "keep me\n").unwrap();

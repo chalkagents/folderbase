@@ -68,8 +68,8 @@ fn cargo_and_executable_surface_is_folderbase_only() {
             .as_array()
             .expect("workspace packages")
             .iter()
-            .all(|package| package["version"] == "0.5.0-rc.1"),
-        "every published workspace package must carry the protocol 0.5 release-candidate identity"
+            .all(|package| package["version"] == "0.5.0"),
+        "every published workspace package must carry the stable protocol 0.5 identity"
     );
 
     let core = metadata["packages"]
@@ -112,7 +112,7 @@ fn cargo_and_executable_surface_is_folderbase_only() {
         .arg("--version")
         .assert()
         .success()
-        .stdout("folderbase 0.5.0-rc.1\n");
+        .stdout("folderbase 0.5.0\n");
 }
 
 #[test]

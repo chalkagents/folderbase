@@ -8,6 +8,9 @@ release for the current machine.
 npx @folderbase/cli init .
 ```
 
+The installed binary advertises the stable integration contract with
+`folderbase protocol contract --json`.
+
 The npm package is a dependency-free distribution adapter. Folderbase remains
 an open-source Rust engine and ordinary native executable; it is not
 reimplemented in JavaScript and is not installed into the folder being
@@ -50,7 +53,7 @@ From the repository root:
 ```sh
 npm test --prefix packages/npm-cli
 node scripts/test-npm-cli-package.mjs
-node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
+node --test scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
 ```
 
 The tests use local fixture binaries and never execute a downloaded production

@@ -45,9 +45,11 @@ winapi-util.workspace = true
 windows-sys.workspace = true
 
 [package.metadata.folderbase-protocol]
+compatibility-contract = "folderbase-compatibility-contract-v1"
 contract = "folderbase-version-v1"
 protocol-version = "0.4"
-candidate-protocol-version = "0.5"
+additional-protocol-version = "0.5"
+native-root-protocol-version = "0.5.0"
 distribution = "repository-tag-source-archive"
 cargo-package-role = "runtime-implementation-only"
 

@@ -34,7 +34,7 @@ jobs:
         run: node scripts/test-npm-cli-package.mjs
 
       - name: Test release publication policy
-        run: node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
+        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Verify packaged legal notices
         run: |
@@ -83,11 +83,14 @@ jobs:
       - name: Verify independent Folderbase Version 0.5 digest vectors
         run: node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 
-      - name: Verify the complete Folderbase Version 0.5 candidate closure
+      - name: Verify the complete Folderbase Version 0.5 released closure
         run: node scripts/verify-folderbase-version-0.5-distribution.mjs
 
       - name: Test
         run: cargo test --workspace --all-features --locked
+
+      - name: Run public implementation-neutral conformance
+        run: node protocol/conformance/cli-json-v1/run.mjs --implementation ./target/debug/folderbase
 
       - name: Verify packages and installed CLI
         run: scripts/test-package-install.sh
@@ -120,7 +123,7 @@ jobs:
       - name: Test the public Folderbase Version contract
         run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
 
-      - name: Test the Folderbase Version 0.5 candidate contract
+      - name: Test the Folderbase Version 0.5 released contract
         run: cargo test --package folderbase-core --test folderbase_version_05_conformance --locked
 
       - name: Test metadata-only Folderbase capture planning

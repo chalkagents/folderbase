@@ -148,7 +148,7 @@ case "$*" in
   "pack --dry-run --json")
     printf '%s\n' '[{"integrity":"sha512-local"}]'
     ;;
-  "view @folderbase/cli@0.4.0 version dist.integrity --json")
+  "view @folderbase/cli@0.5.0 version dist.integrity --json")
     printf '%s\n' 'npm error code E404' >&2
     exit 1
     ;;
@@ -178,7 +178,7 @@ esac
 publish_tag=latest
 cleanup_tag=
 advance_channel=true
-advance_github_latest=false
+advance_github_latest=true
 `,
     );
   } finally {

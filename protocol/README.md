@@ -30,6 +30,12 @@ independent of the Folderbase application and hosted services.
 - `schemas/0.5/folderbase-version.schema.json` validates the protocol 0.5
   profile of the same closed, provider-neutral Version v1 envelope.
 - `conformance/` contains valid and invalid compatibility fixtures.
+- `compatibility/v1/contract.json` is the machine-readable stable Core
+  compatibility inventory.
+- `schemas/cli/1/folderbase-cli-json.schema.json` defines the stable CLI JSON
+  result and error documents.
+- `conformance/cli-json-v1/run.mjs` runs the complete black-box contract against
+  any compatible executable without loading Rust.
 - `conformance/chunk-manifest/` fixes the valid and invalid manifest shapes;
   its independently generated `.sha256` sidecars fix cross-client canonical
   binary digests for small and greater-than-32-bit identities.

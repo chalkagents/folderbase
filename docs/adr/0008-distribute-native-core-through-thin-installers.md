@@ -100,9 +100,13 @@ commands, conditional bypasses, and duplicate or overriding critical keys
 cannot be accepted through heuristic text parsing alone.
 
 The macOS App will separately bundle a compatible native Core inside its
-signed, notarized application boundary. Homebrew may provide a persistent CLI
-installation. Both must execute the same released CLI behavior and protocol
-version rather than fork Core.
+signed, notarized application boundary. Stable Core releases are incomplete
+until the exact release is available through all four public installation
+paths: GitHub binaries, `@folderbase/cli`, the `folderbase-core` then
+`folderbase-cli` crates, and `chalkagents/tap/folderbase`. Homebrew and Cargo
+must execute the same released CLI behavior and compatibility contract rather
+than fork Core. The dependency order and public smoke tests are normative
+release gates in [`../releasing.md`](../releasing.md).
 
 ## Consequences
 
@@ -130,3 +134,6 @@ version rather than fork Core.
 - The literal `npx folderbase` command remains unavailable unless the unrelated
   package owner voluntarily transfers the npm name. Acquiring that name may
   add a compatibility launcher later, but it does not change this architecture.
+- A stable release is not complete merely because a Git tag exists. Every
+  documented install command must resolve from its public registry and pass an
+  ordinary-folder `init` and `validate` smoke test.
