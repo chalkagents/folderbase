@@ -1,0 +1,35 @@
+{
+  "name": "@folderbase/cli",
+  "version": "0.4.0",
+  "description": "Install and run the native Folderbase CLI for agent-ready local-first folders.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "folderbase": "bin/folderbase.js"
+  },
+  "files": [
+    "bin",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chalkagents/folderbase.git",
+    "directory": "packages/npm-cli"
+  },
+  "homepage": "https://folderbase.ai",
+  "bugs": {
+    "url": "https://github.com/chalkagents/folderbase/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

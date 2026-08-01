@@ -1,0 +1,230 @@
+name: Release native CLI and npm launcher
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Core tag to build and backfill
+        required: true
+        type: string
+      publish_npm:
+        description: Publish npm after the native artifacts are ready
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  build-native:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Check out distribution sources
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Check out the exact native Core tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          path: native-source
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.96.0
+
+      - name: Verify the canonical remote tag and package versions
+        shell: bash
+        run: |
+          release_version="${RELEASE_TAG#v}"
+          package_version="$(
+            cargo metadata --manifest-path native-source/Cargo.toml --format-version 1 --no-deps |
+              jq -r '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace package versions differ") end'
+          )"
+          npm_version="$(jq -r '.version' packages/npm-cli/package.json)"
+          canonical_tag="v${package_version}"
+          test "$RELEASE_TAG" = "$canonical_tag"
+          test "$release_version" = "$package_version"
+          test "$release_version" = "$npm_version"
+          remote_tag_object="$(
+            git -C native-source ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          remote_tag_commit="$(
+            git -C native-source ls-remote --tags origin "refs/tags/${RELEASE_TAG}^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          remote_tag_commit="${remote_tag_commit:-$remote_tag_object}"
+          checked_out_commit="$(git -C native-source rev-parse HEAD)"
+          test "$checked_out_commit" = "$remote_tag_commit"
+
+      - name: Build the native CLI
+        run: |
+          cargo build \
+            --manifest-path native-source/Cargo.toml \
+            --locked \
+            --release \
+            --package folderbase-cli \
+            --target "${{ matrix.target }}"
+
+      - name: Verify and stage the native CLI
+        shell: bash
+        run: |
+          release_version="${RELEASE_TAG#v}"
+          binary="native-source/target/${{ matrix.target }}/release/folderbase"
+          test "$("$binary" --version)" = "folderbase $release_version"
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          printf 'release smoke\n' > "$smoke_root/ordinary-file.txt"
+          "$binary" inspect "$smoke_root" --json
+          "$binary" init "$smoke_root" --name "Release Smoke" --json
+          "$binary" validate "$smoke_root" --json
+          test -f "$smoke_root/.folderbase/manifest.json"
+          mkdir -p dist
+          install -m 0755 \
+            "$binary" \
+            "dist/folderbase-${RELEASE_TAG}-${{ matrix.target }}"
+
+      - name: Upload the native CLI
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: native-${{ matrix.target }}
+          path: dist/folderbase-${{ env.RELEASE_TAG }}-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release and npm launcher
+    needs: build-native
+    concurrency:
+      group: folderbase-publication
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Check out distribution sources
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Verify the canonical package tag
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./packages/npm-cli/package.json').version")"
+          canonical_tag="v${package_version}"
+          test "$RELEASE_TAG" = "$canonical_tag"
+
+      - name: Select stable or prerelease publication channels
+        id: release-metadata
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./packages/npm-cli/package.json').version")"
+          classification="$(
+            node scripts/npm-publication-policy.mjs classify "$package_version"
+          )"
+          echo "github_prerelease=$(printf '%s' "$classification" | jq -r '.githubPrerelease')" >> "$GITHUB_OUTPUT"
+          echo "npm_dist_tag=$(printf '%s' "$classification" | jq -r '.channel')" >> "$GITHUB_OUTPUT"
+
+      - name: Download native CLIs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+
+      - name: Seal the release artifacts
+        shell: bash
+        run: |
+          expected=(
+            "folderbase-${RELEASE_TAG}-aarch64-apple-darwin"
+            "folderbase-${RELEASE_TAG}-x86_64-apple-darwin"
+            "folderbase-${RELEASE_TAG}-aarch64-unknown-linux-gnu"
+            "folderbase-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
+          )
+          test "$(find dist -maxdepth 1 -type f -name 'folderbase-*' | wc -l | tr -d ' ')" = "${#expected[@]}"
+          for asset in "${expected[@]}"; do
+            test -f "dist/$asset"
+          done
+          (
+            cd dist
+            sha256sum "${expected[@]}" > SHA256SUMS
+          )
+
+      - name: Test the npm distribution package
+        run: |
+          npm test --prefix packages/npm-cli
+          node scripts/test-npm-cli-package.mjs
+          node --test scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
+
+      - name: Require repository immutable releases
+        env:
+          GH_TOKEN: ${{ secrets.FOLDERBASE_IMMUTABLE_RELEASES_READ_TOKEN }}
+        run: scripts/release/require-immutable-releases.sh
+
+      - name: Use an OIDC-capable npm client
+        if: github.event_name == 'push' || inputs.publish_npm
+        run: npm install --global npm@11.5.1
+
+      - name: Check immutable npm publication state
+        id: npm-publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
+        run: scripts/release/decide-publication-state.sh
+
+      - name: Publish GitHub release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_PRERELEASE: ${{ steps.release-metadata.outputs.github_prerelease }}
+          GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_github_latest }}
+        run: scripts/release/publish-github-release.sh
+
+      - name: Publish the public npm launcher
+        if: (github.event_name == 'push' || inputs.publish_npm) && steps.npm-publication.outputs.skip_publish != 'true'
+        env:
+          PUBLISH_TAG: ${{ steps.npm-publication.outputs.publish_tag }}
+        working-directory: packages/npm-cli
+        run: npm publish --access public --tag "$PUBLISH_TAG"
+
+      - name: Remove the temporary npm backfill tag
+        if: (github.event_name == 'push' || inputs.publish_npm) && steps.npm-publication.outputs.cleanup_tag != ''
+        env:
+          CLEANUP_TAG: ${{ steps.npm-publication.outputs.cleanup_tag }}
+        working-directory: packages/npm-cli
+        run: npm dist-tag rm @folderbase/cli "$CLEANUP_TAG"
