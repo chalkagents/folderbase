@@ -67,5 +67,7 @@ release writes.
 
 All GitHub and npm publication work shares one non-cancelling `queue: max`
 concurrency group so the `latest` and `next` decisions are recalculated
-serially and cannot race backward. The same decision drives GitHub's stable
-Latest marker; prereleases and older backfills explicitly set it false.
+serially and cannot race backward. GitHub and npm are compared independently so
+a manual or partially completed release cannot let the lagging registry roll
+the other one backward. One tested SemVer parser owns channel classification;
+prereleases and older backfills explicitly leave GitHub Latest false.

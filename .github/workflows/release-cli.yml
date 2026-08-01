@@ -155,15 +155,11 @@ jobs:
         shell: bash
         run: |
           package_version="$(node -p "require('./packages/npm-cli/package.json').version")"
-          if [[ "$package_version" == *-* ]]; then
-            github_prerelease=true
-            npm_dist_tag=next
-          else
-            github_prerelease=false
-            npm_dist_tag=latest
-          fi
-          echo "github_prerelease=$github_prerelease" >> "$GITHUB_OUTPUT"
-          echo "npm_dist_tag=$npm_dist_tag" >> "$GITHUB_OUTPUT"
+          classification="$(
+            node scripts/npm-publication-policy.mjs classify "$package_version"
+          )"
+          echo "github_prerelease=$(printf '%s' "$classification" | jq -r '.githubPrerelease')" >> "$GITHUB_OUTPUT"
+          echo "npm_dist_tag=$(printf '%s' "$classification" | jq -r '.channel')" >> "$GITHUB_OUTPUT"
 
       - name: Download native CLIs
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -216,6 +212,7 @@ jobs:
       - name: Check immutable npm publication state
         id: npm-publication
         env:
+          GH_TOKEN: ${{ github.token }}
           NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
         shell: bash
         working-directory: packages/npm-cli
@@ -230,7 +227,21 @@ jobs:
           published_version=""
           published_integrity=""
           view_error="$(mktemp)"
-          trap 'rm -f "$view_error"' EXIT
+          github_error="$(mktemp)"
+          trap 'rm -f "$view_error" "$github_error"' EXIT
+          github_latest_version=""
+          if github_latest_tag="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>"$github_error"
+          )"; then
+            if [[ "$github_latest_tag" != v* ]]; then
+              echo "GitHub Latest tag is not canonical: $github_latest_tag" >&2
+              exit 1
+            fi
+            github_latest_version="${github_latest_tag#v}"
+          elif ! grep -Eq 'HTTP 404|Not Found' "$github_error"; then
+            cat "$github_error" >&2
+            exit 1
+          fi
           if published_metadata="$(
             npm view "$package_spec" version dist.integrity --json 2>"$view_error"
           )"; then
@@ -264,6 +275,7 @@ jobs:
               --arg localIntegrity "$local_integrity" \
               --arg publishedVersion "$published_version" \
               --arg publishedIntegrity "$published_integrity" \
+              --arg githubLatestVersion "$github_latest_version" \
               --argjson distTags "$dist_tags" \
               '{
                 packageVersion: $packageVersion,
@@ -271,6 +283,7 @@ jobs:
                 localIntegrity: $localIntegrity,
                 publishedVersion: (if $publishedVersion == "" then null else $publishedVersion end),
                 publishedIntegrity: (if $publishedIntegrity == "" then null else $publishedIntegrity end),
+                githubLatestVersion: (if $githubLatestVersion == "" then null else $githubLatestVersion end),
                 distTags: $distTags
               }' |
               node ../../scripts/npm-publication-policy.mjs
@@ -279,12 +292,13 @@ jobs:
           echo "publish_tag=$(printf '%s' "$decision" | jq -r '.publishTag // ""')" >> "$GITHUB_OUTPUT"
           echo "cleanup_tag=$(printf '%s' "$decision" | jq -r '.cleanupTag // ""')" >> "$GITHUB_OUTPUT"
           echo "advance_channel=$(printf '%s' "$decision" | jq -r '.advanceChannel')" >> "$GITHUB_OUTPUT"
+          echo "advance_github_latest=$(printf '%s' "$decision" | jq -r '.advanceGithubLatest')" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_PRERELEASE: ${{ steps.release-metadata.outputs.github_prerelease }}
-          GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_channel }}
+          GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_github_latest }}
         shell: bash
         run: |
           if [[ "$GITHUB_PRERELEASE" == true ]]; then

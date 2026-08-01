@@ -73,12 +73,18 @@ Exact npm versions are immutable while `latest` and `next` are mutable discovery
 channels. Rerunning an already-published exact version verifies its integrity
 without requiring that it still owns a channel. Publishing an older missing
 version uses and then removes a temporary backfill tag so neither public
-channel can move backward. The same tested decision explicitly controls
-GitHub's stable `Latest` marker; prereleases and older backfills always set it
-false. One repository-wide, non-cancelling `queue: max` publication concurrency
-group encloses the GitHub preflight and npm decision, publication, verification,
-and temporary-tag cleanup. The channel decision is therefore made only after
-the publication lock is acquired.
+channel can move backward. One tested SemVer parser owns stable/prerelease
+classification, including versions with build metadata.
+
+GitHub and npm discovery state may differ after manual or partially completed
+publication. Under the same lock, the workflow therefore reads each registry's
+current state and computes separate npm-channel and GitHub-Latest advancement
+decisions. Prereleases can never become GitHub Latest, and neither registry may
+move backward because the other one is behind. One repository-wide,
+non-cancelling `queue: max` publication concurrency group encloses the GitHub
+preflight and both registry decisions, publication, verification, and
+temporary-tag cleanup. Each decision is made only after the publication lock is
+acquired.
 
 The macOS App will separately bundle a compatible native Core inside its
 signed, notarized application boundary. Homebrew may provide a persistent CLI

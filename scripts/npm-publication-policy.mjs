@@ -73,6 +73,22 @@ function compareSemver(leftVersion, rightVersion) {
   return 0;
 }
 
+export function classifyRelease(version) {
+  const parsed = parseSemver(version);
+  const githubPrerelease = parsed.prerelease.length > 0;
+  return {
+    channel: githubPrerelease ? "next" : "latest",
+    githubPrerelease,
+  };
+}
+
+function mayAdvanceVersion(packageVersion, selectedVersion) {
+  if (selectedVersion === null) return true;
+  const comparison = compareSemver(packageVersion, selectedVersion);
+  if (comparison !== 0) return comparison > 0;
+  return packageVersion === selectedVersion;
+}
+
 function backfillTagFor(packageVersion) {
   return `folderbase-backfill-${packageVersion.replace(/[^0-9A-Za-z-]/g, "-")}`;
 }
@@ -85,14 +101,24 @@ export function decideNpmPublication(input) {
     publishedVersion,
     publishedIntegrity,
     distTags,
+    githubLatestVersion = null,
   } = input;
   const parsed = parseSemver(packageVersion);
   if (!["latest", "next"].includes(channel)) {
     throw new Error(`unsupported npm publication channel: ${channel}`);
   }
+  const classification = classifyRelease(packageVersion);
+  if (channel !== classification.channel) {
+    throw new Error(
+      `${packageVersion} must use ${classification.channel}, not ${channel}`,
+    );
+  }
   if (parsed.prerelease.length > 0 && distTags.latest === packageVersion) {
     throw new Error(`prerelease ${packageVersion} cannot occupy latest`);
   }
+  const advanceGithubLatest = classification.githubPrerelease
+    ? false
+    : mayAdvanceVersion(packageVersion, githubLatestVersion);
 
   if (publishedVersion !== null) {
     if (publishedVersion !== packageVersion) {
@@ -108,6 +134,7 @@ export function decideNpmPublication(input) {
       publishTag: null,
       cleanupTag,
       advanceChannel: distTags[channel] === packageVersion,
+      advanceGithubLatest,
     };
   }
 
@@ -118,6 +145,7 @@ export function decideNpmPublication(input) {
       publishTag: channel,
       cleanupTag: null,
       advanceChannel: true,
+      advanceGithubLatest,
     };
   }
   const comparison = compareSemver(packageVersion, selectedVersion);
@@ -132,6 +160,7 @@ export function decideNpmPublication(input) {
       publishTag: channel,
       cleanupTag: null,
       advanceChannel: true,
+      advanceGithubLatest,
     };
   }
 
@@ -141,6 +170,7 @@ export function decideNpmPublication(input) {
     publishTag: cleanupTag,
     cleanupTag,
     advanceChannel: false,
+    advanceGithubLatest,
   };
 }
 
@@ -152,10 +182,14 @@ async function readStandardInput() {
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const decision = decideNpmPublication(
-      JSON.parse(await readStandardInput()),
-    );
-    process.stdout.write(`${JSON.stringify(decision)}\n`);
+    if (process.argv[2] === "classify") {
+      process.stdout.write(`${JSON.stringify(classifyRelease(process.argv[3]))}\n`);
+    } else {
+      const decision = decideNpmPublication(
+        JSON.parse(await readStandardInput()),
+      );
+      process.stdout.write(`${JSON.stringify(decision)}\n`);
+    }
   } catch (error) {
     console.error(`folderbase npm publication policy: ${error.message}`);
     process.exitCode = 1;

@@ -3,6 +3,39 @@ set -euo pipefail
 
 workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 release_workflow="${RELEASE_WORKFLOW:-.github/workflows/release-cli.yml}"
+active_release_workflow="$(mktemp)"
+trap 'rm -f "$active_release_workflow"' EXIT
+
+awk '
+  function without_unquoted_comment(value, i, character, previous, in_single, in_double, escaped, single_quote) {
+    single_quote = sprintf("%c", 39)
+    for (i = 1; i <= length(value); i += 1) {
+      character = substr(value, i, 1)
+      previous = i == 1 ? "" : substr(value, i - 1, 1)
+      if (escaped) {
+        escaped = 0
+        continue
+      }
+      if (in_double && character == "\\") {
+        escaped = 1
+        continue
+      }
+      if (!in_double && character == single_quote) {
+        in_single = !in_single
+        continue
+      }
+      if (!in_single && character == "\"") {
+        in_double = !in_double
+        continue
+      }
+      if (!in_single && !in_double && character == "#" && (i == 1 || previous ~ /[[:space:]]/)) {
+        return substr(value, 1, i - 1)
+      }
+    }
+    return value
+  }
+  { print without_unquoted_comment($0) }
+' "$release_workflow" > "$active_release_workflow"
 
 require_release_fragment() {
   local fragment=$1
@@ -19,7 +52,7 @@ require_release_fragment() {
     END {
       exit found ? 0 : 1
     }
-  ' "$release_workflow"; then
+  ' "$active_release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
@@ -42,7 +75,7 @@ require_release_fragment_minimum_count() {
     END {
       print count + 0
     }
-  ' "$release_workflow")
+  ' "$active_release_workflow")
   if [[ "$actual" -lt "$minimum" ]]; then
     printf '%s (expected at least %s, found %s)\n' \
       "$message" "$minimum" "$actual" >&2
@@ -75,7 +108,7 @@ require_release_step_fragment_minimum_count() {
     END {
       print count + 0
     }
-  ' "$release_workflow")
+  ' "$active_release_workflow")
   if [[ "$actual" -lt "$minimum" ]]; then
     printf '%s (expected at least %s, found %s)\n' \
       "$message" "$minimum" "$actual" >&2
@@ -106,7 +139,7 @@ reject_release_step_fragment() {
     END {
       exit found ? 0 : 1
     }
-  ' "$release_workflow"; then
+  ' "$active_release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
@@ -127,7 +160,7 @@ require_release_step_before() {
     END {
       exit first_seen && second_seen && first_seen < second_seen ? 0 : 1
     }
-  ' "$release_workflow"; then
+  ' "$active_release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
@@ -156,7 +189,7 @@ require_release_step_fragment() {
     END {
       exit found ? 0 : 1
     }
-  ' "$release_workflow"; then
+  ' "$active_release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
@@ -185,32 +218,32 @@ require_release_job_fragment() {
     END {
       exit found ? 0 : 1
     }
-  ' "$release_workflow"; then
+  ' "$active_release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
 }
 
-require_release_fragment_only_after_step() {
-  local step_name=$1
-  local fragment=$2
+require_release_fragment_only_after_fragment() {
+  local gate_fragment=$1
+  local guarded_fragment=$2
   local message=$3
 
-  if ! awk -v step_name="$step_name" -v fragment="$fragment" '
-    $0 == "      - name: " step_name {
-      gate_seen = 1
-    }
+  if ! awk -v gate_fragment="$gate_fragment" -v guarded_fragment="$guarded_fragment" '
     {
       line = $0
       sub(/^[[:space:]]*/, "", line)
     }
-    line !~ /^#/ && index(line, fragment) && !gate_seen {
+    index(line, guarded_fragment) && !gate_seen {
       invalid = 1
     }
-    END {
-      exit invalid ? 1 : 0
+    index(line, gate_fragment) {
+      gate_seen = 1
     }
-  ' "$release_workflow"; then
+    END {
+      exit !gate_seen || invalid ? 1 : 0
+    }
+  ' "$active_release_workflow"; then
     printf '%s\n' "$message" >&2
     exit 1
   fi
@@ -284,16 +317,13 @@ require_release_step_fragment \
   "Publish GitHub release artifacts" \
   'github_release_flags+=(--prerelease)' \
   "Semver prereleases must create a GitHub prerelease that cannot become latest."
-require_release_fragment \
-  'npm_dist_tag=next' \
-  "Semver prereleases must use a non-latest npm dist-tag."
 require_release_step_fragment \
   "Publish GitHub release artifacts" \
   "--json isImmutable --jq '.isImmutable'" \
   "The publication step must prove the final GitHub release is immutable."
 require_release_step_fragment \
   "Publish GitHub release artifacts" \
-  'GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_channel }}' \
+  'GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_github_latest }}' \
   "GitHub Latest must consume the tested monotonic channel decision."
 require_release_step_fragment_minimum_count \
   "Publish GitHub release artifacts" \
@@ -328,10 +358,14 @@ require_release_step_fragment \
   "Publish GitHub release artifacts" \
   'GH_TOKEN: ${{ github.token }}' \
   "GitHub release writes must use the short-lived workflow token."
-require_release_fragment_only_after_step \
-  "Require repository immutable releases" \
+require_release_step_fragment \
+  "Check immutable npm publication state" \
+  'GH_TOKEN: ${{ github.token }}' \
+  "GitHub Latest reads must use the short-lived workflow token."
+require_release_fragment_only_after_fragment \
+  ')" = true' \
   "gh release " \
-  "Every GitHub release operation must occur after the immutable-release preflight."
+  "Every GitHub release operation must occur after the immutable-release proof."
 require_release_job_fragment \
   "publish" \
   "group: folderbase-publication" \
@@ -348,14 +382,26 @@ require_release_step_before \
   "Check immutable npm publication state" \
   "Publish GitHub release artifacts" \
   "The monotonic npm/GitHub channel decision must precede GitHub publication."
-require_release_fragment_only_after_step \
-  "Check immutable npm publication state" \
+require_release_fragment_only_after_fragment \
+  'echo "advance_github_latest=' \
   "gh release " \
   "Every GitHub release operation must follow the monotonic channel decision."
 require_release_step_fragment \
+  "Select stable or prerelease publication channels" \
+  'node scripts/npm-publication-policy.mjs classify "$package_version"' \
+  "Stable and prerelease channels must use the tested SemVer parser."
+require_release_step_fragment \
+  "Check immutable npm publication state" \
+  'gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '\''.tag_name'\''' \
+  "GitHub Latest state must be read independently under the publication lock."
+require_release_step_fragment \
   "Check immutable npm publication state" \
   ".advanceChannel" \
-  "The tested publication decision must expose whether the channel may advance."
+  "The tested publication decision must expose whether the npm channel may advance."
+require_release_step_fragment \
+  "Check immutable npm publication state" \
+  ".advanceGithubLatest" \
+  "The tested publication decision must expose whether GitHub Latest may advance."
 require_release_step_fragment \
   "Check immutable npm publication state" \
   'npm pack --dry-run --json' \
