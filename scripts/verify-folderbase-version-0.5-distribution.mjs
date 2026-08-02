@@ -4,13 +4,65 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   lstatSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const checkoutRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const releaseTag = "v0.5.0";
+
+function git(args, options = {}) {
+  return execFileSync("git", args, {
+    cwd: checkoutRoot,
+    encoding: "utf8",
+    ...options,
+  }).trim();
+}
+
+let repositoryRoot = checkoutRoot;
+let releaseWorktreeParent;
+let releaseWorktree;
+
+let releaseCommit;
+try {
+  releaseCommit = git(["rev-parse", "--verify", `${releaseTag}^{commit}`]);
+} catch {
+  throw new Error(
+    `missing immutable Folderbase release tag ${releaseTag}; fetch tags before verification`,
+  );
+}
+
+const checkoutCommit = git(["rev-parse", "HEAD"]);
+if (checkoutCommit !== releaseCommit) {
+  releaseWorktreeParent = mkdtempSync(
+    join(tmpdir(), "folderbase-v0.5.0-release-"),
+  );
+  releaseWorktree = join(releaseWorktreeParent, "source");
+  execFileSync(
+    "git",
+    ["worktree", "add", "--detach", releaseWorktree, releaseTag],
+    { cwd: checkoutRoot, stdio: "ignore" },
+  );
+  repositoryRoot = releaseWorktree;
+
+  process.once("exit", () => {
+    try {
+      execFileSync(
+        "git",
+        ["worktree", "remove", "--force", releaseWorktree],
+        { cwd: checkoutRoot, stdio: "ignore" },
+      );
+    } finally {
+      rmSync(releaseWorktreeParent, { recursive: true, force: true });
+    }
+  });
+}
+
 const releaseRoot = join(repositoryRoot, "protocol", "releases", "0.5");
 const releaseManifestPath = join(
   releaseRoot,
