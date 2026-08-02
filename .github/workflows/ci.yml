@@ -49,6 +49,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
       - name: Enforce the CI trigger and action-pin policy
         run: scripts/check-ci-policy.sh
@@ -85,6 +87,9 @@ jobs:
 
       - name: Verify the complete Folderbase Version 0.5 released closure
         run: node scripts/verify-folderbase-version-0.5-distribution.mjs
+
+      - name: Test immutable release verification from a mutable checkout
+        run: node --test scripts/tests/released-distribution.test.mjs
 
       - name: Test
         run: cargo test --workspace --all-features --locked

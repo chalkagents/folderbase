@@ -5,7 +5,15 @@
 </p>
 
 <p align="center">
+  <strong>The open folder database for AI agents.</strong><br>
+  Turn any ordinary folder into a structured, versioned workspace without moving or replacing its files.
+</p>
+
+<p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-d7ff3f" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/chalkagents/folderbase/releases/latest"><img src="https://img.shields.io/github/v/release/chalkagents/folderbase?color=d7ff3f" alt="Latest GitHub release"></a>
+  <a href="https://www.npmjs.com/package/@folderbase/cli"><img src="https://img.shields.io/npm/v/@folderbase/cli?color=d7ff3f&amp;label=npm" alt="npm package version"></a>
+  <a href="https://crates.io/crates/folderbase-cli"><img src="https://img.shields.io/crates/v/folderbase-cli?color=d7ff3f" alt="crates.io package version"></a>
   <img src="https://img.shields.io/badge/rust-1.96%2B-17120e?logo=rust&amp;logoColor=f5efe4" alt="Rust 1.96 or newer">
   <a href="https://github.com/chalkagents/folderbase/actions/workflows/ci.yml"><img src="https://github.com/chalkagents/folderbase/actions/workflows/ci.yml/badge.svg" alt="Continuous integration status"></a>
 </p>
@@ -19,6 +27,70 @@ Folderbase is the open database core beneath
 [Folderbase Cloud](https://folderbase.ai), in the same way that PostgreSQL is
 the open database beneath managed platforms. The core works locally and does
 not require a Folderbase account.
+
+## Start in 60 seconds
+
+From any folder, with Node.js 22.14 or newer:
+
+```sh
+cd /path/to/your-folder
+npx --yes @folderbase/cli init . --json
+npx --yes @folderbase/cli validate . --json
+```
+
+Initialization is additive. It leaves every existing file at its ordinary path
+and creates the minimum engine-owned state:
+
+```text
+your-folder/
+├── .folderbase/
+│   └── manifest.json
+└── …your existing repositories, documents, media, and data
+```
+
+That folder now has a durable Folderbase ID and a machine-readable contract
+that Codex, Claude, remote VMs, scripts, and apps can discover locally. It is
+still a normal folder: existing editors, terminals, Git workflows, and native
+file tools continue to work.
+
+## Install
+
+Use `npx` for a zero-setup invocation, including inside a remote agent VM:
+
+```sh
+npx --yes @folderbase/cli init .
+```
+
+Install the same native CLI persistently with Homebrew or Cargo:
+
+```sh
+brew install chalkagents/tap/folderbase
+# or, with Rust 1.96+
+cargo install folderbase-cli --version 0.5.0 --locked
+```
+
+Prebuilt macOS and Linux binaries and their closed `SHA256SUMS` record are
+available from [GitHub Releases](https://github.com/chalkagents/folderbase/releases/latest).
+Every channel runs the same released Core executable and Compatibility
+Contract.
+
+## Integrate an agent or application
+
+The CLI JSON interface is the universal integration surface. Callers do not
+need to link the Rust library or interpret private `.folderbase/` internals:
+
+```sh
+folderbase protocol contract --json
+folderbase inspect . --json
+folderbase workspace list . --json
+folderbase validate . --json
+```
+
+Compatibility Contract v1 freezes portable record meanings, Version IDs,
+manifest behavior, explicit upgrade behavior, CLI JSON envelopes and exit
+meanings. Additive fields may appear, so integrations should ignore unknown
+JSON fields. See the [Compatibility Contract](docs/compatibility-v1.md) and
+[CLI JSON specification](docs/cli-json-v1.md).
 
 ## Design principles
 
@@ -76,26 +148,6 @@ and optional context are inert. Case aliases and symlink or wrong-type marker
 shapes gain no authority: read-only analysis may quarantine them as
 `Unchecked` (`unchecked` on the wire) and omit descendants, while
 materialization, mutation, transfer, and restore operations reject them.
-
-## Install
-
-Run once from any Node 22.14+ environment, including a remote agent VM:
-
-```sh
-npx --yes @folderbase/cli init .
-```
-
-Install the same native CLI persistently with Homebrew or Cargo:
-
-```sh
-brew install chalkagents/tap/folderbase
-# or, with Rust 1.96+
-cargo install folderbase-cli --locked
-```
-
-Native macOS and Linux binaries and their closed `SHA256SUMS` record are also
-published on the [GitHub Releases page](https://github.com/chalkagents/folderbase/releases/latest).
-Every channel runs the same released executable and Compatibility Contract.
 
 ## Turn a folder into a Folderbase
 
@@ -224,6 +276,33 @@ Cargo packages remain below 1.0, but the surfaces named by Compatibility
 Contract v1 are stable. Experimental surfaces may change between minor Cargo
 versions. Breaking the named portable records, identifiers, CLI JSON fields,
 exit meanings, or conformance behavior requires a new compatibility contract.
+
+## Implement Folderbase in another language
+
+The public fixture suite is the authority—not this Rust implementation. A Go,
+TypeScript, or other independent implementation can run the same conformance
+runner against its executable:
+
+```sh
+node protocol/conformance/cli-json-v1/run.mjs \
+  --implementation /path/to/your/folderbase
+```
+
+The suite checks the stable CLI contract and portable protocol fixtures without
+using Rust internals. Passing it demonstrates behavioral compatibility with
+Folderbase Compatibility Contract v1.
+
+## Product boundaries
+
+This repository is the Apache-2.0 **Folderbase Database Core**: the portable
+protocol, reference engine, CLI, schemas, fixtures, and conformance suite.
+
+The commercial **Folderbase App** provides the Better Finder experience and
+the reliable local-to-cloud bridge. **Folderbase Cloud** hosts, syncs, and
+shares live Folderbases with scoped permissions for humans and agents.
+**Folderbase Cloud Agents** will run agent sessions against ordinary Folderbase
+workspaces and return reviewable changes. Cloud authority and sync behavior are
+not invented or implied by local Core records.
 
 ## Development
 
