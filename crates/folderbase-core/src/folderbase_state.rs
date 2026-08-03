@@ -2832,7 +2832,11 @@ mod tests {
         fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
         let outside = tempdir().expect("outside target");
         fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
-        let link = fixture.path().join(".folderbase/local/query-index-v1");
+        let link = fixture
+            .path()
+            .join(".folderbase")
+            .join("local")
+            .join("query-index-v1");
         let output = Command::new("cmd.exe")
             .args(["/D", "/C", "mklink", "/J"])
             .arg(&link)
