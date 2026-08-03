@@ -9,6 +9,12 @@
       "conformance_runner": "protocol/conformance/capabilities/query-index-0.1/run.mjs"
     },
     {
+      "name": "folderbase.template-expansion",
+      "version": "0.1.0",
+      "stability": "stable",
+      "conformance_runner": "protocol/conformance/capabilities/template-expansion-0.1/run.mjs"
+    },
+    {
       "name": "folderbase.version-cli-json",
       "version": "0.1.0",
       "stability": "experimental",

@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/capabilities/template-expansion/0.1/template-expansion.schema.json",
+  "title": "Folderbase template expansion capability 0.1",
+  "description": "Bounded JSON documents for folderbase.template-expansion@0.1.0.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/plan" },
+    { "$ref": "#/$defs/applyResult" },
+    { "$ref": "#/$defs/attention" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "digest": {
+      "type": "object",
+      "required": ["algorithm", "digest"],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?![\\s\\S]*\\\\)(?![\\s\\S]*(?:^|/)\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*[\\u0000-\\u001f<>:\"|?*])(?![\\s\\S]*[. ](?:/|$))[\\s\\S]+(?<!/)$",
+      "x-folderbase-semantic-policy": "folderbase-template-path-v1: 4096 UTF-8 bytes total, 255 UTF-8 bytes per component, depth 128, Windows reserved stems, NFC Unicode 17, and full-default case folding Unicode 9"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "extensionObject": {
+      "type": "object",
+      "maxProperties": 32
+    },
+    "question": {
+      "type": "object",
+      "required": ["id", "prompt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "answer_type": { "enum": ["text", "boolean"] },
+        "required": { "type": "boolean" }
+      },
+      "patternProperties": { "^x-": true },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["target", "kind", "install"],
+      "properties": {
+        "target": { "$ref": "#/$defs/portablePath" },
+        "kind": { "enum": ["directory", "text"] },
+        "content": { "type": "string", "maxLength": 1048576 },
+        "install": { "const": "create_if_missing" }
+      },
+      "patternProperties": { "^x-": true },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "text" } } },
+          "then": { "required": ["content"] }
+        },
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "directory" } } },
+          "then": { "not": { "required": ["content"] } }
+        }
+      ]
+    },
+    "upgradeEdge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/semanticVersion" },
+        "to": { "$ref": "#/$defs/semanticVersion" },
+        "notes": { "type": "string", "maxLength": 4096 }
+      },
+      "patternProperties": { "^x-": true },
+      "additionalProperties": false
+    },
+    "template": {
+      "type": "object",
+      "required": ["protocol_version", "id", "version", "name", "suggested_folderbase_kind", "artifacts"],
+      "properties": {
+        "$schema": { "type": "string", "maxLength": 2048 },
+        "protocol_version": { "type": "string", "pattern": "^0\\.2\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "version": { "$ref": "#/$defs/semanticVersion" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "description": { "type": "string", "maxLength": 65536 },
+        "suggested_folderbase_kind": { "enum": ["person", "organization", "engagement", "project", "customer", "temporary", "custom"] },
+        "questions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/question" } },
+        "artifacts": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/artifact" } },
+        "upgrade_edges": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/upgradeEdge" } }
+      },
+      "patternProperties": { "^x-": true },
+      "additionalProperties": false
+    },
+    "answer": {
+      "oneOf": [
+        { "type": "string", "maxLength": 1048576 },
+        { "type": "boolean" }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "required": ["format", "template", "answers"],
+      "properties": {
+        "format": { "const": "folderbase-template-expansion-request-v1" },
+        "template": { "$ref": "#/$defs/template" },
+        "answers": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]*$", "maxLength": 128 },
+          "additionalProperties": { "$ref": "#/$defs/answer" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "templateIdentity": {
+      "type": "object",
+      "required": ["id", "version", "package_digest"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "version": { "$ref": "#/$defs/semanticVersion" },
+        "package_digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "comparison": {
+      "type": "object",
+      "required": ["source", "version", "application_id"],
+      "properties": {
+        "source": { "enum": ["unmanaged", "origin", "application"] },
+        "version": { "$ref": "#/$defs/semanticVersion" },
+        "application_id": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^template_application_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "addition": {
+      "type": "object",
+      "required": ["path", "kind", "bytes", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "kind": { "enum": ["directory", "text"] },
+        "bytes": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": 1048576 }] },
+        "sha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] }
+      },
+      "additionalProperties": false
+    },
+    "structuralChange": {
+      "type": "object",
+      "required": ["kind", "path", "reason"],
+      "properties": {
+        "kind": { "enum": ["downgrade", "lineage", "unsupported_transition"] },
+        "path": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/portablePath" }] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "additionalProperties": false
+    },
+    "plan": {
+      "type": "object",
+      "required": ["format", "root", "folderbase_id", "template", "comparison", "disposition", "additions", "preserved_paths", "blocked_paths", "structural_changes", "plan_digest"],
+      "properties": {
+        "format": { "const": "folderbase-template-expansion-plan-v1" },
+        "root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "template": { "$ref": "#/$defs/templateIdentity" },
+        "comparison": { "$ref": "#/$defs/comparison" },
+        "disposition": { "enum": ["ready", "noop", "blocked", "reorganization_required"] },
+        "additions": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/addition" } },
+        "preserved_paths": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/portablePath" } },
+        "blocked_paths": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/portablePath" } },
+        "structural_changes": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/structuralChange" } },
+        "plan_digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "applyResult": {
+      "type": "object",
+      "required": ["format", "root", "folderbase_id", "template", "status", "created_paths", "preserved_paths", "application_record", "plan_digest"],
+      "properties": {
+        "format": { "const": "folderbase-template-expansion-apply-result-v1" },
+        "root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "template": { "$ref": "#/$defs/templateIdentity" },
+        "status": { "enum": ["applied", "noop"] },
+        "created_paths": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/portablePath" } },
+        "preserved_paths": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/portablePath" } },
+        "application_record": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^\\.folderbase/template-applications/template_application_[0-9a-f-]+\\.json$", "maxLength": 512 }
+          ]
+        },
+        "plan_digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "attention": {
+      "type": "object",
+      "required": ["format", "root", "attention"],
+      "properties": {
+        "format": { "const": "folderbase-template-expansion-attention-v1" },
+        "root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "attention": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "enum": ["expected_plan_digest_mismatch", "reorganization_required", "template_expansion_blocked"] },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "expected_plan_digest": { "$ref": "#/$defs/digest" },
+            "provided_plan_digest": { "$ref": "#/$defs/digest" },
+            "plan": { "$ref": "#/$defs/plan" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-template-expansion-error-v1" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9_]+$" },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

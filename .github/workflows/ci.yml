@@ -110,6 +110,9 @@ jobs:
       - name: Test optional capability contracts
         run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs
 
+      - name: Test template capability contracts
+        run: node --test protocol/conformance/capabilities/template-expansion-0.1/suite.test.mjs
+
       - name: Verify packaged legal notices
         run: |
           cmp LICENSE packages/npm-cli/LICENSE
@@ -288,6 +291,9 @@ jobs:
 
       - name: Conform the native query CLI candidate
         run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase${{ runner.os == 'Windows' && '.exe' || '' }}
+
+      - name: Conform the native template CLI candidate
+        run: node protocol/conformance/capabilities/template-expansion-0.1/run.mjs --implementation ./target/debug/folderbase${{ runner.os == 'Windows' && '.exe' || '' }}
 
   required:
     # Keep this display name stable because main branch protection requires it.

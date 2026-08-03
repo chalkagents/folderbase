@@ -5,9 +5,38 @@ description: Add optional, no-clobber structure while keeping the folder free to
 
 Templates are explicit starting guidance. They may add useful ordinary files and directories, but they do not establish authority, freeze the folder layout, or permit silent reorganization later.
 
-**Core 0.5 status:** built-in templates and reviewed application are implemented, but the templates capability is experimental and is not part of Compatibility Contract v1. Pin the exact Core release if you automate it.
+**Compatibility status:** current source builds advertise the stable optional
+capability `folderbase.template-expansion@0.1.0`. It is separate from
+Compatibility Contract v1, so integrations must discover it with
+`folderbase protocol contract --json` before use.
 
-## Preview a project template
+## Use the stable agent interface
+
+The stable process surface accepts one exact, inert Template Protocol 0.2
+package and its typed answers on stdin. It does not fetch a registry package or
+silently select “latest.”
+
+Save a request such as `template-request.json`, then preview it without writes:
+
+```bash
+folderbase template plan /path/to/project --stdin --json \
+  < template-request.json > template-plan.json
+```
+
+Review the proposed additions and copy `plan_digest.digest`. Apply the same
+request with that exact approval:
+
+```bash
+folderbase template apply /path/to/project \
+  --expected-plan-digest DIGEST_FROM_PLAN \
+  --stdin --json < template-request.json
+```
+
+Core re-plans against the same physical folder identity under its shared
+transaction lease before comparing the digest. A replacement folder, new
+target, changed template, or changed answer cannot reuse an old approval.
+
+## Use the built-in catalog convenience
 
 Pass the exact template identity and its answers during both review and apply:
 
@@ -39,12 +68,20 @@ folderbase init /path/to/project \
 
 Template artifacts use no-clobber installation. If the reviewed destination changes or a planned target appears, apply fails instead of replacing existing work.
 
-## Released built-ins
+## Built-in templates
 
-Core 0.5 includes person, organization, customer, engagement, project, temporary, and custom template families under `protocol/templates/0.2/`. Exact IDs and versions are part of the request; integrations should not silently substitute a newer template.
+The source catalog includes person, organization, customer, engagement,
+project, temporary, and custom template families under
+`protocol/templates/0.2/`. Catalog lookup and `init --template` are convenience
+interfaces, not part of `folderbase.template-expansion@0.1.0`. Exact IDs and
+versions are part of every stable request; integrations must not silently
+substitute a newer template.
 
 ## Evolve after initialization
 
 Template identity describes what was selected at initialization. It is not a permanent schema for the ordinary folder. Humans and agents may add new files and later propose reviewable reorganizations when the folder needs a clearer shape.
 
-The [template protocol](https://github.com/chalkagents/folderbase/blob/main/docs/template-protocol.md) defines canonical plans, questions, installation modes, and digest behavior.
+The [template expansion wire reference](/docs/reference/template-expansion)
+defines process transport and conformance. The [Template Protocol
+0.2](https://github.com/chalkagents/folderbase/blob/main/docs/template-protocol.md)
+defines canonical packages, questions, installation modes, and digest behavior.

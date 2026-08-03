@@ -1,0 +1,42 @@
+{
+  "format": "folderbase-template-expansion-request-v1",
+  "template": {
+    "$schema": "https://folderbase.ai/protocol/0.2/template.schema.json",
+    "protocol_version": "0.2.0",
+    "id": "example.project",
+    "version": "1.0.0",
+    "name": "Example project guidance",
+    "suggested_folderbase_kind": "project",
+    "questions": [
+      {
+        "id": "purpose",
+        "prompt": "What is the purpose?",
+        "answer_type": "text",
+        "required": true
+      }
+    ],
+    "artifacts": [
+      {
+        "target": "Existing.md",
+        "kind": "text",
+        "content": "template must not replace this\n",
+        "install": "create_if_missing"
+      },
+      {
+        "target": "Notes",
+        "kind": "directory",
+        "install": "create_if_missing"
+      },
+      {
+        "target": "Notes/README.md",
+        "kind": "text",
+        "content": "# Notes\n\n${purpose}\n",
+        "install": "create_if_missing"
+      }
+    ],
+    "upgrade_edges": []
+  },
+  "answers": {
+    "purpose": "Keep agent context understandable across time."
+  }
+}

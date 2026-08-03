@@ -9,29 +9,38 @@ use semver::Version;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::initialization::{
     canonical_directory, create_directory_no_clobber, ensure_safe_relative,
-    install_text_no_clobber, refuse_symlink_root, refuse_template_target_inside_nested_folderbase,
-    safe_destination, sha256_path, validate_template_path_collisions,
-    validate_template_paths_against_existing_casefold,
+    install_text_no_clobber, refuse_symlink_root, sha256_reader, validate_template_path_collisions,
 };
 use crate::model::{AppliedTemplate, TemplateApplicationComparison, TemplateExpansionPrecondition};
 use crate::physical_identity::{PhysicalIdentity, RetainedPhysicalIdentity};
-use crate::template::{template_package_sha256, validate_runtime_package};
+use crate::template::{
+    render_template_for_capability_destination, template_package_sha256, validate_runtime_package,
+};
 use crate::{
     FolderbaseError, PlannedTemplateAddition, Result, TemplateAnswerValue,
     TemplateApplicationCreatedPath, TemplateApplicationRecord, TemplateApplicationResult,
     TemplateApplicationState, TemplateArtifactKind, TemplateComparisonSource,
     TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest, TemplateStructuralChange,
-    TemplateStructuralChangeKind, attest_folderbase_root, render_template,
+    TemplateStructuralChangeKind, attest_folderbase_root,
+};
+use crate::{
+    folderbase_state::{FolderbaseState, WorkspaceTarget},
+    local_versions::LocalVersionStore,
 };
 
 const MANIFEST: &str = ".folderbase/manifest.json";
 const APPLICATIONS: &str = ".folderbase/template-applications";
 const APPLICATION_SCHEMA: &str =
     "https://folderbase.ai/protocol/0.2/template-application.schema.json";
+const MAX_TEMPLATE_HISTORY_RECORDS: usize = 4096;
+const MAX_TEMPLATE_APPLICATION_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_TEMPLATE_PATH_ENTRY_WORK: usize = 100_000;
+const MAX_TEMPLATE_PRESERVED_HASH_BYTES: u64 = 1024 * 1024;
 
 pub fn plan_template_expansion(
     root: impl AsRef<Path>,
@@ -41,20 +50,38 @@ pub fn plan_template_expansion(
     refuse_symlink_root(root.as_ref())?;
     let root = canonical_directory(root.as_ref())?;
     validate_folderbase_root(&root)?;
+    let state = FolderbaseState::open_existing_read_only(&root)?;
+    plan_template_expansion_in_state(&state, target, answers)
+}
+
+fn plan_template_expansion_in_state(
+    state: &FolderbaseState,
+    target: &TemplatePackage,
+    answers: &BTreeMap<String, TemplateAnswerValue>,
+) -> Result<TemplateExpansionPlan> {
+    state.classify_attached_root_boundary().map(drop)?;
+    let root = state.display_root().to_path_buf();
     validate_runtime_package(&root, target)?;
 
-    let root_identity = RetainedPhysicalIdentity::from_path(&root)
-        .map_err(|source| FolderbaseError::io(&root, source))?;
+    let root_identity =
+        RetainedPhysicalIdentity::from_file(state.clone_root_capability()?.into_std_file())
+            .map_err(|source| FolderbaseError::io(&root, source))?;
+    let root_identity_sha256 = root_identity.identity().stable_sha256();
     let manifest_path = root.join(MANIFEST);
-    let manifest_bytes =
-        fs::read(&manifest_path).map_err(|source| FolderbaseError::io(&manifest_path, source))?;
+    let manifest_bytes = state
+        .read_bounded(Path::new(MANIFEST), 2 * 1024 * 1024)?
+        .ok_or_else(|| FolderbaseError::InvalidRecord {
+            path: manifest_path.clone(),
+            message: "Folderbase manifest is missing".to_owned(),
+        })?;
     let manifest_sha256 = sha256_bytes(&manifest_bytes);
     let manifest: Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|source| FolderbaseError::json(&manifest_path, source))?;
     let folderbase_id =
         required_string(&manifest, &["folderbase", "id"], &manifest_path)?.to_owned();
 
-    let (history, history_sha256) = read_history_with_snapshot(&root, Some(&folderbase_id))?;
+    let (history, history_sha256) =
+        read_history_with_snapshot_in_state(state, Some(&folderbase_id))?;
     validate_application_history_chain(&manifest, &history, &manifest_path)?;
     let package_digest = TemplatePlanDigest {
         algorithm: "sha256".to_owned(),
@@ -66,6 +93,7 @@ pub fn plan_template_expansion(
         return build_plan(
             root,
             root_identity,
+            root_identity_sha256,
             folderbase_id,
             target,
             package_digest,
@@ -103,6 +131,7 @@ pub fn plan_template_expansion(
         return build_plan(
             root,
             root_identity,
+            root_identity_sha256,
             folderbase_id,
             target,
             package_digest,
@@ -162,6 +191,7 @@ pub fn plan_template_expansion(
         return build_plan(
             root,
             root_identity,
+            root_identity_sha256,
             folderbase_id,
             target,
             package_digest,
@@ -175,17 +205,74 @@ pub fn plan_template_expansion(
         );
     }
 
-    validate_template_paths_against_existing_casefold(
-        &root,
+    validate_template_paths_against_existing_in_state(
+        state,
         target
             .artifacts
             .iter()
             .map(|artifact| artifact.target.as_path()),
         true,
     )?;
-    let rendered = render_template(target, &root, answers)?;
-    let mut additions = rendered.additions;
-    add_missing_parent_directories(&root, &mut additions)?;
+    let rendered = render_template_for_capability_destination(target, &root, answers)?;
+    let mut rendered = rendered
+        .additions
+        .into_iter()
+        .map(|addition| (addition.path.clone(), addition))
+        .collect::<BTreeMap<_, _>>();
+    let mut additions = Vec::new();
+    let mut preserved_paths = Vec::new();
+    let mut preserved_preconditions = Vec::new();
+    let mut blocked_paths = Vec::new();
+    for artifact in &target.artifacts {
+        match open_template_target(state, &artifact.target)? {
+            WorkspaceTarget::Absent => additions.push(
+                rendered
+                    .remove(&artifact.target)
+                    .expect("capability renderer returned every validated artifact"),
+            ),
+            WorkspaceTarget::Directory(directory) => {
+                if artifact.kind != TemplateArtifactKind::Directory {
+                    blocked_paths.push(artifact.target.clone());
+                    continue;
+                }
+                let identity = RetainedPhysicalIdentity::from_file(directory.into_std_file())
+                    .map_err(|source| FolderbaseError::io(root.join(&artifact.target), source))?;
+                preserved_paths.push(artifact.target.clone());
+                preserved_preconditions.push(TemplateExpansionPrecondition {
+                    path: artifact.target.clone(),
+                    kind: artifact.kind,
+                    sha256: None,
+                    identity,
+                });
+            }
+            WorkspaceTarget::RegularFile(file) => {
+                if artifact.kind != TemplateArtifactKind::Text {
+                    blocked_paths.push(artifact.target.clone());
+                    continue;
+                }
+                let mut file = file.into_std();
+                let metadata = file
+                    .metadata()
+                    .map_err(|source| FolderbaseError::io(root.join(&artifact.target), source))?;
+                if metadata.len() > MAX_TEMPLATE_PRESERVED_HASH_BYTES {
+                    blocked_paths.push(artifact.target.clone());
+                    continue;
+                }
+                let sha256 = sha256_reader(&mut file)
+                    .map_err(|source| FolderbaseError::io(root.join(&artifact.target), source))?;
+                let identity = RetainedPhysicalIdentity::from_file(file)
+                    .map_err(|source| FolderbaseError::io(root.join(&artifact.target), source))?;
+                preserved_paths.push(artifact.target.clone());
+                preserved_preconditions.push(TemplateExpansionPrecondition {
+                    path: artifact.target.clone(),
+                    kind: artifact.kind,
+                    sha256: Some(sha256),
+                    identity,
+                });
+            }
+        }
+    }
+    add_missing_parent_directories_in_state(state, &mut additions)?;
     validate_template_path_collisions(
         &root,
         additions.iter().map(|addition| {
@@ -198,49 +285,15 @@ pub fn plan_template_expansion(
     additions.sort_by(|left, right| left.path.cmp(&right.path));
     additions.dedup_by(|left, right| left.path == right.path);
 
-    let mut preserved_paths = Vec::new();
-    let mut preserved_preconditions = Vec::new();
-    let mut blocked_paths = Vec::new();
-    for path in rendered.existing_paths {
-        let artifact = target
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.target == path)
-            .expect("rendered target belongs to validated package");
-        let destination = safe_destination(&root, &path)?;
-        refuse_template_target_inside_nested_folderbase(&root, &path)?;
-        let metadata = fs::symlink_metadata(&destination)
-            .map_err(|source| FolderbaseError::io(&destination, source))?;
-        let type_matches = match artifact.kind {
-            TemplateArtifactKind::Directory => metadata.is_dir(),
-            TemplateArtifactKind::Text => metadata.is_file(),
-        };
-        if metadata.file_type().is_symlink() || !type_matches {
-            blocked_paths.push(path);
-            continue;
-        }
-        let identity = RetainedPhysicalIdentity::from_path(&destination)
-            .map_err(|source| FolderbaseError::io(&destination, source))?;
-        let sha256 = if artifact.kind == TemplateArtifactKind::Text {
-            Some(sha256_path(&destination)?)
-        } else {
-            None
-        };
-        preserved_paths.push(path.clone());
-        preserved_preconditions.push(TemplateExpansionPrecondition {
-            path,
-            kind: artifact.kind,
-            sha256,
-            identity,
-        });
-    }
     preserved_paths.sort();
     preserved_preconditions.sort_by(|left, right| left.path.cmp(&right.path));
     blocked_paths.sort();
+    state.classify_attached_root_boundary().map(drop)?;
 
     build_plan(
         root,
         root_identity,
+        root_identity_sha256,
         folderbase_id,
         target,
         package_digest,
@@ -260,6 +313,15 @@ pub fn plan_template_expansion(
 }
 
 pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<TemplateApplicationResult> {
+    let state = FolderbaseState::open_existing(&plan.root)?;
+    let _lease = LocalVersionStore::acquire_transaction_lock_for_state(&plan.root, &state)?;
+    apply_template_expansion_in_state(&state, plan)
+}
+
+fn apply_template_expansion_in_state(
+    state: &FolderbaseState,
+    plan: &TemplateExpansionPlan,
+) -> Result<TemplateApplicationResult> {
     if !plan.structural_changes.is_empty() {
         return Err(FolderbaseError::StructuralTemplateChangeRequiresApproval);
     }
@@ -267,38 +329,36 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
         return Err(FolderbaseError::TemplateExpansionBlocked);
     }
 
-    let root = canonical_directory(&plan.root)?;
-    let current_identity =
-        PhysicalIdentity::from_path(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    if root != plan.root || current_identity != plan.root_identity.identity() {
-        return Err(FolderbaseError::PlanRootIdentityChanged(root));
-    }
-    validate_folderbase_root(&root)?;
+    let root = state.display_root().to_path_buf();
+    state
+        .verify_root_identity(&plan.root_identity.identity())
+        .map_err(|_| FolderbaseError::PlanRootIdentityChanged(root.clone()))?;
 
-    let manifest_path = root.join(MANIFEST);
-    let manifest_bytes =
-        fs::read(&manifest_path).map_err(|source| FolderbaseError::io(&manifest_path, source))?;
+    let manifest_bytes = state
+        .read_bounded(Path::new(MANIFEST), 2 * 1024 * 1024)?
+        .ok_or_else(|| FolderbaseError::PlanPreconditionChanged(PathBuf::from(MANIFEST)))?;
     if sha256_bytes(&manifest_bytes) != plan.manifest_sha256 {
         return Err(FolderbaseError::PlanPreconditionChanged(PathBuf::from(
             MANIFEST,
         )));
     }
-    let (_, history_sha256) = read_history_with_snapshot(&root, Some(&plan.folderbase_id))?;
+    let (_, history_sha256) =
+        read_history_with_snapshot_in_state(state, Some(&plan.folderbase_id))?;
     if history_sha256 != plan.history_sha256 {
         return Err(FolderbaseError::PlanPreconditionChanged(PathBuf::from(
             APPLICATIONS,
         )));
     }
-    validate_template_paths_against_existing_casefold(
-        &root,
+    validate_template_paths_against_existing_in_state(
+        state,
         plan.additions
             .iter()
             .map(|addition| addition.path.as_path())
             .chain(plan.preserved_paths.iter().map(PathBuf::as_path)),
         true,
     )?;
-    verify_preserved_preconditions(plan)?;
-    verify_additions_absent(plan)?;
+    verify_preserved_preconditions_in_state(state, plan)?;
+    verify_additions_absent_in_state(state, plan)?;
 
     if plan.is_noop() {
         return Ok(TemplateApplicationResult {
@@ -308,8 +368,7 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
         });
     }
 
-    let root_file = fs::File::open(&root).map_err(|source| FolderbaseError::io(&root, source))?;
-    let root_dir = Dir::from_std_file(root_file);
+    let root_dir = state.clone_root_capability()?;
     let mut ordered = plan.additions.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         let left_directory = left.kind == TemplateArtifactKind::Directory;
@@ -342,9 +401,9 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
         }
     }
 
-    let created_paths = verify_created_additions(&root, &plan.additions)?;
-    verify_preserved_preconditions(plan)?;
-    let preserved_targets = materialize_preserved_targets(&root, plan)?;
+    let created_paths = verify_created_additions_in_state(state, &plan.additions)?;
+    verify_preserved_preconditions_in_state(state, plan)?;
+    let preserved_targets = materialize_preserved_targets_in_state(state, plan)?;
 
     let application_id = format!("template_application_{}", Uuid::now_v7());
     let mut record = TemplateApplicationRecord {
@@ -375,7 +434,7 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
     record.record_digest = digest_application_record(&record);
     validate_application_record(&record, Some(&plan.folderbase_id), &root)?;
 
-    ensure_history_directory(&root_dir, &root)?;
+    ensure_history_directory_in_state(state, &root_dir)?;
     let record_path = PathBuf::from(APPLICATIONS).join(format!("{application_id}.json"));
     let mut bytes = serde_json::to_vec_pretty(&record)
         .map_err(|source| FolderbaseError::json(root.join(&record_path), source))?;
@@ -387,11 +446,14 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
         &bytes,
         "template-application",
     )?;
-    let installed: TemplateApplicationRecord = serde_json::from_slice(
-        &fs::read(root.join(&record_path))
-            .map_err(|source| FolderbaseError::io(root.join(&record_path), source))?,
-    )
-    .map_err(|source| FolderbaseError::json(root.join(&record_path), source))?;
+    let installed_bytes = state
+        .read_bounded(&record_path, MAX_TEMPLATE_APPLICATION_BYTES)?
+        .ok_or_else(|| FolderbaseError::InvalidRecord {
+            path: root.join(&record_path),
+            message: "installed template application record is missing".to_owned(),
+        })?;
+    let installed: TemplateApplicationRecord = serde_json::from_slice(&installed_bytes)
+        .map_err(|source| FolderbaseError::json(root.join(&record_path), source))?;
     validate_application_record(&installed, Some(&plan.folderbase_id), &root)?;
     if installed != record {
         return Err(FolderbaseError::InvalidRecord {
@@ -409,6 +471,58 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
         preserved_paths: plan.preserved_paths.clone(),
         application_record: Some(record_path),
     })
+}
+
+/// Re-plan and apply one exact data-only template package under Folderbase's
+/// shared transaction lease.
+///
+/// The caller supplies only the reviewed digest, never a deserialized plan.
+/// Core derives the live plan again after the lease is held and fails before
+/// any template write when it no longer matches the approval.
+pub fn apply_template_expansion_with_expected_plan_digest(
+    root: impl AsRef<Path>,
+    target: &TemplatePackage,
+    answers: &BTreeMap<String, TemplateAnswerValue>,
+    expected_plan_digest: &str,
+) -> Result<(TemplateExpansionPlan, TemplateApplicationResult)> {
+    apply_template_expansion_with_expected_plan_digest_and_hook(
+        root,
+        target,
+        answers,
+        expected_plan_digest,
+        || {},
+    )
+}
+
+fn apply_template_expansion_with_expected_plan_digest_and_hook(
+    root: impl AsRef<Path>,
+    target: &TemplatePackage,
+    answers: &BTreeMap<String, TemplateAnswerValue>,
+    expected_plan_digest: &str,
+    after_lease: impl FnOnce(),
+) -> Result<(TemplateExpansionPlan, TemplateApplicationResult)> {
+    if expected_plan_digest.len() != 64
+        || !expected_plan_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(FolderbaseError::InvalidTemplateExpansionPlanDigest);
+    }
+
+    let state = FolderbaseState::open_existing(root.as_ref())?;
+    let _lease = LocalVersionStore::acquire_transaction_lock_for_state(root.as_ref(), &state)?;
+    after_lease();
+    state.classify_attached_root_boundary().map(drop)?;
+    let plan = plan_template_expansion_in_state(&state, target, answers)?;
+    state.classify_attached_root_boundary().map(drop)?;
+    if plan.plan_digest.digest != expected_plan_digest {
+        return Err(FolderbaseError::TemplateExpansionPlanChanged {
+            expected: expected_plan_digest.to_owned(),
+            actual: plan.plan_digest.digest.clone(),
+        });
+    }
+    let result = apply_template_expansion_in_state(&state, &plan)?;
+    Ok((plan, result))
 }
 
 pub fn template_application_history(
@@ -493,6 +607,23 @@ fn derive_comparison(
                 },
                 source: TemplateComparisonSource::Unmanaged,
                 application_id: None,
+            });
+        }
+        let predecessor_ids = history
+            .iter()
+            .filter_map(|record| record.comparison.application_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        let terminals = history
+            .iter()
+            .filter(|record| !predecessor_ids.contains(record.id.as_str()))
+            .collect::<Vec<_>>();
+        if let [record] = terminals.as_slice() {
+            return Ok(Comparison {
+                template_id: record.template.id.clone(),
+                version: record.template.version.clone(),
+                package_digest: record.template.package_digest.clone(),
+                source: TemplateComparisonSource::Application,
+                application_id: Some(record.id.clone()),
             });
         }
         return Err(FolderbaseError::InvalidRecord {
@@ -696,6 +827,7 @@ fn manifest_is_native_v05(manifest: &Value) -> bool {
 fn build_plan(
     root: PathBuf,
     root_identity: RetainedPhysicalIdentity,
+    root_identity_sha256: String,
     folderbase_id: String,
     target: &TemplatePackage,
     template_package_digest: TemplatePlanDigest,
@@ -733,6 +865,7 @@ fn build_plan(
         manifest_sha256,
         history_sha256,
         preserved_preconditions: Vec::new(),
+        root_identity_sha256,
         root_identity,
     };
     plan.plan_digest = digest_plan(&plan);
@@ -777,6 +910,7 @@ fn digest_plan(plan: &TemplateExpansionPlan) -> TemplatePlanDigest {
         .collect::<Vec<_>>();
     let dto = json!({
         "folderbase_id": plan.folderbase_id,
+        "root_identity_sha256": plan.root_identity_sha256,
         "manifest_sha256": plan.manifest_sha256,
         "history_sha256": plan.history_sha256,
         "comparison": {
@@ -803,8 +937,125 @@ fn digest_plan(plan: &TemplateExpansionPlan) -> TemplatePlanDigest {
     }
 }
 
-fn add_missing_parent_directories(
-    root: &Path,
+fn open_template_target(state: &FolderbaseState, path: &Path) -> Result<WorkspaceTarget> {
+    if path
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == ".folderbase")
+    {
+        state.open_private_target_nofollow(path)
+    } else {
+        state.open_workspace_target_nofollow(path)
+    }
+}
+
+fn template_directory_names(
+    state: &FolderbaseState,
+    path: &Path,
+    maximum_entries: usize,
+) -> Result<Vec<std::ffi::OsString>> {
+    if path
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == ".folderbase")
+    {
+        state.private_directory_names(path, maximum_entries)
+    } else {
+        state.workspace_directory_names(path, maximum_entries)
+    }
+}
+
+fn template_path_key(value: &str) -> String {
+    value
+        .nfc()
+        .collect::<String>()
+        .case_fold()
+        .collect::<String>()
+        .nfc()
+        .collect()
+}
+
+fn validate_template_paths_against_existing_in_state<'a>(
+    state: &FolderbaseState,
+    planned_paths: impl IntoIterator<Item = &'a Path>,
+    allow_exact_target: bool,
+) -> Result<()> {
+    let mut remaining_work = MAX_TEMPLATE_PATH_ENTRY_WORK;
+    for planned in planned_paths {
+        let mut parent = PathBuf::new();
+        let component_count = planned.components().count();
+        for (index, component) in planned.components().enumerate() {
+            let Component::Normal(component) = component else {
+                return Err(FolderbaseError::UnsafePath(planned.to_path_buf()));
+            };
+            let component_text = component
+                .to_str()
+                .ok_or_else(|| FolderbaseError::UnsafePath(planned.to_path_buf()))?;
+            let folded = template_path_key(component_text);
+            let names = template_directory_names(state, &parent, remaining_work.saturating_add(1))?;
+            if names.len() > remaining_work {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: state.display_root().to_path_buf(),
+                    message: format!(
+                        "template path inspection exceeds {MAX_TEMPLATE_PATH_ENTRY_WORK} directory entries"
+                    ),
+                });
+            }
+            remaining_work -= names.len();
+            let mut exact = false;
+            for name in names {
+                let Some(name_text) = name.to_str() else {
+                    continue;
+                };
+                if template_path_key(name_text) != folded {
+                    continue;
+                }
+                if name == component {
+                    exact = true;
+                } else {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: state.display_root().to_path_buf(),
+                        message: format!(
+                            "planned path collision: {} aliases existing {}",
+                            planned.display(),
+                            state.display_root().join(&parent).join(name).display()
+                        ),
+                    });
+                }
+            }
+            if !exact {
+                break;
+            }
+            parent.push(component);
+            if index + 1 == component_count {
+                if allow_exact_target {
+                    break;
+                }
+                return Err(FolderbaseError::WouldOverwrite(
+                    state.display_root().join(planned),
+                ));
+            }
+            if parent != Path::new(".folderbase")
+                && !matches!(
+                    open_template_target(state, &parent)?,
+                    WorkspaceTarget::Directory(_)
+                )
+            {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: state.display_root().join(&parent),
+                    message: format!(
+                        "planned path collision: ancestor {} is not a safe directory",
+                        parent.display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn add_missing_parent_directories_in_state(
+    state: &FolderbaseState,
     additions: &mut Vec<PlannedTemplateAddition>,
 ) -> Result<()> {
     let planned = additions
@@ -817,22 +1068,24 @@ fn add_missing_parent_directories(
             continue;
         };
         let mut relative = PathBuf::new();
-        let mut destination = root.to_path_buf();
         for component in parent.components() {
             let Component::Normal(component) = component else {
                 return Err(FolderbaseError::UnsafePath(path));
             };
             relative.push(component);
-            destination.push(component);
-            match fs::symlink_metadata(&destination) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                    return Err(FolderbaseError::UnsafePath(destination));
-                }
-                Ok(_) => {}
-                Err(source) if source.kind() == ErrorKind::NotFound => {
+            if relative == Path::new(".folderbase") {
+                continue;
+            }
+            match open_template_target(state, &relative)? {
+                WorkspaceTarget::Absent => {
                     extra.insert(relative.clone());
                 }
-                Err(source) => return Err(FolderbaseError::io(destination, source)),
+                WorkspaceTarget::Directory(_) => {}
+                WorkspaceTarget::RegularFile(_) => {
+                    return Err(FolderbaseError::UnsafePath(
+                        state.display_root().join(&relative),
+                    ));
+                }
             }
         }
     }
@@ -857,87 +1110,107 @@ fn validate_folderbase_root(root: &Path) -> Result<()> {
         })
 }
 
-fn verify_preserved_preconditions(plan: &TemplateExpansionPlan) -> Result<()> {
+fn verify_preserved_preconditions_in_state(
+    state: &FolderbaseState,
+    plan: &TemplateExpansionPlan,
+) -> Result<()> {
     for precondition in &plan.preserved_preconditions {
-        refuse_template_target_inside_nested_folderbase(&plan.root, &precondition.path)?;
-        let destination = safe_destination(&plan.root, &precondition.path)?;
-        let metadata = fs::symlink_metadata(&destination)
-            .map_err(|_| FolderbaseError::PlanPreconditionChanged(precondition.path.clone()))?;
-        let type_matches = match precondition.kind {
-            TemplateArtifactKind::Directory => metadata.is_dir(),
-            TemplateArtifactKind::Text => metadata.is_file(),
-        };
-        if metadata.file_type().is_symlink() || !type_matches {
-            return Err(FolderbaseError::PlanPreconditionChanged(
-                precondition.path.clone(),
-            ));
-        }
-        let identity = PhysicalIdentity::from_path(&destination)
-            .map_err(|_| FolderbaseError::PlanPreconditionChanged(precondition.path.clone()))?;
-        if identity != precondition.identity.identity() {
-            return Err(FolderbaseError::PlanPreconditionChanged(
-                precondition.path.clone(),
-            ));
-        }
-        if let Some(expected) = &precondition.sha256
-            && sha256_path(&destination)
-                .map_err(|_| FolderbaseError::PlanPreconditionChanged(precondition.path.clone()))?
-                != *expected
-        {
-            return Err(FolderbaseError::PlanPreconditionChanged(
-                precondition.path.clone(),
-            ));
+        match open_template_target(state, &precondition.path) {
+            Ok(WorkspaceTarget::Directory(directory))
+                if precondition.kind == TemplateArtifactKind::Directory =>
+            {
+                let file = directory.into_std_file();
+                let identity = PhysicalIdentity::from_file(&file).map_err(|_| {
+                    FolderbaseError::PlanPreconditionChanged(precondition.path.clone())
+                })?;
+                if identity != precondition.identity.identity() {
+                    return Err(FolderbaseError::PlanPreconditionChanged(
+                        precondition.path.clone(),
+                    ));
+                }
+            }
+            Ok(WorkspaceTarget::RegularFile(file))
+                if precondition.kind == TemplateArtifactKind::Text =>
+            {
+                let mut file = file.into_std();
+                let identity = PhysicalIdentity::from_file(&file).map_err(|_| {
+                    FolderbaseError::PlanPreconditionChanged(precondition.path.clone())
+                })?;
+                if identity != precondition.identity.identity() {
+                    return Err(FolderbaseError::PlanPreconditionChanged(
+                        precondition.path.clone(),
+                    ));
+                }
+                if let Some(expected) = &precondition.sha256
+                    && sha256_reader(&mut file).map_err(|_| {
+                        FolderbaseError::PlanPreconditionChanged(precondition.path.clone())
+                    })? != *expected
+                {
+                    return Err(FolderbaseError::PlanPreconditionChanged(
+                        precondition.path.clone(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(FolderbaseError::PlanPreconditionChanged(
+                    precondition.path.clone(),
+                ));
+            }
         }
     }
     Ok(())
 }
 
-fn verify_additions_absent(plan: &TemplateExpansionPlan) -> Result<()> {
+fn verify_additions_absent_in_state(
+    state: &FolderbaseState,
+    plan: &TemplateExpansionPlan,
+) -> Result<()> {
     for addition in &plan.additions {
         ensure_safe_relative(&addition.path)?;
-        refuse_template_target_inside_nested_folderbase(&plan.root, &addition.path)?;
-        let destination = safe_destination(&plan.root, &addition.path)?;
-        match fs::symlink_metadata(&destination) {
-            Ok(_) => return Err(FolderbaseError::WouldOverwrite(destination)),
-            Err(source) if source.kind() == ErrorKind::NotFound => {}
-            Err(source) => return Err(FolderbaseError::io(destination, source)),
+        if !matches!(
+            open_template_target(state, &addition.path)?,
+            WorkspaceTarget::Absent
+        ) {
+            return Err(FolderbaseError::WouldOverwrite(
+                state.display_root().join(&addition.path),
+            ));
         }
     }
     Ok(())
 }
 
-fn verify_created_additions(
-    root: &Path,
+fn verify_created_additions_in_state(
+    state: &FolderbaseState,
     additions: &[PlannedTemplateAddition],
 ) -> Result<Vec<TemplateApplicationCreatedPath>> {
     let mut created = Vec::new();
     for addition in additions {
-        let destination = safe_destination(root, &addition.path)?;
-        let metadata = fs::symlink_metadata(&destination)
-            .map_err(|source| FolderbaseError::io(&destination, source))?;
-        let type_matches = match addition.kind {
-            TemplateArtifactKind::Directory => metadata.is_dir(),
-            TemplateArtifactKind::Text => metadata.is_file(),
-        };
-        if metadata.file_type().is_symlink() || !type_matches {
-            return Err(FolderbaseError::InvalidRecord {
-                path: destination,
-                message: "template addition failed post-write verification".to_owned(),
-            });
-        }
-        let (bytes, sha256) = if addition.kind == TemplateArtifactKind::Text {
-            let bytes = metadata.len();
-            let digest = sha256_path(&destination)?;
-            let expected = sha256_bytes(addition.content.as_deref().unwrap_or_default().as_bytes());
-            if digest != expected {
+        let (bytes, sha256) = match (addition.kind, open_template_target(state, &addition.path)?) {
+            (TemplateArtifactKind::Directory, WorkspaceTarget::Directory(_)) => (None, None),
+            (TemplateArtifactKind::Text, WorkspaceTarget::RegularFile(file)) => {
+                let mut file = file.into_std();
+                let metadata = file.metadata().map_err(|source| {
+                    FolderbaseError::io(state.display_root().join(&addition.path), source)
+                })?;
+                let digest = sha256_reader(&mut file).map_err(|source| {
+                    FolderbaseError::io(state.display_root().join(&addition.path), source)
+                })?;
+                let expected =
+                    sha256_bytes(addition.content.as_deref().unwrap_or_default().as_bytes());
+                if digest != expected {
+                    return Err(FolderbaseError::InvalidRecord {
+                        path: state.display_root().join(&addition.path),
+                        message: "template addition content digest mismatch".to_owned(),
+                    });
+                }
+                (Some(metadata.len()), Some(digest))
+            }
+            _ => {
                 return Err(FolderbaseError::InvalidRecord {
-                    path: destination,
-                    message: "template addition content digest mismatch".to_owned(),
+                    path: state.display_root().join(&addition.path),
+                    message: "template addition failed post-write verification".to_owned(),
                 });
             }
-            (Some(bytes), Some(digest))
-        } else {
-            (None, None)
         };
         created.push(TemplateApplicationCreatedPath {
             path: addition.path.clone(),
@@ -950,30 +1223,45 @@ fn verify_created_additions(
     Ok(created)
 }
 
-fn materialize_preserved_targets(
-    root: &Path,
+fn materialize_preserved_targets_in_state(
+    state: &FolderbaseState,
     plan: &TemplateExpansionPlan,
 ) -> Result<Vec<crate::TemplateApplicationPreservedTarget>> {
     let mut preserved = Vec::new();
     for precondition in &plan.preserved_preconditions {
-        let destination = safe_destination(root, &precondition.path)?;
-        let metadata = fs::symlink_metadata(&destination)
-            .map_err(|source| FolderbaseError::io(&destination, source))?;
-        let sha256 = if precondition.kind == TemplateArtifactKind::Text {
-            let digest = sha256_path(&destination)?;
-            if precondition.sha256.as_ref() != Some(&digest) {
+        let (bytes, sha256) = match open_template_target(state, &precondition.path)? {
+            WorkspaceTarget::Directory(_)
+                if precondition.kind == TemplateArtifactKind::Directory =>
+            {
+                (None, None)
+            }
+            WorkspaceTarget::RegularFile(file)
+                if precondition.kind == TemplateArtifactKind::Text =>
+            {
+                let mut file = file.into_std();
+                let metadata = file.metadata().map_err(|source| {
+                    FolderbaseError::io(state.display_root().join(&precondition.path), source)
+                })?;
+                let digest = sha256_reader(&mut file).map_err(|source| {
+                    FolderbaseError::io(state.display_root().join(&precondition.path), source)
+                })?;
+                if precondition.sha256.as_ref() != Some(&digest) {
+                    return Err(FolderbaseError::PlanPreconditionChanged(
+                        precondition.path.clone(),
+                    ));
+                }
+                (Some(metadata.len()), Some(digest))
+            }
+            _ => {
                 return Err(FolderbaseError::PlanPreconditionChanged(
                     precondition.path.clone(),
                 ));
             }
-            Some(digest)
-        } else {
-            None
         };
         preserved.push(crate::TemplateApplicationPreservedTarget {
             path: precondition.path.clone(),
             kind: precondition.kind,
-            bytes: (precondition.kind == TemplateArtifactKind::Text).then_some(metadata.len()),
+            bytes,
             sha256,
         });
     }
@@ -981,16 +1269,15 @@ fn materialize_preserved_targets(
     Ok(preserved)
 }
 
-fn ensure_history_directory(root_dir: &Dir, root: &Path) -> Result<()> {
-    validate_history_path(root)?;
-    let relative = Path::new(APPLICATIONS);
-    match root_dir.symlink_metadata(relative) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err(FolderbaseError::UnsafePath(root.join(relative))),
-        Err(source) if source.kind() == ErrorKind::NotFound => {
-            create_directory_no_clobber(root_dir, root, relative)
+fn ensure_history_directory_in_state(state: &FolderbaseState, root_dir: &Dir) -> Result<()> {
+    match state.open_private_target_nofollow(Path::new(APPLICATIONS))? {
+        WorkspaceTarget::Directory(_) => Ok(()),
+        WorkspaceTarget::Absent => {
+            create_directory_no_clobber(root_dir, state.display_root(), Path::new(APPLICATIONS))
         }
-        Err(source) => Err(FolderbaseError::io(root.join(relative), source)),
+        WorkspaceTarget::RegularFile(_) => Err(FolderbaseError::UnsafePath(
+            state.display_root().join(APPLICATIONS),
+        )),
     }
 }
 
@@ -1020,6 +1307,103 @@ fn validate_history_path(root: &Path) -> Result<()> {
         Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
         Err(source) => Err(FolderbaseError::io(history, source)),
     }
+}
+
+fn read_history_with_snapshot_in_state(
+    state: &FolderbaseState,
+    expected_folderbase_id: Option<&str>,
+) -> Result<(Vec<TemplateApplicationRecord>, String)> {
+    let expected_name = template_path_key("template-applications");
+    for name in state.private_directory_names(Path::new(".folderbase"), 4097)? {
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        if template_path_key(text) == expected_name && text != "template-applications" {
+            return Err(FolderbaseError::UnsafePath(
+                state.display_root().join(".folderbase").join(name),
+            ));
+        }
+    }
+
+    let names = match state.open_private_target_nofollow(Path::new(APPLICATIONS))? {
+        WorkspaceTarget::Absent => return Ok((Vec::new(), sha256_bytes(b"absent"))),
+        WorkspaceTarget::Directory(_) => state
+            .private_directory_names(Path::new(APPLICATIONS), MAX_TEMPLATE_HISTORY_RECORDS + 1)?,
+        WorkspaceTarget::RegularFile(_) => {
+            return Err(FolderbaseError::UnsafePath(
+                state.display_root().join(APPLICATIONS),
+            ));
+        }
+    };
+    if names.len() > MAX_TEMPLATE_HISTORY_RECORDS {
+        return Err(FolderbaseError::InvalidRecord {
+            path: state.display_root().join(APPLICATIONS),
+            message: format!(
+                "template application history exceeds {MAX_TEMPLATE_HISTORY_RECORDS} records"
+            ),
+        });
+    }
+    let mut names = names;
+    names.sort_by(|left, right| left.as_encoded_bytes().cmp(right.as_encoded_bytes()));
+    let mut snapshot = Sha256::new();
+    let mut history = Vec::new();
+    let mut ids = BTreeSet::new();
+    for name in names {
+        let Some(name_text) = name.to_str() else {
+            return Err(FolderbaseError::InvalidRecord {
+                path: state.display_root().join(APPLICATIONS),
+                message: "template application history filename is not UTF-8".to_owned(),
+            });
+        };
+        if Path::new(name_text)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("json")
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path: state.display_root().join(APPLICATIONS).join(&name),
+                message: "template application history contains a non-JSON entry".to_owned(),
+            });
+        }
+        let relative = Path::new(APPLICATIONS).join(&name);
+        let bytes = state
+            .read_bounded(&relative, MAX_TEMPLATE_APPLICATION_BYTES)?
+            .ok_or_else(|| FolderbaseError::InvalidRecord {
+                path: state.display_root().join(&relative),
+                message: "template application disappeared during planning".to_owned(),
+            })?;
+        snapshot.update(name.as_encoded_bytes());
+        snapshot.update([0]);
+        snapshot.update(&bytes);
+        snapshot.update([0]);
+        let path = state.display_root().join(&relative);
+        let record: TemplateApplicationRecord = serde_json::from_slice(&bytes)
+            .map_err(|source| FolderbaseError::json(&path, source))?;
+        validate_application_record(&record, expected_folderbase_id, &path)?;
+        if Path::new(name_text)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            != Some(record.id.as_str())
+        {
+            return Err(FolderbaseError::InvalidRecord {
+                path,
+                message: "template application filename does not match record id".to_owned(),
+            });
+        }
+        if !ids.insert(record.id.clone()) {
+            return Err(FolderbaseError::InvalidRecord {
+                path,
+                message: "duplicate template application id".to_owned(),
+            });
+        }
+        history.push(record);
+    }
+    history.sort_by(|left, right| {
+        parsed_application_time(left)
+            .cmp(&parsed_application_time(right))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok((history, format!("{:x}", snapshot.finalize())))
 }
 
 fn read_history_with_snapshot(
@@ -1271,4 +1655,71 @@ fn path_text(path: &Path) -> String {
     path.to_str()
         .expect("validated template paths are UTF-8")
         .to_owned()
+}
+
+#[cfg(test)]
+mod capability_security_tests {
+    use super::*;
+    use crate::{InitializationOptions, initialize, plan_initialization};
+
+    fn package() -> TemplatePackage {
+        serde_json::from_value(json!({
+            "protocol_version": "0.2.0",
+            "id": "example.project",
+            "version": "1.0.0",
+            "name": "Capability security fixture",
+            "suggested_folderbase_kind": "project",
+            "questions": [],
+            "artifacts": [{
+                "target": "Notes/README.md",
+                "kind": "text",
+                "content": "# Notes\n",
+                "install": "create_if_missing"
+            }],
+            "upgrade_edges": []
+        }))
+        .expect("template package")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_never_reenters_a_replaced_ambient_root_after_acquiring_its_lease() {
+        let owner = tempfile::tempdir().expect("fixture owner");
+        let root = owner.path().join("root");
+        fs::create_dir(&root).expect("root directory");
+        initialize(
+            &plan_initialization(&root, InitializationOptions::default())
+                .expect("initialization plan"),
+        )
+        .expect("initialize root");
+        let package = package();
+        let answers = BTreeMap::new();
+        let reviewed =
+            plan_template_expansion(&root, &package, &answers).expect("reviewed expansion");
+        let approved = reviewed.plan_digest().digest().to_owned();
+        let moved = owner.path().join("moved-root");
+
+        let result = apply_template_expansion_with_expected_plan_digest_and_hook(
+            &root,
+            &package,
+            &answers,
+            &approved,
+            || {
+                fs::rename(&root, &moved).expect("detach retained root");
+                fs::create_dir_all(root.join(".folderbase")).expect("replacement state");
+                fs::copy(moved.join(MANIFEST), root.join(MANIFEST))
+                    .expect("same manifest in replacement root");
+            },
+        );
+
+        assert!(result.is_err(), "detached display root must fail closed");
+        assert!(
+            !root.join("Notes/README.md").exists(),
+            "replacement root must never receive template writes"
+        );
+        assert!(
+            !moved.join("Notes/README.md").exists(),
+            "a detached retained root is not published through an obsolete display path"
+        );
+    }
 }

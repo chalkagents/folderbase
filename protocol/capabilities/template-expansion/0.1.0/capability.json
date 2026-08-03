@@ -1,0 +1,6 @@
+{
+  "name": "folderbase.template-expansion",
+  "version": "0.1.0",
+  "stability": "stable",
+  "conformance_runner": "protocol/conformance/capabilities/template-expansion-0.1/run.mjs"
+}

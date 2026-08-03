@@ -116,7 +116,8 @@ pub use template::{
     list_templates, load_builtin_template, load_template, render_template, template_package_sha256,
 };
 pub use template_expansion::{
-    apply_template_expansion, plan_template_expansion, template_application_history,
+    apply_template_expansion, apply_template_expansion_with_expected_plan_digest,
+    plan_template_expansion, template_application_history,
 };
 pub use transfer_source::{
     ChunkTransferProfile, ChunkTransferSource, MANAGED_LARGE_PROFILE_THRESHOLD_BYTES,

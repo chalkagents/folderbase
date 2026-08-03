@@ -38,6 +38,21 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")
+        .arg(repository.join("protocol/conformance/capabilities/template-expansion-0.1/run.mjs"))
+        .arg("--implementation")
+        .arg(implementation)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"format\": \"folderbase-capability-suite-report-v1\"",
+        ))
+        .stdout(predicate::str::contains(
+            "\"capability\": \"folderbase.template-expansion@0.1.0\"",
+        ))
+        .stdout(predicate::str::contains("\"passed\": 9"))
+        .stdout(predicate::str::contains("\"failed\": 0"));
+
+    Command::new("node")
         .arg(repository.join("protocol/conformance/capabilities/run.mjs"))
         .arg("--implementation")
         .arg(implementation)
@@ -46,8 +61,8 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains(
             "\"format\": \"folderbase-capability-conformance-report-v1\"",
         ))
-        .stdout(predicate::str::contains("\"selected\": 2"))
-        .stdout(predicate::str::contains("\"passed\": 2"))
+        .stdout(predicate::str::contains("\"selected\": 3"))
+        .stdout(predicate::str::contains("\"passed\": 3"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")

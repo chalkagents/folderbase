@@ -5,9 +5,13 @@ const MAX_QUERY_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 #[cfg(unix)]
 #[test]
-fn query_index_parser_failures_exit_two_when_stderr_is_closed() {
+fn capability_parser_failures_exit_two_when_stderr_is_closed() {
     let implementation = assert_cmd::cargo::cargo_bin!("folderbase");
-    for arguments in [["query", "run", "--json"], ["index", "status", "--json"]] {
+    for arguments in [
+        ["query", "run", "--json"],
+        ["index", "status", "--json"],
+        ["template", "plan", "--json"],
+    ] {
         let (closed_stderr, reader) = std::os::unix::net::UnixStream::pair()
             .expect("create a deterministic broken stderr pipe");
         drop(reader);

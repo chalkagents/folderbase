@@ -259,6 +259,46 @@ fn canonical_package_digest_matches_the_protocol_vector() {
 }
 
 #[test]
+fn runtime_packages_enforce_the_public_template_capability_bounds() {
+    let fixture = protocol_root().join("conformance/template/valid/digest-vector-0.2.0.json");
+    let source = fs::read(&fixture).expect("digest vector bytes");
+    let base: Value = serde_json::from_slice(&source).expect("digest vector JSON");
+
+    let mut too_many_artifacts = base.clone();
+    too_many_artifacts["artifacts"] = Value::Array(
+        (0..4097)
+            .map(|index| {
+                serde_json::json!({
+                    "target": format!("Notes/{index}.md"),
+                    "kind": "text",
+                    "content": "bounded\n",
+                    "install": "create_if_missing"
+                })
+            })
+            .collect(),
+    );
+    let package: TemplatePackage =
+        serde_json::from_value(too_many_artifacts).expect("typed oversized package");
+    assert!(
+        template_package_sha256(&package)
+            .expect_err("artifact count must be bounded")
+            .to_string()
+            .contains("4096")
+    );
+
+    let mut oversized_content = base;
+    oversized_content["artifacts"][0]["content"] = Value::String("x".repeat(1_048_577));
+    let package: TemplatePackage =
+        serde_json::from_value(oversized_content).expect("typed oversized content package");
+    assert!(
+        template_package_sha256(&package)
+            .expect_err("artifact content must be bounded")
+            .to_string()
+            .contains("1048576")
+    );
+}
+
+#[test]
 fn project_template_declares_typed_answers_and_explicit_interpolation() {
     let project = read_json("templates/0.2/project-0.2.1/template.json");
     let questions = project["questions"].as_array().expect("questions");

@@ -18,14 +18,16 @@ use folderbase_core::{
     MigrationAnswer, MigrationCommand, MigrationConflict, MigrationExecution, MigrationOutcome,
     MigrationPlan, MigrationPreview, MigrationResult, MigrationState, ProtocolUpgradePlanDigest,
     RollbackResult, RootAttestationError, RootClaim, TemplateAnswerType, TemplateAnswerValue,
-    TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity, VersionId,
-    analyze_migration, apply_migration, apply_protocol_upgrade, approve_migration,
-    attest_folderbase_root, initialize, initialize_with_expected_plan_digest, inspect,
-    list_workspace, load_builtin_template, plan_initialization, plan_migration,
-    plan_protocol_upgrade, plan_template_initialization, preview_migration, read_workspace_text,
+    TemplateExpansionPlan, TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity,
+    VersionId, analyze_migration, apply_migration, apply_protocol_upgrade,
+    apply_template_expansion_with_expected_plan_digest, approve_migration, attest_folderbase_root,
+    initialize, initialize_with_expected_plan_digest, inspect, list_workspace,
+    load_builtin_template, plan_initialization, plan_migration, plan_protocol_upgrade,
+    plan_template_expansion, plan_template_initialization, preview_migration, read_workspace_text,
     save_workspace_text, validate,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 mod query_capability;
 
@@ -33,6 +35,7 @@ const EXIT_SUCCESS: u8 = 0;
 const EXIT_INVALID: u8 = 1;
 const EXIT_OPERATIONAL_ERROR: u8 = 2;
 const MAX_MIGRATION_ANSWERS_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_TEMPLATE_EXPANSION_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 const CAPABILITY_REGISTRY: &str = include_str!("../assets/capability-registry-v1.json");
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +118,12 @@ enum Command {
         /// Apply only if Core replans to this approved SHA-256 digest.
         #[arg(long, conflicts_with = "dry_run")]
         expected_plan_digest: Option<String>,
+    },
+
+    /// Plan or apply additive Template Protocol 0.2 guidance.
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
     },
 
     /// Review or apply the explicit legacy-root transition to protocol 0.5.
@@ -207,6 +216,36 @@ enum Command {
         #[command(subcommand)]
         command: ProtocolCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum TemplateCommand {
+    /// Preview one exact data-only template package without writing files.
+    Plan {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Re-plan and apply only the exact approved additive expansion.
+    Apply {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        expected_plan_digest: String,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemplateExpansionRequest {
+    format: String,
+    template: TemplatePackage,
+    answers: BTreeMap<String, TemplateAnswerValue>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -499,6 +538,9 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Err(error) if error.exit_code() != 0 && argv_selects_template_capability() => {
+            return write_template_invocation_error(error.to_string());
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             return match error.print() {
@@ -513,17 +555,29 @@ fn main() -> ExitCode {
         }
     };
     let json_errors = command_emits_json_errors(&cli.command);
+    let template_json_errors = matches!(cli.command, Command::Template { .. });
 
     match run(cli) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             if json_errors {
                 let envelope = serde_json::json!({
+                    "format": template_json_errors.then_some("folderbase-template-expansion-error-v1"),
                     "error": {
                         "code": error_code(&error),
                         "message": error.to_string(),
                     }
                 });
+                let envelope = if template_json_errors {
+                    envelope
+                } else {
+                    let mut envelope = envelope;
+                    envelope
+                        .as_object_mut()
+                        .expect("error envelope is an object")
+                        .remove("format");
+                    envelope
+                };
                 match serde_json::to_string_pretty(&envelope) {
                     Ok(encoded) => write_stderr_best_effort(format_args!("{encoded}")),
                     Err(serialization) => {
@@ -555,6 +609,42 @@ fn argv_selects_query_capability() -> bool {
             .as_deref(),
         Some("query" | "index")
     )
+}
+
+fn argv_selects_template_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("template")
+    )
+}
+
+fn write_template_invocation_error(message: String) -> ExitCode {
+    let envelope = serde_json::json!({
+        "format": "folderbase-template-expansion-error-v1",
+        "error": {
+            "code": "invalid_template_request",
+            "message": message,
+        }
+    });
+    let mut encoded = match serde_json::to_vec_pretty(&envelope) {
+        Ok(encoded) => encoded,
+        Err(source) => {
+            write_stderr_best_effort(format_args!(
+                "error: failed to serialize template invocation error: {source}"
+            ));
+            return ExitCode::from(EXIT_OPERATIONAL_ERROR);
+        }
+    };
+    encoded.push(b'\n');
+
+    let stderr = std::io::stderr();
+    if let Err(error) = write_transport_stream(&mut stderr.lock(), &encoded, "stderr") {
+        write_stderr_best_effort(format_args!("error: {error}"));
+    }
+    ExitCode::from(EXIT_OPERATIONAL_ERROR)
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
@@ -636,6 +726,66 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     print_initialization_result(&result);
                 }
             }
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Template { command } => {
+            let (root, expected) = match &command {
+                TemplateCommand::Plan { root, .. } => (root.clone(), None),
+                TemplateCommand::Apply {
+                    root,
+                    expected_plan_digest,
+                    ..
+                } => (root.clone(), Some(expected_plan_digest.clone())),
+            };
+            let request = parse_template_expansion_request_stdin()?;
+            let reviewed = plan_template_expansion(&root, &request.template, &request.answers)
+                .map_err(map_template_request_error)?;
+            let plan_document = template_plan_document(&reviewed);
+
+            if expected.is_none() {
+                print_json(&plan_document)?;
+                return Ok(EXIT_SUCCESS);
+            }
+
+            let expected = expected.expect("apply has an expected digest");
+            if reviewed.plan_digest().digest() != expected {
+                print_json(&template_attention_document(
+                    &root,
+                    "expected_plan_digest_mismatch",
+                    "the live template expansion plan no longer matches the reviewed digest",
+                    Some((&expected, reviewed.plan_digest().digest())),
+                    Some(plan_document),
+                ))?;
+                return Ok(EXIT_INVALID);
+            }
+            if !reviewed.structural_changes().is_empty() {
+                print_json(&template_attention_document(
+                    &root,
+                    "reorganization_required",
+                    "this change is structural and must use the Reorganization workflow",
+                    None,
+                    Some(plan_document),
+                ))?;
+                return Ok(EXIT_INVALID);
+            }
+            if !reviewed.blocked_paths().is_empty() {
+                print_json(&template_attention_document(
+                    &root,
+                    "template_expansion_blocked",
+                    "one or more template targets cannot be preserved safely",
+                    None,
+                    Some(plan_document),
+                ))?;
+                return Ok(EXIT_INVALID);
+            }
+
+            let (applied_plan, result) = apply_template_expansion_with_expected_plan_digest(
+                &root,
+                &request.template,
+                &request.answers,
+                &expected,
+            )?;
+            print_json(&template_apply_document(&applied_plan, &result))?;
             Ok(EXIT_SUCCESS)
         }
         Command::Upgrade {
@@ -1176,9 +1326,173 @@ fn run_protocol_check(artifact: ProtocolArtifactArg, json: bool) -> Result<u8, C
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<(), CliError> {
-    let encoded = serde_json::to_string_pretty(value).map_err(CliError::OutputSerialization)?;
-    println!("{encoded}");
-    Ok(())
+    let mut encoded = serde_json::to_vec_pretty(value).map_err(CliError::OutputSerialization)?;
+    encoded.push(b'\n');
+    let stdout = std::io::stdout();
+    write_transport_stream(&mut stdout.lock(), &encoded, "stdout")
+}
+
+fn parse_template_expansion_request_stdin() -> Result<TemplateExpansionRequest, CliError> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(MAX_TEMPLATE_EXPANSION_REQUEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| {
+            FolderbaseError::InvalidTemplateRequest(format!(
+                "failed to read template request from stdin: {source}"
+            ))
+        })?;
+    if bytes.len() as u64 > MAX_TEMPLATE_EXPANSION_REQUEST_BYTES {
+        return Err(FolderbaseError::TemplateRequestTooLarge.into());
+    }
+    let request: TemplateExpansionRequest = serde_json::from_slice(&bytes).map_err(|source| {
+        FolderbaseError::InvalidTemplateRequest(format!("request is not valid JSON: {source}"))
+    })?;
+    if request.format != "folderbase-template-expansion-request-v1" {
+        return Err(FolderbaseError::InvalidTemplateRequest(
+            "format must be folderbase-template-expansion-request-v1".to_owned(),
+        )
+        .into());
+    }
+    Ok(request)
+}
+
+fn map_template_request_error(error: FolderbaseError) -> CliError {
+    match error {
+        FolderbaseError::InvalidRecord { .. } | FolderbaseError::UnsafePath(_) => {
+            FolderbaseError::InvalidTemplateRequest(error.to_string()).into()
+        }
+        error => error.into(),
+    }
+}
+
+fn template_plan_document(plan: &TemplateExpansionPlan) -> serde_json::Value {
+    let additions = plan
+        .additions()
+        .iter()
+        .map(|addition| {
+            let content = addition.content().map(str::as_bytes);
+            serde_json::json!({
+                "path": template_wire_path(addition.path()),
+                "kind": addition.kind(),
+                "bytes": content.map(|bytes| bytes.len() as u64),
+                "sha256": content.map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+            })
+        })
+        .collect::<Vec<_>>();
+    let structural_changes = plan
+        .structural_changes()
+        .iter()
+        .map(|change| {
+            serde_json::json!({
+                "kind": change.kind(),
+                "path": change.path().map(template_wire_path),
+                "reason": change.reason(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let disposition = if !plan.structural_changes().is_empty() {
+        "reorganization_required"
+    } else if !plan.blocked_paths().is_empty() {
+        "blocked"
+    } else if plan.is_noop() {
+        "noop"
+    } else {
+        "ready"
+    };
+    serde_json::json!({
+        "format": "folderbase-template-expansion-plan-v1",
+        "root": plan.root(),
+        "folderbase_id": plan.folderbase_id(),
+        "template": {
+            "id": plan.template_id(),
+            "version": plan.template_version(),
+            "package_digest": {
+                "algorithm": plan.template_package_digest().algorithm(),
+                "digest": plan.template_package_digest().digest(),
+            },
+        },
+        "comparison": {
+            "source": plan.comparison_source(),
+            "version": plan.comparison_version(),
+            "application_id": plan.comparison_application_id(),
+        },
+        "disposition": disposition,
+        "additions": additions,
+        "preserved_paths": plan.preserved_paths().iter().map(|path| template_wire_path(path)).collect::<Vec<_>>(),
+        "blocked_paths": plan.blocked_paths().iter().map(|path| template_wire_path(path)).collect::<Vec<_>>(),
+        "structural_changes": structural_changes,
+        "plan_digest": {
+            "algorithm": plan.plan_digest().algorithm(),
+            "digest": plan.plan_digest().digest(),
+        },
+    })
+}
+
+fn template_apply_document(
+    plan: &TemplateExpansionPlan,
+    result: &folderbase_core::TemplateApplicationResult,
+) -> serde_json::Value {
+    serde_json::json!({
+        "format": "folderbase-template-expansion-apply-result-v1",
+        "root": plan.root(),
+        "folderbase_id": plan.folderbase_id(),
+        "template": {
+            "id": plan.template_id(),
+            "version": plan.template_version(),
+            "package_digest": {
+                "algorithm": plan.template_package_digest().algorithm(),
+                "digest": plan.template_package_digest().digest(),
+            },
+        },
+        "status": if result.application_record().is_some() { "applied" } else { "noop" },
+        "created_paths": result.created_paths().iter().map(|path| template_wire_path(path)).collect::<Vec<_>>(),
+        "preserved_paths": result.preserved_paths().iter().map(|path| template_wire_path(path)).collect::<Vec<_>>(),
+        "application_record": result.application_record().map(template_wire_path),
+        "plan_digest": {
+            "algorithm": plan.plan_digest().algorithm(),
+            "digest": plan.plan_digest().digest(),
+        },
+    })
+}
+
+fn template_attention_document(
+    root: &Path,
+    code: &str,
+    message: &str,
+    digests: Option<(&str, &str)>,
+    plan: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut attention = serde_json::json!({
+        "code": code,
+        "message": message,
+    });
+    if let Some((provided, current)) = digests {
+        attention["provided_plan_digest"] = serde_json::json!({
+            "algorithm": "sha256",
+            "digest": provided,
+        });
+        attention["expected_plan_digest"] = serde_json::json!({
+            "algorithm": "sha256",
+            "digest": current,
+        });
+    }
+    if let Some(plan) = plan {
+        attention["plan"] = plan;
+    }
+    serde_json::json!({
+        "format": "folderbase-template-expansion-attention-v1",
+        "root": root,
+        "attention": attention,
+    })
+}
+
+fn template_wire_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn command_emits_json_errors(command: &Command) -> bool {
@@ -1189,6 +1503,9 @@ fn command_emits_json_errors(command: &Command) -> bool {
         | Command::Upgrade { json, .. }
         | Command::Validate { json, .. }
         | Command::Migrate { json, .. } => *json,
+        Command::Template { command } => match command {
+            TemplateCommand::Plan { json, .. } | TemplateCommand::Apply { json, .. } => *json,
+        },
         Command::Version { command } => match command {
             VersionCommand::Capture { json, .. }
             | VersionCommand::Restore { json, .. }
@@ -1282,6 +1599,12 @@ fn error_code(error: &CliError) -> &'static str {
             "structural_template_change_requires_approval"
         }
         FolderbaseError::TemplateExpansionBlocked => "template_expansion_blocked",
+        FolderbaseError::TemplateRequestTooLarge => "template_request_too_large",
+        FolderbaseError::InvalidTemplateRequest(_) => "invalid_template_request",
+        FolderbaseError::InvalidTemplateExpansionPlanDigest => {
+            "invalid_template_expansion_plan_digest"
+        }
+        FolderbaseError::TemplateExpansionPlanChanged { .. } => "expected_plan_digest_mismatch",
         FolderbaseError::WorkspaceContentChanged(_) => "workspace_content_changed",
         FolderbaseError::InvalidRecord { .. } => "invalid_record",
         FolderbaseError::Io { .. } => "io_error",

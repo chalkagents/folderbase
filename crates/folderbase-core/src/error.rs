@@ -117,6 +117,22 @@ pub enum FolderbaseError {
     #[error("template expansion contains blocked paths")]
     TemplateExpansionBlocked,
 
+    #[error("template expansion request exceeds the 4194304-byte input limit")]
+    TemplateRequestTooLarge,
+
+    #[error("invalid template expansion request: {0}")]
+    InvalidTemplateRequest(String),
+
+    #[error(
+        "template expansion plan digest must be exactly 64 lowercase hexadecimal SHA-256 characters"
+    )]
+    InvalidTemplateExpansionPlanDigest,
+
+    #[error(
+        "template expansion plan changed after approval: expected {expected}, current plan is {actual}"
+    )]
+    TemplateExpansionPlanChanged { expected: String, actual: String },
+
     #[error("workspace content changed: {0}")]
     WorkspaceContentChanged(PathBuf),
 

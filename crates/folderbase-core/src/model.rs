@@ -210,12 +210,30 @@ pub struct TemplateExpansionPlan {
     pub(crate) history_sha256: String,
     pub(crate) preserved_preconditions: Vec<TemplateExpansionPrecondition>,
     #[serde(skip_serializing)]
+    pub(crate) root_identity_sha256: String,
+    #[serde(skip_serializing)]
     pub(crate) root_identity: RetainedPhysicalIdentity,
 }
 
 impl TemplateExpansionPlan {
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    pub fn folderbase_id(&self) -> &str {
+        &self.folderbase_id
+    }
+
     pub fn template_id(&self) -> &str {
         &self.template_id
+    }
+
+    pub fn comparison_source(&self) -> TemplateComparisonSource {
+        self.comparison_source
+    }
+
+    pub fn comparison_application_id(&self) -> Option<&str> {
+        self.comparison_application_id.as_deref()
     }
 
     pub fn comparison_version(&self) -> &str {
@@ -224,6 +242,10 @@ impl TemplateExpansionPlan {
 
     pub fn template_version(&self) -> &str {
         &self.template_version
+    }
+
+    pub fn template_package_digest(&self) -> &TemplatePlanDigest {
+        &self.template_package_digest
     }
 
     pub fn additions(&self) -> &[PlannedTemplateAddition] {
