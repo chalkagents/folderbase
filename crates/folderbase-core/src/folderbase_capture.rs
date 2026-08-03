@@ -1858,13 +1858,12 @@ fn read_local_head(
     }
     let mut file = open_regular_nofollow(&local, Path::new("head.json"))
         .map_err(|_| FolderbaseCaptureError::UnsafeLocalHead)?;
-    let observed =
-        CaptureMetadataFingerprint::from_std_metadata(&file.metadata().map_err(|source| {
-            FolderbaseCaptureError::Io {
-                path: path.clone(),
-                source,
-            }
-        })?);
+    let observed = CaptureMetadataFingerprint::from_std_file(&file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        }
+    })?;
     let mut encoded = Vec::new();
     file.by_ref()
         .take(MAX_LOCAL_HEAD_BYTES + 1)
@@ -1878,13 +1877,12 @@ fn read_local_head(
             maximum_bytes: MAX_LOCAL_HEAD_BYTES,
         });
     }
-    let final_observed =
-        CaptureMetadataFingerprint::from_std_metadata(&file.metadata().map_err(|source| {
-            FolderbaseCaptureError::Io {
-                path: path.clone(),
-                source,
-            }
-        })?);
+    let final_observed = CaptureMetadataFingerprint::from_std_file(&file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        }
+    })?;
     if final_observed != observed {
         return Err(FolderbaseCaptureError::PlanningStateChanged);
     }
@@ -2100,11 +2098,15 @@ fn protocol_file_observation(
         })?;
     let metadata = file
         .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io { path, source })?;
+        .map_err(|source| FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        })?;
     if !metadata.is_file() {
         return Err(FolderbaseCaptureError::RequiredMarker(root.join(relative)));
     }
-    Ok(CaptureMetadataFingerprint::from_std_metadata(&metadata))
+    CaptureMetadataFingerprint::from_std_file(&file)
+        .map_err(|source| FolderbaseCaptureError::Io { path, source })
 }
 
 fn open_regular_nofollow(root: &Dir, relative: &Path) -> io::Result<fs::File> {
