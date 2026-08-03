@@ -1777,41 +1777,46 @@ fn sanitize_private_directory_queued_with_root_entry_visibility(
         .map_err(|source| FolderbaseError::io(&queue_display, source))?;
     sync_directory(&directory, &display)?;
 
-    let mut root_changed = false;
-    for entry in directory
-        .read_dir(".")
-        .map_err(|source| FolderbaseError::io(&display, source))?
-    {
-        let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
-        let name = entry.file_name();
-        if !root_entry_is_visible(0, &name) {
-            continue;
+    let mut pass = 0_usize;
+    loop {
+        let mut root_changed = false;
+        for entry in directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+            let name = entry.file_name();
+            if !root_entry_is_visible(pass, &name) {
+                continue;
+            }
+            if name == queue_name {
+                continue;
+            }
+            let child_display = display.join(&name);
+            let metadata = match directory.symlink_metadata(&name) {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(FolderbaseError::io(&child_display, source)),
+            };
+            if retained_file == name.as_os_str() && private_metadata_is_regular_file(&metadata) {
+                continue;
+            }
+            if private_metadata_is_directory(&metadata) {
+                let queued_name = private_sanitize_work_name();
+                directory
+                    .rename(&name, &queue, &queued_name)
+                    .map_err(|source| FolderbaseError::io(&child_display, source))?;
+            } else {
+                remove_private_leaf(&directory, &name, &child_display)?;
+            }
+            root_changed = true;
         }
-        if name == queue_name {
-            continue;
+        if !root_changed {
+            break;
         }
-        let child_display = display.join(&name);
-        let metadata = match directory.symlink_metadata(&name) {
-            Ok(metadata) => metadata,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(FolderbaseError::io(&child_display, source)),
-        };
-        if retained_file == name.as_os_str() && private_metadata_is_regular_file(&metadata) {
-            continue;
-        }
-        if private_metadata_is_directory(&metadata) {
-            let queued_name = private_sanitize_work_name();
-            directory
-                .rename(&name, &queue, &queued_name)
-                .map_err(|source| FolderbaseError::io(&child_display, source))?;
-        } else {
-            remove_private_leaf(&directory, &name, &child_display)?;
-        }
-        root_changed = true;
-    }
-    if root_changed {
         sync_directory(&directory, &display)?;
         sync_directory(&queue, &queue_display)?;
+        pass = pass.saturating_add(1);
     }
 
     drain_private_sanitize_queue(&queue, &queue_display, access)?;
@@ -2723,6 +2728,7 @@ mod tests {
         let index_root = fixture.path().join(".folderbase/local/query-index-v1");
         fs::create_dir_all(&index_root).expect("private namespace");
         fs::write(index_root.join("index.json"), b"retained\n").expect("retained record");
+        fs::write(index_root.join("visible-junk"), b"junk\n").expect("visible crash junk");
         fs::write(index_root.join("skipped-junk"), b"junk\n").expect("crash junk");
         let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
         let directory = state
