@@ -2385,7 +2385,7 @@ fn verify_open_regular_file(
     #[cfg(not(unix))]
     let _ = executable;
     verify_open_regular_metadata(file, bytes, display)?;
-    #[cfg(any(unix, windows))]
+    #[cfg(unix)]
     {
         use cap_std::fs::PermissionsExt;
         let observed = file
