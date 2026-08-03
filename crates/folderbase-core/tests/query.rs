@@ -1,7 +1,8 @@
 use std::fs;
 
 use folderbase_core::{
-    FolderbaseQueryEngine, QueryEntryKind, QueryExecution, QueryRequest, QuerySource,
+    FolderbaseQueryEngine, QueryEntryKind, QueryError, QueryExecution, QueryLifecycle,
+    QueryRequest, QuerySource,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -34,6 +35,10 @@ fn folderbase() -> TempDir {
     fs::create_dir(root.path().join(".folderbase")).expect("state directory");
     fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
     root
+}
+
+fn request(value: serde_json::Value) -> QueryRequest {
+    serde_json::from_value(value).expect("query request shape")
 }
 
 #[test]
@@ -102,4 +107,132 @@ fn live_query_projects_the_capture_plan_without_opening_ordinary_file_bytes() {
             .iter()
             .all(|entry| !entry.path().starts_with("clients/acme/"))
     );
+}
+
+#[test]
+fn historical_query_projects_one_verified_version_with_exact_identity() {
+    const VERSION_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000001";
+    let root = folderbase();
+    let versions = root.path().join(".folderbase/versions/folderbase");
+    fs::create_dir_all(&versions).expect("Folderbase Version directory");
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
+        ),
+        versions.join(format!("{VERSION_ID}.json")),
+    )
+    .expect("historical fixture");
+
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    let result = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "historical", "folderbase_version_id": VERSION_ID},
+            "filters": {
+                "lifecycles": ["deleted"],
+                "object_ids": ["obj_019f0000-0000-7000-8000-000000000010"]
+            },
+            "page": {"limit": 10}
+        })))
+        .expect("verified historical query");
+
+    assert_eq!(result.entries().len(), 1);
+    let deleted = &result.entries()[0];
+    assert_eq!(deleted.path(), "archive/approved-proposal.docx");
+    assert_eq!(deleted.lifecycle(), QueryLifecycle::Deleted);
+    assert_eq!(
+        deleted.object_id(),
+        Some("obj_019f0000-0000-7000-8000-000000000010")
+    );
+    assert_eq!(
+        deleted.object_version_id(),
+        Some("version_019f0000-0000-7000-8000-000000000011")
+    );
+    assert_eq!(deleted.folderbase_version_id(), Some(VERSION_ID));
+    assert_eq!(deleted.source(), QuerySource::FolderbaseVersion);
+
+    let missing = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {
+                "kind": "historical",
+                "folderbase_version_id": "fbversion_019f0000-0000-7000-8000-000000000099"
+            },
+            "page": {"limit": 10}
+        })))
+        .expect_err("missing exact Version");
+    assert!(matches!(missing, QueryError::ScopeVersionMissing { .. }));
+
+    fs::write(versions.join(format!("{VERSION_ID}.json")), b"{not json").expect("tamper Version");
+    let invalid = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "historical", "folderbase_version_id": VERSION_ID},
+            "page": {"limit": 10}
+        })))
+        .expect_err("invalid exact Version");
+    assert!(matches!(invalid, QueryError::ScopeVersionInvalid { .. }));
+}
+
+#[test]
+fn filters_intersect_families_and_or_values_with_component_aware_prefixes() {
+    let root = folderbase();
+    fs::create_dir(root.path().join("data")).expect("data");
+    fs::write(root.path().join("data/app.sqlite"), b"SQLite format 3\0").expect("SQLite");
+    fs::write(root.path().join("data/table.csv"), b"a,b\n1,2\n").expect("CSV");
+    fs::write(root.path().join("database.md"), b"# sibling\n").expect("sibling");
+    fs::write(root.path().join("notes.md"), b"# Notes\n").expect("notes");
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+
+    let filtered = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "live"},
+            "filters": {
+                "paths": ["data/app.sqlite", "data/table.csv", "data/app.sqlite"],
+                "path_prefixes": ["data"],
+                "kinds": ["regular_file"],
+                "lifecycles": ["live"],
+                "minimum_bytes": 10,
+                "maximum_bytes": 20
+            },
+            "page": {"limit": 100}
+        })))
+        .expect("filtered query");
+    assert_eq!(
+        filtered
+            .entries()
+            .iter()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>(),
+        vec!["data/app.sqlite"]
+    );
+
+    let prefix = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "live"},
+            "filters": {"path_prefixes": ["data"]},
+            "page": {"limit": 100}
+        })))
+        .expect("prefix query");
+    assert_eq!(
+        prefix
+            .entries()
+            .iter()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>(),
+        vec!["data", "data/app.sqlite", "data/table.csv"]
+    );
+
+    let collision = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "live"},
+            "filters": {"paths": ["Notes.md", "notes.md"]},
+            "page": {"limit": 10}
+        })))
+        .expect_err("full-fold collision");
+    assert!(matches!(collision, QueryError::InvalidQueryRequest(_)));
 }
