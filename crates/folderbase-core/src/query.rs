@@ -37,6 +37,7 @@ const INDEX_FORMAT: &str = "folderbase-query-private-index-v1";
 #[derive(Debug)]
 pub struct FolderbaseQueryEngine {
     root: PathBuf,
+    opening_root_instance_sha256: String,
 }
 
 /// One bounded query request.
@@ -435,6 +436,8 @@ pub enum QueryError {
     InvalidQueryCursor,
     #[error("the query observation changed; retry without a cursor")]
     QuerySnapshotChanged,
+    #[error("the opened Folderbase root authority changed")]
+    RootAuthorityChanged,
     #[error("query index rebuild failed: {0}")]
     IndexRebuildFailed(String),
     #[error("the exact historical Folderbase Version is missing: {version_id}")]
@@ -450,12 +453,33 @@ impl FolderbaseQueryEngine {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, QueryError> {
         let store = FolderbaseVersionStore::open(root)?;
         Ok(Self {
-            root: store.root_attestation.root,
+            root: store.root_attestation.root.clone(),
+            opening_root_instance_sha256: store.root_attestation.root_instance_sha256,
         })
+    }
+
+    fn ensure_root_authority(&self) -> Result<(), QueryError> {
+        let current =
+            attest_folderbase_root(&self.root).map_err(|_| QueryError::RootAuthorityChanged)?;
+        if current.root_instance_sha256 != self.opening_root_instance_sha256 {
+            return Err(QueryError::RootAuthorityChanged);
+        }
+        Ok(())
+    }
+
+    fn ensure_observation_authority(
+        &self,
+        observation: &QueryObservation,
+    ) -> Result<(), QueryError> {
+        if observation.root_instance_sha256 != self.opening_root_instance_sha256 {
+            return Err(QueryError::RootAuthorityChanged);
+        }
+        self.ensure_root_authority()
     }
 
     /// Run one bounded query against a newly observed scope.
     pub fn run(&self, request: &QueryRequest) -> Result<QueryResult, QueryError> {
+        self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
         let live = matches!(&request.scope, QueryScope::Live);
         let mut observation = match &request.scope {
@@ -464,6 +488,7 @@ impl FolderbaseQueryEngine {
                 folderbase_version_id,
             } => observe_historical(&self.root, folderbase_version_id)?,
         };
+        self.ensure_observation_authority(&observation)?;
         let index = live.then(|| read_index(&self.root, &observation));
         let execution = if index
             .as_ref()
@@ -535,6 +560,7 @@ impl FolderbaseQueryEngine {
 
     /// Explain one query using the same normalized request and observation.
     pub fn explain(&self, request: &QueryRequest) -> Result<QueryExplain, QueryError> {
+        self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
         let live = matches!(&request.scope, QueryScope::Live);
         let observation = match &request.scope {
@@ -543,6 +569,7 @@ impl FolderbaseQueryEngine {
                 folderbase_version_id,
             } => observe_historical(&self.root, folderbase_version_id)?,
         };
+        self.ensure_observation_authority(&observation)?;
         let request_sha256 = request_sha256(&normalized)?;
         if let Some(cursor) = request.page.cursor.as_deref() {
             let cursor = decode_cursor(cursor)?;
@@ -587,7 +614,9 @@ impl FolderbaseQueryEngine {
 
     /// Inspect disposable-index freshness without writing state.
     pub fn index_status(&self) -> Result<QueryIndexStatus, QueryError> {
+        self.ensure_root_authority()?;
         let observation = observe_live(&self.root)?;
+        self.ensure_observation_authority(&observation)?;
         let index = read_index(&self.root, &observation);
         Ok(QueryIndexStatus {
             root: observation.root,
@@ -608,7 +637,9 @@ impl FolderbaseQueryEngine {
         &self,
         before_publish: impl FnOnce() -> std::io::Result<()>,
     ) -> Result<QueryIndexRebuildResult, QueryError> {
+        self.ensure_root_authority()?;
         let observation = observe_live(&self.root)?;
+        self.ensure_observation_authority(&observation)?;
         if observation.entries.len() + observation.exclusions.len() > MAX_INDEX_RECORDS {
             return Err(QueryError::IndexRebuildFailed(
                 "derived record count exceeds the private-index bound".to_owned(),
@@ -631,6 +662,7 @@ impl FolderbaseQueryEngine {
         }
         let state = FolderbaseState::open_existing(&self.root)
             .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+        self.ensure_root_authority()?;
         if let Err(first) = state.ensure_private_dir(Path::new(INDEX_ROOT)) {
             state
                 .remove_durable(Path::new(INDEX_ROOT))
