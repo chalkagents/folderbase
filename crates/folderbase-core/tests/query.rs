@@ -604,6 +604,68 @@ fn disposable_index_is_explicit_bounded_and_never_required_for_correctness() {
     );
 }
 
+#[test]
+fn rebuild_sanitizes_the_complete_private_index_namespace_without_following_links() {
+    let root = folderbase();
+    fs::write(root.path().join("a.md"), b"a\n").expect("query row");
+    fs::create_dir_all(root.path().join(".folderbase/local/other-engine"))
+        .expect("sibling private state");
+    fs::write(
+        root.path()
+            .join(".folderbase/local/other-engine/sentinel.txt"),
+        b"preserve sibling\n",
+    )
+    .expect("sibling sentinel");
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    engine.rebuild_index().expect("initial index");
+    let index_root = root.path().join(".folderbase/local/query-index-v1");
+
+    let oversized =
+        fs::File::create(index_root.join("oversized-junk.bin")).expect("oversized namespace child");
+    oversized
+        .set_len(64 * 1024 * 1024 + 1)
+        .expect("sparse oversized junk");
+    drop(oversized);
+    fs::create_dir_all(index_root.join("orphan/nested")).expect("crash directories");
+    fs::write(
+        index_root.join("orphan/nested/.replace-crash.tmp"),
+        b"partial\n",
+    )
+    .expect("nested crash leftover");
+    fs::write(index_root.join(".replace-orphan.tmp"), b"partial\n").expect("orphan replacement");
+
+    let outside = tempdir().expect("outside target");
+    fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), index_root.join("hostile-link"))
+        .expect("hostile namespace symlink");
+
+    for round in 0..2 {
+        engine.rebuild_index().expect("bounded namespace recovery");
+        let names = fs::read_dir(&index_root)
+            .expect("rebuilt namespace")
+            .map(|entry| entry.expect("namespace entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [std::ffi::OsString::from("index.json")]);
+        assert_eq!(
+            fs::read(
+                root.path()
+                    .join(".folderbase/local/other-engine/sentinel.txt")
+            )
+            .unwrap(),
+            b"preserve sibling\n"
+        );
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).unwrap(),
+            b"outside\n"
+        );
+        if round == 0 {
+            fs::write(index_root.join(".replace-interrupted.tmp"), b"partial\n")
+                .expect("repeated interrupted replacement");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn index_symlink_is_never_followed_and_explicit_rebuild_recovers_it() {
