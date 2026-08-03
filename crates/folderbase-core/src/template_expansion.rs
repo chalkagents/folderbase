@@ -451,7 +451,9 @@ fn apply_template_expansion_with_expected_plan_digest_and_hook(
     let state = FolderbaseState::open_existing(root.as_ref())?;
     let _lease = LocalVersionStore::acquire_transaction_lock_for_state(root.as_ref(), &state)?;
     after_lease();
+    state.classify_attached_root_boundary().map(drop)?;
     let plan = plan_template_expansion(root.as_ref(), target, answers)?;
+    state.classify_attached_root_boundary().map(drop)?;
     if plan.plan_digest.digest != expected_plan_digest {
         return Err(FolderbaseError::TemplateExpansionPlanChanged {
             expected: expected_plan_digest.to_owned(),
