@@ -1555,6 +1555,33 @@ impl FolderbaseState {
         }
     }
 
+    pub(crate) fn remove_private_leaf_durable(&self, relative: &Path) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let (parent, name) = match self.open_parent(&relative) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let display = self.display_path(&relative);
+        match remove_private_leaf(&parent, &name, &display) {
+            Ok(()) => {
+                let parent_display = display.parent().unwrap_or(&display);
+                sync_directory(&parent, parent_display)
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn verify_still_attached(&self) -> Result<()> {
         let visible_root = open_root_nofollow(&self.display_root, self.access)?;
         let visible_root_identity = directory_identity(&visible_root, &self.display_root)?;
@@ -2299,7 +2326,7 @@ fn verify_open_regular_file(
     #[cfg(not(unix))]
     let _ = executable;
     verify_open_regular_metadata(file, bytes, display)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use cap_std::fs::PermissionsExt;
         let observed = file
@@ -2677,7 +2704,11 @@ mod tests {
         let outside = tempdir().expect("outside target");
         fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
         let link = fixture.path().join(".folderbase/local/query-index-v1");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), &link).expect("directory link");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), &link)
+            .expect("GitHub Windows runner can create directory symlinks");
         let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
 
         state
@@ -2693,45 +2724,38 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn exact_private_leaf_removal_unlinks_windows_directory_links_without_following_them() {
-        use std::{os::windows::fs::symlink_dir, process::Command};
+    fn exact_private_leaf_removal_unlinks_a_windows_junction_without_following_it() {
+        use std::process::Command;
 
-        for junction in [false, true] {
-            let fixture = tempdir().expect("fixture");
-            fs::create_dir(fixture.path().join(".folderbase")).expect("state");
-            fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
-            let outside = tempdir().expect("outside target");
-            fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
-            let link = fixture.path().join(".folderbase/local/query-index-v1");
-            if junction {
-                let output = Command::new("cmd.exe")
-                    .args(["/D", "/C", "mklink", "/J"])
-                    .arg(&link)
-                    .arg(outside.path())
-                    .output()
-                    .expect("create directory junction");
-                assert!(
-                    output.status.success(),
-                    "mklink /J failed: stdout={} stderr={}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            } else {
-                symlink_dir(outside.path(), &link)
-                    .expect("GitHub Windows runner can create directory symlinks");
-            }
-            let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
+        let outside = tempdir().expect("outside target");
+        fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+        let link = fixture.path().join(".folderbase/local/query-index-v1");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .expect("create directory junction");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
 
-            state
-                .remove_private_leaf_durable(Path::new(".folderbase/local/query-index-v1"))
-                .expect("unlink exact private leaf");
+        state
+            .remove_private_leaf_durable(Path::new(".folderbase/local/query-index-v1"))
+            .expect("unlink exact private leaf");
 
-            assert!(!link.exists());
-            assert_eq!(
-                fs::read(outside.path().join("sentinel")).expect("outside sentinel remains"),
-                b"outside\n"
-            );
-        }
+        assert!(!link.exists());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).expect("outside sentinel remains"),
+            b"outside\n"
+        );
     }
 
     #[cfg(unix)]

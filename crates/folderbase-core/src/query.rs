@@ -851,7 +851,7 @@ impl FolderbaseQueryEngine {
         let publication: Result<IndexRead, QueryError> = (|| {
             if let Err(first) = self.state.ensure_private_dir(Path::new(INDEX_ROOT)) {
                 self.state
-                    .remove_durable(Path::new(INDEX_ROOT))
+                    .remove_private_leaf_durable(Path::new(INDEX_ROOT))
                     .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
                 self.state
                     .ensure_private_dir(Path::new(INDEX_ROOT))
