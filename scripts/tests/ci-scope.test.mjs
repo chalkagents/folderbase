@@ -11,6 +11,11 @@ import { classifyChanges } from "../ci/classify-changes.mjs";
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const classifier = join(repositoryRoot, "scripts", "ci", "classify-changes.mjs");
 const ciWorkflow = join(repositoryRoot, ".github", "workflows", "ci.yml");
+const extractedPackageProof = join(
+  repositoryRoot,
+  "scripts",
+  "test-extracted-packages.sh",
+);
 
 function workflowJob(source, jobName) {
   const start = source.indexOf(`\n  ${jobName}:\n`);
@@ -190,6 +195,18 @@ test("the npm policy lane executes scoped result verification tests", () => {
   const npm = workflowJob(source, "npm-cli");
 
   assert.match(npm, /scripts\/tests\/ci-required-results\.test\.mjs/);
+});
+
+test("the extracted CLI prefetches dependencies before its offline proof", () => {
+  const source = readFileSync(extractedPackageProof, "utf8");
+  const fetch = source.indexOf("cargo fetch \\");
+  const offlineCliTest = source.indexOf(
+    'cargo test \\\n  --manifest-path "$cli_source/Cargo.toml" \\\n  --offline',
+  );
+
+  assert.notEqual(fetch, -1, "missing extracted CLI dependency prefetch");
+  assert.notEqual(offlineCliTest, -1, "missing extracted CLI offline proof");
+  assert(fetch < offlineCliTest, "dependency prefetch must precede offline proof");
 });
 
 test("fresh installation proof is isolated from the Linux Core gate", () => {
