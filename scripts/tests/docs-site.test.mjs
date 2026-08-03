@@ -151,7 +151,17 @@ test("released templates, local versions, and public conformance have runnable g
     "utf8",
   );
   assert.equal((templates.match(/--name "Launch project"/gu) ?? []).length, 2);
-  assert.match(templates, /templates capability is experimental/u);
+  assert.match(templates, /folderbase\.template-expansion@0\.1\.0/u);
+  assert.match(templates, /folderbase template plan \/path\/to\/project --stdin --json/u);
+  assert.match(templates, /folderbase template apply \/path\/to\/project/u);
+  assert(referenceMeta.pages.includes("template-expansion"));
+  assert.match(
+    readFileSync(
+      join(docsRoot, "content", "docs", "reference", "conformance.mdx"),
+      "utf8",
+    ),
+    /protocol\/conformance\/capabilities\/template-expansion-0\.1\/run\.mjs/u,
+  );
 
   for (const guide of ["migrate", "versioning"]) {
     assert.match(
