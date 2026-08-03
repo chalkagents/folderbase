@@ -1,0 +1,90 @@
+---
+title: Query a Folderbase
+description: Run bounded metadata-first queries over live folders or exact historical Versions.
+---
+
+The stable optional `folderbase.query-index@0.1.0` capability queries normal
+Folderbase contents without reading ordinary file bytes. It preserves all file
+types as metadata rows, treats nested Folderbases as opaque boundaries, and can
+select either the current filesystem observation or one exact historical
+Folderbase Version.
+
+First confirm that the executable advertises the capability:
+
+```bash
+folderbase protocol contract --json
+```
+
+## Run a live query
+
+Requests are JSON on standard input. This example returns up to 100 regular
+files under `docs` or `data` that are at least one byte:
+
+```bash
+printf '%s' '{
+  "format": "folderbase-query-request-v1",
+  "scope": {"kind": "live"},
+  "filters": {
+    "path_prefixes": ["data", "docs"],
+    "kinds": ["regular_file"],
+    "minimum_bytes": 1
+  },
+  "page": {"limit": 100}
+}' | folderbase query run . --json
+```
+
+Rows are deterministic and metadata-first. A 10 GiB movie can therefore be
+listed by path, kind, and logical byte size without loading its content.
+
+## Explain before integrating
+
+Use the same request with explain to inspect normalized filters, ordering,
+scope source, excluded paths, and whether the command used a bounded scan or
+the private index:
+
+```bash
+printf '%s' '{
+  "format": "folderbase-query-request-v1",
+  "scope": {"kind": "live"},
+  "page": {"limit": 100}
+}' | folderbase query explain . --json
+```
+
+## Inspect and rebuild the disposable index
+
+Queries remain correct without an index. The index is private, local,
+rebuildable state under `.folderbase/local/query-index-v1`; it is not portable
+authority and must not be synced as Folderbase data.
+
+```bash
+folderbase index status . --json
+folderbase index rebuild . --json
+folderbase index status . --json
+```
+
+Only the explicit rebuild command may replace that namespace. Query, explain,
+and status do not mutate ordinary files or portable Folderbase records.
+
+## Continue a page safely
+
+Copy `page.next_cursor` into the next request while keeping the rest of the
+request identical. A cursor is bound to the exact root, normalized request,
+manifest, ignore policy, Local Head, and observed metadata generation. If any
+bound state changes, the command returns `query_snapshot_changed` instead of
+mixing rows from two observations. Start again without the old cursor.
+
+For historical queries, use:
+
+```json
+{
+  "format": "folderbase-query-request-v1",
+  "scope": {
+    "kind": "historical",
+    "folderbase_version_id": "fbv1_..."
+  },
+  "page": {"limit": 100}
+}
+```
+
+See the [query/index wire reference](/docs/reference/query-index) for bounds,
+result formats, errors, exit statuses, and the public conformance runner.
