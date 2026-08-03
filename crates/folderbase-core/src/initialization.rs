@@ -1008,6 +1008,7 @@ fn refuse_nested_target(root: &Path, budget: &mut InitializationInventoryBudget)
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn refuse_template_target_inside_nested_folderbase(
     root: &Path,
     target: &Path,
@@ -1700,11 +1701,6 @@ fn verify_destinations_absent(
         }
     }
     Ok(())
-}
-
-pub(crate) fn sha256_path(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).map_err(|source| FolderbaseError::io(path, source))?;
-    sha256_reader(&mut file).map_err(|source| FolderbaseError::io(path, source))
 }
 
 pub(crate) fn sha256_reader(reader: &mut impl Read) -> std::io::Result<String> {

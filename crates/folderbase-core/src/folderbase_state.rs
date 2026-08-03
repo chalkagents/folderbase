@@ -50,6 +50,12 @@ pub(crate) struct FolderbaseState {
     access: StateAccess,
 }
 
+pub(crate) enum WorkspaceTarget {
+    Absent,
+    Directory(Dir),
+    RegularFile(cap_std::fs::File),
+}
+
 struct WorkspaceTargetCapability {
     parent: Dir,
     parent_identity: PhysicalIdentity,
@@ -224,9 +230,18 @@ impl FolderbaseState {
         relative: &Path,
         maximum_entries: usize,
     ) -> Result<Vec<OsString>> {
-        let relative = state_relative(relative)?;
-        let directory = self.open_dir(&relative)?;
-        let display = self.display_path(&relative);
+        let relative = relative.strip_prefix(STATE_COMPONENT).unwrap_or(relative);
+        let (directory, display) = if relative.as_os_str().is_empty() {
+            (
+                self.state.try_clone().map_err(|source| {
+                    FolderbaseError::io(self.display_root.join(STATE_COMPONENT), source)
+                })?,
+                self.display_root.join(STATE_COMPONENT),
+            )
+        } else {
+            let relative = state_relative(relative)?;
+            (self.open_dir(&relative)?, self.display_path(&relative))
+        };
         let mut names = Vec::new();
         for entry in directory
             .read_dir(".")
@@ -633,6 +648,121 @@ impl FolderbaseState {
         };
         self.reopen_workspace_target_capability(&target)?;
         Ok(absent)
+    }
+
+    /// Open one exact workspace target through the retained root without
+    /// following a symlink/reparse point or crossing a nested Folderbase.
+    pub(crate) fn open_workspace_target_nofollow(
+        &self,
+        relative: &Path,
+    ) -> Result<WorkspaceTarget> {
+        let relative = safe_workspace_relative(relative)?;
+        let target = match self.open_workspace_target_capability(&relative) {
+            Ok(target) => target,
+            Err(FolderbaseError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(WorkspaceTarget::Absent);
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = match target.parent.symlink_metadata(&target.name) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                self.reopen_workspace_target_capability(&target)?;
+                return Ok(WorkspaceTarget::Absent);
+            }
+            Err(source) => return Err(FolderbaseError::io(&target.display, source)),
+        };
+        let opened = if metadata.file_type().is_symlink() {
+            return Err(FolderbaseError::UnsafePath(target.display));
+        } else if metadata.is_dir() {
+            let directory =
+                open_directory_nofollow(&target.parent, &target.name, &target.display, self.access)
+                    .map_err(|source| FolderbaseError::io(&target.display, source))?;
+            if classify_nested_folderbase_boundary(&directory, &target.display)?
+                != NestedFolderbaseBoundaryKind::None
+            {
+                return Err(FolderbaseError::UnsafePath(target.display));
+            }
+            WorkspaceTarget::Directory(directory)
+        } else if metadata.is_file() {
+            WorkspaceTarget::RegularFile(open_regular_file_nofollow(
+                &target.parent,
+                &target.name,
+                &target.display,
+            )?)
+        } else {
+            return Err(FolderbaseError::UnsafePath(target.display));
+        };
+        self.reopen_workspace_target_capability(&target)?;
+        Ok(opened)
+    }
+
+    pub(crate) fn open_private_target_nofollow(&self, relative: &Path) -> Result<WorkspaceTarget> {
+        let relative = state_relative(relative)?;
+        let (parent, name) = match self.open_parent(&relative) {
+            Ok(target) => target,
+            Err(FolderbaseError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(WorkspaceTarget::Absent);
+            }
+            Err(error) => return Err(error),
+        };
+        let display = self.display_path(&relative);
+        let metadata = match parent.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(WorkspaceTarget::Absent);
+            }
+            Err(source) => return Err(FolderbaseError::io(&display, source)),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(FolderbaseError::UnsafePath(display));
+        }
+        if metadata.is_dir() {
+            let directory = open_directory_nofollow(&parent, &name, &display, self.access)
+                .map_err(|source| FolderbaseError::io(&display, source))?;
+            Ok(WorkspaceTarget::Directory(directory))
+        } else if metadata.is_file() {
+            Ok(WorkspaceTarget::RegularFile(open_regular_file_nofollow(
+                &parent, &name, &display,
+            )?))
+        } else {
+            Err(FolderbaseError::UnsafePath(display))
+        }
+    }
+
+    pub(crate) fn workspace_directory_names(
+        &self,
+        relative: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<OsString>> {
+        let directory = if relative.as_os_str().is_empty() {
+            self.clone_root_capability()?
+        } else {
+            let WorkspaceTarget::Directory(directory) =
+                self.open_workspace_target_nofollow(relative)?
+            else {
+                return Err(FolderbaseError::UnsafePath(
+                    self.display_root.join(relative),
+                ));
+            };
+            directory
+        };
+        let display = self.display_root.join(relative);
+        let mut names = Vec::new();
+        for entry in directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+            if names.len() >= maximum_entries {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: display,
+                    message: "workspace directory exceeds its bounded entry limit".to_owned(),
+                });
+            }
+            names.push(entry.file_name());
+        }
+        Ok(names)
     }
 
     /// Open one ordinary workspace file through the retained physical-root
