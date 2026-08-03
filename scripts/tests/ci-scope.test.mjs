@@ -21,11 +21,35 @@ function workflowJob(source, jobName) {
 }
 
 test("documentation-only changes require no expensive CI lanes", () => {
-  assert.deepEqual(classifyChanges(["README.md", "docs/releasing.md"]), {
-    install: false,
-    npm: false,
-    platform: false,
-    rust: false,
+  assert.deepEqual(
+    classifyChanges([
+      "README.md",
+      "docs/superpowers/plans/2026-08-01-readme-banner.md",
+    ]),
+    {
+      install: false,
+      npm: false,
+      platform: false,
+      rust: false,
+    },
+  );
+});
+
+test("new unclassified Markdown paths fail safe to every lane", () => {
+  assert.deepEqual(classifyChanges(["docs/new-contract-v2.md"]), {
+    install: true,
+    npm: true,
+    platform: true,
+    rust: true,
+  });
+});
+
+test("normative compatibility documents require every verification lane", () => {
+  assert.deepEqual(classifyChanges(["docs/compatibility-v1.md"]), {
+    install: true,
+    npm: true,
+    platform: true,
+    rust: true,
   });
 });
 
@@ -77,6 +101,27 @@ test("workspace manifest changes require every verification lane", () => {
   });
 });
 
+test("protocol contract changes require every verification lane", () => {
+  assert.deepEqual(
+    classifyChanges(["protocol/schemas/cli/1/folderbase-cli-json.schema.json"]),
+    {
+      install: true,
+      npm: true,
+      platform: true,
+      rust: true,
+    },
+  );
+});
+
+test("release workflow changes require every verification lane", () => {
+  assert.deepEqual(classifyChanges([".github/workflows/release-cli.yml"]), {
+    install: true,
+    npm: true,
+    platform: true,
+    rust: true,
+  });
+});
+
 test("scheduled and manual confidence runs require every lane", () => {
   assert.deepEqual(classifyChanges([], { full: true }), {
     install: true,
@@ -88,6 +133,15 @@ test("scheduled and manual confidence runs require every lane", () => {
 
 test("CI control changes exercise every lane", () => {
   assert.deepEqual(classifyChanges([".github/workflows/ci.yml"]), {
+    install: true,
+    npm: true,
+    platform: true,
+    rust: true,
+  });
+});
+
+test("unknown paths fail safe to every verification lane", () => {
+  assert.deepEqual(classifyChanges(["new-surface/contract.bin"]), {
     install: true,
     npm: true,
     platform: true,
@@ -131,6 +185,13 @@ test("CI plans expensive lanes from the changed paths", () => {
   assert.match(source, /CI_HEAD_SHA:/);
 });
 
+test("the npm policy lane executes scoped result verification tests", () => {
+  const source = readFileSync(ciWorkflow, "utf8");
+  const npm = workflowJob(source, "npm-cli");
+
+  assert.match(npm, /scripts\/tests\/ci-required-results\.test\.mjs/);
+});
+
 test("fresh installation proof is isolated from the Linux Core gate", () => {
   const source = readFileSync(ciWorkflow, "utf8");
   const rust = workflowJob(source, "rust");
@@ -159,5 +220,14 @@ test("one stable required check aggregates every applicable lane", () => {
   assert.match(required, /name: Rust quality gate/);
   assert.match(required, /needs: \[plan, npm-cli, rust, package-install, core-platforms\]/);
   assert.match(required, /if: always\(\)/);
-  assert.match(required, /success\|skipped/);
+  assert.match(required, /NPM_REQUIRED: \$\{\{ needs\.plan\.outputs\.npm \}\}/);
+  assert.match(required, /RUST_REQUIRED: \$\{\{ needs\.plan\.outputs\.rust \}\}/);
+  assert.match(required, /INSTALL_REQUIRED: \$\{\{ needs\.plan\.outputs\.install \}\}/);
+  assert.match(
+    required,
+    /PLATFORM_REQUIRED: \$\{\{ github\.event_name != 'pull_request' && needs\.plan\.outputs\.platform == 'true' \}\}/,
+  );
+  assert.match(required, /uses: actions\/checkout@/);
+  assert.match(required, /node scripts\/ci\/verify-required-results\.mjs/);
+  assert.doesNotMatch(required, /success\|skipped/);
 });

@@ -78,7 +78,7 @@ jobs:
         run: node scripts/test-npm-cli-package.mjs
 
       - name: Test release publication policy
-        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
+        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-required-results.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Verify packaged legal notices
         run: |
@@ -254,26 +254,18 @@ jobs:
     timeout-minutes: 5
     env:
       PLAN_RESULT: ${{ needs.plan.result }}
+      NPM_REQUIRED: ${{ needs.plan.outputs.npm }}
       NPM_RESULT: ${{ needs.npm-cli.result }}
+      RUST_REQUIRED: ${{ needs.plan.outputs.rust }}
       RUST_RESULT: ${{ needs.rust.result }}
+      INSTALL_REQUIRED: ${{ needs.plan.outputs.install }}
       INSTALL_RESULT: ${{ needs.package-install.result }}
+      PLATFORM_REQUIRED: ${{ github.event_name != 'pull_request' && needs.plan.outputs.platform == 'true' }}
       PLATFORM_RESULT: ${{ needs.core-platforms.result }}
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
       - name: Require every applicable CI lane
-        run: |
-          for result in \
-            "$PLAN_RESULT" \
-            "$NPM_RESULT" \
-            "$RUST_RESULT" \
-            "$INSTALL_RESULT" \
-            "$PLATFORM_RESULT"
-          do
-            case "$result" in
-              success|skipped) ;;
-              *)
-                echo "Required CI dependency ended with: $result" >&2
-                exit 1
-                ;;
-            esac
-          done
+        run: node scripts/ci/verify-required-results.mjs

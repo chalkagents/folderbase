@@ -383,6 +383,38 @@ require_workflow_job_exact_line \
   "required" \
   "    if: always()" \
   "The required check must report dependency failures and skips."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "required" \
+  "        run: node scripts/ci/verify-required-results.mjs" \
+  "The required check must verify scoped CI results."
+
+for required_result_line in \
+  '      NPM_REQUIRED: ${{ needs.plan.outputs.npm }}' \
+  '      RUST_REQUIRED: ${{ needs.plan.outputs.rust }}' \
+  '      INSTALL_REQUIRED: ${{ needs.plan.outputs.install }}' \
+  "      PLATFORM_REQUIRED: \${{ github.event_name != 'pull_request' && needs.plan.outputs.platform == 'true' }}"
+do
+  require_workflow_job_exact_line \
+    "$workflow" \
+    "required" \
+    "$required_result_line" \
+    "The required check must compare its result with the CI plan."
+done
+
+for dependency_result_line in \
+  '      PLAN_RESULT: ${{ needs.plan.result }}' \
+  '      NPM_RESULT: ${{ needs.npm-cli.result }}' \
+  '      RUST_RESULT: ${{ needs.rust.result }}' \
+  '      INSTALL_RESULT: ${{ needs.package-install.result }}' \
+  '      PLATFORM_RESULT: ${{ needs.core-platforms.result }}'
+do
+  require_workflow_job_exact_line \
+    "$workflow" \
+    "required" \
+    "$dependency_result_line" \
+    "The required check must use the real dependency results."
+done
 
 if ! awk '
   $0 == "  push:" {

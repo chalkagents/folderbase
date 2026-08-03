@@ -119,6 +119,41 @@ test("pull requests cannot spend cross-platform runner minutes", async () => {
   }
 });
 
+test("the required check cannot bypass scoped result verification", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const verifier = "        run: node scripts/ci/verify-required-results.mjs";
+    assert(source.includes(verifier));
+    await writeFile(fixture, source.replace(verifier, "        run: true"));
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /scoped CI results/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the required check cannot forge a dependency result", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const resultMapping = "      RUST_RESULT: ${{ needs.rust.result }}";
+    assert(source.includes(resultMapping));
+    await writeFile(
+      fixture,
+      source.replace(resultMapping, "      RUST_RESULT: success"),
+    );
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /dependency results/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("the registry-state step cannot call a different entrypoint", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
