@@ -1,0 +1,6 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": { "kind": "live" },
+  "filters": { "minimum_bytes": -1 },
+  "page": { "limit": 10 }
+}

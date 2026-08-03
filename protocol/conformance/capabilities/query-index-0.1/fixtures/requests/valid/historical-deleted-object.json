@@ -1,0 +1,12 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": {
+    "kind": "historical",
+    "folderbase_version_id": "fbversion_019f0000-0000-7000-8000-000000000001"
+  },
+  "filters": {
+    "lifecycles": ["deleted"],
+    "object_ids": ["obj_019f0000-0000-7000-8000-000000000010"]
+  },
+  "page": { "limit": 2 }
+}

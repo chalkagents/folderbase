@@ -1,0 +1,31 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": {
+    "kind": "live"
+  },
+  "filters": {
+    "paths": [
+      "emoji/😀.md",
+      "unicode/line separator.md",
+      "unicode/paragraph separator.md",
+      "unicode/é.md"
+    ],
+    "path_prefixes": [
+      "é",
+      "東京"
+    ],
+    "kinds": [
+      "regular_file"
+    ],
+    "lifecycles": [
+      "live"
+    ],
+    "object_ids": [],
+    "object_version_ids": [],
+    "minimum_bytes": 0,
+    "maximum_bytes": 1099511627776
+  },
+  "page": {
+    "limit": 17
+  }
+}

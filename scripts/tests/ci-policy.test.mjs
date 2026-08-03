@@ -60,6 +60,43 @@ test("the canonical release workflow satisfies scoped policy", async () => {
   assert.equal(result.code, 0, result.stderr);
 });
 
+test("optional capability contract tests are policy-pinned in CI", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const critical =
+      "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs";
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, "        run: true"));
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /optional capability contract/u);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("native post-merge query capability proof is policy-pinned", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const start = source.indexOf("  core-platforms:");
+    const end = source.indexOf("\n  required:", start);
+    const block = source.slice(start, end);
+    const critical =
+      "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs";
+    assert(block.includes(critical));
+    await writeFile(fixture, `${source.slice(0, start)}${block.replace(critical, "        run: true")}${source.slice(end)}`);
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /native post-merge|optional query/u);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("superseded CI runs must remain cancellable", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {

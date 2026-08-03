@@ -1,0 +1,15 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": { "kind": "live" },
+  "filters": {
+    "paths": ["notes/Brief.md", "data/table.csv", "notes/Brief.md"],
+    "path_prefixes": ["repo", "data"],
+    "kinds": ["symlink", "regular_file"],
+    "lifecycles": ["live"],
+    "object_ids": [],
+    "object_version_ids": [],
+    "minimum_bytes": 0,
+    "maximum_bytes": 10737418240
+  },
+  "page": { "limit": 2 }
+}

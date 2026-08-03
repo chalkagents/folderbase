@@ -1,0 +1,6 @@
+{
+  "name": "folderbase.query-index",
+  "version": "0.1.0",
+  "stability": "experimental",
+  "conformance_runner": "protocol/conformance/capabilities/query-index-0.1/run.mjs"
+}

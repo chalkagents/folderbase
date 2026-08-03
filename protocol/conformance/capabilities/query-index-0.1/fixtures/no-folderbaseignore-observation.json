@@ -1,0 +1,10 @@
+{
+  "format": "folderbase-no-folderbaseignore-observation-v1",
+  "folderbaseignore_present": false,
+  "absent_path": ".folderbaseignore",
+  "engine_exclusion": {
+    "path": "node_modules",
+    "reason": "capture-ignore-policy"
+  },
+  "ordinary_included_path": "ignored/private.txt"
+}

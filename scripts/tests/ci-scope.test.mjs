@@ -241,6 +241,11 @@ test("cross-platform gates run after merge or during full confidence runs", () =
     platforms,
     /if: github\.event_name != 'pull_request' && needs\.plan\.outputs\.platform == 'true'/,
   );
+  assert.match(platforms, /node-version: 24/);
+  assert.match(
+    platforms,
+    /node --test protocol\/conformance\/capabilities\/query-index-0\.1\/suite\.test\.mjs/,
+  );
 });
 
 test("one stable required check aggregates every applicable lane", () => {

@@ -1,0 +1,6 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": { "kind": "live" },
+  "filters": { "path_prefixes": ["../outside"] },
+  "page": { "limit": 10 }
+}
