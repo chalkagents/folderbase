@@ -539,6 +539,7 @@ fn tree_snapshot_without_index(root: &Path) -> BTreeMap<String, (String, Vec<u8>
 #[test]
 fn repeated_rebuild_and_read_only_operations_are_whole_tree_confined() {
     let root = folderbase();
+    fs::create_dir_all(root.path().join(".folderbase/local")).expect("existing local parent");
     fs::create_dir_all(root.path().join("ignored/private")).expect("ignored tree");
     fs::write(root.path().join("ignored/private/secret.txt"), b"ignored\n").expect("ignored bytes");
     fs::create_dir_all(root.path().join("nested/.folderbase")).expect("nested state");

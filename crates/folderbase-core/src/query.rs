@@ -601,6 +601,13 @@ impl FolderbaseQueryEngine {
 
     /// Explicitly replace the exact disposable query-index namespace.
     pub fn rebuild_index(&self) -> Result<QueryIndexRebuildResult, QueryError> {
+        self.rebuild_index_with_before_publish(|| Ok(()))
+    }
+
+    fn rebuild_index_with_before_publish(
+        &self,
+        before_publish: impl FnOnce() -> std::io::Result<()>,
+    ) -> Result<QueryIndexRebuildResult, QueryError> {
         let observation = observe_live(&self.root)?;
         if observation.entries.len() + observation.exclusions.len() > MAX_INDEX_RECORDS {
             return Err(QueryError::IndexRebuildFailed(
@@ -635,7 +642,7 @@ impl FolderbaseQueryEngine {
                 })?;
         }
         state
-            .replace(Path::new(INDEX_RECORD), &encoded)
+            .replace_with_before_publish(Path::new(INDEX_RECORD), &encoded, before_publish)
             .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
         let verified = read_index(&self.root, &observation);
         if verified.state != QueryIndexState::Fresh {

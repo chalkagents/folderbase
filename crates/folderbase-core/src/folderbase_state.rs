@@ -1366,12 +1366,25 @@ impl FolderbaseState {
     }
 
     pub(crate) fn replace(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
+        self.replace_with_before_publish(relative, bytes, || Ok(()))
+    }
+
+    pub(crate) fn replace_with_before_publish(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+        before_publish: impl FnOnce() -> io::Result<()>,
+    ) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
         let (parent, name) = self.open_parent(&relative)?;
         let display = self.display_path(&relative);
         let temporary = OsString::from(format!(".replace-{}.tmp", Uuid::now_v7()));
         write_staged(&parent, &temporary, bytes, &display)?;
+        if let Err(source) = before_publish() {
+            let _ = parent.remove_file(&temporary);
+            return Err(FolderbaseError::io(display, source));
+        }
         if let Err(source) = parent.rename(&temporary, &parent, &name) {
             let _ = parent.remove_file(&temporary);
             return Err(FolderbaseError::io(display, source));
