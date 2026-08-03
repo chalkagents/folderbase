@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -12,8 +19,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  plan:
+    name: Plan CI scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      install: ${{ steps.scope.outputs.install }}
+      npm: ${{ steps.scope.outputs.npm }}
+      platform: ${{ steps.scope.outputs.platform }}
+      rust: ${{ steps.scope.outputs.rust }}
+
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Enforce CI and release policy
+        run: scripts/check-ci-policy.sh
+
+      - name: Classify changed paths
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            node scripts/ci/classify-changes.mjs --full </dev/null
+          elif [[ -z "$CI_BASE_SHA" || "$CI_BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$CI_BASE_SHA^{commit}"; then
+            node scripts/ci/classify-changes.mjs --full </dev/null
+          else
+            git diff --name-only "$CI_BASE_SHA" "$CI_HEAD_SHA" -- |
+              node scripts/ci/classify-changes.mjs
+          fi
+
   npm-cli:
     name: npm CLI distribution gate
+    needs: plan
+    if: needs.plan.outputs.npm == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -34,7 +78,7 @@ jobs:
         run: node scripts/test-npm-cli-package.mjs
 
       - name: Test release publication policy
-        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
+        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-required-results.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Verify packaged legal notices
         run: |
@@ -42,7 +86,9 @@ jobs:
           cmp NOTICE packages/npm-cli/NOTICE
 
   rust:
-    name: Rust quality gate
+    name: Linux Core gate
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -51,9 +97,6 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-
-      - name: Enforce the CI trigger and action-pin policy
-        run: scripts/check-ci-policy.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -97,11 +140,31 @@ jobs:
       - name: Run public implementation-neutral conformance
         run: node protocol/conformance/cli-json-v1/run.mjs --implementation ./target/debug/folderbase
 
+  package-install:
+    name: Fresh package installation gate
+    needs: plan
+    if: needs.plan.outputs.install == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.96.0
+
       - name: Verify packages and installed CLI
         run: scripts/test-package-install.sh
 
   core-platforms:
     name: Core platform gate (${{ matrix.os }})
+    needs: plan
+    if: github.event_name != 'pull_request' && needs.plan.outputs.platform == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -181,3 +244,28 @@ jobs:
 
       - name: Test the root-attestation CLI contract
         run: cargo test --package folderbase-cli --test attest --locked
+
+  required:
+    # Keep this display name stable because main branch protection requires it.
+    name: Rust quality gate
+    needs: [plan, npm-cli, rust, package-install, core-platforms]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PLAN_RESULT: ${{ needs.plan.result }}
+      NPM_REQUIRED: ${{ needs.plan.outputs.npm }}
+      NPM_RESULT: ${{ needs.npm-cli.result }}
+      RUST_REQUIRED: ${{ needs.plan.outputs.rust }}
+      RUST_RESULT: ${{ needs.rust.result }}
+      INSTALL_REQUIRED: ${{ needs.plan.outputs.install }}
+      INSTALL_RESULT: ${{ needs.package-install.result }}
+      PLATFORM_REQUIRED: ${{ github.event_name != 'pull_request' && needs.plan.outputs.platform == 'true' }}
+      PLATFORM_RESULT: ${{ needs.core-platforms.result }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Require every applicable CI lane
+        run: node scripts/ci/verify-required-results.mjs

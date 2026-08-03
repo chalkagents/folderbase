@@ -15,16 +15,44 @@ legacy compatibility aliases unless an accepted issue explicitly requires one.
 
 ## Development
 
-Install Rust 1.96 or newer with the `rustfmt` and `clippy` components. Before
-submitting a change, run:
+Install Rust 1.96 or newer with the `rustfmt` and `clippy` components. Always
+run the repository policy checks before submitting a change:
 
 ```sh
+scripts/check-ci-policy.sh
 scripts/check-public-eclipse.sh
+```
+
+For Core or protocol changes, also run the Linux Core lane locally:
+
+```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features --locked
+node protocol/conformance/cli-json-v1/run.mjs --implementation ./target/debug/folderbase
+```
+
+For npm launcher changes, run:
+
+```sh
+npm test --prefix packages/npm-cli
+node scripts/test-npm-cli-package.mjs
+```
+
+For ordinary local feature work, run the fresh package installation proof when
+changing Cargo workspace manifests, the native CLI package, packaged Core
+assets, or package-install scripts:
+
+```sh
 scripts/test-package-install.sh
 ```
+
+CI classifies changed paths using `scripts/ci/classify-changes.mjs`. Pull
+requests run only their applicable Linux lanes. Cross-platform Core checks run
+after merge, every Monday, on demand, and again for native releases. CI also
+runs every lane when protocol, release-orchestration, or CI controls change—or
+when a new path has not yet been classified—so contract-affecting work fails
+closed.
 
 ## Pull requests
 
