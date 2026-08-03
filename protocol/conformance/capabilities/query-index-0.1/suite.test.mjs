@@ -32,6 +32,7 @@ import {
   queryRequestSha256,
   validatePortablePath,
 } from "./reference-request-digest.mjs";
+import { assertSparseFixture } from "./sparse-fixture.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(directory, "../../../..");
@@ -245,6 +246,22 @@ test("mixed fixture covers every opaque file shape and a simulated 10 GiB asset"
     10 * 1024 * 1024 * 1024,
   );
   assert.equal(fixture.ordinary_content_access, "metadata_only");
+});
+
+test("sparse fixture allocation uses POSIX blocks but only logical size on Windows", () => {
+  const bytes = 10 * 1024 * 1024 * 1024;
+  assert.doesNotThrow(() =>
+    assertSparseFixture({ size: BigInt(bytes), blocks: 8n }, bytes, "linux"));
+  assert.throws(
+    () => assertSparseFixture({ size: BigInt(bytes), blocks: BigInt(bytes) }, bytes, "linux"),
+    /sparsely allocated below 16 MiB/u,
+  );
+  assert.doesNotThrow(() =>
+    assertSparseFixture({ size: BigInt(bytes), blocks: BigInt(bytes) }, bytes, "win32"));
+  assert.throws(
+    () => assertSparseFixture({ size: BigInt(bytes - 1), blocks: 0n }, bytes, "win32"),
+    /Expected values to be strictly equal/u,
+  );
 });
 
 test("public Gitignore corpus freezes ordered edge semantics", async () => {

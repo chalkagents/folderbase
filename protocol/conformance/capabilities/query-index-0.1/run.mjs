@@ -34,6 +34,7 @@ import {
 
 import { assertQuerySchema } from "./schema.mjs";
 import { queryRequestSha256 } from "./reference-request-digest.mjs";
+import { assertSparseFixture } from "./sparse-fixture.mjs";
 
 const FORMAT = "folderbase-capability-suite-report-v1";
 const CAPABILITY = "folderbase.query-index@0.1.0";
@@ -403,16 +404,7 @@ async function createFixtureRoot(owner, name, { folderbaseignore = true } = {}) 
   await writeFile(sparsePath, "");
   await truncate(sparsePath, LARGE_BYTES);
   const sparse = await stat(sparsePath, { bigint: true });
-  assert.equal(sparse.size, BigInt(LARGE_BYTES));
-  if (typeof sparse.blocks === "bigint") {
-    assert.ok(
-      sparse.blocks * 512n <= 16n * 1024n * 1024n,
-      "the 10 GiB fixture must remain sparsely allocated below 16 MiB",
-    );
-  } else {
-    assert.equal(process.platform, "win32",
-      "only Windows may omit sparse allocation blocks from Node metadata");
-  }
+  assertSparseFixture(sparse, LARGE_BYTES);
   await symlink("../notes/Brief.md", join(root, "links/brief-link"));
   return root;
 }

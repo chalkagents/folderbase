@@ -60,7 +60,7 @@ node --test \
   scripts/tests/ci-policy.test.mjs
 ```
 
-Result: 84 passed, 0 failed.
+Result: 85 passed, 0 failed.
 
 The query suite's minimal JavaScript candidate passed all 22 public black-box
 cases. They cover the complete deterministic filter algebra; fixed ASCII and
@@ -77,7 +77,9 @@ present-empty policy generations differ. The missing-query candidate exited 1
 with the same intentional runtime gap.
 
 The runner creates every fixture below one cleanup-owned parent, verifies the
-sparse 10 GiB file occupies no more than 16 MiB, and removes it on every path.
+sparse 10 GiB file occupies no more than 16 MiB on POSIX hosts, verifies its
+exact logical size on Windows where Node's `blocks` value is not a POSIX
+allocation count, and removes it on every path.
 SIGTERM-trapping, forking, and noisy candidates are terminated as complete
 process trees within test-selected bounds, every recorded PID is proven absent,
 and the production defaults remain 30 seconds and 8 MiB combined output per
