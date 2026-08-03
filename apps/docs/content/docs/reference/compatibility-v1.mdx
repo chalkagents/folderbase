@@ -1,0 +1,38 @@
+---
+title: Compatibility Contract v1
+description: The stable compatibility promise for Folderbase records, identifiers, upgrades, CLI JSON, and conformance.
+---
+
+Compatibility Contract v1 defines what external implementations may rely on beginning with Folderbase Core 0.5.
+
+## Stability promise
+
+The contract covers the advertised CLI JSON surface and the interpretation of portable Folderbase records. Protocol `0.x` remains pre-stable, but conforming implementations can discover and negotiate the supported contract instead of relying on undocumented internals.
+
+## Record classes
+
+### Portable and normative
+
+These records define cross-implementation meaning and must be interpreted according to their schemas and compatibility rules.
+
+### Extension-preserving
+
+Unknown extension fields must survive read-modify-write operations where the contract requires preservation. An implementation must not erase data merely because it does not understand a newer extension.
+
+### Engine-owned durable state
+
+Transaction and recovery state belongs to the engine. External tools should use supported commands rather than editing it directly.
+
+### Rebuildable projections
+
+Indexes and optional hints may be regenerated from authoritative state. They are not equivalent to normative records.
+
+## Identifiers and upgrades
+
+Identifiers remain opaque. Upgrade behavior is explicit, bounded, and validated before new protocol state becomes canonical.
+
+## Conformance
+
+The repository publishes schemas, fixtures, and conformance suites. Integrations should run them against the exact contract they claim to support.
+
+Read the [canonical specification on GitHub](https://github.com/chalkagents/folderbase/blob/main/docs/compatibility-v1.md).

@@ -11,6 +11,8 @@ const normativeDocumentationPaths = new Set([
   "docs/template-protocol.md",
 ]);
 const normativeAdrPath = /^docs\/adr\/000(?:3|4|5|6|8|9)-/;
+const docsSitePath = /^apps\/docs\//;
+const docsSiteControlPath = /^scripts\/tests\/docs-site\.test\.mjs$/;
 const npmLauncherPath = /^packages\/npm-cli\//;
 const workspaceManifestPath = /^Cargo\.(?:lock|toml)$/;
 const ciControlPath = /^(?:\.github\/workflows\/ci\.yml|scripts\/check-ci-policy\.sh|scripts\/ci\/|scripts\/tests\/ci-(?:policy|required-results|scope)\.test\.mjs)/;
@@ -32,6 +34,8 @@ function requiresFullConfidencePath(path) {
 function isKnownPath(path) {
   return requiresFullConfidencePath(path) ||
     routineDocumentationPath.test(path) ||
+    docsSitePath.test(path) ||
+    docsSiteControlPath.test(path) ||
     npmLauncherPath.test(path) ||
     nativeInstallPath.test(path) ||
     npmOnlyPath.test(path) ||
@@ -57,6 +61,9 @@ export function classifyChanges(paths, { full = false } = {}) {
   );
 
   return {
+    docs: requiresFullConfidence || paths.some(
+      (path) => docsSitePath.test(path) || docsSiteControlPath.test(path),
+    ),
     install,
     npm,
     platform: requiresCoreVerification,

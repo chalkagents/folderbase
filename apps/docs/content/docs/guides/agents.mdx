@@ -1,0 +1,48 @@
+---
+title: Operate Folderbase from an agent
+description: Give an agent a bounded workspace with safe reads, optimistic saves, and stable JSON output.
+---
+
+Agents can use the Folderbase CLI directly. An MCP server is optional rather than required.
+
+## Discover the contract
+
+```bash
+folderbase protocol contract --json
+```
+
+Use the reported contract and the stable command inventory in [CLI JSON v1](/docs/reference/cli-json-v1) instead of guessing which commands or fields exist.
+
+## List the workspace
+
+```bash
+folderbase workspace list /path/to/project --json
+```
+
+The result exposes ordinary workspace files and suppresses engine state and common reconstructable noise.
+
+## Read a file
+
+```bash
+folderbase workspace read /path/to/project README.md --json
+```
+
+Read an existing UTF-8 file. Retain the returned SHA-256 with the content; it becomes the concurrency precondition for a save.
+
+## Save without clobbering
+
+```bash
+printf '%s' "$UPDATED_TEXT" | folderbase workspace save \
+  /path/to/project README.md \
+  --expected-sha256 "$LOADED_SHA256" \
+  --stdin \
+  --json
+```
+
+If the expected hash no longer matches, read the current file and reconcile instead of retrying an unconditional overwrite.
+
+## Large and binary files
+
+`workspace list` reports metadata for ordinary files of every type. Stable CLI JSON v1 intentionally limits `workspace read` and `workspace save` to existing UTF-8 documents no larger than 2 MiB. For larger or binary files, inspect the listing first and use a native tool that understands the format. Core has lower-level streaming transfer primitives, but they are not yet a stable CLI JSON retrieval surface.
+
+See [CLI JSON v1](/docs/reference/cli-json-v1) for transport guarantees.

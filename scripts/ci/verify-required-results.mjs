@@ -28,6 +28,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const input = {
     planResult: process.env.PLAN_RESULT,
     lanes: {
+      docs: {
+        required: process.env.DOCS_REQUIRED,
+        result: process.env.DOCS_RESULT,
+      },
       install: {
         required: process.env.INSTALL_REQUIRED,
         result: process.env.INSTALL_RESULT,

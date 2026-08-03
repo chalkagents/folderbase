@@ -1,0 +1,46 @@
+---
+title: Install Folderbase
+description: Install the Folderbase 0.5 CLI through npx, a native release binary, or Cargo.
+---
+
+Folderbase Core is an Apache-2.0 Rust engine distributed as a native `folderbase` executable. Choose the installation path that fits your environment.
+
+## Run through npx
+
+The quickest path for macOS and Linux is the verified npm launcher:
+
+```bash
+npx @folderbase/cli --version
+```
+
+The launcher downloads the exact native executable for the package version, verifies it against the release `SHA256SUMS`, caches it by version, and forwards arguments directly. It does not install Folderbase into the folder you operate on.
+
+### Requirements
+
+- Node.js 22.14 or newer for the launcher
+- macOS on Apple silicon or Intel, or Linux on ARM64 or x64
+
+The downloaded binary does not require Node.js when installed separately.
+
+## Download a native binary
+
+Download the matching artifact from the [Core 0.5 GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.5.0), verify it with the published `SHA256SUMS`, mark it executable, and place it on your `PATH`.
+
+## Install from source
+
+Folderbase currently requires Rust 1.96 or newer:
+
+```bash
+git clone https://github.com/chalkagents/folderbase.git
+cd folderbase
+cargo install --path crates/folderbase-cli --locked
+folderbase --version
+```
+
+## Verify the integration contract
+
+```bash
+folderbase protocol contract --json
+```
+
+This advertises the stable contract supported by the installed CLI. Continue with the [five-minute quickstart](/docs/getting-started/quickstart).

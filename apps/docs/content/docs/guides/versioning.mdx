@@ -1,0 +1,49 @@
+---
+title: Capture and restore local versions
+description: Preserve immutable ordinary-file bytes and restore without overwriting current work.
+---
+
+Folderbase local versions preserve ordinary file bytes behind opaque identifiers. Files remain at their native paths; version records and objects live in engine-owned `.folderbase/` state.
+
+**Core 0.5 status:** local version behavior is implemented, but `version ... --json` is experimental and is not part of CLI JSON v1. Pin the exact Core release if you automate it.
+
+## Capture a file
+
+```bash
+folderbase version capture /path/to/project Decision.md --json
+```
+
+Keep the returned `version.id`. Identifiers are opaque; do not infer time, order, permission, or content identity from them.
+
+## Restore to a new path
+
+```bash
+folderbase version restore \
+  /path/to/project \
+  VERSION_ID \
+  Restored/Decision.md \
+  --json
+```
+
+Restore is no-clobber: the destination must be unoccupied. Reconcile current work explicitly instead of using restore as an overwrite operation.
+
+## Inspect local history
+
+```bash
+folderbase version history /path/to/project --json
+```
+
+The journal is append-only engine state. Read it through Core; do not edit `.folderbase/` records directly.
+
+## Restore a captured deletion
+
+After a full-state capture records a deletion in Local Head, restore the exact ordinary-file bytes to the original free path:
+
+```bash
+folderbase version restore-tombstone \
+  /path/to/project \
+  path/to/deleted-file \
+  --json
+```
+
+Tombstone restore currently covers regular files. It refuses occupied destinations and preserves binary bytes and executable fidelity without requiring the content to be UTF-8 or model-readable.

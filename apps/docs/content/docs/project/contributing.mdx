@@ -1,0 +1,26 @@
+---
+title: Contributing and security
+description: Build Folderbase Core locally, run its validation suite, and report vulnerabilities responsibly.
+---
+
+Folderbase Core is developed in public under Apache-2.0.
+
+## Development checks
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features --locked
+bash scripts/check-public-eclipse.sh
+bash scripts/test-package-install.sh
+```
+
+Changes to public contracts should include corresponding schemas, fixtures, conformance coverage, and documentation.
+
+## Project policies
+
+- Read the [contributing guide](https://github.com/chalkagents/folderbase/blob/main/CONTRIBUTING.md).
+- Review the [code of conduct](https://github.com/chalkagents/folderbase/blob/main/CODE_OF_CONDUCT.md).
+- Follow the [security policy](https://github.com/chalkagents/folderbase/blob/main/SECURITY.md) for vulnerability reports.
+
+Do not disclose a suspected vulnerability through a public issue before following the private reporting process in the security policy.

@@ -1,0 +1,53 @@
+---
+title: CLI JSON v1
+description: Stable discovery, transport, and schema-evolution rules for machine integrations with Folderbase Core.
+---
+
+CLI JSON v1 is the stable machine interface introduced in Folderbase Core 0.5.
+
+## Discoverability
+
+Integrations begin with:
+
+```bash
+folderbase protocol contract --json
+```
+
+Do not infer support from a version string alone when the contract can be queried directly.
+
+## Stable commands
+
+- `inspect PATH --json`
+- `attest PATH --json`
+- `init PATH --dry-run --json`
+- `init PATH --expected-plan-digest DIGEST --json`
+- `upgrade PATH --dry-run --json`
+- `upgrade PATH --expected-plan-digest DIGEST --json`
+- `validate PATH --level shallow --json`
+- `protocol contract --json`
+- `protocol check chunk-manifest --stdin --json`
+- `protocol check folderbase-version --stdin --json`
+- `workspace list ROOT --json`
+- `workspace read ROOT PATH --json`
+- `workspace save ROOT PATH --expected-sha256 DIGEST --stdin --json`
+
+Other command JSON remains experimental until a later compatibility contract names it.
+
+## Transport rules
+
+- successful and attention-required calls emit exactly one JSON document on stdout and leave stderr empty;
+- operational failures leave stdout empty and emit exactly one JSON error document on stderr;
+- process exit status remains authoritative for success or failure;
+- callers should consume complete JSON values rather than scrape presentation text.
+
+Exit status `0` means success, `1` means a valid result requires attention, and `2` means an operational or domain error prevented a result.
+
+## Schema evolution
+
+Callers must tolerate additive fields. They should reject a contract they cannot support rather than silently reinterpret it. Unknown extensions are preserved where Compatibility Contract v1 requires them.
+
+## Conformance suite
+
+The public repository includes the JSON schema and an executable conformance suite under `protocol/conformance/cli-json-v1/`.
+
+Read the [canonical CLI JSON specification](https://github.com/chalkagents/folderbase/blob/main/docs/cli-json-v1.md).

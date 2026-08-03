@@ -39,6 +39,14 @@ npm test --prefix packages/npm-cli
 node scripts/test-npm-cli-package.mjs
 ```
 
+For documentation-site changes, run:
+
+```sh
+node --test scripts/tests/docs-site.test.mjs
+npm ci --prefix apps/docs
+npm test --prefix apps/docs
+```
+
 For ordinary local feature work, run the fresh package installation proof when
 changing Cargo workspace manifests, the native CLI package, packaged Core
 assets, or package-install scripts:
@@ -48,7 +56,7 @@ scripts/test-package-install.sh
 ```
 
 CI classifies changed paths using `scripts/ci/classify-changes.mjs`. Pull
-requests run only their applicable Linux lanes. Cross-platform Core checks run
+requests run only their applicable Linux or documentation lanes. Cross-platform Core checks run
 after merge, every Monday, on demand, and again for native releases. CI also
 runs every lane when protocol, release-orchestration, or CI controls change—or
 when a new path has not yet been classified—so contract-affecting work fails

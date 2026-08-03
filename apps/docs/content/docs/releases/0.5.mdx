@@ -1,0 +1,34 @@
+---
+title: Folderbase Core 0.5
+description: Native distribution, stable CLI JSON, Compatibility Contract v1, captures, Local Head, and durable migrations.
+---
+
+Folderbase Core 0.5 was released on August 2, 2026. It turns the open core into a distributable integration surface rather than only a library and protocol candidate.
+
+## Highlights
+
+- Verified `npx @folderbase/cli` distribution backed by native release binaries.
+- Native artifacts for macOS and Linux on ARM64 and x64.
+- Stable CLI JSON v1 discovery and transport rules.
+- Compatibility Contract v1 and public conformance suites.
+- Metadata-only capture planning and transactional sealing into Local Head.
+- Productive tombstones with exact-byte restore protection.
+- Durable transaction-v1 execution for migrations and recovery.
+
+## Install
+
+```bash
+npx @folderbase/cli@0.5.0 --version
+```
+
+## Verify the contract
+
+```bash
+npx @folderbase/cli@0.5.0 protocol contract --json
+```
+
+## Release artifacts
+
+All native artifacts are published with SHA-256 digests in the immutable [GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.5.0).
+
+Protocol and crate `0.x` releases remain pre-stable. Pin your integration and consult the [Compatibility Contract v1](/docs/reference/compatibility-v1) before depending on filesystem or wire behavior.

@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      docs: ${{ steps.scope.outputs.docs }}
       install: ${{ steps.scope.outputs.install }}
       npm: ${{ steps.scope.outputs.npm }}
       platform: ${{ steps.scope.outputs.platform }}
@@ -53,6 +54,32 @@ jobs:
             git diff --name-only "$CI_BASE_SHA" "$CI_HEAD_SHA" -- |
               node scripts/ci/classify-changes.mjs
           fi
+
+  docs:
+    name: Documentation site gate
+    needs: plan
+    if: needs.plan.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Verify documentation policy
+        run: node --test scripts/tests/docs-site.test.mjs
+
+      - name: Install documentation dependencies
+        run: npm ci --prefix apps/docs
+
+      - name: Lint, type-check, and build documentation
+        run: npm test --prefix apps/docs
 
   npm-cli:
     name: npm CLI distribution gate
@@ -248,12 +275,14 @@ jobs:
   required:
     # Keep this display name stable because main branch protection requires it.
     name: Rust quality gate
-    needs: [plan, npm-cli, rust, package-install, core-platforms]
+    needs: [plan, docs, npm-cli, rust, package-install, core-platforms]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       PLAN_RESULT: ${{ needs.plan.result }}
+      DOCS_REQUIRED: ${{ needs.plan.outputs.docs }}
+      DOCS_RESULT: ${{ needs.docs.result }}
       NPM_REQUIRED: ${{ needs.plan.outputs.npm }}
       NPM_RESULT: ${{ needs.npm-cli.result }}
       RUST_REQUIRED: ${{ needs.plan.outputs.rust }}

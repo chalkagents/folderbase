@@ -1,0 +1,54 @@
+---
+title: Five-minute quickstart
+description: Inspect, preview, initialize, and validate an ordinary folder without moving its files.
+---
+
+This workflow turns an existing folder into a Folderbase. Inspection and dry-run steps are read-only.
+
+## 1. Inspect the folder
+
+```bash
+npx @folderbase/cli inspect /path/to/project --json
+```
+
+Inspection reports boundaries and metadata without changing the target.
+
+## 2. Preview initialization
+
+```bash
+npx @folderbase/cli init /path/to/project --dry-run --json
+```
+
+Review the proposed additions. Initialization is additive: existing files remain in place.
+
+The JSON response includes a stable `plan_digest`. Keep its `digest` value so the apply step is bound to the exact folder state and initialization plan you reviewed.
+
+## 3. Initialize
+
+```bash
+npx @folderbase/cli init /path/to/project \
+  --expected-plan-digest DIGEST_FROM_DRY_RUN \
+  --json
+```
+
+Native protocol 0.5 initialization creates only `.folderbase/manifest.json` by default. Existing files stay where they are. `--agent-adapters` explicitly adds `AGENTS.md` and `CLAUDE.md`; a selected template may add its own reviewed artifacts. `FOLDERBASE.md` and the user-owned `.folderbaseignore` remain optional and are never implicit root authority.
+
+## 4. Validate
+
+```bash
+npx @folderbase/cli validate /path/to/project --json
+```
+
+Validation checks the Folderbase protocol surface and returns machine-readable diagnostics.
+
+## 5. See what agents can access
+
+```bash
+npx @folderbase/cli workspace list /path/to/project --json
+```
+
+The workspace view includes ordinary files while excluding protocol state, repository internals, and reconstructable dependency trees from agent context.
+
+## When the folder is disorganized
+
+Do not manually initialize multiple accidental boundaries. Core 0.5 includes an experimental [migration workflow](/docs/guides/migrate) that can analyze the folder and produce a reviewable structure plan. Its JSON is not part of CLI JSON v1 yet.
