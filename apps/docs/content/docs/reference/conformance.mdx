@@ -45,3 +45,25 @@ node protocol/conformance/cli-json-v1/run.mjs \
 - black-box filesystem behavior for stable initialization, upgrade, validation, protocol checks, and workspace operations.
 
 Passing one suite proves compatibility only with its named contract and protocol profiles. Query, templates, Change Sets, and other future capabilities require their own advertised capability and conformance closure before third parties can claim them.
+
+## Run advertised capability suites
+
+An implementation advertises optional profiles in `protocol contract --json`.
+Run every profile known to this checkout that the executable advertises:
+
+```bash
+node protocol/conformance/capabilities/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+Run only the experimental query/index profile:
+
+```bash
+node protocol/conformance/capabilities/query-index-0.1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+`folderbase.query-index@0.1.0` is separate from Compatibility Contract v1 and
+Folderbase CLI JSON v1. Passing the base suite does not imply query support,
+and advertising query support commits the implementation to the complete
+query/index suite.

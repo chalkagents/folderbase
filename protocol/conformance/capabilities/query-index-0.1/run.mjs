@@ -517,6 +517,42 @@ try {
       },
     },
     {
+      id: "query-index-missing-root-is-a-typed-invocation-error",
+      run() {
+        for (const arguments_ of [
+          ["query", "run", "--json"],
+          ["index", "status", "--json"],
+        ]) errorJson(implementation, arguments_, "invalid_query_request", undefined, root);
+      },
+    },
+    {
+      id: "query-index-missing-json-is-a-typed-invocation-error",
+      run() {
+        for (const arguments_ of [
+          ["query", "run", root],
+          ["index", "status", root],
+        ]) errorJson(implementation, arguments_, "invalid_query_request", undefined, root);
+      },
+    },
+    {
+      id: "query-index-unknown-flag-is-a-typed-invocation-error",
+      run() {
+        for (const arguments_ of [
+          ["query", "run", root, "--json", "--unknown-query-option"],
+          ["index", "status", root, "--json", "--unknown-index-option"],
+        ]) errorJson(implementation, arguments_, "invalid_query_request", undefined, root);
+      },
+    },
+    {
+      id: "query-index-unknown-subcommand-is-a-typed-invocation-error",
+      run() {
+        for (const arguments_ of [
+          ["query", "unknown", root, "--json"],
+          ["index", "unknown", root, "--json"],
+        ]) errorJson(implementation, arguments_, "invalid_query_request", undefined, root);
+      },
+    },
+    {
       id: "query-live-supports-an-optional-folderbaseignore",
       async run() {
         const noIgnoreRoot = await createFixtureRoot(cleanupRoot, "without-ignore", {

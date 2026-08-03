@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -26,6 +26,8 @@ use folderbase_core::{
     save_workspace_text, validate,
 };
 use serde::{Deserialize, Serialize};
+
+mod query_capability;
 
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_INVALID: u8 = 1;
@@ -188,6 +190,18 @@ enum Command {
         command: WorkspaceCommand,
     },
 
+    /// Query one exact Folderbase observation through the optional query capability.
+    Query {
+        #[command(subcommand)]
+        command: QueryCommand,
+    },
+
+    /// Inspect or explicitly rebuild the disposable private query index.
+    Index {
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+
     /// Check portable protocol records through a bounded implementation-neutral interface.
     Protocol {
         #[command(subcommand)]
@@ -276,6 +290,38 @@ enum WorkspaceCommand {
         #[arg(long)]
         stdin: bool,
         #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QueryCommand {
+    /// Run one bounded metadata query read from standard input.
+    Run {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Explain one bounded metadata query read from standard input.
+    Explain {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IndexCommand {
+    /// Inspect index freshness without changing state.
+    Status {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Explicitly replace only the disposable query-index namespace.
+    Rebuild {
+        root: PathBuf,
+        #[arg(long, required = true)]
         json: bool,
     },
 }
@@ -379,6 +425,10 @@ enum CliError {
     Capture(FolderbaseCaptureError),
     RootAttestation(RootAttestationError),
     OutputSerialization(serde_json::Error),
+    OutputWrite {
+        stream: &'static str,
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for CliError {
@@ -389,6 +439,9 @@ impl fmt::Display for CliError {
             Self::RootAttestation(source) => source.fmt(formatter),
             Self::OutputSerialization(source) => {
                 write!(formatter, "failed to serialize command output: {source}")
+            }
+            Self::OutputWrite { stream, source } => {
+                write!(formatter, "failed to write command {stream}: {source}")
             }
         }
     }
@@ -401,6 +454,7 @@ impl std::error::Error for CliError {
             Self::Capture(source) => Some(source),
             Self::RootAttestation(source) => Some(source),
             Self::OutputSerialization(source) => Some(source),
+            Self::OutputWrite { source, .. } => Some(source),
         }
     }
 }
@@ -433,7 +487,31 @@ impl From<ValidationLevelArg> for ValidationLevel {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.exit_code() != 0 && argv_selects_query_capability() => {
+            let transport = query_capability::invalid_invocation(error.to_string());
+            return match write_query_transport(transport) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    write_stderr_best_effort(format_args!("error: {error}"));
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
+        Err(error) => {
+            let exit_code = error.exit_code();
+            return match error.print() {
+                Ok(()) => ExitCode::from(u8::try_from(exit_code).unwrap_or(EXIT_OPERATIONAL_ERROR)),
+                Err(source) => {
+                    write_stderr_best_effort(format_args!(
+                        "error: failed to write command output: {source}"
+                    ));
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
+    };
     let json_errors = command_emits_json_errors(&cli.command);
 
     match run(cli) {
@@ -447,17 +525,36 @@ fn main() -> ExitCode {
                     }
                 });
                 match serde_json::to_string_pretty(&envelope) {
-                    Ok(encoded) => eprintln!("{encoded}"),
+                    Ok(encoded) => write_stderr_best_effort(format_args!("{encoded}")),
                     Err(serialization) => {
-                        eprintln!("error: {error} (JSON serialization failed: {serialization})");
+                        write_stderr_best_effort(format_args!(
+                            "error: {error} (JSON serialization failed: {serialization})"
+                        ));
                     }
                 }
             } else {
-                eprintln!("error: {error}");
+                write_stderr_best_effort(format_args!("error: {error}"));
             }
             ExitCode::from(EXIT_OPERATIONAL_ERROR)
         }
     }
+}
+
+fn write_stderr_best_effort(arguments: fmt::Arguments<'_>) {
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = stderr.write_fmt(arguments);
+    let _ = stderr.write_all(b"\n");
+}
+
+fn argv_selects_query_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("query" | "index")
+    )
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
@@ -932,6 +1029,30 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
             Ok(EXIT_SUCCESS)
         }
+        Command::Query { command } => {
+            let (root, operation) = match command {
+                QueryCommand::Run { root, json: _ } => {
+                    (root, query_capability::QueryOperation::Run)
+                }
+                QueryCommand::Explain { root, json: _ } => {
+                    (root, query_capability::QueryOperation::Explain)
+                }
+            };
+            let transport =
+                query_capability::execute_query(operation, root, std::io::stdin().lock());
+            write_query_transport(transport)
+        }
+        Command::Index { command } => {
+            let (root, operation) = match command {
+                IndexCommand::Status { root, json: _ } => {
+                    (root, query_capability::IndexOperation::Status)
+                }
+                IndexCommand::Rebuild { root, json: _ } => {
+                    (root, query_capability::IndexOperation::Rebuild)
+                }
+            };
+            write_query_transport(query_capability::execute_index(operation, root))
+        }
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } => {
                 if json {
@@ -962,6 +1083,39 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             } => run_protocol_check(artifact, json),
         },
     }
+}
+
+fn write_query_transport(transport: query_capability::QueryTransport) -> Result<u8, CliError> {
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    write_query_transport_to(transport, &mut stdout.lock(), &mut stderr.lock())
+}
+
+fn write_query_transport_to(
+    transport: query_capability::QueryTransport,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<u8, CliError> {
+    write_transport_stream(stdout, &transport.stdout, "stdout")?;
+    write_transport_stream(stderr, &transport.stderr, "stderr")?;
+    Ok(transport.exit_code)
+}
+
+fn write_transport_stream(
+    stream: &mut impl Write,
+    bytes: &[u8],
+    name: &'static str,
+) -> Result<(), CliError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    stream
+        .write_all(bytes)
+        .and_then(|()| stream.flush())
+        .map_err(|source| CliError::OutputWrite {
+            stream: name,
+            source,
+        })
 }
 
 fn run_protocol_check(artifact: ProtocolArtifactArg, json: bool) -> Result<u8, CliError> {
@@ -1056,6 +1210,12 @@ fn command_emits_json_errors(command: &Command) -> bool {
             | WorkspaceCommand::Read { json, .. }
             | WorkspaceCommand::Save { json, .. } => *json,
         },
+        Command::Query { command } => match command {
+            QueryCommand::Run { json, .. } | QueryCommand::Explain { json, .. } => *json,
+        },
+        Command::Index { command } => match command {
+            IndexCommand::Status { json, .. } | IndexCommand::Rebuild { json, .. } => *json,
+        },
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } | ProtocolCommand::Check { json, .. } => *json,
         },
@@ -1087,6 +1247,7 @@ fn error_code(error: &CliError) -> &'static str {
         }
         CliError::RootAttestation(error) => return error.code(),
         CliError::OutputSerialization(_) => return "output_serialization",
+        CliError::OutputWrite { .. } => return "output_write_failed",
     };
     match error {
         FolderbaseError::InvalidRoot(_) => "invalid_root",
@@ -1594,6 +1755,53 @@ fn validation_severity_label(severity: ValidationSeverity) -> &'static str {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    struct RejectsWrites;
+
+    impl Write for RejectsWrites {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed test stream",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn query_transport_stdout_write_failure_is_operational() {
+        let transport = query_capability::QueryTransport {
+            exit_code: EXIT_SUCCESS,
+            stdout: b"success document\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        let mut stdout = RejectsWrites;
+        let mut stderr = Vec::new();
+
+        let error = write_query_transport_to(transport, &mut stdout, &mut stderr)
+            .expect_err("a closed stdout must not report success");
+
+        assert_eq!(error_code(&error), "output_write_failed");
+    }
+
+    #[test]
+    fn query_transport_stderr_write_failure_is_operational() {
+        let transport = query_capability::QueryTransport {
+            exit_code: EXIT_OPERATIONAL_ERROR,
+            stdout: Vec::new(),
+            stderr: b"error document\n".to_vec(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = RejectsWrites;
+
+        let error = write_query_transport_to(transport, &mut stdout, &mut stderr)
+            .expect_err("a closed stderr must remain an operational failure");
+
+        assert_eq!(error_code(&error), "output_write_failed");
+    }
 
     #[test]
     fn reports_the_shared_nested_boundary_work_limit() {

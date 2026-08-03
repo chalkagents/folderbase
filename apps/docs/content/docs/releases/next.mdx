@@ -1,0 +1,27 @@
+---
+title: Next Core release
+description: Implemented on main and awaiting the next immutable multi-channel Folderbase Core release.
+---
+
+This page describes completed source work that is awaiting the next immutable
+GitHub, npm, crates.io, and Homebrew release. It is not part of the immutable Core 0.5 release.
+Check `folderbase protocol contract --json` before using any optional capability.
+
+## Experimental optional query/index capability
+
+Builds that advertise `folderbase.query-index@0.1.0` provide:
+
+- bounded metadata-first live queries over every ordinary file type;
+- exact historical Folderbase Version queries with live and deleted lifecycle;
+- deterministic filters, ordering, pagination, and snapshot-bound cursors;
+- query explanations naming source, exclusions, ordering, and content access;
+- explicit status and rebuild commands for one disposable private index;
+- closed JSON success, attention, and error documents;
+- an implementation-neutral public conformance suite; and
+- native CLI conformance on macOS and Windows in post-merge CI.
+
+The capability remains additive: Compatibility Contract v1, Folderbase CLI
+JSON v1, and the immutable Core 0.5 release closure are unchanged.
+
+Read [Query a Folderbase](/docs/guides/querying) and the
+[query/index wire reference](/docs/reference/query-index).

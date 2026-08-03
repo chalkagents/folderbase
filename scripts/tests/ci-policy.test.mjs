@@ -86,7 +86,7 @@ test("native post-merge query capability proof is policy-pinned", async () => {
     const end = source.indexOf("\n  required:", start);
     const block = source.slice(start, end);
     const critical =
-      "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs";
+      "        run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase${{ runner.os == 'Windows' && '.exe' || '' }}";
     assert(block.includes(critical));
     await writeFile(fixture, `${source.slice(0, start)}${block.replace(critical, "        run: true")}${source.slice(end)}`);
     const result = await runPolicy(releaseWorkflow, fixture);

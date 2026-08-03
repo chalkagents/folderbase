@@ -414,8 +414,13 @@ require_workflow_job_exact_line \
 require_workflow_job_exact_line \
   "$workflow" \
   "core-platforms" \
-  "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs" \
-  "Native post-merge runners must exercise the optional query contract."
+  "        run: cargo build --package folderbase-cli --locked" \
+  "Native post-merge runners must build the actual query CLI candidate."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "core-platforms" \
+  "        run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase\${{ runner.os == 'Windows' && '.exe' || '' }}" \
+  "Native post-merge runners must conform the actual optional query CLI candidate."
 require_workflow_job_exact_line \
   "$workflow" \
   "required" \

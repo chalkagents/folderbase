@@ -203,7 +203,19 @@ Successful commands exit 0 with one JSON document on stdout and empty stderr.
 `query_snapshot_changed` exits 1 with the capability attention document.
 Invocation and operational failures exit 2 with empty stdout and one typed
 capability error on stderr. These are optional-capability JSON documents, not
-new definitions or commands in Folderbase CLI JSON v1.
+new definitions or commands in Folderbase CLI JSON v1. Once argv selects
+`query` or `index`, parser syntax failures are inside this rule: missing roots
+or `--json`, unknown flags, and unknown subcommands use
+`folderbase-query-error-v1` with `invalid_query_request`. Successful help and
+version output remain ordinary CLI output.
+
+Host output-stream failure is the only delivery carve-out. When stdout or
+stderr itself is unavailable, the process still exits 2 and makes a
+non-panicking, best-effort diagnostic attempt on stderr, but it cannot guarantee
+delivery of a typed JSON document to an unusable destination. A stdout write
+failure follows the same rule and may report best-effort on stderr. This does
+not relax the typed-envelope requirement for normal invocation, domain, or
+operational failures when their destination stream is usable.
 
 The public runner resolves one regular candidate executable without a shell,
 places every fixture beneath one cleanup-owned temporary parent, and applies a

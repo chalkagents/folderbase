@@ -17,6 +17,10 @@ const registrySchemaUrl = new URL(
   "../../protocol/schemas/capabilities/1/registry.schema.json",
   import.meta.url,
 );
+const queryCapabilityUrl = new URL(
+  "../../protocol/capabilities/query-index/0.1.0/capability.json",
+  import.meta.url,
+);
 const embeddedRegistryUrl = new URL(
   "../../crates/folderbase-cli/assets/capability-registry-v1.json",
   import.meta.url,
@@ -64,9 +68,10 @@ test("optional capabilities do not expand Compatibility Contract v1's minimum", 
 });
 
 test("the public capability registry is exact, deterministic, and embedded unchanged", async () => {
-  const [registry, embeddedRegistry, schema] = await Promise.all([
+  const [registry, embeddedRegistry, queryCapability, schema] = await Promise.all([
     load(registryUrl),
     load(embeddedRegistryUrl),
+    load(queryCapabilityUrl),
     load(registrySchemaUrl),
   ]);
 
@@ -86,6 +91,11 @@ test("the public capability registry is exact, deterministic, and embedded uncha
   );
   assert.deepEqual(profiles, [
     {
+      name: "folderbase.query-index",
+      version: "0.1.0",
+      stability: "experimental",
+    },
+    {
       name: "folderbase.version-cli-json",
       version: "0.1.0",
       stability: "experimental",
@@ -95,6 +105,10 @@ test("the public capability registry is exact, deterministic, and embedded uncha
     ({ name, version }) => `${name}@${version}`,
   );
   assert.deepEqual(selectors, [...new Set(selectors)].sort());
+  assert.deepEqual(
+    registry.capabilities.find(({ name }) => name === "folderbase.query-index"),
+    queryCapability,
+  );
 });
 
 test("capability discovery does not rewrite the immutable protocol 0.5 release", async () => {
