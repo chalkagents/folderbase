@@ -244,3 +244,68 @@ fn filters_intersect_families_and_or_values_with_component_aware_prefixes() {
         .expect_err("full-fold collision");
     assert!(matches!(collision, QueryError::InvalidQueryRequest(_)));
 }
+
+fn live_page(limit: usize, cursor: Option<&str>) -> QueryRequest {
+    request(serde_json::json!({
+        "format": "folderbase-query-request-v1",
+        "scope": {"kind": "live"},
+        "page": {
+            "limit": limit,
+            "cursor": cursor
+        }
+    }))
+}
+
+#[test]
+fn opaque_cursors_are_snapshot_safe_and_bound_to_root_request_and_sort_key() {
+    let root = folderbase();
+    for name in ["a.md", "b.md", "c.md"] {
+        fs::write(root.path().join(name), format!("{name}\n")).expect("query row");
+    }
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+
+    let mut paths = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = engine
+            .run(&live_page(1, cursor.as_deref()))
+            .expect("stable continuation");
+        paths.extend(page.entries().iter().map(|entry| entry.path().to_owned()));
+        cursor = page.page().next_cursor().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(paths, ["a.md", "b.md", "c.md"]);
+
+    let first = engine.run(&live_page(1, None)).expect("first page");
+    let cursor = first.page().next_cursor().expect("continuation cursor");
+    fs::write(root.path().join("b.md"), b"changed\n").expect("bound metadata mutation");
+    let changed = engine
+        .run(&live_page(1, Some(cursor)))
+        .expect_err("snapshot changed");
+    assert!(matches!(changed, QueryError::QuerySnapshotChanged));
+
+    let other = folderbase();
+    fs::write(other.path().join("a.md"), b"a.md\n").expect("other root row");
+    let other_engine = FolderbaseQueryEngine::open(other.path()).expect("other query engine");
+    let cross_root = other_engine
+        .run(&live_page(1, Some(cursor)))
+        .expect_err("cursor is root-bound");
+    assert!(matches!(cross_root, QueryError::InvalidQueryCursor));
+
+    let cross_request = engine
+        .run(&request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "live"},
+            "filters": {"paths": ["a.md"]},
+            "page": {"limit": 1, "cursor": cursor}
+        })))
+        .expect_err("cursor is request-bound");
+    assert!(matches!(cross_request, QueryError::InvalidQueryCursor));
+
+    let malformed = engine
+        .run(&live_page(1, Some("fbq1_not-a-cursor")))
+        .expect_err("malformed cursor");
+    assert!(matches!(malformed, QueryError::InvalidQueryCursor));
+}
