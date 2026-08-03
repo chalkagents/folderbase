@@ -14,8 +14,9 @@ CSV, SQLite, video, a symlink, an ignored tree, one opaque nested Folderbase,
 and a sparse 10 GiB video whose bytes are never read. It also installs one exact
 Folderbase Version fixture with a Tombstone. Every fixture lives below one
 cleanup-owned temporary parent. The runner verifies that the 10 GiB file uses at
-most 16 MiB of allocated blocks and removes all state even when setup or the
-candidate fails.
+most 16 MiB of allocated blocks on POSIX hosts and verifies its exact logical
+size on Windows, where Node does not expose POSIX allocation semantics. It
+removes all state even when setup or the candidate fails.
 
 The suite proves:
 
