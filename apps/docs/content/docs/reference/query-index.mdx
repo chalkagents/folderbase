@@ -70,10 +70,11 @@ Messages are explanatory and must not be parsed.
 ## Metadata and file types
 
 Rows can represent directories, regular files, symlinks, and opaque nested
-Folderbase boundaries. Regular files include logical byte size and may refer to
-Markdown, PDF, CSV, SQLite, video, repositories, or any other ordinary file
-type. Live queries never read regular-file content. Historical rows may carry
-stable Knowledge Object, Object Version, and Folderbase Version identities.
+Folderbase boundaries. Repository trees remain ordinary directories and
+entries. Regular files include logical byte size and may be Markdown, PDF, CSV,
+SQLite, video, or any other ordinary file type. Live queries never read
+regular-file content. Historical rows may carry stable Knowledge Object,
+Object Version, and Folderbase Version identities.
 
 ## Independent conformance
 
