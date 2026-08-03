@@ -35,8 +35,9 @@ const INDEX_ROOT: &str = ".folderbase/local/query-index-v1";
 const INDEX_RECORD: &str = ".folderbase/local/query-index-v1/index.json";
 const INDEX_FORMAT: &str = "folderbase-query-private-index-v1";
 #[cfg(test)]
-static LIVE_ROW_PROJECTIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static LIVE_ROW_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// A root-bound handle for read-only query and explicit disposable-index work.
 #[derive(Debug)]
@@ -565,32 +566,42 @@ impl FolderbaseQueryEngine {
         self.ensure_root_authority()
     }
 
+    fn observe_live_query(&self) -> Result<(QueryObservation, QueryExecution), QueryError> {
+        let state = observe_live_state(&self.root)?;
+        if state.plan.root_instance_sha256() != self.opening_root_instance_sha256 {
+            return Err(QueryError::RootAuthorityChanged);
+        }
+        let index = read_index(&self.root, &state);
+        let selected = if index.state == QueryIndexState::Fresh {
+            let record = index.record.expect("fresh index has a verified record");
+            (
+                state.observation_with(record.entries, record.exclusions),
+                QueryExecution::PrivateIndex,
+            )
+        } else {
+            (
+                project_live_observation(&state),
+                QueryExecution::BoundedScan,
+            )
+        };
+        self.ensure_observation_authority(&selected.0)?;
+        Ok(selected)
+    }
+
     /// Run one bounded query against a newly observed scope.
     pub fn run(&self, request: &QueryRequest) -> Result<QueryResult, QueryError> {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
-        let live = matches!(&request.scope, QueryScope::Live);
-        let mut observation = match &request.scope {
-            QueryScope::Live => observe_live(&self.root)?,
+        let (mut observation, execution) = match &request.scope {
+            QueryScope::Live => self.observe_live_query()?,
             QueryScope::Historical {
                 folderbase_version_id,
-            } => observe_historical(&self.root, folderbase_version_id)?,
+            } => (
+                observe_historical(&self.root, folderbase_version_id)?,
+                QueryExecution::BoundedScan,
+            ),
         };
         self.ensure_observation_authority(&observation)?;
-        let index = live.then(|| read_index(&self.root, &observation));
-        let execution = if index
-            .as_ref()
-            .is_some_and(|index| index.state == QueryIndexState::Fresh)
-        {
-            let record = index
-                .and_then(|index| index.record)
-                .expect("fresh index has a verified record");
-            observation.entries = record.entries;
-            observation.exclusions = record.exclusions;
-            QueryExecution::PrivateIndex
-        } else {
-            QueryExecution::BoundedScan
-        };
         let exclusions_truncated = observation.exclusions.len() > MAX_RETURNED_EXCLUSIONS;
         observation.exclusions.truncate(MAX_RETURNED_EXCLUSIONS);
         let request_sha256 = request_sha256(&normalized)?;
@@ -653,11 +664,14 @@ impl FolderbaseQueryEngine {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
         let live = matches!(&request.scope, QueryScope::Live);
-        let mut observation = match &request.scope {
-            QueryScope::Live => observe_live(&self.root)?,
+        let (mut observation, index_strategy) = match &request.scope {
+            QueryScope::Live => self.observe_live_query()?,
             QueryScope::Historical {
                 folderbase_version_id,
-            } => observe_historical(&self.root, folderbase_version_id)?,
+            } => (
+                observe_historical(&self.root, folderbase_version_id)?,
+                QueryExecution::BoundedScan,
+            ),
         };
         self.ensure_observation_authority(&observation)?;
         let request_sha256 = request_sha256(&normalized)?;
@@ -672,12 +686,6 @@ impl FolderbaseQueryEngine {
                 return Err(QueryError::QuerySnapshotChanged);
             }
         }
-        let index_strategy =
-            if live && read_index(&self.root, &observation).state == QueryIndexState::Fresh {
-                QueryExecution::PrivateIndex
-            } else {
-                QueryExecution::BoundedScan
-            };
         let matched = observation
             .entries
             .iter()
@@ -708,12 +716,15 @@ impl FolderbaseQueryEngine {
     /// Inspect disposable-index freshness without writing state.
     pub fn index_status(&self) -> Result<QueryIndexStatus, QueryError> {
         self.ensure_root_authority()?;
-        let observation = observe_live(&self.root)?;
-        self.ensure_observation_authority(&observation)?;
+        let observation = observe_live_state(&self.root)?;
+        if observation.plan.root_instance_sha256() != self.opening_root_instance_sha256 {
+            return Err(QueryError::RootAuthorityChanged);
+        }
+        self.ensure_root_authority()?;
         let index = read_index(&self.root, &observation);
         Ok(QueryIndexStatus {
-            root: observation.root,
-            folderbase_id: observation.folderbase_id,
+            root: observation.plan.root().to_path_buf(),
+            folderbase_id: observation.plan.folderbase_id().to_owned(),
             state: index.state,
             generation: index.generation,
             observed_generation: observation.generation,
@@ -731,21 +742,25 @@ impl FolderbaseQueryEngine {
         before_publish: impl FnOnce() -> std::io::Result<()>,
     ) -> Result<QueryIndexRebuildResult, QueryError> {
         self.ensure_root_authority()?;
-        let observation = observe_live(&self.root)?;
+        let live_state = observe_live_state(&self.root)?;
+        let observation = project_live_observation(&live_state);
         self.ensure_observation_authority(&observation)?;
         if observation.entries.len() + observation.exclusions.len() > MAX_INDEX_RECORDS {
             return Err(QueryError::IndexRebuildFailed(
                 "derived record count exceeds the private-index bound".to_owned(),
             ));
         }
-        let record = PrivateIndexRecord {
+        let mut record = PrivateIndexRecord {
             format: INDEX_FORMAT.to_owned(),
             generation: observation.generation.clone(),
             root_instance_sha256: observation.root_instance_sha256.clone(),
             folderbase_id: observation.folderbase_id.clone(),
+            content_sha256: String::new(),
             entries: observation.entries.clone(),
             exclusions: observation.exclusions.clone(),
         };
+        record.content_sha256 = private_index_content_sha256(&record)
+            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
         let encoded = serde_json::to_vec(&record)
             .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
         if encoded.len() as u64 > MAX_INDEX_BYTES {
@@ -776,7 +791,7 @@ impl FolderbaseQueryEngine {
         state
             .replace_with_before_publish(Path::new(INDEX_RECORD), &encoded, before_publish)
             .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
-        let verified = read_index(&self.root, &observation);
+        let verified = read_index(&self.root, &live_state);
         if verified.state != QueryIndexState::Fresh {
             return Err(QueryError::IndexRebuildFailed(
                 "published index did not verify against its observation".to_owned(),
@@ -1031,6 +1046,29 @@ struct QueryObservation {
     exclusions: Vec<QueryExclusion>,
 }
 
+struct LiveObservationState {
+    plan: CapturePlan,
+    identity: LiveIdentityProjection,
+    generation: String,
+}
+
+impl LiveObservationState {
+    fn observation_with(
+        &self,
+        entries: Vec<QueryEntry>,
+        exclusions: Vec<QueryExclusion>,
+    ) -> QueryObservation {
+        QueryObservation {
+            root: self.plan.root().to_path_buf(),
+            root_instance_sha256: self.plan.root_instance_sha256().to_owned(),
+            folderbase_id: self.plan.folderbase_id().to_owned(),
+            generation: self.generation.clone(),
+            entries,
+            exclusions,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrivateIndexRecord {
@@ -1038,8 +1076,33 @@ struct PrivateIndexRecord {
     generation: String,
     root_instance_sha256: String,
     folderbase_id: String,
+    content_sha256: String,
     entries: Vec<QueryEntry>,
     exclusions: Vec<QueryExclusion>,
+}
+
+fn private_index_content_sha256(record: &PrivateIndexRecord) -> Result<String, serde_json::Error> {
+    #[derive(Serialize)]
+    struct Content<'a> {
+        format: &'a str,
+        generation: &'a str,
+        root_instance_sha256: &'a str,
+        folderbase_id: &'a str,
+        entries: &'a [QueryEntry],
+        exclusions: &'a [QueryExclusion],
+    }
+    let encoded = serde_json::to_vec(&Content {
+        format: &record.format,
+        generation: &record.generation,
+        root_instance_sha256: &record.root_instance_sha256,
+        folderbase_id: &record.folderbase_id,
+        entries: &record.entries,
+        exclusions: &record.exclusions,
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-query-private-index-content-v1\0");
+    digest.update(encoded);
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 struct IndexRead {
@@ -1069,7 +1132,7 @@ impl IndexRead {
     }
 }
 
-fn read_index(root: &Path, observation: &QueryObservation) -> IndexRead {
+fn read_index(root: &Path, observation: &LiveObservationState) -> IndexRead {
     let state = match FolderbaseState::open_existing_read_only(root) {
         Ok(state) => state,
         Err(_) => return IndexRead::stale(None, 0),
@@ -1102,13 +1165,14 @@ fn read_index(root: &Path, observation: &QueryObservation) -> IndexRead {
             .exclusions
             .iter()
             .all(|entry| validate_capture_path(&entry.path).is_ok());
+    let content_valid = is_sha256(&record.content_sha256)
+        && private_index_content_sha256(&record).ok().as_deref()
+            == Some(record.content_sha256.as_str());
     let equivalent = record.format == INDEX_FORMAT
         && record.generation == observation.generation
-        && record.root_instance_sha256 == observation.root_instance_sha256
-        && record.folderbase_id == observation.folderbase_id
-        && record.entries == observation.entries
-        && record.exclusions == observation.exclusions;
-    if bounded && ordered && paths_valid && equivalent {
+        && record.root_instance_sha256 == observation.plan.root_instance_sha256()
+        && record.folderbase_id == observation.plan.folderbase_id();
+    if bounded && ordered && paths_valid && content_valid && equivalent {
         IndexRead {
             state: QueryIndexState::Fresh,
             generation,
@@ -1120,12 +1184,20 @@ fn read_index(root: &Path, observation: &QueryObservation) -> IndexRead {
     }
 }
 
-fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {
+fn observe_live_state(root: &Path) -> Result<LiveObservationState, QueryError> {
     let plan = FolderbaseVersionStore::open(root)?.plan_capture()?;
     let identity = resolve_live_identity(&plan);
     let generation = live_observation_generation(&plan, &identity)?;
-    let mut entries = project_live_entries(&plan);
-    if let Some(version) = identity.version.as_ref() {
+    Ok(LiveObservationState {
+        plan,
+        identity,
+        generation,
+    })
+}
+
+fn project_live_observation(state: &LiveObservationState) -> QueryObservation {
+    let mut entries = project_live_entries(&state.plan);
+    if let Some(version) = state.identity.version.as_ref() {
         for entry in &mut entries {
             let Some(binding) = version.lookup_binding(&entry.path) else {
                 continue;
@@ -1142,14 +1214,7 @@ fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {
             }
         }
     }
-    Ok(QueryObservation {
-        root: plan.root().to_path_buf(),
-        root_instance_sha256: plan.root_instance_sha256().to_owned(),
-        folderbase_id: plan.folderbase_id().to_owned(),
-        generation,
-        entries,
-        exclusions: project_live_exclusions(&plan),
-    })
+    state.observation_with(entries, project_live_exclusions(&state.plan))
 }
 
 struct LiveIdentityProjection {
@@ -1441,7 +1506,7 @@ fn query_version_exclusion_kind(kind: ExclusionKind) -> QueryExclusionKind {
 
 fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
     #[cfg(test)]
-    LIVE_ROW_PROJECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    LIVE_ROW_PROJECTIONS.with(|count| count.set(count.get() + 1));
     let mut entries = plan
         .entries()
         .iter()
@@ -1612,7 +1677,7 @@ fn live_observation_generation(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, sync::atomic::Ordering};
+    use std::{fs, io};
 
     use tempfile::tempdir;
 
@@ -1650,15 +1715,26 @@ mod tests {
         let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
         engine.rebuild_index().expect("fresh index");
 
-        LIVE_ROW_PROJECTIONS.store(0, Ordering::Relaxed);
+        LIVE_ROW_PROJECTIONS.with(|count| count.set(0));
         let indexed = engine.run(&QueryRequest::live(10)).expect("indexed query");
         assert_eq!(indexed.execution(), QueryExecution::PrivateIndex);
-        assert_eq!(LIVE_ROW_PROJECTIONS.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            engine.index_status().expect("status").state(),
+            QueryIndexState::Fresh
+        );
+        assert_eq!(
+            engine
+                .explain(&QueryRequest::live(10))
+                .expect("indexed explain")
+                .index_strategy(),
+            QueryExecution::PrivateIndex
+        );
+        LIVE_ROW_PROJECTIONS.with(|count| assert_eq!(count.get(), 0));
 
         fs::write(root.path().join("second.md"), b"second\n").expect("stale index");
         let scanned = engine.run(&QueryRequest::live(10)).expect("fallback query");
         assert_eq!(scanned.execution(), QueryExecution::BoundedScan);
-        assert_eq!(LIVE_ROW_PROJECTIONS.load(Ordering::Relaxed), 1);
+        LIVE_ROW_PROJECTIONS.with(|count| assert_eq!(count.get(), 1));
     }
 
     #[test]

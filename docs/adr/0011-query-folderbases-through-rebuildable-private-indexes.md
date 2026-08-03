@@ -166,6 +166,14 @@ excluded from capture. Deleting them changes performance only. A rebuild is a
 derived-state transaction, not Folderbase history and not permission or share
 authority.
 
+Live operations first obtain the authoritative Capture Plan fingerprint and
+resolved identity-source state. A bounded, ordered, content-digested private
+record whose generation matches that fingerprint supplies the already-derived
+rows without repeating row projection or identity mapping. Missing, stale,
+malformed, oversized, or digest-invalid private state is ignored and the same
+authoritative state is projected in memory. Rebuild alone both projects rows
+and publishes their private acceleration record.
+
 Conformance protects ordinary files, ignored descendants, descendants behind a
 nested Folderbase, portable protocol records, and pre-existing sibling
 namespaces under `.folderbase/local/**` across query, explain, status, and
