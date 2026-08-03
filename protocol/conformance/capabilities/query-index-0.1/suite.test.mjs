@@ -349,7 +349,7 @@ test("minimal non-Rust candidate passes the complete black-box runner", () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.capability, "folderbase.query-index@0.1.0");
   assert.equal(report.failed, 0);
-  assert.equal(report.passed, 22);
+  assert.equal(report.passed, 23);
 });
 
 test("the runner hard-kills hanging and overproducing candidate commands", async () => {

@@ -33,7 +33,8 @@ The suite proves:
   keys independent of host ICU, Cargo, and Rust;
 - fixed request digests cover normalized key order, Unicode byte order,
   duplicates, bounds, and JSON escaping;
-- pages of size 1, 2, and N concatenate to the same UTF-8 path-byte ordering;
+- pages of size 1, 2, and N concatenate to the same total `query_row_key_v1`
+  ordering, including same-path recreation rows;
 - missing and invalid exact historical Versions use distinct typed exit-2
   errors with empty stdout;
 - explain reports observation source, ordering, content access, and exclusions;

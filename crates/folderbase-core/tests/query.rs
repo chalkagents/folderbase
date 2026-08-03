@@ -237,24 +237,8 @@ fn historical_recreation_rows_page_by_a_total_row_key() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
     );
-    let mut version: serde_json::Value =
-        serde_json::from_slice(&fs::read(fixture).expect("historical fixture"))
-            .expect("historical fixture JSON");
-    version["tombstones"]
-        .as_array_mut()
-        .expect("tombstone array")
-        .push(serde_json::json!({
-            "path": "data/table.csv",
-            "object_id": "obj_019f0000-0000-7000-8000-000000000080",
-            "lifecycle": "deleted",
-            "deleted_kind": "regular_file",
-            "last_object_version_id": "version_019f0000-0000-7000-8000-000000000081"
-        }));
-    fs::write(
-        versions.join(format!("{VERSION_ID}.json")),
-        serde_json::to_vec(&version).expect("recreation Version"),
-    )
-    .expect("historical recreation fixture");
+    fs::copy(fixture, versions.join(format!("{VERSION_ID}.json")))
+        .expect("historical recreation fixture");
     let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
 
     let make_request = |cursor: Option<&str>| {
@@ -556,7 +540,7 @@ fn disposable_index_is_explicit_bounded_and_never_required_for_correctness() {
         .expect("query explanation");
     assert_eq!(explained.scope_source(), QuerySource::CapturePlan);
     assert_eq!(explained.index_strategy(), QueryExecution::PrivateIndex);
-    assert_eq!(explained.ordering(), "portable_path_utf8_bytes_ascending");
+    assert_eq!(explained.ordering(), "query_row_key_v1");
     assert_eq!(explained.ordinary_content_access(), "metadata_only");
 
     fs::write(root.path().join("c.md"), b"c.md\n").expect("stale observation");

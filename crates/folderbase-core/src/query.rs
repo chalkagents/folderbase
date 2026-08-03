@@ -4,6 +4,7 @@
 //! [`crate::CapturePlan`] produced by [`crate::FolderbaseVersionStore`].
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
@@ -185,6 +186,85 @@ impl QueryEntry {
     pub fn boundary_reason(&self) -> Option<&str> {
         self.boundary_reason.as_deref()
     }
+
+    fn row_key(&self) -> QueryRowKey {
+        QueryRowKey {
+            path: self.path.clone(),
+            lifecycle: self.lifecycle,
+            kind: self.kind,
+            object_id: self.object_id.clone(),
+            object_version_id: self.object_version_id.clone(),
+            folderbase_version_id: self.folderbase_version_id.clone(),
+            source: self.source,
+            boundary_reason: self.boundary_reason.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryRowKey {
+    path: String,
+    lifecycle: QueryLifecycle,
+    kind: QueryEntryKind,
+    object_id: Option<String>,
+    object_version_id: Option<String>,
+    folderbase_version_id: Option<String>,
+    source: QuerySource,
+    boundary_reason: Option<String>,
+}
+
+impl QueryRowKey {
+    fn compare(&self, other: &Self) -> Ordering {
+        self.path
+            .as_bytes()
+            .cmp(other.path.as_bytes())
+            .then_with(|| lifecycle_rank(self.lifecycle).cmp(&lifecycle_rank(other.lifecycle)))
+            .then_with(|| kind_rank(self.kind).cmp(&kind_rank(other.kind)))
+            .then_with(|| compare_optional_bytes(&self.object_id, &other.object_id))
+            .then_with(|| compare_optional_bytes(&self.object_version_id, &other.object_version_id))
+            .then_with(|| {
+                compare_optional_bytes(&self.folderbase_version_id, &other.folderbase_version_id)
+            })
+            .then_with(|| source_rank(self.source).cmp(&source_rank(other.source)))
+            .then_with(|| compare_optional_bytes(&self.boundary_reason, &other.boundary_reason))
+    }
+}
+
+fn lifecycle_rank(lifecycle: QueryLifecycle) -> u8 {
+    match lifecycle {
+        QueryLifecycle::Live => 0,
+        QueryLifecycle::Deleted => 1,
+    }
+}
+
+fn kind_rank(kind: QueryEntryKind) -> u8 {
+    match kind {
+        QueryEntryKind::Directory => 0,
+        QueryEntryKind::RegularFile => 1,
+        QueryEntryKind::Symlink => 2,
+        QueryEntryKind::NestedFolderbase => 3,
+    }
+}
+
+fn source_rank(source: QuerySource) -> u8 {
+    match source {
+        QuerySource::CapturePlan => 0,
+        QuerySource::FolderbaseVersion => 1,
+    }
+}
+
+fn compare_optional_bytes(left: &Option<String>, right: &Option<String>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => left.as_bytes().cmp(right.as_bytes()),
+    }
+}
+
+fn compare_entries(left: &QueryEntry, right: &QueryEntry) -> Ordering {
+    left.row_key().compare(&right.row_key())
 }
 
 /// Optional type attached to an explainable exclusion.
@@ -377,7 +457,7 @@ impl QueryExplain {
         self.scope_source
     }
     pub fn ordering(&self) -> &'static str {
-        "portable_path_utf8_bytes_ascending"
+        "query_row_key_v1"
     }
     pub fn filter_algebra(&self) -> &'static str {
         "families_and_values_or"
@@ -504,7 +584,7 @@ impl FolderbaseQueryEngine {
             QueryExecution::BoundedScan
         };
         let request_sha256 = request_sha256(&normalized)?;
-        let after_path = if let Some(cursor) = request.page.cursor.as_deref() {
+        let after_row_key = if let Some(cursor) = request.page.cursor.as_deref() {
             let cursor = decode_cursor(cursor)?;
             if cursor.root_instance_sha256 != observation.root_instance_sha256
                 || cursor.request_sha256 != request_sha256
@@ -514,7 +594,7 @@ impl FolderbaseQueryEngine {
             if cursor.observation_generation != observation.generation {
                 return Err(QueryError::QuerySnapshotChanged);
             }
-            Some(cursor.last_path)
+            Some(cursor.last_row_key)
         } else {
             None
         };
@@ -523,9 +603,9 @@ impl FolderbaseQueryEngine {
             .into_iter()
             .filter(|entry| normalized.filters.applies(entry))
             .filter(|entry| {
-                after_path
+                after_row_key
                     .as_ref()
-                    .is_none_or(|path| entry.path.as_bytes() > path.as_bytes())
+                    .is_none_or(|row_key| entry.row_key().compare(row_key) == Ordering::Greater)
             })
             .collect::<Vec<_>>();
         let returned = entries.len().min(normalized.limit);
@@ -536,7 +616,7 @@ impl FolderbaseQueryEngine {
                     root_instance_sha256: observation.root_instance_sha256.clone(),
                     request_sha256: request_sha256.clone(),
                     observation_generation: observation.generation.clone(),
-                    last_path: entries[returned - 1].path.clone(),
+                    last_row_key: entries[returned - 1].row_key(),
                 })
             })
             .transpose()?;
@@ -989,7 +1069,7 @@ fn read_index(root: &Path, observation: &QueryObservation) -> IndexRead {
     let ordered = record
         .entries
         .windows(2)
-        .all(|pair| pair[0].path.as_bytes() < pair[1].path.as_bytes())
+        .all(|pair| compare_entries(&pair[0], &pair[1]) == Ordering::Less)
         && record
             .exclusions
             .windows(2)
@@ -1164,7 +1244,7 @@ fn observe_historical(root: &Path, version_id: &str) -> Result<QueryObservation,
                 boundary_reason: Some("nested-folderbase-boundary".to_owned()),
             }),
     );
-    entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    entries.sort_by(compare_entries);
     let exclusions = version
         .exclusions()
         .iter()
@@ -1199,7 +1279,7 @@ struct QueryCursorPayload {
     root_instance_sha256: String,
     request_sha256: String,
     observation_generation: String,
-    last_path: String,
+    last_row_key: QueryRowKey,
 }
 
 fn encode_cursor(payload: &QueryCursorPayload) -> Result<String, QueryError> {
@@ -1238,7 +1318,7 @@ fn decode_cursor(cursor: &str) -> Result<QueryCursorPayload, QueryError> {
     if !is_sha256(&payload.root_instance_sha256)
         || !is_sha256(&payload.request_sha256)
         || !is_sha256(&payload.observation_generation)
-        || validate_capture_path(&payload.last_path).is_err()
+        || validate_capture_path(&payload.last_row_key.path).is_err()
     {
         return Err(QueryError::InvalidQueryCursor);
     }
@@ -1367,7 +1447,7 @@ fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
                 boundary_reason: Some("nested-folderbase-boundary".to_owned()),
             }),
     );
-    entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    entries.sort_by(compare_entries);
     entries
 }
 

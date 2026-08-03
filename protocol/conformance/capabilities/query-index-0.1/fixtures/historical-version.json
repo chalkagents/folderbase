@@ -86,6 +86,13 @@
       "lifecycle": "deleted",
       "deleted_kind": "regular_file",
       "last_object_version_id": "version_019f0000-0000-7000-8000-000000000011"
+    },
+    {
+      "path": "data/table.csv",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000080",
+      "lifecycle": "deleted",
+      "deleted_kind": "regular_file",
+      "last_object_version_id": "version_019f0000-0000-7000-8000-000000000081"
     }
   ],
   "exclusions": [

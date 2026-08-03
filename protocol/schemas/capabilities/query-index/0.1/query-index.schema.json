@@ -348,7 +348,7 @@
         "observation_generation": { "$ref": "#/$defs/sha256" },
         "normalized_request": { "$ref": "#/$defs/normalizedRequest" },
         "scope_source": { "enum": ["capture_plan", "folderbase_version"] },
-        "ordering": { "const": "portable_path_utf8_bytes_ascending" },
+        "ordering": { "const": "query_row_key_v1" },
         "filter_algebra": { "const": "families_and_values_or" },
         "ordinary_content_access": { "const": "metadata_only" },
         "index_strategy": { "enum": ["bounded_scan", "private_index"] },
