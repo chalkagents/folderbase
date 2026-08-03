@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CapturePlan,
-    FolderbaseCaptureError, FolderbaseVersionStore,
+    FolderbaseCaptureError, FolderbaseError, FolderbaseVersionStore,
     folderbase_state::FolderbaseState,
     folderbase_version::{
         DeletedKind, ExclusionKind, FolderbaseVersion, MAX_ENCODED_VERSION_BYTES, PathBindingKind,
@@ -1377,15 +1377,27 @@ fn read_historical_version(root: &Path, version_id: &str) -> Result<FolderbaseVe
         }
     })?;
     let relative = Path::new(".folderbase/versions/folderbase").join(format!("{version_id}.json"));
-    let encoded = state
-        .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)
-        .map_err(|error| QueryError::ScopeVersionInvalid {
-            version_id: version_id.to_owned(),
-            message: error.to_string(),
-        })?
-        .ok_or_else(|| QueryError::ScopeVersionMissing {
-            version_id: version_id.to_owned(),
-        })?;
+    let encoded = match state.read_bounded(&relative, MAX_ENCODED_VERSION_BYTES) {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => {
+            return Err(QueryError::ScopeVersionMissing {
+                version_id: version_id.to_owned(),
+            });
+        }
+        Err(FolderbaseError::Io { ref source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Err(QueryError::ScopeVersionMissing {
+                version_id: version_id.to_owned(),
+            });
+        }
+        Err(error) => {
+            return Err(QueryError::ScopeVersionInvalid {
+                version_id: version_id.to_owned(),
+                message: error.to_string(),
+            });
+        }
+    };
     FolderbaseVersion::decode_bounded(encoded.as_slice()).map_err(|error| {
         QueryError::ScopeVersionInvalid {
             version_id: version_id.to_owned(),

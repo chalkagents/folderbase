@@ -251,10 +251,80 @@ fn historical_scope_classifies_missing_ancestors_without_weakening_invalid_recor
         Err(QueryError::ScopeVersionInvalid { .. })
     ));
 
+    #[cfg(unix)]
+    {
+        let alias_root = folderbase();
+        fs::create_dir(alias_root.path().join(".folderbase/versions")).expect("Version parent");
+        let outside = tempdir().expect("outside Version store");
+        std::os::unix::fs::symlink(
+            outside.path(),
+            alias_root.path().join(".folderbase/versions/folderbase"),
+        )
+        .expect("unsafe Version alias");
+        let alias_engine =
+            FolderbaseQueryEngine::open(alias_root.path()).expect("alias query engine");
+        assert!(matches!(
+            alias_engine.run(&historical(REQUESTED)),
+            Err(QueryError::ScopeVersionInvalid { .. })
+        ));
+    }
+
     let malformed = missing_engine
         .run(&historical("not-a-version-id"))
         .expect_err("malformed Version ID");
     assert!(matches!(malformed, QueryError::InvalidQueryRequest(_)));
+
+    const FIXTURE_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000001";
+    let invalid_root = folderbase();
+    fs::write(
+        invalid_root.path().join(".folderbase/manifest.json"),
+        String::from_utf8_lossy(MANIFEST).replace(
+            "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+            "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+        ),
+    )
+    .expect("fixture Folderbase identity");
+    let versions = invalid_root.path().join(".folderbase/versions/folderbase");
+    fs::create_dir_all(&versions).expect("Version namespace");
+    let fixture = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
+    ))
+    .expect("historical fixture");
+    fs::write(versions.join(format!("{REQUESTED}.json")), &fixture)
+        .expect("identity-mismatched Version");
+    let invalid_engine =
+        FolderbaseQueryEngine::open(invalid_root.path()).expect("invalid query engine");
+    assert!(matches!(
+        invalid_engine.run(&historical(REQUESTED)),
+        Err(QueryError::ScopeVersionInvalid { .. })
+    ));
+
+    let mut schema_invalid: serde_json::Value =
+        serde_json::from_slice(&fixture).expect("fixture JSON");
+    schema_invalid["future_field"] = serde_json::json!(true);
+    fs::write(
+        versions.join(format!("{FIXTURE_ID}.json")),
+        serde_json::to_vec(&schema_invalid).unwrap(),
+    )
+    .expect("schema-invalid Version");
+    assert!(matches!(
+        invalid_engine.run(&historical(FIXTURE_ID)),
+        Err(QueryError::ScopeVersionInvalid { .. })
+    ));
+
+    let mut semantic_invalid: serde_json::Value =
+        serde_json::from_slice(&fixture).expect("fixture JSON");
+    semantic_invalid["parents"] = serde_json::json!([FIXTURE_ID]);
+    fs::write(
+        versions.join(format!("{FIXTURE_ID}.json")),
+        serde_json::to_vec(&semantic_invalid).unwrap(),
+    )
+    .expect("semantic-invalid Version");
+    assert!(matches!(
+        invalid_engine.run(&historical(FIXTURE_ID)),
+        Err(QueryError::ScopeVersionInvalid { .. })
+    ));
 }
 
 #[test]
