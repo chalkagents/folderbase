@@ -16,7 +16,7 @@
     "cloud_sync": "disabled",
     "capture_ignore": {
       "format": "folderbase-capture-ignore-v1",
-      "rules": []
+      "rules": ["node_modules/", ".DS_Store", "*.tmp", "~$*", "generated/**", "opaque/", "reports/**"]
     }
   }
 }

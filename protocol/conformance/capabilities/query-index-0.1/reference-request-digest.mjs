@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { PortablePathCollisionIndex } from "./portable-path-v1.mjs";
 
 const DOMAIN = Buffer.from("folderbase-query-request-v1\0", "utf8");
 const MAX_PATH_BYTES = 4_096;
@@ -22,32 +23,15 @@ function canonicalSet(values = []) {
   return [...new Set(values)].sort(byteCompare);
 }
 
-function portableCollisionKey(path) {
-  // The normative policy pins Unicode 17 NFC and Unicode 9 full default case
-  // folding. U+1ACF was assigned combining class 230 in Unicode 17; the
-  // replacement below preserves the table-discriminating public vector on
-  // hosts whose built-in normalizer predates Unicode 17. Implementations remain
-  // responsible for the complete pinned tables, not this representative shim.
-  const unicode17Nfc = path
-    .replaceAll("\u{1acf}\u{0323}", "\u{0323}\u{1acf}")
-    .normalize("NFC");
-  return unicode17Nfc.toUpperCase().toLowerCase().normalize("NFC");
-}
-
 function validatePortablePathSet(values, label) {
-  const normalized = new Map();
-  const folded = new Map();
+  const index = new PortablePathCollisionIndex();
   for (const path of values) {
     validatePortablePath(path);
-    const nfc = path.normalize("NFC");
-    const fold = portableCollisionKey(path);
-    const nfcOwner = normalized.get(nfc);
-    const foldedOwner = folded.get(fold);
-    if ((nfcOwner && nfcOwner !== path) || (foldedOwner && foldedOwner !== path)) {
-      throw new Error(`${label} contains a portable-path collision`);
+    try {
+      index.insert(path, null, { exactDuplicates: "allow" });
+    } catch (error) {
+      throw new Error(`${label} contains a portable-path collision`, { cause: error });
     }
-    normalized.set(nfc, path);
-    folded.set(fold, path);
   }
 }
 

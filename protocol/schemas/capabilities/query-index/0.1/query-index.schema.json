@@ -37,7 +37,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*[\\u0000-\\u001f<>:\"|?*])(?!.*(?:^|/)\\.[fF][oO][lL][dD][eE][rR][bB][aA][sS][eE](?:/|$))(?!.*[. ](?:/|$)).+(?<!/)$",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?![\\s\\S]*\\\\)(?![\\s\\S]*(?:^|/)\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*[\\u0000-\\u001f<>:\"|?*])(?![\\s\\S]*(?:^|/)\\.[fF][oO][lL][dD][eE][rR][bB][aA][sS][eE](?:/|$))(?![\\s\\S]*[. ](?:/|$))[\\s\\S]+(?<!/)$",
       "x-folderbase-semantic-policy": "folderbase-portable-path-v1: 4096 UTF-8 bytes total, 255 UTF-8 bytes per component, depth 128, Windows reserved stems, and NFC/full-case-fold collision rejection"
     },
     "queryCursor": {
@@ -303,12 +303,12 @@
             "maximum_bytes"
           ],
           "properties": {
-            "paths": { "type": "array", "items": { "$ref": "#/$defs/portablePath" } },
-            "path_prefixes": { "type": "array", "items": { "$ref": "#/$defs/portablePath" } },
-            "kinds": { "type": "array", "items": { "enum": ["directory", "nested_folderbase", "regular_file", "symlink"] } },
-            "lifecycles": { "type": "array", "items": { "enum": ["deleted", "live"] } },
-            "object_ids": { "type": "array", "items": { "$ref": "#/$defs/objectId" } },
-            "object_version_ids": { "type": "array", "items": { "$ref": "#/$defs/objectVersionId" } },
+            "paths": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/portablePath" } },
+            "path_prefixes": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/portablePath" } },
+            "kinds": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "enum": ["directory", "nested_folderbase", "regular_file", "symlink"] } },
+            "lifecycles": { "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "enum": ["deleted", "live"] } },
+            "object_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/objectId" } },
+            "object_version_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/objectVersionId" } },
             "minimum_bytes": { "$ref": "#/$defs/nullableBytes" },
             "maximum_bytes": { "$ref": "#/$defs/nullableBytes" }
           },

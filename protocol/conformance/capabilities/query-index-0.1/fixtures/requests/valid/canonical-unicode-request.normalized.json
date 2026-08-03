@@ -6,6 +6,8 @@
   "filters": {
     "paths": [
       "emoji/😀.md",
+      "unicode/line separator.md",
+      "unicode/paragraph separator.md",
       "unicode/é.md"
     ],
     "path_prefixes": [

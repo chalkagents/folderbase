@@ -26,14 +26,16 @@ The suite proves:
   AND-between-families/OR-within-family semantics;
 - request paths obey the complete portable-path byte, depth, reserved-name,
   normalization, case-fold collision, and reserved-state policy;
+- checked-in Unicode 17 NFC and Unicode 9 full-fold tables make those collision
+  keys independent of host ICU, Cargo, and Rust;
 - fixed request digests cover normalized key order, Unicode byte order,
   duplicates, bounds, and JSON escaping;
 - pages of size 1, 2, and N concatenate to the same UTF-8 path-byte ordering;
 - missing and invalid exact historical Versions use distinct typed exit-2
   errors with empty stdout;
 - explain reports observation source, ordering, content access, and exclusions;
-- query, explain, and status do not create an index or alter ordinary,
-  portable, ignored, nested-boundary, or sibling-private state;
+- every command is surrounded by a complete no-follow tree snapshot and cannot
+  alter ordinary, portable, ignored, nested-boundary, or sibling-private state;
 - explicit rebuild writes only `.folderbase/local/query-index-v1/**`;
 - cursors bind the physical root, manifest, effective ignore policy, optional
   Local Head, and complete CapturePlan-like metadata fingerprints; and
@@ -45,15 +47,18 @@ with a behavioral failure, including the expected result for the released 0.5
 binary because it does not implement or advertise this post-0.5 capability.
 Bad runner arguments exit 2.
 
-Each candidate command has a 30-second wall-clock bound and an 8 MiB bound for
-each output stream by default, enforced with SIGKILL. A conformance host may lower or
+Each candidate command has a 30-second wall-clock bound and an 8 MiB combined
+output bound by default. A conformance host may lower or
 raise them only within the runner's closed bounds through
 `FOLDERBASE_QUERY_CONFORMANCE_COMMAND_TIMEOUT_MS` and
-`FOLDERBASE_QUERY_CONFORMANCE_COMMAND_MAX_BYTES`. Hanging and noisy adversarial
-fixtures prove both bounds and prove their PIDs are gone after termination.
+`FOLDERBASE_QUERY_CONFORMANCE_COMMAND_MAX_BYTES`. POSIX uses a new process group
+and `SIGKILL`; Windows uses `taskkill /T /F`. Hanging, forking, and noisy
+adversarial fixtures prove both bounds and prove every recorded PID is gone.
+This cleanup is not an OS security sandbox.
 
 `reference-request-digest.mjs` is an implementation-independent reference for
 the domain-separated normalized-request digest. The checked-in `.sha256`
 sidecars are fixed expected values, not values calculated by the candidate.
 Canonical serialization is schema-ordered compact JSON, not a host-language map
 order; see ADR-0011 and the public JSON/Unicode vectors for the exact rules.
+`THIRD_PARTY_NOTICES.md` records the Unicode table provenance and licenses.

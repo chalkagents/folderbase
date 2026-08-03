@@ -1,0 +1,10 @@
+[package]
+name = "folderbase-unicode-nfc-v17-generator"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+unicode-normalization = "=0.1.25"
+
+[workspace]

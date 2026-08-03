@@ -103,3 +103,7 @@ export function assertQuerySchema(value, root, definition) {
   assert.ok(schema, `unknown query schema definition ${definition}`);
   validate(value, schema, root, definition);
 }
+
+export function assertJsonSchema(value, root, label = "document") {
+  validate(value, root, root, label);
+}

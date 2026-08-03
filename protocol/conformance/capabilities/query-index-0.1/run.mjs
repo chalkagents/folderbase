@@ -22,6 +22,15 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  closeSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  readSync,
+} from "node:fs";
 
 import { assertQuerySchema } from "./schema.mjs";
 import { queryRequestSha256 } from "./reference-request-digest.mjs";
@@ -80,25 +89,108 @@ function execute(implementation, arguments_, input) {
     ? process.execPath
     : implementation;
   const args = command === process.execPath ? [implementation, ...arguments_] : arguments_;
-  const result = spawnSync(command, args, {
-    encoding: "utf8",
-    input,
-    killSignal: "SIGKILL",
-    maxBuffer: commandMaxBytes,
-    timeout: commandTimeoutMs,
+  const payload = JSON.stringify({
+    command,
+    args,
+    input: Buffer.from(input ?? "").toString("base64"),
+    timeoutMs: commandTimeoutMs,
+    maxBytes: commandMaxBytes,
   });
-  if (result.error?.code === "ETIMEDOUT") {
+  const supervised = spawnSync(process.execPath, [join(directory, "command-supervisor.mjs")], {
+    encoding: "utf8",
+    input: payload,
+    killSignal: "SIGKILL",
+    maxBuffer: commandMaxBytes + 1024 * 1024,
+    timeout: commandTimeoutMs + 10_000,
+  });
+  if (supervised.error?.code === "ETIMEDOUT") {
+    throw new Error("candidate process supervisor failed to reap its process tree");
+  }
+  if (supervised.error) throw supervised.error;
+  const result = JSON.parse(supervised.stdout);
+  if (result.bound === "timeout") {
     throw new Error(`candidate command timed out after ${commandTimeoutMs} ms`);
   }
-  if (result.error?.code === "ENOBUFS") {
+  if (result.bound === "output") {
     throw new Error(`candidate command exceeded the ${commandMaxBytes}-byte output limit`);
   }
-  if (result.error) throw result.error;
+  if (result.error) throw Object.assign(new Error(result.error.message), { code: result.error.code });
   return result;
 }
 
-function successJson(implementation, arguments_, definition, input) {
-  const result = execute(implementation, arguments_, input);
+function wholeTreeSnapshot(root) {
+  const records = [];
+  function visit(relative) {
+    const absolute = join(root, relative);
+    for (const name of readdirSync(absolute).sort((left, right) =>
+      Buffer.compare(Buffer.from(left), Buffer.from(right)))) {
+      const path = relative ? `${relative}/${name}` : name;
+      if (path === ".folderbase/local/query-index-v1") continue;
+      const metadata = lstatSync(join(root, path), { bigint: true });
+      if (metadata.isDirectory()) {
+        records.push({ path, kind: "directory" });
+        visit(path);
+      } else if (metadata.isSymbolicLink()) {
+        records.push({
+          path,
+          kind: "symlink",
+          mode: metadata.mode.toString(),
+          size: metadata.size.toString(),
+          mtime_ns: metadata.mtimeNs.toString(),
+          device: metadata.dev.toString(),
+          inode: metadata.ino.toString(),
+          blocks: metadata.blocks?.toString() ?? null,
+          target: readlinkSync(join(root, path)),
+        });
+      } else if (metadata.isFile()) {
+        const common = {
+          path,
+          kind: "regular_file",
+          mode: metadata.mode.toString(),
+          size: metadata.size.toString(),
+          mtime_ns: metadata.mtimeNs.toString(),
+          device: metadata.dev.toString(),
+          inode: metadata.ino.toString(),
+          blocks: metadata.blocks?.toString() ?? null,
+        };
+        if (metadata.size <= 1024n * 1024n) {
+          records.push({ ...common, sha256: sha256(readFileSync(join(root, path))) });
+        } else {
+          const descriptor = openSync(join(root, path), "r");
+          try {
+            const head = Buffer.alloc(4096);
+            const tail = Buffer.alloc(4096);
+            const headRead = readSync(descriptor, head, 0, head.length, 0);
+            const tailPosition = metadata.size > 4096n ? metadata.size - 4096n : 0n;
+            const tailRead = readSync(descriptor, tail, 0, tail.length, Number(tailPosition));
+            records.push({
+              ...common,
+              bounded_head_sha256: sha256(head.subarray(0, headRead)),
+              bounded_tail_sha256: sha256(tail.subarray(0, tailRead)),
+            });
+          } finally { closeSync(descriptor); }
+        }
+      } else {
+        records.push({ path, kind: "other", mode: metadata.mode.toString() });
+      }
+    }
+  }
+  visit("");
+  return records;
+}
+
+function executeAtRoot(implementation, arguments_, input, root) {
+  const before = wholeTreeSnapshot(root);
+  try {
+    return execute(implementation, arguments_, input);
+  } finally {
+    assert.deepEqual(wholeTreeSnapshot(root), before,
+      "candidate changed content outside its exact disposable query-index namespace");
+  }
+}
+
+function successJson(implementation, arguments_, definition, input, root) {
+  const result = executeAtRoot(implementation, arguments_, input, root);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(result.stderr, "", "successful query capability commands leave stderr empty");
   const output = JSON.parse(result.stdout);
@@ -106,8 +198,8 @@ function successJson(implementation, arguments_, definition, input) {
   return output;
 }
 
-function errorJson(implementation, arguments_, expectedCode, input) {
-  const result = execute(implementation, arguments_, input);
+function errorJson(implementation, arguments_, expectedCode, input, root) {
+  const result = executeAtRoot(implementation, arguments_, input, root);
   assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(result.stdout, "", "operational failures leave stdout empty");
   const output = JSON.parse(result.stderr);
@@ -120,12 +212,17 @@ async function fixtureRequest(name) {
   return JSON.parse(await readFile(join(fixtures, "requests", "valid", name), "utf8"));
 }
 
+async function invalidFixtureRequest(name) {
+  return JSON.parse(await readFile(join(fixtures, "requests", "invalid", name), "utf8"));
+}
+
 function query(implementation, command, root, request) {
   return successJson(
     implementation,
     ["query", command, root, "--json"],
     command === "run" ? "queryResult" : "queryExplain",
     `${JSON.stringify(request)}\n`,
+    root,
   );
 }
 
@@ -135,15 +232,41 @@ function queryError(implementation, root, request, expectedCode) {
     ["query", "run", root, "--json"],
     expectedCode,
     `${JSON.stringify(request)}\n`,
+    root,
   );
 }
 
 function index(implementation, command, root) {
-  return successJson(
+  const output = successJson(
     implementation,
     ["index", command, root, "--json"],
     command === "status" ? "indexStatus" : "indexRebuildResult",
+    undefined,
+    root,
   );
+  if (command === "rebuild") {
+    const indexRoot = join(root, ".folderbase/local/query-index-v1");
+    const metadata = lstatSync(indexRoot, { bigint: true });
+    assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink(),
+      "query index root must be an exact private directory, not a symlink");
+    let records = 0;
+    let bytes = 0n;
+    const visit = (path) => {
+      for (const entry of readdirSync(path)) {
+        const child = join(path, entry);
+        const childMetadata = lstatSync(child, { bigint: true });
+        assert.ok(!childMetadata.isSymbolicLink(), "query index must not contain symlinks");
+        records += 1;
+        bytes += childMetadata.size;
+        assert.ok(records <= 16_384 && bytes <= 64n * 1024n * 1024n,
+          "query index exceeds the public conformance bound");
+        if (childMetadata.isDirectory()) visit(child);
+        else assert.ok(childMetadata.isFile(), "query index contains unsupported state");
+      }
+    };
+    visit(indexRoot);
+  }
+  return output;
 }
 
 function sha256(bytes) {
@@ -196,10 +319,15 @@ async function createFixtureRoot(owner, name) {
     ".folderbase/versions/folderbase",
     "data",
     "documents",
+    "generated/keep",
     "ignored",
+    "logs",
     "links",
     "media",
     "notes",
+    "node_modules/package",
+    "opaque",
+    "reports/current",
     "repo/.git",
     "vendors/nested/.folderbase",
     "vendors/nested/secret",
@@ -207,13 +335,24 @@ async function createFixtureRoot(owner, name) {
   const writes = [
     [".folderbase/manifest.json", await readFile(join(fixtures, "root-manifest.json"))],
     [".folderbase/local/other-engine/sentinel.txt", "another private engine owns this\n"],
-    [".folderbaseignore", "ignored/\n"],
+    [".folderbaseignore", "ignored/*\n!ignored/keep.txt\nlogs/*.log\n!logs/keep.log\n!generated/keep/\n!generated/keep/**\n!reports/current/\n!reports/current/**\nreports/current/reignored.txt\n!opaque/child.txt\n"],
     ["AGENTS.md", "agent instructions\n"],
     ["data/app.sqlite", Buffer.from("SQLite format 3\0", "binary")],
     ["data/table.csv", "a,b\none,two\n"],
     ["database.md", "# Database sibling!\n"],
     ["documents/Brief.pdf", "%PDF-1.7\nquery\n"],
+    ["generated/drop.txt", "engine ignored\n"],
+    ["generated/keep/context.txt", "engine rule overridden\n"],
     ["ignored/private.txt", "must stay excluded\n"],
+    ["ignored/keep.txt", "negation keeps this\n"],
+    ["logs/drop.log", "ignored log\n"],
+    ["logs/keep.log", "kept log\n"],
+    ["node_modules/package/index.js", "reconstructable\n"],
+    ["opaque/child.txt", "parent remains pruned\n"],
+    ["reports/drop.txt", "ignored report\n"],
+    ["reports/current/keep.txt", "kept report\n"],
+    ["reports/current/reignored.txt", "last match wins\n"],
+    ["scratch.tmp", "engine ignored\n"],
     ["media/clip.mp4", "video-bytes\n"],
     ["notes/Brief.md", "# Brief\ncontext\n"],
     ["repo/.git/HEAD", "ref: refs/heads/main\n"],
@@ -234,11 +373,15 @@ async function createFixtureRoot(owner, name) {
   await truncate(sparsePath, LARGE_BYTES);
   const sparse = await stat(sparsePath, { bigint: true });
   assert.equal(sparse.size, BigInt(LARGE_BYTES));
-  assert.ok(typeof sparse.blocks === "bigint", "filesystem must expose sparse allocation blocks");
-  assert.ok(
-    sparse.blocks * 512n <= 16n * 1024n * 1024n,
-    "the 10 GiB fixture must remain sparsely allocated below 16 MiB",
-  );
+  if (typeof sparse.blocks === "bigint") {
+    assert.ok(
+      sparse.blocks * 512n <= 16n * 1024n * 1024n,
+      "the 10 GiB fixture must remain sparsely allocated below 16 MiB",
+    );
+  } else {
+    assert.equal(process.platform, "win32",
+      "only Windows may omit sparse allocation blocks from Node metadata");
+  }
   await symlink("../notes/Brief.md", join(root, "links/brief-link"));
   return root;
 }
@@ -275,10 +418,11 @@ function concatenatePages(implementation, root, limit) {
 }
 
 function continuation(implementation, root, first) {
-  return execute(
+  return executeAtRoot(
     implementation,
     ["query", "run", root, "--json"],
     `${JSON.stringify(liveRequest(1, first.page.next_cursor))}\n`,
+    root,
   );
 }
 
@@ -460,8 +604,45 @@ try {
           tampered.version_id = MISSING_VERSION_ID;
           await writeFile(versionPath, `${JSON.stringify(tampered)}\n`);
           queryError(implementation, root, historicalRequest(), "query_scope_version_invalid");
+          const schemaInvalid = JSON.parse(exact);
+          schemaInvalid.future_field = true;
+          await writeFile(versionPath, `${JSON.stringify(schemaInvalid)}\n`);
+          queryError(implementation, root, historicalRequest(), "query_scope_version_invalid");
+          const semanticInvalid = JSON.parse(exact);
+          semanticInvalid.parents = [semanticInvalid.version_id];
+          await writeFile(versionPath, `${JSON.stringify(semanticInvalid)}\n`);
+          queryError(implementation, root, historicalRequest(), "query_scope_version_invalid");
         } finally {
           await writeFile(versionPath, exact);
+        }
+      },
+    },
+    {
+      id: "query-historical-generation-binds-canonical-version-digest",
+      async run() {
+        const versionPath = join(root, ".folderbase/versions/folderbase", `${VERSION_ID}.json`);
+        const exact = await readFile(versionPath);
+        const request = { ...historicalRequest(), page: { limit: 1 } };
+        const first = query(implementation, "run", root, request);
+        assert.ok(first.page.next_cursor);
+        try {
+          const reformatted = JSON.stringify(JSON.parse(exact), null, 2)
+            .replace('"bytes": 624', '"bytes": 6.24e2');
+          await writeFile(versionPath, `${reformatted}\n`);
+          const continued = query(implementation, "run", root, {
+            ...request,
+            page: { limit: 1, cursor: first.page.next_cursor },
+          });
+          assert.equal(continued.observation_generation, first.observation_generation);
+        } finally { await writeFile(versionPath, exact); }
+      },
+    },
+    {
+      id: "query-validates-the-closed-request-before-normalization",
+      async run() {
+        for (const name of await readdir(join(fixtures, "requests", "invalid"))) {
+          if (!name.endsWith(".json")) continue;
+          queryError(implementation, root, await invalidFixtureRequest(name), "invalid_query_request");
         }
       },
     },
@@ -489,6 +670,26 @@ try {
             page: { limit: 10 },
           }, "invalid_query_request");
         }
+      },
+    },
+    {
+      id: "query-live-inventory-rejects-full-fold-collisions",
+      async run() {
+        const directory = join(root, "unicode-collision");
+        await mkdir(directory);
+        await writeFile(join(directory, "ẞ.md"), "one\n");
+        await writeFile(join(directory, "ss.md"), "two\n");
+        try {
+          const distinct = await readdir(directory);
+          if (distinct.length === 2) {
+            queryError(implementation, root, liveRequest(10), "invalid_query_request");
+          } else {
+            // A case-insensitive filesystem prevented construction of the
+            // counterexample. The pure table/index test still proves ẞ vs ss;
+            // Linux conformance runs exercise this black-box inventory path.
+            assert.equal(distinct.length, 1);
+          }
+        } finally { await rm(directory, { recursive: true, force: true }); }
       },
     },
     {
@@ -558,6 +759,7 @@ try {
           ["query", "run", other, "--json"],
           "invalid_query_cursor",
           `${JSON.stringify(liveRequest(1, first.page.next_cursor))}\n`,
+          other,
         );
       },
     },

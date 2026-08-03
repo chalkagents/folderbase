@@ -12,13 +12,27 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { compileGitignore, effectiveCaptureIgnoreDigest, ignoredByGitignore } from "../capture-ignore-v2.mjs";
+import { verifyFolderbaseVersion05 } from "../folderbase-version-0.5-verifier.mjs";
+import { PortablePathCollisionIndex } from "../portable-path-v1.mjs";
 import {
   normalizeQueryRequest,
   pathMatchesPrefix,
   queryRequestSha256,
   validatePortablePath,
 } from "../reference-request-digest.mjs";
+import { assertQuerySchema } from "../schema.mjs";
+
+const querySchema = JSON.parse(await readFile(fileURLToPath(new URL(
+  "../../../../schemas/capabilities/query-index/0.1/query-index.schema.json",
+  import.meta.url,
+))));
+const versionSchema = JSON.parse(await readFile(fileURLToPath(new URL(
+  "../../../../schemas/0.5/folderbase-version.schema.json",
+  import.meta.url,
+))));
 
 const FOLDERBASE_ID = "folderbase_018f43c2-9a1b-7def-8123-456789abcdef";
 const INDEX_PATH = ".folderbase/local/query-index-v1";
@@ -64,10 +78,6 @@ function metadataFingerprint(metadata) {
   };
 }
 
-function ignoredByRules(path, rules) {
-  return rules.some((rule) => path === rule || path.startsWith(`${rule}/`));
-}
-
 async function exactRegularFile(path) {
   try {
     const metadata = await lstat(path);
@@ -98,20 +108,16 @@ async function liveObservation(root) {
   const manifestMetadata = await lstat(manifestPath, { bigint: true });
   const ignorePath = join(exactRoot, ".folderbaseignore");
   const ignoreBytes = await readFile(ignorePath);
-  const ignoreRules = ignoreBytes
-    .toString("utf8")
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .map((line) => line.endsWith("/") ? line.slice(0, -1) : line);
-  const effectiveIgnoreDigest = hash(JSON.stringify({
-    manifest: manifest.policies?.capture_ignore ?? null,
-    folderbaseignore_sha256: hash(ignoreBytes),
-    rules: ignoreRules,
-  }));
+  const engineRules = manifest.policies?.capture_ignore?.rules ?? [];
+  const ignoreRules = compileGitignore([
+    ...engineRules,
+    ...ignoreBytes.toString("utf8").split(/\r?\n/u),
+  ]);
+  const effectiveIgnoreDigest = effectiveCaptureIgnoreDigest(engineRules, ignoreBytes);
   const entries = [];
   const exclusions = [];
   const observed = [];
+  const pathIndex = new PortablePathCollisionIndex();
   async function visit(relativeDirectory) {
     const children = await readdir(join(exactRoot, relativeDirectory), { withFileTypes: true });
     children.sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
@@ -119,13 +125,11 @@ async function liveObservation(root) {
       const path = relativeDirectory ? `${relativeDirectory}/${child.name}` : child.name;
       if (!relativeDirectory && child.name === ".folderbase") continue;
       validatePortablePath(path);
-      if (path !== ".folderbaseignore" && ignoredByRules(path, ignoreRules)) {
-        if (!exclusions.some((entry) => entry.path === ignoreRules.find((rule) => path === rule || path.startsWith(`${rule}/`)))) {
-          const rule = ignoreRules.find((candidate) => path === candidate || path.startsWith(`${candidate}/`));
-          exclusions.push({ path: rule, reason: "capture-ignore-policy" });
-        }
+      if (path !== ".folderbaseignore" && ignoredByGitignore(path, child.isDirectory(), ignoreRules)) {
+        exclusions.push({ path, reason: "capture-ignore-policy" });
         continue;
       }
+      pathIndex.insert(path);
       const absolute = join(exactRoot, path);
       const metadata = await lstat(absolute, { bigint: true });
       const fingerprint = metadataFingerprint(metadata);
@@ -216,31 +220,11 @@ async function historicalObservation(root, versionId) {
     }
     throw error;
   }
-  let version;
+  let verified;
   try {
-    version = JSON.parse(bytes);
-    if (
-      version.format !== "folderbase-version-v1" ||
-      version.protocol_version !== "0.5" ||
-      version.version_id !== versionId ||
-      version.folderbase_id !== FOLDERBASE_ID ||
-      version.path_policy?.format !== "folderbase-portable-path-v1" ||
-      !Array.isArray(version.bindings) ||
-      !Array.isArray(version.tombstones) ||
-      !Array.isArray(version.exclusions)
-    ) throw new Error("closed Folderbase Version fields are invalid");
-    const allPaths = [
-      ...version.bindings.map((entry) => entry.path),
-      ...version.tombstones.map((entry) => entry.path),
-      ...version.exclusions.map((entry) => entry.path),
-    ];
-    for (const portablePath of allPaths) validatePortablePath(portablePath);
-    for (const collection of [version.bindings, version.tombstones, version.exclusions]) {
-      for (let index = 1; index < collection.length; index += 1) {
-        if (Buffer.compare(Buffer.from(collection[index - 1].path), Buffer.from(collection[index].path)) >= 0) {
-          throw new Error("Folderbase Version paths are not strictly sorted");
-        }
-      }
+    verified = verifyFolderbaseVersion05(bytes, versionSchema);
+    if (verified.version.version_id !== versionId || verified.version.folderbase_id !== FOLDERBASE_ID) {
+      throw new Error("historical Version identity does not bind the requested Folderbase");
     }
   } catch (error) {
     throw new QueryCapabilityError(
@@ -248,6 +232,7 @@ async function historicalObservation(root, versionId) {
       `the exact historical Folderbase Version is invalid: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const version = verified.version;
   const entries = version.bindings.map((binding) => ({
     path: binding.path,
     kind: binding.kind,
@@ -290,7 +275,7 @@ async function historicalObservation(root, versionId) {
   return {
     entries: entries.sort(portableCompare),
     exclusions: version.exclusions,
-    generation: hash(`${resolve(root)}\0${versionId}\0${hash(bytes)}`),
+    generation: hash(`${resolve(root)}\0${versionId}\0${verified.canonicalDigest}`),
     rootIdentity: await rootInstanceIdentity(root, version.folderbase_id),
     scopeSource: "folderbase_version",
   };
@@ -378,6 +363,7 @@ async function readStandardInput() {
 
 async function query(command, root) {
   const request = await readStandardInput();
+  assertQuerySchema(request, querySchema, "queryRequest");
   const normalized = normalizeQueryRequest(request);
   const requestSha256 = queryRequestSha256(request);
   const observed = await observation(root, request.scope);

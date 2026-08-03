@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,18 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { assertQuerySchema } from "./schema.mjs";
+import { verifyFolderbaseVersion05 } from "./folderbase-version-0.5-verifier.mjs";
+import {
+  fullDefaultCaseFoldV9,
+  PortablePathCollisionIndex,
+  unicode17Nfc,
+} from "./portable-path-v1.mjs";
+import { FULL_DEFAULT_CASE_FOLD_V9 } from "./unicode-casefold-v9-data.mjs";
+import {
+  CANONICAL_COMBINING_CLASS_V17,
+  CANONICAL_COMPOSITION_V17,
+  CANONICAL_DECOMPOSITION_V17,
+} from "./unicode-nfc-v17-data.mjs";
 import {
   canonicalJsonBytes,
   normalizeQueryRequest,
@@ -52,7 +65,15 @@ test("public query request fixtures separate schema and semantic negatives", asy
     assert.doesNotThrow(() => normalizeQueryRequest(request), name);
   }
 
-  for (const name of ["relationship-filter.json", "path-traversal.json", "page-too-large.json"]) {
+  for (const name of [
+    "relationship-filter.json",
+    "path-traversal.json",
+    "page-too-large.json",
+    "unknown-top-level.json",
+    "invalid-kind-enum.json",
+    "negative-minimum.json",
+    "unknown-filter.json",
+  ]) {
     const request = await json(join(requestDirectory, "invalid", name));
     assert.throws(() => assertQuerySchema(request, schema, "queryRequest"), name);
   }
@@ -80,6 +101,41 @@ test("request normalization and domain-separated digest match fixed vectors", as
       expectedDigest,
       `${stem}: cursor is not recursively digested`,
     );
+  }
+});
+
+test("canonical Unicode request freezes U+2028 and U+2029 JSON behavior", async () => {
+  const request = await json(join(requestDirectory, "valid", "canonical-unicode-request.json"));
+  const paths = request.filters.paths.join("");
+  assert.ok(paths.includes("\u2028"));
+  assert.ok(paths.includes("\u2029"));
+});
+
+test("portable-path reference uses complete pinned Unicode tables", () => {
+  assert.equal(FULL_DEFAULT_CASE_FOLD_V9.size, 1401);
+  assert.equal(fullDefaultCaseFoldV9("ẞ"), "ss");
+  assert.equal(fullDefaultCaseFoldV9("ß"), "ss");
+  assert.equal(fullDefaultCaseFoldV9("𐒰"), "𐓘");
+  assert.equal(unicode17Nfc("e\u0301"), "é");
+  assert.equal(unicode17Nfc("\u1100\u1161"), "가");
+  assert.equal(unicode17Nfc("a\u{1acf}\u0323"), "ạ\u{1acf}");
+  const inventory = new PortablePathCollisionIndex();
+  inventory.insert("unicode/ẞ.md");
+  assert.throws(() => inventory.insert("unicode/ss.md"), /full default case folding/u);
+  assert.deepEqual(
+    [CANONICAL_COMBINING_CLASS_V17.size, CANONICAL_DECOMPOSITION_V17.size,
+      CANONICAL_COMPOSITION_V17.size],
+    [968, 13253, 12133],
+  );
+});
+
+test("checked-in Unicode table artifacts have pinned reproducible provenance", async () => {
+  for (const [name, expected] of [
+    ["unicode-casefold-v9-data.mjs", "72c69c88d27d3e7802dee055fb6b862a363ef95b85266e491056f5948b0e3883"],
+    ["unicode-nfc-v17-data.mjs", "f225c5ff043797c5d95901a358383caef126ebb99bb259a5da6439f618a897d7"],
+  ]) {
+    const bytes = await readFile(join(directory, name));
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), expected);
   }
 });
 
@@ -200,6 +256,43 @@ test("historical fixture digest is fixed by the independent Version reference", 
   );
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), expected);
+  const bytes = await readFile(join(fixtureDirectory, "historical-version.json"));
+  const versionSchema = await json(resolve(repositoryRoot, "protocol/schemas/0.5/folderbase-version.schema.json"));
+  assert.equal(verifyFolderbaseVersion05(bytes, versionSchema).canonicalDigest, expected);
+  const schemaInvalid = JSON.parse(bytes);
+  schemaInvalid.future = true;
+  assert.throws(() => verifyFolderbaseVersion05(JSON.stringify(schemaInvalid), versionSchema));
+  const semanticInvalid = JSON.parse(bytes);
+  semanticInvalid.parents = [semanticInvalid.version_id];
+  assert.throws(() => verifyFolderbaseVersion05(JSON.stringify(semanticInvalid), versionSchema), /own parent/u);
+  const source = bytes.toString("utf8");
+  assert.throws(
+    () => verifyFolderbaseVersion05(source.replace('"format":', '"format":"folderbase-version-v1","format_duplicate":').replace('"format_duplicate"', '"format"'), versionSchema),
+    /duplicate JSON object key/u,
+  );
+});
+
+test("query-owned Version verifier accepts 0.5 corpus and rejects semantic corpus", async () => {
+  const versionSchema = await json(resolve(repositoryRoot, "protocol/schemas/0.5/folderbase-version.schema.json"));
+  const v05 = resolve(repositoryRoot, "protocol/conformance/folderbase-version-0.5");
+  for (const name of await readdir(join(v05, "valid"))) {
+    if (!name.endsWith(".json")) continue;
+    const verified = verifyFolderbaseVersion05(await readFile(join(v05, "valid", name)), versionSchema);
+    const expected = (await readFile(join(v05, "valid", name.replace(/\.json$/u, ".sha256")), "utf8")).trim();
+    assert.equal(verified.canonicalDigest, expected, name);
+  }
+  for (const name of await readdir(join(v05, "invalid"))) {
+    if (!name.endsWith(".json")) continue;
+    const bytes = await readFile(join(v05, "invalid", name));
+    assert.throws(() => verifyFolderbaseVersion05(bytes, versionSchema), name);
+  }
+  const legacy = resolve(repositoryRoot, "protocol/conformance/folderbase-version/invalid");
+  for (const name of await readdir(legacy)) {
+    if (!name.endsWith(".json") || name.startsWith("missing-")) continue;
+    const value = await json(join(legacy, name));
+    value.protocol_version = "0.5";
+    assert.throws(() => verifyFolderbaseVersion05(JSON.stringify(value), versionSchema), name);
+  }
 });
 
 test("minimal non-Rust candidate passes the complete black-box runner", () => {
@@ -208,13 +301,17 @@ test("minimal non-Rust candidate passes the complete black-box runner", () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.capability, "folderbase.query-index@0.1.0");
   assert.equal(report.failed, 0);
-  assert.equal(report.passed, 18);
+  assert.equal(report.passed, 21);
 });
 
 test("the runner hard-kills hanging and overproducing candidate commands", async () => {
   const ownershipRoot = await mkdtemp(join(tmpdir(), "folderbase-query-process-proof-"));
   try {
-    for (const candidate of ["hanging-candidate.mjs", "noisy-candidate.mjs"]) {
+    for (const candidate of [
+      "hanging-candidate.mjs",
+      "forking-hanging-candidate.mjs",
+      "noisy-candidate.mjs",
+    ]) {
       const pidFile = join(ownershipRoot, `${candidate}.pid`);
       const started = Date.now();
       const result = run(candidate, {
@@ -227,12 +324,14 @@ test("the runner hard-kills hanging and overproducing candidate commands", async
       const report = JSON.parse(result.stdout);
       assert.equal(report.failed, 1);
       assert.match(report.cases[0].message, /timed out|output limit/u);
-      const pid = Number((await readFile(pidFile, "utf8")).trim());
-      assert.throws(
-        () => process.kill(pid, 0),
-        (error) => error?.code === "ESRCH",
-        `${candidate} PID ${pid} survived its hard bound`,
-      );
+      const pids = (await readFile(pidFile, "utf8")).trim().split("\n").map(Number);
+      for (const pid of pids) {
+        assert.throws(
+          () => process.kill(pid, 0),
+          (error) => error?.code === "ESRCH",
+          `${candidate} PID ${pid} survived its hard bound`,
+        );
+      }
     }
   } finally {
     await rm(ownershipRoot, { recursive: true, force: true });
@@ -315,4 +414,13 @@ test("schema publishes every required capability document", () => {
     ...nested,
     kind: "directory",
   }, schema, "queryEntry"));
+
+  const normalized = schema.$defs.normalizedRequest.properties.filters.properties;
+  for (const [field, maximum] of [
+    ["paths", 256], ["path_prefixes", 256], ["kinds", 4], ["lifecycles", 2],
+    ["object_ids", 256], ["object_version_ids", 256],
+  ]) {
+    assert.equal(normalized[field].maxItems, maximum, field);
+    assert.equal(normalized[field].uniqueItems, true, field);
+  }
 });

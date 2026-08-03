@@ -60,21 +60,25 @@ node --test \
   scripts/tests/ci-policy.test.mjs
 ```
 
-Result: 57 passed, 0 failed.
+Result: 83 passed, 0 failed.
 
-The query suite's minimal JavaScript candidate passed all 18 public black-box
+The query suite's minimal JavaScript candidate passed all 21 public black-box
 cases. They cover the complete deterministic filter algebra; fixed ASCII and
-Unicode request digests; every portable-path bound and representative Unicode
-17 NFC/Unicode 9 full-fold collision discriminator; typed invalid/missing
-historical Versions; root/manifest/ignore/Local Head/metadata cursor binding;
-and confinement of ignored, nested, portable, and sibling-private state. The
-missing-query candidate exited 1 with the same intentional runtime gap.
+Unicode request digests including U+2028/U+2029; every portable-path bound and
+complete checked-in Unicode 17 NFC/Unicode 9 full-fold reference; schema-invalid
+and semantically invalid historical Versions; canonical Version-digest
+generation; closed request negatives; root/manifest/ordered CapturePlan ignore
+rules/Local Head/metadata cursor binding; and whole-tree confinement of ignored,
+nested, portable, and sibling-private state. The missing-query candidate exited
+1 with the same intentional runtime gap.
 
 The runner creates every fixture below one cleanup-owned parent, verifies the
 sparse 10 GiB file occupies no more than 16 MiB, and removes it on every path.
-SIGTERM-trapping and noisy candidates are hard-killed within test-selected
-bounds, their PIDs are proven absent, and the production defaults remain 30
-seconds and 8 MiB per output stream for each candidate command.
+SIGTERM-trapping, forking, and noisy candidates are terminated as complete
+process trees within test-selected bounds, every recorded PID is proven absent,
+and the production defaults remain 30 seconds and 8 MiB combined output per
+candidate command. POSIX uses a new process group plus SIGKILL; Windows uses
+`taskkill /T /F`.
 
 ```sh
 node protocol/conformance/capabilities/query-index-0.1/run.mjs \
@@ -82,14 +86,27 @@ node protocol/conformance/capabilities/query-index-0.1/run.mjs \
   protocol/conformance/capabilities/query-index-0.1/fixtures/conforming-candidate.mjs
 ```
 
-Result: 18 passed, 0 failed.
+Result: 21 passed, 0 failed.
 
 ```sh
 scripts/check-ci-policy.sh
 ```
 
-Result: exited 0. The optional capability suite is a distinct npm-lane CI step,
-and the policy test proves replacing that exact entrypoint makes policy fail.
+Result: exited 0. The optional capability suite is a distinct Linux npm-lane CI
+step and a macOS/Windows step in the cost-controlled post-merge platform gate.
+Policy tests prove removing either exact entrypoint fails closed while pull
+requests remain excluded from native-platform minutes.
+
+The checked-in Unicode data artifacts are self-contained and fixed at:
+
+```text
+Unicode 9 full fold: 72c69c88d27d3e7802dee055fb6b862a363ef95b85266e491056f5948b0e3883
+Unicode 17 NFC:      f225c5ff043797c5d95901a358383caef126ebb99bb259a5da6439f618a897d7
+```
+
+Their public third-party notice records the exact upstream crate versions,
+checksums, generated-table digests, licenses, and Unicode terms. Independent
+conformance consumers do not need Cargo or a registry checkout.
 
 ```sh
 node scripts/verify-folderbase-version-0.5-digest-vectors.mjs

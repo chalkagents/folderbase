@@ -8,7 +8,7 @@
     "lifecycles": ["live", "live"],
     "kinds": ["regular_file"],
     "path_prefixes": ["東京", "é", "東京"],
-    "paths": ["unicode/é.md", "emoji/😀.md"]
+    "paths": ["unicode/é.md", "unicode/line separator.md", "emoji/😀.md", "unicode/paragraph separator.md"]
   },
   "scope": { "kind": "live" },
   "format": "folderbase-query-request-v1"

@@ -74,6 +74,12 @@ distinct spellings that collide by NFC or full case fold make the request
 invalid. Path and prefix families are validated independently because their
 intersection is meaningful.
 
+The independent reference carries checked-in, self-contained Unicode 17.0.0
+canonical normalization and Unicode 9.0.0 full-default case-fold tables. It
+does not delegate portability to the host ICU version. Table provenance,
+license notices, fixed artifact digests, and maintainers' generators live with
+the capability runner.
+
 Rows use ascending raw UTF-8 portable-path byte order. Because Folderbase
 Version portability already rejects exact, NFC, and case-fold collisions, this
 is stable without normalizing the displayed spelling. Exclusions use the same
@@ -144,6 +150,10 @@ Conformance protects ordinary files, ignored descendants, descendants behind a
 nested Folderbase, portable protocol records, and pre-existing sibling
 namespaces under `.folderbase/local/**` across query, explain, status, and
 rebuild. Only the exact query-index namespace may differ after rebuild.
+Protection is a complete no-follow tree snapshot: bounded regular files are
+hashed, large sparse files use metadata and bounded edge samples, and symlink
+targets are recorded. Rebuilt private index state is independently bounded and
+may not be a symlink.
 
 ### Process surface
 
@@ -162,10 +172,18 @@ new definitions or commands in Folderbase CLI JSON v1.
 
 The public runner resolves one regular candidate executable without a shell,
 places every fixture beneath one cleanup-owned temporary parent, and applies a
-hard per-command wall-clock limit, SIGKILL, and per-stream stdout/stderr byte
-bound. Its adversarial fixtures trap SIGTERM or produce unbounded output and
-prove the child PID no longer exists afterward. The sparse 10 GiB fixture is
-also required to consume at most 16 MiB of allocated blocks.
+hard per-command wall-clock and combined stdout/stderr byte bound. It terminates
+the candidate process tree with a new process group plus `SIGKILL` on POSIX and
+`taskkill /T /F` on Windows. Adversarial fixtures trap SIGTERM, fork a child, or
+produce unbounded output and prove every recorded PID is gone afterward. This
+is process-tree cleanup, not a security sandbox against deliberate daemon or
+kernel escape. The sparse 10 GiB fixture must consume at most 16 MiB where the
+host exposes allocation blocks; Windows still proves the exact logical size.
+
+The full capability suite runs on the Linux pull-request lane and on the
+existing cost-controlled macOS/Windows platform matrix only after merge,
+schedule, or manual full-confidence runs. Pull requests spend no native-platform
+runner minutes.
 
 Query never grants access, evaluates share policy, or crosses the authority of
 the root opened by the caller. It never mutates ordinary files or portable

@@ -413,6 +413,11 @@ require_workflow_job_exact_line \
   "Cross-platform runners must not run for pull requests."
 require_workflow_job_exact_line \
   "$workflow" \
+  "core-platforms" \
+  "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs" \
+  "Native post-merge runners must exercise the optional query contract."
+require_workflow_job_exact_line \
+  "$workflow" \
   "required" \
   "    name: Rust quality gate" \
   "The protected required-check name must remain stable."
