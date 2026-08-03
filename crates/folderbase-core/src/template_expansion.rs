@@ -424,6 +424,22 @@ pub fn apply_template_expansion_with_expected_plan_digest(
     answers: &BTreeMap<String, TemplateAnswerValue>,
     expected_plan_digest: &str,
 ) -> Result<(TemplateExpansionPlan, TemplateApplicationResult)> {
+    apply_template_expansion_with_expected_plan_digest_and_hook(
+        root,
+        target,
+        answers,
+        expected_plan_digest,
+        || {},
+    )
+}
+
+fn apply_template_expansion_with_expected_plan_digest_and_hook(
+    root: impl AsRef<Path>,
+    target: &TemplatePackage,
+    answers: &BTreeMap<String, TemplateAnswerValue>,
+    expected_plan_digest: &str,
+    after_lease: impl FnOnce(),
+) -> Result<(TemplateExpansionPlan, TemplateApplicationResult)> {
     if expected_plan_digest.len() != 64
         || !expected_plan_digest
             .bytes()
@@ -434,6 +450,7 @@ pub fn apply_template_expansion_with_expected_plan_digest(
 
     let state = FolderbaseState::open_existing(root.as_ref())?;
     let _lease = LocalVersionStore::acquire_transaction_lock_for_state(root.as_ref(), &state)?;
+    after_lease();
     let plan = plan_template_expansion(root.as_ref(), target, answers)?;
     if plan.plan_digest.digest != expected_plan_digest {
         return Err(FolderbaseError::TemplateExpansionPlanChanged {
@@ -1322,4 +1339,71 @@ fn path_text(path: &Path) -> String {
     path.to_str()
         .expect("validated template paths are UTF-8")
         .to_owned()
+}
+
+#[cfg(test)]
+mod capability_security_tests {
+    use super::*;
+    use crate::{InitializationOptions, initialize, plan_initialization};
+
+    fn package() -> TemplatePackage {
+        serde_json::from_value(json!({
+            "protocol_version": "0.2.0",
+            "id": "example.project",
+            "version": "1.0.0",
+            "name": "Capability security fixture",
+            "suggested_folderbase_kind": "project",
+            "questions": [],
+            "artifacts": [{
+                "target": "Notes/README.md",
+                "kind": "text",
+                "content": "# Notes\n",
+                "install": "create_if_missing"
+            }],
+            "upgrade_edges": []
+        }))
+        .expect("template package")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_never_reenters_a_replaced_ambient_root_after_acquiring_its_lease() {
+        let owner = tempfile::tempdir().expect("fixture owner");
+        let root = owner.path().join("root");
+        fs::create_dir(&root).expect("root directory");
+        initialize(
+            &plan_initialization(&root, InitializationOptions::default())
+                .expect("initialization plan"),
+        )
+        .expect("initialize root");
+        let package = package();
+        let answers = BTreeMap::new();
+        let reviewed =
+            plan_template_expansion(&root, &package, &answers).expect("reviewed expansion");
+        let approved = reviewed.plan_digest().digest().to_owned();
+        let moved = owner.path().join("moved-root");
+
+        let result = apply_template_expansion_with_expected_plan_digest_and_hook(
+            &root,
+            &package,
+            &answers,
+            &approved,
+            || {
+                fs::rename(&root, &moved).expect("detach retained root");
+                fs::create_dir_all(root.join(".folderbase")).expect("replacement state");
+                fs::copy(moved.join(MANIFEST), root.join(MANIFEST))
+                    .expect("same manifest in replacement root");
+            },
+        );
+
+        assert!(result.is_err(), "detached display root must fail closed");
+        assert!(
+            !root.join("Notes/README.md").exists(),
+            "replacement root must never receive template writes"
+        );
+        assert!(
+            !moved.join("Notes/README.md").exists(),
+            "a detached retained root is not published through an obsolete display path"
+        );
+    }
 }
