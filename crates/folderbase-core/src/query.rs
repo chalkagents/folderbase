@@ -1174,7 +1174,7 @@ fn private_index_content_sha256(record: &PrivateIndexRecord) -> Result<String, s
         entries: &'a [QueryEntry],
         exclusions: &'a [QueryExclusion],
     }
-    let encoded = serde_json::to_vec(&Content {
+    let content = Content {
         format: &record.format,
         generation: &record.generation,
         root_instance_sha256: &record.root_instance_sha256,
@@ -1182,10 +1182,10 @@ fn private_index_content_sha256(record: &PrivateIndexRecord) -> Result<String, s
         projection_sha256: &record.projection_sha256,
         entries: &record.entries,
         exclusions: &record.exclusions,
-    })?;
+    };
     let mut digest = Sha256::new();
     digest.update(b"folderbase-query-private-index-content-v1\0");
-    digest.update(encoded);
+    serde_json::to_writer(ProjectionDigestWriter(&mut digest), &content)?;
     Ok(format!("{:x}", digest.finalize()))
 }
 
@@ -1202,10 +1202,45 @@ fn private_index_projection_sha256(record: &PrivateIndexRecord) -> String {
 }
 
 fn update_projection_digest<T: Serialize>(digest: &mut Sha256, tag: u8, value: &T) {
-    let encoded = serde_json::to_vec(value).expect("typed query projections serialize to JSON");
+    let mut length = ProjectionLengthWriter::default();
+    serde_json::to_writer(&mut length, value)
+        .expect("typed query projections serialize to a counting writer");
     digest.update([tag]);
-    digest.update((encoded.len() as u64).to_be_bytes());
-    digest.update(encoded);
+    digest.update(length.bytes.to_be_bytes());
+    serde_json::to_writer(ProjectionDigestWriter(digest), value)
+        .expect("typed query projections serialize to a digest writer");
+}
+
+#[derive(Default)]
+struct ProjectionLengthWriter {
+    bytes: u64,
+}
+
+impl std::io::Write for ProjectionLengthWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .expect("bounded query projection length fits u64");
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ProjectionDigestWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for ProjectionDigestWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 struct IndexRead {
@@ -1610,16 +1645,39 @@ fn query_version_exclusion_kind(kind: ExclusionKind) -> QueryExclusionKind {
     }
 }
 
+fn query_capture_kind(kind: CaptureEntryKind) -> QueryEntryKind {
+    match kind {
+        CaptureEntryKind::Directory => QueryEntryKind::Directory,
+        CaptureEntryKind::RegularFile => QueryEntryKind::RegularFile,
+        CaptureEntryKind::Symlink => QueryEntryKind::Symlink,
+    }
+}
+
+fn query_capture_exclusion_kind(kind: CaptureExclusionKind) -> QueryExclusionKind {
+    match kind {
+        CaptureExclusionKind::NestedFolderbase => QueryExclusionKind::NestedFolderbase,
+        CaptureExclusionKind::HardLink => QueryExclusionKind::HardLink,
+        CaptureExclusionKind::Fifo => QueryExclusionKind::Fifo,
+        CaptureExclusionKind::Socket => QueryExclusionKind::Socket,
+        CaptureExclusionKind::BlockDevice => QueryExclusionKind::BlockDevice,
+        CaptureExclusionKind::CharacterDevice => QueryExclusionKind::CharacterDevice,
+        CaptureExclusionKind::OtherSpecial => QueryExclusionKind::OtherSpecial,
+    }
+}
+
+fn query_capture_exclusion_reason(reason: CaptureExclusionReason) -> &'static str {
+    match reason {
+        CaptureExclusionReason::NestedFolderbaseBoundary => "nested-folderbase-boundary",
+        CaptureExclusionReason::UnsupportedV1 => "unsupported-v1",
+    }
+}
+
 fn live_capture_entry(entry: &CapturePlanEntry) -> QueryEntry {
     #[cfg(test)]
     LIVE_RESULT_ROW_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     QueryEntry {
         path: entry.path().to_owned(),
-        kind: match entry.kind() {
-            CaptureEntryKind::Directory => QueryEntryKind::Directory,
-            CaptureEntryKind::RegularFile => QueryEntryKind::RegularFile,
-            CaptureEntryKind::Symlink => QueryEntryKind::Symlink,
-        },
+        kind: query_capture_kind(entry.kind()),
         lifecycle: QueryLifecycle::Live,
         bytes: entry.bytes(),
         executable: entry.executable(),
@@ -1650,22 +1708,27 @@ fn live_boundary_entry(exclusion: &CapturePlanExclusion) -> QueryEntry {
     }
 }
 
-fn attach_live_identity(state: &LiveObservationState, entry: &mut QueryEntry) {
+fn live_identity_fields<'a>(
+    state: &'a LiveObservationState,
+    path: &str,
+    kind: QueryEntryKind,
+) -> (Option<&'a str>, Option<&'a str>) {
     let Some(version) = state.identity.version.as_ref() else {
-        return;
+        return (None, None);
     };
-    let Some(binding) = version.lookup_binding(&entry.path) else {
-        return;
+    let Some(binding) = version.lookup_binding(path) else {
+        return (None, None);
     };
     let compatible = matches!(
-        (entry.kind, binding.kind()),
+        (kind, binding.kind()),
         (QueryEntryKind::Directory, PathBindingKind::Directory)
             | (QueryEntryKind::RegularFile, PathBindingKind::RegularFile)
             | (QueryEntryKind::Symlink, PathBindingKind::Symlink)
     );
     if compatible {
-        entry.object_id = Some(binding.object_id().to_owned());
-        entry.object_version_id = binding.object_version_id().map(str::to_owned);
+        (Some(binding.object_id()), binding.object_version_id())
+    } else {
+        (None, None)
     }
 }
 
@@ -1684,20 +1747,84 @@ fn live_plan_exclusion(exclusion: &CapturePlanExclusion) -> QueryExclusion {
     LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     QueryExclusion {
         path: exclusion.path().to_owned(),
-        reason: match exclusion.reason() {
-            CaptureExclusionReason::NestedFolderbaseBoundary => "nested-folderbase-boundary",
-            CaptureExclusionReason::UnsupportedV1 => "unsupported-v1",
+        reason: query_capture_exclusion_reason(exclusion.reason()).to_owned(),
+        kind: Some(query_capture_exclusion_kind(exclusion.kind())),
+    }
+}
+
+#[derive(Serialize)]
+struct BorrowedLiveEntry<'a> {
+    path: &'a str,
+    kind: QueryEntryKind,
+    lifecycle: QueryLifecycle,
+    bytes: Option<u64>,
+    executable: Option<bool>,
+    symlink_target: Option<&'a str>,
+    object_id: Option<&'a str>,
+    object_version_id: Option<&'a str>,
+    folderbase_version_id: Option<&'a str>,
+    source: QuerySource,
+    boundary_reason: Option<&'a str>,
+}
+
+impl<'a> BorrowedLiveEntry<'a> {
+    fn capture(state: &'a LiveObservationState, entry: &'a CapturePlanEntry) -> Self {
+        let kind = query_capture_kind(entry.kind());
+        let (object_id, object_version_id) = live_identity_fields(state, entry.path(), kind);
+        Self {
+            path: entry.path(),
+            kind,
+            lifecycle: QueryLifecycle::Live,
+            bytes: entry.bytes(),
+            executable: entry.executable(),
+            symlink_target: entry.symlink_target(),
+            object_id,
+            object_version_id,
+            folderbase_version_id: None,
+            source: QuerySource::CapturePlan,
+            boundary_reason: None,
         }
-        .to_owned(),
-        kind: Some(match exclusion.kind() {
-            CaptureExclusionKind::NestedFolderbase => QueryExclusionKind::NestedFolderbase,
-            CaptureExclusionKind::HardLink => QueryExclusionKind::HardLink,
-            CaptureExclusionKind::Fifo => QueryExclusionKind::Fifo,
-            CaptureExclusionKind::Socket => QueryExclusionKind::Socket,
-            CaptureExclusionKind::BlockDevice => QueryExclusionKind::BlockDevice,
-            CaptureExclusionKind::CharacterDevice => QueryExclusionKind::CharacterDevice,
-            CaptureExclusionKind::OtherSpecial => QueryExclusionKind::OtherSpecial,
-        }),
+    }
+
+    fn boundary(exclusion: &'a CapturePlanExclusion) -> Self {
+        Self {
+            path: exclusion.path(),
+            kind: QueryEntryKind::NestedFolderbase,
+            lifecycle: QueryLifecycle::Live,
+            bytes: None,
+            executable: None,
+            symlink_target: None,
+            object_id: None,
+            object_version_id: None,
+            folderbase_version_id: None,
+            source: QuerySource::CapturePlan,
+            boundary_reason: Some("nested-folderbase-boundary"),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct BorrowedLiveExclusion<'a> {
+    path: &'a str,
+    reason: &'static str,
+    kind: Option<QueryExclusionKind>,
+}
+
+impl<'a> BorrowedLiveExclusion<'a> {
+    fn ignored(ignored: &'a CaptureIgnoredPath) -> Self {
+        Self {
+            path: ignored.path(),
+            reason: "capture-ignore-policy",
+            kind: None,
+        }
+    }
+
+    fn plan(exclusion: &'a CapturePlanExclusion) -> Self {
+        Self {
+            path: exclusion.path(),
+            reason: query_capture_exclusion_reason(exclusion.reason()),
+            kind: Some(query_capture_exclusion_kind(exclusion.kind())),
+        }
     }
 }
 
@@ -1718,12 +1845,11 @@ fn live_projection_sha256(state: &LiveObservationState) -> String {
             (None, Some(_)) => false,
             (None, None) => unreachable!(),
         };
-        let mut entry = if take_entry {
-            live_capture_entry(entries.next().expect("peeked entry"))
+        let entry = if take_entry {
+            BorrowedLiveEntry::capture(state, entries.next().expect("peeked entry"))
         } else {
-            live_boundary_entry(boundaries.next().expect("peeked boundary"))
+            BorrowedLiveEntry::boundary(boundaries.next().expect("peeked boundary"))
         };
-        attach_live_identity(state, &mut entry);
         update_projection_digest(&mut digest, b'E', &entry);
     }
 
@@ -1739,9 +1865,9 @@ fn live_projection_sha256(state: &LiveObservationState) -> String {
             (None, None) => unreachable!(),
         };
         let exclusion = if take_ignored {
-            live_ignored_exclusion(ignored.next().expect("peeked ignored path"))
+            BorrowedLiveExclusion::ignored(ignored.next().expect("peeked ignored path"))
         } else {
-            live_plan_exclusion(exclusions.next().expect("peeked exclusion"))
+            BorrowedLiveExclusion::plan(exclusions.next().expect("peeked exclusion"))
         };
         update_projection_digest(&mut digest, b'X', &exclusion);
     }
@@ -1940,10 +2066,18 @@ mod tests {
 
     #[test]
     fn fresh_index_validation_materializes_no_expected_result_rows() {
+        const REPRESENTATIVE_ROWS: usize = 512;
+
         let root = tempdir().expect("temporary Folderbase");
         fs::create_dir(root.path().join(".folderbase")).expect("state");
         fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
-        fs::write(root.path().join("ordinary.md"), b"ordinary\n").expect("ordinary file");
+        for index in 0..REPRESENTATIVE_ROWS {
+            fs::write(
+                root.path().join(format!("ordinary-{index:04}.md")),
+                b"ordinary\n",
+            )
+            .expect("ordinary file");
+        }
         fs::create_dir_all(root.path().join("nested/.folderbase")).expect("nested state");
         fs::write(
             root.path().join("nested/.folderbase/manifest.json"),
@@ -1957,10 +2091,9 @@ mod tests {
         LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| count.set(0));
         let indexed = engine.run(&QueryRequest::live(10)).expect("indexed query");
         assert_eq!(indexed.execution(), QueryExecution::PrivateIndex);
-        assert_eq!(
-            engine.index_status().expect("status").state(),
-            QueryIndexState::Fresh
-        );
+        let status = engine.index_status().expect("status");
+        assert_eq!(status.state(), QueryIndexState::Fresh);
+        assert_eq!(status.records(), REPRESENTATIVE_ROWS + 1);
         assert_eq!(
             engine
                 .explain(&QueryRequest::live(10))

@@ -168,11 +168,14 @@ authority.
 
 Live operations first obtain the authoritative Capture Plan fingerprint and
 resolved identity-source state. A bounded, ordered, content-digested private
-record whose generation matches that fingerprint supplies the already-derived
-rows without repeating row projection or identity mapping. Missing, stale,
-malformed, oversized, or digest-invalid private state is ignored and the same
-authoritative state is projected in memory. Rebuild alone both projects rows
-and publishes their private acceleration record.
+record whose generation matches that fingerprint supplies its already-derived
+rows without materializing or sorting a second full result. Freshness
+verification remains authoritative: Core streams the expected ordered
+projection digest directly from borrowed Capture Plan and verified Version
+fields and compares it with the independently content-digested stored rows.
+Missing, stale, malformed, oversized, or digest-invalid private state is ignored
+and the same authoritative state is projected in memory. Rebuild alone both
+projects rows and publishes their private acceleration record.
 
 Conformance protects ordinary files, ignored descendants, descendants behind a
 nested Folderbase, portable protocol records, and pre-existing sibling
