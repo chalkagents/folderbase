@@ -58,6 +58,14 @@ const BUILTIN_TEMPLATES: [(&str, &str, &str); 8] = [
     ),
 ];
 
+const MAX_TEMPLATE_PACKAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TEMPLATE_QUESTIONS: usize = 256;
+const MAX_TEMPLATE_ARTIFACTS: usize = 4096;
+const MAX_TEMPLATE_UPGRADE_EDGES: usize = 256;
+const MAX_TEMPLATE_EXTENSION_FIELDS: usize = 32;
+const MAX_TEMPLATE_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_RENDERED_TEMPLATE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Load one exact built-in template from bytes embedded in the core binary.
 ///
 /// Exact matching avoids fallback upgrades, and embedding keeps an installed
@@ -142,6 +150,7 @@ pub fn render_template(
 
     let mut additions = Vec::new();
     let mut existing_paths = Vec::new();
+    let mut rendered_bytes = 0_usize;
     for artifact in &package.artifacts {
         if inspect_destination(destination_root, &artifact.target)? == DestinationState::Existing {
             existing_paths.push(artifact.target.clone());
@@ -149,12 +158,22 @@ pub fn render_template(
         }
         let content = match artifact.kind {
             TemplateArtifactKind::Directory => None,
-            TemplateArtifactKind::Text => Some(render_content(
-                artifact.content.as_deref().unwrap_or_default(),
-                package,
-                answers,
-                destination_root,
-            )?),
+            TemplateArtifactKind::Text => {
+                let content = render_content(
+                    artifact.content.as_deref().unwrap_or_default(),
+                    package,
+                    answers,
+                    destination_root,
+                )?;
+                rendered_bytes = rendered_bytes.saturating_add(content.len());
+                if rendered_bytes > MAX_RENDERED_TEMPLATE_BYTES {
+                    return invalid_template(
+                        destination_root,
+                        "rendered template exceeds 4194304 bytes",
+                    );
+                }
+                Some(content)
+            }
         };
         additions.push(PlannedTemplateAddition {
             path: artifact.target.clone(),
@@ -188,15 +207,26 @@ pub(crate) fn render_template_for_capability_destination(
     validate_answers(package, answers, destination_label)?;
 
     let mut additions = Vec::new();
+    let mut rendered_bytes = 0_usize;
     for artifact in &package.artifacts {
         let content = match artifact.kind {
             TemplateArtifactKind::Directory => None,
-            TemplateArtifactKind::Text => Some(render_content(
-                artifact.content.as_deref().unwrap_or_default(),
-                package,
-                answers,
-                destination_label,
-            )?),
+            TemplateArtifactKind::Text => {
+                let content = render_content(
+                    artifact.content.as_deref().unwrap_or_default(),
+                    package,
+                    answers,
+                    destination_label,
+                )?;
+                rendered_bytes = rendered_bytes.saturating_add(content.len());
+                if rendered_bytes > MAX_RENDERED_TEMPLATE_BYTES {
+                    return invalid_template(
+                        destination_label,
+                        "rendered template exceeds 4194304 bytes",
+                    );
+                }
+                Some(content)
+            }
         };
         additions.push(PlannedTemplateAddition {
             path: artifact.target.clone(),
@@ -306,6 +336,9 @@ fn validate_answers(
     answers: &BTreeMap<String, TemplateAnswerValue>,
     error_path: &Path,
 ) -> Result<()> {
+    if answers.len() > MAX_TEMPLATE_QUESTIONS {
+        return invalid_template(error_path, "template answers exceed 256 entries");
+    }
     let questions = package
         .questions
         .iter()
@@ -336,6 +369,13 @@ fn validate_answers(
             return invalid_template(
                 error_path,
                 format!("wrong type for template answer: {}", question.id),
+            );
+        }
+        if matches!(answer, TemplateAnswerValue::Text(value) if value.len() > MAX_TEMPLATE_TEXT_BYTES)
+        {
+            return invalid_template(
+                error_path,
+                format!("template answer exceeds 1048576 bytes: {}", question.id),
             );
         }
         if question.required
@@ -386,6 +426,12 @@ fn render_content(
                 }
             }
         }
+        if rendered.len() > MAX_TEMPLATE_TEXT_BYTES {
+            return invalid_template(
+                error_path,
+                "rendered template artifact exceeds 1048576 bytes",
+            );
+        }
     }
     Ok(rendered)
 }
@@ -414,6 +460,11 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
             "template path policy requires Unicode NFC 17.0.0 and full-default case folding 9.0.0",
         );
     }
+    let encoded =
+        serde_json::to_vec(package).map_err(|source| FolderbaseError::json(path, source))?;
+    if encoded.len() > MAX_TEMPLATE_PACKAGE_BYTES {
+        return invalid_template(path, "template package exceeds 4194304 bytes");
+    }
     if !supported_protocol_version(&package.protocol_version) {
         return invalid_template(
             path,
@@ -426,6 +477,9 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
     if !valid_package_id(&package.id) {
         return invalid_template(path, format!("invalid template package id: {}", package.id));
     }
+    if package.id.len() > 256 {
+        return invalid_template(path, "template package id exceeds 256 bytes");
+    }
     let package_version =
         Version::parse(&package.version).map_err(|_| FolderbaseError::InvalidRecord {
             path: path.to_path_buf(),
@@ -433,6 +487,25 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
         })?;
     if package.name.trim().is_empty() {
         return invalid_template(path, "template name is empty");
+    }
+    if package.name.len() > 4096 {
+        return invalid_template(path, "template name exceeds 4096 bytes");
+    }
+    if package
+        .description
+        .as_deref()
+        .is_some_and(|description| description.len() > 65_536)
+    {
+        return invalid_template(path, "template description exceeds 65536 bytes");
+    }
+    if package.questions.len() > MAX_TEMPLATE_QUESTIONS {
+        return invalid_template(path, "template exceeds 256 questions");
+    }
+    if package.artifacts.len() > MAX_TEMPLATE_ARTIFACTS {
+        return invalid_template(path, "template exceeds 4096 artifacts");
+    }
+    if package.upgrade_edges.len() > MAX_TEMPLATE_UPGRADE_EDGES {
+        return invalid_template(path, "template exceeds 256 upgrade edges");
     }
     validate_extensions(path, "template package", package.extensions.keys())?;
     let mut question_ids = BTreeSet::new();
@@ -442,6 +515,12 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
             return invalid_template(
                 path,
                 format!("invalid template question id: {}", question.id),
+            );
+        }
+        if question.id.len() > 128 || question.prompt.len() > 4096 {
+            return invalid_template(
+                path,
+                format!("template question exceeds its text bound: {}", question.id),
             );
         }
         if !question_ids.insert(question.id.as_str()) {
@@ -460,6 +539,13 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
     validate_upgrade_graph(path, package, &package_version)?;
     for edge in &package.upgrade_edges {
         validate_extensions(path, "template upgrade edge", edge.extensions.keys())?;
+        if edge
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.len() > 4096)
+        {
+            return invalid_template(path, "template upgrade notes exceed 4096 bytes");
+        }
     }
 
     let mut targets = BTreeSet::new();
@@ -501,6 +587,9 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
             _ => {}
         }
         if let Some(content) = artifact.content.as_deref() {
+            if content.len() > MAX_TEMPLATE_TEXT_BYTES {
+                return invalid_template(path, "template artifact content exceeds 1048576 bytes");
+            }
             for segment in parse_content(content, path)? {
                 if let ContentSegment::Placeholder(placeholder) = segment
                     && !question_ids.contains(placeholder)
@@ -601,6 +690,10 @@ fn validate_extensions<'a>(
     location: &str,
     keys: impl Iterator<Item = &'a String>,
 ) -> Result<()> {
+    let keys = keys.into_iter().collect::<Vec<_>>();
+    if keys.len() > MAX_TEMPLATE_EXTENSION_FIELDS {
+        return invalid_template(path, format!("{location} exceeds 32 extension fields"));
+    }
     if let Some(key) = keys.into_iter().find(|key| !key.starts_with("x-")) {
         return invalid_template(path, format!("unknown {location} property: {key}"));
     }
