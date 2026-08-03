@@ -283,8 +283,11 @@ jobs:
       - name: Test the root-attestation CLI contract
         run: cargo test --package folderbase-cli --test attest --locked
 
-      - name: Test optional query capability contract on native platforms
-        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs
+      - name: Build the native query CLI candidate
+        run: cargo build --package folderbase-cli --locked
+
+      - name: Conform the native query CLI candidate
+        run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase
 
   required:
     # Keep this display name stable because main branch protection requires it.
