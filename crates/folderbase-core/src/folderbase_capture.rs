@@ -708,6 +708,13 @@ impl FolderbaseVersionStore {
 
     /// Plan a bounded metadata inventory without reading ordinary file bytes.
     pub fn plan_capture(&self) -> Result<CapturePlan, FolderbaseCaptureError> {
+        self.plan_capture_with_after_protocol_observation(|| ())
+    }
+
+    fn plan_capture_with_after_protocol_observation<G>(
+        &self,
+        after_protocol_observation: impl FnOnce() -> G,
+    ) -> Result<CapturePlan, FolderbaseCaptureError> {
         let (current, _, current_profile) =
             attest_folderbase_root_with_profile(&self.root_attestation.root)?;
         if current.root_instance_sha256 != self.root_attestation.root_instance_sha256 {
@@ -741,11 +748,13 @@ impl FolderbaseVersionStore {
         let ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let current_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
+        let protocol_observation_guard = after_protocol_observation();
         let restore_authorities = read_restore_authorities(
             &current,
             &self.root_instance_authority,
             MAX_RESTORE_AUTHORITIES,
         )?;
+        drop(protocol_observation_guard);
 
         let mut planner = CapturePlanner::new(
             &current.root,
@@ -2120,6 +2129,58 @@ fn open_regular_nofollow(root: &Dir, relative: &Path) -> io::Result<fs::File> {
 mod capability_tests {
     use super::*;
 
+    const MANIFEST: &[u8] = br#"{
+      "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+      "protocol_version": "0.5.0",
+      "folderbase": {
+        "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+        "name": "Capture capability fixture",
+        "kind": "project",
+        "status": "active",
+        "created_at": "2026-08-04T00:00:00Z"
+      },
+      "adapters": [],
+      "policies": {
+        "availability": "keep_local",
+        "structural_changes": "approve",
+        "archive": "manual",
+        "cloud_sync": "disabled",
+        "capture_ignore": {"format": "folderbase-capture-ignore-v1", "rules": []}
+      }
+    }"#;
+
+    struct AmbientRootSwap {
+        visible: PathBuf,
+        detached: PathBuf,
+        replacement: PathBuf,
+    }
+
+    impl AmbientRootSwap {
+        fn activate(visible: &Path, replacement: &Path) -> Self {
+            let detached = visible.with_file_name("detached-capture-root");
+            fs::rename(visible, &detached).expect("detach capture root");
+            fs::rename(replacement, visible).expect("install replacement root");
+            Self {
+                visible: visible.to_path_buf(),
+                detached,
+                replacement: replacement.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for AmbientRootSwap {
+        fn drop(&mut self) {
+            fs::rename(&self.visible, &self.replacement).expect("remove replacement root");
+            fs::rename(&self.detached, &self.visible).expect("restore capture root");
+        }
+    }
+
+    fn initialize_root(root: &Path) {
+        fs::create_dir(root).expect("Folderbase root");
+        fs::create_dir(root.join(".folderbase")).expect("state");
+        fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+    }
+
     #[cfg(unix)]
     #[test]
     fn retained_child_identity_rejects_a_directory_to_symlink_swap() {
@@ -2147,5 +2208,59 @@ mod capability_tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_restore_authorities_never_cross_an_ambient_root_aba() {
+        let owner = tempfile::tempdir().expect("root owner");
+        let visible = owner.path().join("workspace");
+        let replacement = owner.path().join("replacement");
+        initialize_root(&visible);
+        initialize_root(&replacement);
+        let opening_file = visible.join("ordinary.md");
+        fs::write(&opening_file, b"opening bytes\n").expect("opening file");
+        let store = FolderbaseVersionStore::open(&visible).expect("version store");
+
+        let transaction_id = "fbrestore_019f0000-0000-7000-8000-000000000077";
+        let stage = replacement.join(restore_stage_path(transaction_id));
+        fs::create_dir_all(stage.parent().expect("stage parent")).expect("restore transaction");
+        fs::hard_link(&opening_file, replacement.join("ordinary.md"))
+            .expect("replacement workspace hard link");
+        fs::hard_link(&opening_file, &stage).expect("replacement private authority link");
+        let file = fs::File::open(&opening_file).expect("opening file identity");
+        let record = RestoreAuthorityRecord {
+            format: RESTORE_AUTHORITY_FORMAT_V1.to_owned(),
+            folderbase_id: store.root_attestation.folderbase_id.clone(),
+            root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
+            transaction_id: transaction_id.to_owned(),
+            workspace_path: "ordinary.md".to_owned(),
+            private_stage_path: restore_stage_path(transaction_id)
+                .to_str()
+                .expect("UTF-8 stage")
+                .to_owned(),
+            published_identity_sha256: stable_file_identity_sha256(&file)
+                .expect("opening identity"),
+        };
+        fs::write(
+            replacement.join(restore_authority_record_path(transaction_id)),
+            serde_json::to_vec(&record).expect("authority record"),
+        )
+        .expect("B-only restore authority");
+
+        let plan = store
+            .plan_capture_with_after_protocol_observation(|| {
+                AmbientRootSwap::activate(&visible, &replacement)
+            })
+            .expect("capture opening root");
+
+        assert!(
+            plan.entries()
+                .iter()
+                .all(|entry| entry.path() != "ordinary.md")
+        );
+        assert!(plan.exclusions().iter().any(|exclusion| {
+            exclusion.path() == "ordinary.md" && exclusion.kind() == CaptureExclusionKind::HardLink
+        }));
     }
 }
