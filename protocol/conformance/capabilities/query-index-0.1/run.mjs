@@ -779,6 +779,33 @@ try {
       },
     },
     {
+      id: "query-and-explain-bound-ordered-exclusions-with-truncation-signals",
+      async run() {
+        const ignorePath = join(root, ".folderbaseignore");
+        const exactIgnore = await readFile(ignorePath);
+        const bulkPaths = Array.from(
+          { length: 1005 },
+          (_, index) => join(root, `bulk-${String(index).padStart(4, "0")}.tmp`),
+        );
+        try {
+          await writeFile(ignorePath, `${exactIgnore.toString("utf8")}\nbulk-*.tmp\n`);
+          await Promise.all(bulkPaths.map((path) => writeFile(path, "ignored\n")));
+          const output = query(implementation, "run", root, liveRequest(1000));
+          assert.equal(output.exclusions.length, 1000);
+          assert.equal(output.exclusions_truncated, true);
+          assert.equal(output.exclusions[0].path, "bulk-0000.tmp");
+          assert.equal(output.exclusions.at(-1).path, "bulk-0999.tmp");
+          const explained = query(implementation, "explain", root, liveRequest(1000));
+          assert.equal(explained.excluded.length, 1000);
+          assert.equal(explained.excluded_truncated, true);
+          assert.deepEqual(explained.excluded, output.exclusions);
+        } finally {
+          await Promise.all(bulkPaths.map((path) => rm(path, { force: true })));
+          await writeFile(ignorePath, exactIgnore);
+        }
+      },
+    },
+    {
       id: "query-explain-and-status-preserve-every-protected-sentinel",
       async run() {
         const before = await protectedProof(root);

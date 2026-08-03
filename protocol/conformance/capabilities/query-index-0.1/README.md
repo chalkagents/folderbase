@@ -38,6 +38,7 @@ The suite proves:
 - missing and invalid exact historical Versions use distinct typed exit-2
   errors with empty stdout;
 - explain reports observation source, ordering, content access, and exclusions;
+- run and explain cap exclusions at 1,000 in path order and signal truncation;
 - every command is surrounded by a complete no-follow tree snapshot and cannot
   alter ordinary, portable, ignored, nested-boundary, or sibling-private state;
 - explicit rebuild alone may replace `.folderbase/local/query-index-v1/**`;

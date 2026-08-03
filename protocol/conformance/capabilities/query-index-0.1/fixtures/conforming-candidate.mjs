@@ -438,6 +438,8 @@ async function query(command, root) {
     .filter((entry) => lastRowKey === null || queryRowCompare(entry, lastRowKey) > 0);
   const pageEntries = matching.slice(0, request.page.limit);
   const hasMore = matching.length > pageEntries.length;
+  const returnedExclusions = observed.exclusions.slice(0, 1000);
+  const exclusionsTruncated = observed.exclusions.length > returnedExclusions.length;
   const index = await indexState(root, observed.generation);
   if (command === "explain") {
     writeSuccess({
@@ -453,7 +455,8 @@ async function query(command, root) {
       ordinary_content_access: "metadata_only",
       index_strategy: index.state === "fresh" ? "private_index" : "bounded_scan",
       matched: matching.length,
-      excluded: observed.exclusions,
+      excluded: returnedExclusions,
+      excluded_truncated: exclusionsTruncated,
     });
     return;
   }
@@ -465,8 +468,8 @@ async function query(command, root) {
     observation_generation: observed.generation,
     execution: index.state === "fresh" ? "private_index" : "bounded_scan",
     entries: pageEntries,
-    exclusions: observed.exclusions,
-    exclusions_truncated: false,
+    exclusions: returnedExclusions,
+    exclusions_truncated: exclusionsTruncated,
     page: {
       limit: request.page.limit,
       returned: pageEntries.length,

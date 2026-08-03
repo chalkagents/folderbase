@@ -28,6 +28,7 @@ use crate::{
 
 const QUERY_REQUEST_FORMAT: &str = "folderbase-query-request-v1";
 const MAX_PAGE_LIMIT: usize = 1_000;
+const MAX_RETURNED_EXCLUSIONS: usize = 1_000;
 const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INDEX_RECORDS: usize = 16_384;
 const INDEX_ROOT: &str = ".folderbase/local/query-index-v1";
@@ -435,6 +436,7 @@ pub struct QueryExplain {
     index_strategy: QueryExecution,
     matched: usize,
     excluded: Vec<QueryExclusion>,
+    excluded_truncated: bool,
 }
 
 impl QueryExplain {
@@ -473,6 +475,9 @@ impl QueryExplain {
     }
     pub fn excluded(&self) -> &[QueryExclusion] {
         &self.excluded
+    }
+    pub fn excluded_truncated(&self) -> bool {
+        self.excluded_truncated
     }
 }
 
@@ -583,6 +588,8 @@ impl FolderbaseQueryEngine {
         } else {
             QueryExecution::BoundedScan
         };
+        let exclusions_truncated = observation.exclusions.len() > MAX_RETURNED_EXCLUSIONS;
+        observation.exclusions.truncate(MAX_RETURNED_EXCLUSIONS);
         let request_sha256 = request_sha256(&normalized)?;
         let after_row_key = if let Some(cursor) = request.page.cursor.as_deref() {
             let cursor = decode_cursor(cursor)?;
@@ -628,7 +635,7 @@ impl FolderbaseQueryEngine {
             execution,
             entries: entries.into_iter().take(returned).collect(),
             exclusions: observation.exclusions,
-            exclusions_truncated: false,
+            exclusions_truncated,
             page: QueryPageResult {
                 limit: normalized.limit,
                 returned,
@@ -643,7 +650,7 @@ impl FolderbaseQueryEngine {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
         let live = matches!(&request.scope, QueryScope::Live);
-        let observation = match &request.scope {
+        let mut observation = match &request.scope {
             QueryScope::Live => observe_live(&self.root)?,
             QueryScope::Historical {
                 folderbase_version_id,
@@ -675,6 +682,8 @@ impl FolderbaseQueryEngine {
             .count();
         let normalized_request = serde_json::to_value(&normalized.value)
             .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
+        let excluded_truncated = observation.exclusions.len() > MAX_RETURNED_EXCLUSIONS;
+        observation.exclusions.truncate(MAX_RETURNED_EXCLUSIONS);
         Ok(QueryExplain {
             root: observation.root,
             folderbase_id: observation.folderbase_id,
@@ -689,6 +698,7 @@ impl FolderbaseQueryEngine {
             index_strategy,
             matched,
             excluded: observation.exclusions,
+            excluded_truncated,
         })
     }
 

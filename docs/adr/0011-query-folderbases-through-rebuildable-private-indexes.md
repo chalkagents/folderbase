@@ -100,6 +100,12 @@ total row key. Exclusions remain ordered by ascending raw UTF-8 path bytes. Page
 limits are bounded. Pages of size 1, 2, or N must concatenate to the same
 ordered logical result without skips or duplicates.
 
+Run and explain each return at most 1,000 exclusions, preserving the exclusion
+path order above. `exclusions_truncated` on a result and `excluded_truncated`
+on an explanation are true exactly when more exclusions belonged to the bound
+observation. Truncation never changes the observation generation or matched-row
+count.
+
 The normalized request fills every filter family, deduplicates and byte-sorts
 set values, normalizes absent byte bounds to `null`, and omits the cursor. Its
 domain-separated SHA-256 is `folderbase-query-request-v1\0` followed by the

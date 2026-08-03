@@ -338,7 +338,8 @@
         "ordinary_content_access",
         "index_strategy",
         "matched",
-        "excluded"
+        "excluded",
+        "excluded_truncated"
       ],
       "properties": {
         "format": { "const": "folderbase-query-explain-v1" },
@@ -357,7 +358,8 @@
           "type": "array",
           "maxItems": 1000,
           "items": { "$ref": "#/$defs/queryExclusion" }
-        }
+        },
+        "excluded_truncated": { "type": "boolean" }
       },
       "additionalProperties": false
     },
