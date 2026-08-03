@@ -210,6 +210,8 @@ pub struct TemplateExpansionPlan {
     pub(crate) history_sha256: String,
     pub(crate) preserved_preconditions: Vec<TemplateExpansionPrecondition>,
     #[serde(skip_serializing)]
+    pub(crate) root_identity_sha256: String,
+    #[serde(skip_serializing)]
     pub(crate) root_identity: RetainedPhysicalIdentity,
 }
 

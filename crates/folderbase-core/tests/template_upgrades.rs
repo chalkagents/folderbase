@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use folderbase_core::{
     FolderbaseError, FolderbaseKind, InitializationOptions, TemplatePackage,
-    TemplateStructuralChangeKind, apply_template_expansion, initialize, load_template,
+    TemplateStructuralChangeKind, apply_template_expansion,
+    apply_template_expansion_with_expected_plan_digest, initialize, load_template,
     plan_initialization, plan_template_expansion, plan_template_initialization,
     template_application_history,
 };
@@ -137,6 +138,19 @@ fn paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<PathBuf> {
     paths
 }
 
+fn copy_directory(source: &Path, destination: &Path) {
+    fs::create_dir(destination).expect("copy destination");
+    for entry in fs::read_dir(source).expect("copy source") {
+        let entry = entry.expect("copy entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("copy entry type").is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy file");
+        }
+    }
+}
+
 fn rewrite_root_as_legacy_v01(root: &Path) {
     let manifest_path = root.join(".folderbase/manifest.json");
     let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
@@ -203,6 +217,52 @@ fn default_v05_root_can_expand_a_template_without_a_root_narrative_prerequisite(
         error.to_string().contains("missing manifest origin"),
         "only explicit unmanaged may root an untemplated lineage: {error}"
     );
+}
+
+#[test]
+fn reviewed_template_digest_rejects_an_identical_root_replacement_between_processes() {
+    let owner = tempfile::tempdir().expect("root owner");
+    let root = owner.path().join("active");
+    fs::create_dir(&root).expect("active root");
+    let initialization =
+        plan_initialization(&root, InitializationOptions::default()).expect("initialization plan");
+    initialize(&initialization).expect("initialize active root");
+
+    let registry = tempfile::tempdir().expect("template registry");
+    let target = write_package(
+        registry.path(),
+        "replacement-proof",
+        "1.0.0",
+        "project",
+        vec![json!({
+            "target": "Notes/README.md",
+            "kind": "text",
+            "content": "# Notes\n",
+            "install": "create_if_missing"
+        })],
+        None,
+    );
+    let reviewed =
+        plan_template_expansion(&root, &target, &BTreeMap::new()).expect("review original root");
+
+    let replacement = owner.path().join("replacement");
+    copy_directory(&root, &replacement);
+    fs::rename(&root, owner.path().join("detached")).expect("detach reviewed root");
+    fs::rename(&replacement, &root).expect("install byte-identical replacement");
+
+    let error = apply_template_expansion_with_expected_plan_digest(
+        &root,
+        &target,
+        &BTreeMap::new(),
+        reviewed.plan_digest().digest(),
+    )
+    .expect_err("a reviewed digest must not authorize a replacement root");
+
+    assert!(matches!(
+        error,
+        FolderbaseError::TemplateExpansionPlanChanged { .. }
+    ));
+    assert!(!root.join("Notes/README.md").exists());
 }
 
 #[test]

@@ -65,6 +65,7 @@ fn plan_template_expansion_in_state(
     let root_identity =
         RetainedPhysicalIdentity::from_file(state.clone_root_capability()?.into_std_file())
             .map_err(|source| FolderbaseError::io(&root, source))?;
+    let root_identity_sha256 = root_identity.identity().stable_sha256();
     let manifest_path = root.join(MANIFEST);
     let manifest_bytes = state
         .read_bounded(Path::new(MANIFEST), 2 * 1024 * 1024)?
@@ -91,6 +92,7 @@ fn plan_template_expansion_in_state(
         return build_plan(
             root,
             root_identity,
+            root_identity_sha256,
             folderbase_id,
             target,
             package_digest,
@@ -128,6 +130,7 @@ fn plan_template_expansion_in_state(
         return build_plan(
             root,
             root_identity,
+            root_identity_sha256,
             folderbase_id,
             target,
             package_digest,
@@ -187,6 +190,7 @@ fn plan_template_expansion_in_state(
         return build_plan(
             root,
             root_identity,
+            root_identity_sha256,
             folderbase_id,
             target,
             package_digest,
@@ -281,6 +285,7 @@ fn plan_template_expansion_in_state(
     build_plan(
         root,
         root_identity,
+        root_identity_sha256,
         folderbase_id,
         target,
         package_digest,
@@ -814,6 +819,7 @@ fn manifest_is_native_v05(manifest: &Value) -> bool {
 fn build_plan(
     root: PathBuf,
     root_identity: RetainedPhysicalIdentity,
+    root_identity_sha256: String,
     folderbase_id: String,
     target: &TemplatePackage,
     template_package_digest: TemplatePlanDigest,
@@ -851,6 +857,7 @@ fn build_plan(
         manifest_sha256,
         history_sha256,
         preserved_preconditions: Vec::new(),
+        root_identity_sha256,
         root_identity,
     };
     plan.plan_digest = digest_plan(&plan);
@@ -895,6 +902,7 @@ fn digest_plan(plan: &TemplateExpansionPlan) -> TemplatePlanDigest {
         .collect::<Vec<_>>();
     let dto = json!({
         "folderbase_id": plan.folderbase_id,
+        "root_identity_sha256": plan.root_identity_sha256,
         "manifest_sha256": plan.manifest_sha256,
         "history_sha256": plan.history_sha256,
         "comparison": {
