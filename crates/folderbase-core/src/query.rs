@@ -1872,6 +1872,19 @@ mod tests {
     }
 
     #[test]
+    fn query_engine_retains_opening_root_and_state_capabilities() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+        let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+
+        engine
+            .state
+            .verify_root_identity(engine.store.root_physical_identity())
+            .expect("retained capabilities name one opening root");
+    }
+
+    #[test]
     fn failure_before_index_publication_preserves_the_previous_generation() {
         let root = tempdir().expect("temporary Folderbase");
         fs::create_dir(root.path().join(".folderbase")).expect("state");
