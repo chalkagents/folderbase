@@ -393,6 +393,11 @@ require_workflow_job_exact_line \
   "The optional capability contract suite must remain policy-pinned in CI."
 require_workflow_job_exact_line \
   "$workflow" \
+  "npm-cli" \
+  "        run: node --test protocol/conformance/capabilities/template-expansion-0.1/suite.test.mjs" \
+  "The template capability contract suite must remain policy-pinned in CI."
+require_workflow_job_exact_line \
+  "$workflow" \
   "rust" \
   "    if: needs.plan.outputs.rust == 'true'" \
   "The Linux Core lane must remain change-aware."
@@ -421,6 +426,11 @@ require_workflow_job_exact_line \
   "core-platforms" \
   "        run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase\${{ runner.os == 'Windows' && '.exe' || '' }}" \
   "Native post-merge runners must conform the actual optional query CLI candidate."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "core-platforms" \
+  "        run: node protocol/conformance/capabilities/template-expansion-0.1/run.mjs --implementation ./target/debug/folderbase\${{ runner.os == 'Windows' && '.exe' || '' }}" \
+  "Native post-merge runners must conform the actual optional template CLI candidate."
 require_workflow_job_exact_line \
   "$workflow" \
   "required" \
