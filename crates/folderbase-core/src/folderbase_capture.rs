@@ -644,13 +644,24 @@ pub enum FolderbaseCaptureError {
 }
 
 /// Read-only handle for planning Folderbase Version capture.
-#[derive(Debug)]
 pub struct FolderbaseVersionStore {
     pub(crate) root_attestation: FolderbaseRootAttestation,
     pub(crate) root_instance_authority: RootInstanceAuthority,
     pub(crate) protocol_profile: ManifestProtocolProfile,
     root_capability: Dir,
     root_physical_identity: PhysicalIdentity,
+    restore_state: FolderbaseState,
+}
+
+impl fmt::Debug for FolderbaseVersionStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FolderbaseVersionStore")
+            .field("root_attestation", &self.root_attestation)
+            .field("root_instance_authority", &self.root_instance_authority)
+            .field("protocol_profile", &self.protocol_profile)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FolderbaseVersionStore {
@@ -693,12 +704,15 @@ impl FolderbaseVersionStore {
         )?;
         verify_root_capability(&root_capability, &canonical_root)?;
         let root_physical_identity = directory_identity(&root_capability, &canonical_root)?;
+        let restore_state = FolderbaseState::open_existing_read_only(&canonical_root)?;
+        restore_state.verify_root_identity(&root_physical_identity)?;
         Ok(Self {
             root_attestation,
             root_instance_authority,
             protocol_profile,
             root_capability,
             root_physical_identity,
+            restore_state,
         })
     }
 
@@ -749,12 +763,18 @@ impl FolderbaseVersionStore {
         let current_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
         let protocol_observation_guard = after_protocol_observation();
-        let restore_authorities = read_restore_authorities(
+        let restore_authority_records = read_restore_authority_records_unchecked(
             &current,
             &self.root_instance_authority,
+            &self.restore_state,
             MAX_RESTORE_AUTHORITIES,
         )?;
         drop(protocol_observation_guard);
+        self.restore_state.verify_still_attached()?;
+        let restore_authorities = RestoreAuthorityRegistry {
+            state: &self.restore_state,
+            records: restore_authority_records,
+        };
 
         let mut planner = CapturePlanner::new(
             &current.root,
@@ -823,7 +843,7 @@ impl FolderbaseVersionStore {
 struct CapturePlanner<'a> {
     root: &'a Path,
     ignore: &'a IgnorePolicy,
-    restore_authorities: RestoreAuthorityRegistry,
+    restore_authorities: RestoreAuthorityRegistry<'a>,
     legacy_root_files: bool,
     entries: Vec<CapturePlanEntry>,
     exclusions: Vec<CapturePlanExclusion>,
@@ -836,12 +856,12 @@ struct ObservedRestoreAuthority {
     encoded: Vec<u8>,
 }
 
-struct RestoreAuthorityRegistry {
-    state: FolderbaseState,
+struct RestoreAuthorityRegistry<'a> {
+    state: &'a FolderbaseState,
     records: Vec<ObservedRestoreAuthority>,
 }
 
-impl RestoreAuthorityRegistry {
+impl RestoreAuthorityRegistry<'_> {
     fn validated_link_commitment(
         &self,
         workspace_identity: &str,
@@ -850,7 +870,7 @@ impl RestoreAuthorityRegistry {
         display_path: &Path,
     ) -> Result<CaptureLinkCommitment, FolderbaseCaptureError> {
         validated_link_commitment(
-            &self.state,
+            self.state,
             &self.records,
             workspace_identity,
             link_count,
@@ -949,25 +969,29 @@ pub(crate) fn restore_authority_count(
     root_instance_authority: &RootInstanceAuthority,
     maximum: usize,
 ) -> Result<usize, FolderbaseCaptureError> {
-    Ok(
-        read_restore_authorities(root_attestation, root_instance_authority, maximum)?
-            .records
-            .len(),
-    )
-}
-
-fn read_restore_authorities(
-    root_attestation: &FolderbaseRootAttestation,
-    root_instance_authority: &RootInstanceAuthority,
-    maximum: usize,
-) -> Result<RestoreAuthorityRegistry, FolderbaseCaptureError> {
     let state = FolderbaseState::open_existing_read_only(&root_attestation.root)?;
     let records =
         read_restore_authority_records(root_attestation, root_instance_authority, &state, maximum)?;
-    Ok(RestoreAuthorityRegistry { state, records })
+    Ok(records.len())
 }
 
 fn read_restore_authority_records(
+    root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
+    state: &FolderbaseState,
+    maximum: usize,
+) -> Result<Vec<ObservedRestoreAuthority>, FolderbaseCaptureError> {
+    let records = read_restore_authority_records_unchecked(
+        root_attestation,
+        root_instance_authority,
+        state,
+        maximum,
+    )?;
+    state.verify_still_attached()?;
+    Ok(records)
+}
+
+fn read_restore_authority_records_unchecked(
     root_attestation: &FolderbaseRootAttestation,
     root_instance_authority: &RootInstanceAuthority,
     state: &FolderbaseState,
@@ -1015,7 +1039,6 @@ fn read_restore_authority_records(
             return Err(FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { maximum });
         }
     }
-    state.verify_still_attached()?;
     Ok(records)
 }
 
@@ -1131,7 +1154,7 @@ impl<'a> CapturePlanner<'a> {
     fn new(
         root: &'a Path,
         ignore: &'a IgnorePolicy,
-        restore_authorities: RestoreAuthorityRegistry,
+        restore_authorities: RestoreAuthorityRegistry<'a>,
         legacy_root_files: bool,
     ) -> Self {
         Self {
