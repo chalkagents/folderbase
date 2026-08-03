@@ -37,8 +37,44 @@ fn folderbase() -> TempDir {
     root
 }
 
+fn initialize_folderbase(root: &Path) {
+    fs::create_dir_all(root.join(".folderbase")).expect("state directory");
+    fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+}
+
 fn request(value: serde_json::Value) -> QueryRequest {
     serde_json::from_value(value).expect("query request shape")
+}
+
+#[test]
+fn an_open_engine_never_crosses_into_a_replacement_root() {
+    let owner = tempdir().expect("root owner");
+    let root = owner.path().join("workspace");
+    initialize_folderbase(&root);
+    fs::write(root.join("original.md"), b"original\n").expect("original row");
+    let engine = FolderbaseQueryEngine::open(&root).expect("query engine");
+
+    fs::rename(&root, owner.path().join("detached-original")).expect("replace opened root");
+    initialize_folderbase(&root);
+    fs::write(root.join("replacement.md"), b"replacement\n").expect("replacement row");
+
+    let historical = request(serde_json::json!({
+        "format": "folderbase-query-request-v1",
+        "scope": {
+            "kind": "historical",
+            "folderbase_version_id": "fbversion_019f0000-0000-7000-8000-000000000099"
+        },
+        "page": {"limit": 10}
+    }));
+    for result in [
+        engine.run(&QueryRequest::live(10)).map(|_| ()),
+        engine.run(&historical).map(|_| ()),
+        engine.explain(&QueryRequest::live(10)).map(|_| ()),
+        engine.index_status().map(|_| ()),
+        engine.rebuild_index().map(|_| ()),
+    ] {
+        assert!(matches!(result, Err(QueryError::RootAuthorityChanged)));
+    }
 }
 
 #[test]
