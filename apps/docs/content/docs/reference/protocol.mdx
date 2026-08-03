@@ -1,0 +1,27 @@
+---
+title: Protocol and schemas
+description: Navigate the Folderbase filesystem protocol, templates, schemas, release manifests, and conformance vectors.
+---
+
+The `protocol/` directory in the public repository is the distributable contract surface for interoperable Folderbase implementations.
+
+## What it contains
+
+- versioned JSON Schemas;
+- built-in template definitions;
+- valid and invalid conformance fixtures;
+- release manifests and digests;
+- CLI JSON v1 schema and executable conformance suite;
+- compatibility contract data.
+
+## Source of truth
+
+Documentation explains the protocol. The checked-in schemas, release manifests, digests, and conformance vectors are the executable source of truth for their respective formats.
+
+## Pre-stable protocol
+
+Protocol `0.x` can change between minor releases. Use the contract discovery command and pin the release artifacts your integration was tested against.
+
+- [Protocol specification](https://github.com/chalkagents/folderbase/blob/main/docs/protocol-spec.md)
+- [Template protocol](https://github.com/chalkagents/folderbase/blob/main/docs/template-protocol.md)
+- [Schemas and conformance vectors](https://github.com/chalkagents/folderbase/tree/main/protocol)

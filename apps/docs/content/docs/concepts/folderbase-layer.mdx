@@ -1,0 +1,29 @@
+---
+title: The .folderbase layer
+description: Understand how Folderbase adds database behavior while ordinary files remain authoritative.
+---
+
+A Folderbase is an ordinary directory plus a small protocol layer. The protocol does not import files into a proprietary container.
+
+## The two surfaces
+
+| Surface | Purpose |
+| --- | --- |
+| Ordinary files | The authoritative documents, code, media, spreadsheets, databases, and other work people already use. |
+| `.folderbase/` | Durable identity, versions, transaction records, policy, and other engine-owned protocol state. |
+
+Human and agent entry points such as `FOLDERBASE.md`, `AGENTS.md`, and `CLAUDE.md` explain the workspace without requiring an MCP server.
+
+## Structure is additive
+
+Templates can initialize useful files and expand them over time. Folderbase does not treat structure as permission to reorganize silently. Consequential changes are proposed as a plan and applied only after explicit approval.
+
+## Local work is complete work
+
+Core works locally without an account. Cloud availability cannot silently evict active local files. The open protocol remains the base layer beneath managed Folderbase App and Cloud products.
+
+## Related contracts
+
+- [Compatibility Contract v1](/docs/reference/compatibility-v1)
+- [Protocol reference](/docs/reference/protocol)
+- [Agent workspace workflow](/docs/guides/agents)

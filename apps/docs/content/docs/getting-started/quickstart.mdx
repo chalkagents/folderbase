@@ -1,0 +1,50 @@
+---
+title: Five-minute quickstart
+description: Inspect, preview, initialize, and validate an ordinary folder without moving its files.
+---
+
+This workflow turns an existing folder into a Folderbase. Inspection and dry-run steps are read-only.
+
+## 1. Inspect the folder
+
+```bash
+npx @folderbase/cli inspect /path/to/project --json
+```
+
+Inspection reports boundaries and metadata without changing the target.
+
+## 2. Preview initialization
+
+```bash
+npx @folderbase/cli init /path/to/project --dry-run --json
+```
+
+Review the proposed additions. Initialization is additive: existing files remain in place.
+
+## 3. Initialize
+
+```bash
+npx @folderbase/cli init /path/to/project
+```
+
+Folderbase adds a manifest, ignore policy, and agent-facing entry points.
+
+## 4. Validate
+
+```bash
+npx @folderbase/cli validate /path/to/project --json
+```
+
+Validation checks the Folderbase protocol surface and returns machine-readable diagnostics.
+
+## 5. See what agents can access
+
+```bash
+npx @folderbase/cli workspace list /path/to/project --json
+```
+
+The workspace view includes ordinary files while excluding protocol state, repository internals, and reconstructable dependency trees from agent context.
+
+## When the folder is disorganized
+
+Do not manually initialize multiple accidental boundaries. Use the [migration workflow](/docs/guides/migrate) to analyze the folder and produce a reviewable structure plan.

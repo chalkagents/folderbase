@@ -1,0 +1,34 @@
+---
+title: CLI JSON v1
+description: Stable discovery, transport, and schema-evolution rules for machine integrations with Folderbase Core.
+---
+
+CLI JSON v1 is the stable machine interface introduced in Folderbase Core 0.5.
+
+## Discoverability
+
+Integrations begin with:
+
+```bash
+folderbase protocol contract --json
+folderbase --help-json
+```
+
+Do not infer support from a version string alone when the contract can be queried directly.
+
+## Transport rules
+
+- stdout contains the JSON result for a successful machine-readable invocation;
+- stderr is reserved for diagnostics that are not part of that result;
+- process exit status remains authoritative for success or failure;
+- callers should consume complete JSON values rather than scrape presentation text.
+
+## Schema evolution
+
+Callers must tolerate additive fields. They should reject a contract they cannot support rather than silently reinterpret it. Unknown extensions are preserved where Compatibility Contract v1 requires them.
+
+## Conformance suite
+
+The public repository includes the JSON schema and an executable conformance suite under `protocol/conformance/cli-json-v1/`.
+
+Read the [canonical CLI JSON specification](https://github.com/chalkagents/folderbase/blob/main/docs/cli-json-v1.md).

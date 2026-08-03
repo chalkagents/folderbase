@@ -1,0 +1,18 @@
+{
+  "title": "Folderbase Docs",
+  "pages": [
+    "index",
+    "---Getting started---",
+    "getting-started",
+    "---Core concepts---",
+    "concepts",
+    "---Guides---",
+    "guides",
+    "---Reference---",
+    "reference",
+    "---Releases---",
+    "releases",
+    "---Project---",
+    "project"
+  ]
+}

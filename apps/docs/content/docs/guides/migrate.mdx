@@ -1,0 +1,37 @@
+---
+title: Migrate a mixed folder
+description: Analyze a disorganized folder and create a reviewable organization plan before moving anything.
+---
+
+Use migration when an existing directory contains mixed projects, accidental boundaries, or a structure that should be improved rather than merely initialized.
+
+## Generate a plan
+
+```bash
+folderbase migrate /path/to/project --destination Organized
+```
+
+Folderbase analyzes the folder, asks bounded questions when consequences cannot be inferred safely, and creates a proposed transaction.
+
+## Review before applying
+
+Confirm:
+
+- which files and directories will move;
+- where the new Folderbase boundary will live;
+- which files remain untouched;
+- how conflicts and rollback will be handled;
+- whether ignore-policy changes are included.
+
+The proposal is not authority to apply itself. The user or sponsoring system must approve the change explicitly.
+
+## After migration
+
+Validate the destination and inspect the resulting workspace:
+
+```bash
+folderbase validate Organized --json
+folderbase workspace list Organized --json
+```
+
+Folderbase uses durable transaction execution so interrupted publication can be recovered without accepting a partially applied result as canonical.

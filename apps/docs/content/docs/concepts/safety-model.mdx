@@ -1,0 +1,24 @@
+---
+title: Safety and authority
+description: How Folderbase keeps agent writes scoped, reviewable, and attributable.
+---
+
+Folderbase assumes agents can be useful without giving them ambient authority over an entire filesystem.
+
+## Inspect before mutation
+
+Inspection reads boundaries and metadata. Initialization supports a dry run. Migration produces a plan before applying moves. These are distinct operations so a caller cannot accidentally cross from analysis into mutation.
+
+## Expected hashes protect saves
+
+Text saves use an expected SHA-256 value. If another human or agent changed the file after it was read, the stale save is rejected instead of overwriting newer work.
+
+## Relationships do not grant access
+
+Folder nesting, links, and semantic relationships do not imply permission. A human or sponsored agent receives an explicit scope.
+
+## Changes preserve evidence
+
+Local versions, resumable content transfer, conflict preservation, and rollback-safe migrations are designed to retain the evidence needed to understand what happened.
+
+Use the [agent workflow](/docs/guides/agents) for a concrete read/save example.
