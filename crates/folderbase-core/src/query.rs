@@ -2138,6 +2138,36 @@ mod tests {
     }
 
     #[test]
+    fn cursor_continuation_reports_snapshot_change_before_parsing_a_changed_local_head() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+        fs::write(root.path().join("alpha.md"), b"alpha\n").expect("first ordinary file");
+        fs::write(root.path().join("beta.md"), b"beta\n").expect("second ordinary file");
+        let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+        let mut request = QueryRequest::live(1);
+        let first = engine.run(&request).expect("first page");
+        request.page.cursor = Some(
+            first
+                .page()
+                .next_cursor()
+                .expect("first page cursor")
+                .to_owned(),
+        );
+        fs::create_dir_all(root.path().join(".folderbase/local")).expect("local state");
+        fs::write(
+            root.path().join(".folderbase/local/head.json"),
+            b"{\"format\":\"changed-and-invalid-local-head\"}\n",
+        )
+        .expect("changed Local Head");
+
+        assert!(matches!(
+            engine.run(&request),
+            Err(QueryError::QuerySnapshotChanged)
+        ));
+    }
+
+    #[test]
     fn query_engine_retains_opening_root_and_state_capabilities() {
         let root = tempdir().expect("temporary Folderbase");
         fs::create_dir(root.path().join(".folderbase")).expect("state");
