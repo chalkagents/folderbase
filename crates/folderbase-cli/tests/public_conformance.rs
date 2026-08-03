@@ -73,6 +73,6 @@ fn query_index_runner_accepts_the_reference_cli_through_only_its_process_interfa
         .stdout(predicate::str::contains(
             "\"capability\": \"folderbase.query-index@0.1.0\"",
         ))
-        .stdout(predicate::str::contains("\"passed\": 22"))
+        .stdout(predicate::str::contains("\"passed\": 24"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 }
