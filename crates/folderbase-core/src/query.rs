@@ -3,14 +3,26 @@
 //! Live query never owns filesystem traversal. It projects the exact
 //! [`crate::CapturePlan`] produced by [`crate::FolderbaseVersionStore`].
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
+use uuid::Uuid;
 
 use crate::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CapturePlan,
     FolderbaseCaptureError, FolderbaseVersionStore,
+    folderbase_state::FolderbaseState,
+    folderbase_version::{
+        DeletedKind, ExclusionKind, FolderbaseVersion, MAX_ENCODED_VERSION_BYTES, PathBindingKind,
+        validate_capture_path, validate_capture_version_id,
+    },
+    root_attestation::attest_folderbase_root,
 };
 
 const QUERY_REQUEST_FORMAT: &str = "folderbase-query-request-v1";
@@ -28,6 +40,8 @@ pub struct FolderbaseQueryEngine {
 pub struct QueryRequest {
     format: String,
     scope: QueryScope,
+    #[serde(default)]
+    filters: QueryFilters,
     page: QueryPage,
 }
 
@@ -35,6 +49,26 @@ pub struct QueryRequest {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum QueryScope {
     Live,
+    Historical { folderbase_version_id: String },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryFilters {
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    path_prefixes: Vec<String>,
+    #[serde(default)]
+    kinds: Vec<QueryEntryKind>,
+    #[serde(default)]
+    lifecycles: Vec<QueryLifecycle>,
+    #[serde(default)]
+    object_ids: Vec<String>,
+    #[serde(default)]
+    object_version_ids: Vec<String>,
+    minimum_bytes: Option<u64>,
+    maximum_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,13 +83,14 @@ impl QueryRequest {
         Self {
             format: QUERY_REQUEST_FORMAT.to_owned(),
             scope: QueryScope::Live,
+            filters: QueryFilters::default(),
             page: QueryPage { limit },
         }
     }
 }
 
 /// Source observation from which a query row was projected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuerySource {
     CapturePlan,
@@ -63,7 +98,7 @@ pub enum QuerySource {
 }
 
 /// Filesystem kind exposed by query 0.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryEntryKind {
     Directory,
@@ -73,7 +108,7 @@ pub enum QueryEntryKind {
 }
 
 /// Lifecycle exposed by query 0.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryLifecycle {
     Deleted,
@@ -247,6 +282,10 @@ impl QueryResult {
 pub enum QueryError {
     #[error("invalid query request: {0}")]
     InvalidQueryRequest(String),
+    #[error("the exact historical Folderbase Version is missing: {version_id}")]
+    ScopeVersionMissing { version_id: String },
+    #[error("the exact historical Folderbase Version is invalid: {version_id}: {message}")]
+    ScopeVersionInvalid { version_id: String, message: String },
     #[error(transparent)]
     Capture(#[from] FolderbaseCaptureError),
 }
@@ -262,24 +301,31 @@ impl FolderbaseQueryEngine {
 
     /// Run one bounded query against a newly observed scope.
     pub fn run(&self, request: &QueryRequest) -> Result<QueryResult, QueryError> {
-        validate_request(request)?;
-        let plan = FolderbaseVersionStore::open(&self.root)?.plan_capture()?;
-        let observation_generation = live_observation_generation(&plan)?;
-        let entries = project_live_entries(&plan);
-        let exclusions = project_live_exclusions(&plan);
-        let returned = entries.len().min(request.page.limit);
+        let normalized = normalize_request(request)?;
+        let observation = match &request.scope {
+            QueryScope::Live => observe_live(&self.root)?,
+            QueryScope::Historical {
+                folderbase_version_id,
+            } => observe_historical(&self.root, folderbase_version_id)?,
+        };
+        let entries = observation
+            .entries
+            .into_iter()
+            .filter(|entry| normalized.filters.applies(entry))
+            .collect::<Vec<_>>();
+        let returned = entries.len().min(normalized.limit);
         let has_more = returned < entries.len();
         Ok(QueryResult {
-            root: plan.root().to_path_buf(),
-            folderbase_id: plan.folderbase_id().to_owned(),
-            request_sha256: request_sha256(request)?,
-            observation_generation,
+            root: observation.root,
+            folderbase_id: observation.folderbase_id,
+            request_sha256: request_sha256(&normalized)?,
+            observation_generation: observation.generation,
             execution: QueryExecution::BoundedScan,
             entries: entries.into_iter().take(returned).collect(),
-            exclusions,
+            exclusions: observation.exclusions,
             exclusions_truncated: false,
             page: QueryPageResult {
-                limit: request.page.limit,
+                limit: normalized.limit,
                 returned,
                 has_more,
                 next_cursor: None,
@@ -288,7 +334,73 @@ impl FolderbaseQueryEngine {
     }
 }
 
-fn validate_request(request: &QueryRequest) -> Result<(), QueryError> {
+#[derive(Serialize)]
+struct NormalizedQueryRequest<'a> {
+    format: &'static str,
+    scope: NormalizedQueryScope<'a>,
+    filters: NormalizedQueryFilters,
+    page: NormalizedQueryPage,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NormalizedQueryScope<'a> {
+    Live,
+    Historical { folderbase_version_id: &'a str },
+}
+
+#[derive(Serialize)]
+struct NormalizedQueryFilters {
+    paths: Vec<String>,
+    path_prefixes: Vec<String>,
+    kinds: Vec<QueryEntryKind>,
+    lifecycles: Vec<QueryLifecycle>,
+    object_ids: Vec<String>,
+    object_version_ids: Vec<String>,
+    minimum_bytes: Option<u64>,
+    maximum_bytes: Option<u64>,
+}
+
+impl NormalizedQueryFilters {
+    fn applies(&self, entry: &QueryEntry) -> bool {
+        (self.paths.is_empty() || self.paths.iter().any(|path| path == &entry.path))
+            && (self.path_prefixes.is_empty()
+                || self.path_prefixes.iter().any(|prefix| {
+                    entry.path == *prefix || entry.path.starts_with(&format!("{prefix}/"))
+                }))
+            && (self.kinds.is_empty() || self.kinds.contains(&entry.kind))
+            && (self.lifecycles.is_empty() || self.lifecycles.contains(&entry.lifecycle))
+            && (self.object_ids.is_empty()
+                || entry
+                    .object_id
+                    .as_ref()
+                    .is_some_and(|value| self.object_ids.contains(value)))
+            && (self.object_version_ids.is_empty()
+                || entry
+                    .object_version_id
+                    .as_ref()
+                    .is_some_and(|value| self.object_version_ids.contains(value)))
+            && self
+                .minimum_bytes
+                .is_none_or(|minimum| entry.bytes.is_some_and(|bytes| bytes >= minimum))
+            && self
+                .maximum_bytes
+                .is_none_or(|maximum| entry.bytes.is_some_and(|bytes| bytes <= maximum))
+    }
+}
+
+#[derive(Serialize)]
+struct NormalizedQueryPage {
+    limit: usize,
+}
+
+struct NormalizedRequest<'a> {
+    value: NormalizedQueryRequest<'a>,
+    filters: NormalizedQueryFilters,
+    limit: usize,
+}
+
+fn normalize_request(request: &QueryRequest) -> Result<NormalizedRequest<'_>, QueryError> {
     if request.format != QUERY_REQUEST_FORMAT {
         return Err(QueryError::InvalidQueryRequest(
             "unsupported request format".to_owned(),
@@ -299,7 +411,343 @@ fn validate_request(request: &QueryRequest) -> Result<(), QueryError> {
             "page limit must be from 1 through 1000".to_owned(),
         ));
     }
+    let scope = match &request.scope {
+        QueryScope::Live => NormalizedQueryScope::Live,
+        QueryScope::Historical {
+            folderbase_version_id,
+        } => {
+            validate_capture_version_id(folderbase_version_id)
+                .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
+            NormalizedQueryScope::Historical {
+                folderbase_version_id,
+            }
+        }
+    };
+    validate_filter_bounds(&request.filters)?;
+    let paths = normalize_paths(&request.filters.paths, "paths")?;
+    let path_prefixes = normalize_paths(&request.filters.path_prefixes, "path_prefixes")?;
+    let kinds = normalize_set(&request.filters.kinds);
+    let lifecycles = normalize_set(&request.filters.lifecycles);
+    let object_ids = normalize_identifiers(&request.filters.object_ids, "obj_", "object_ids")?;
+    let object_version_ids = normalize_identifiers(
+        &request.filters.object_version_ids,
+        "version_",
+        "object_version_ids",
+    )?;
+    let filters = NormalizedQueryFilters {
+        paths,
+        path_prefixes,
+        kinds,
+        lifecycles,
+        object_ids,
+        object_version_ids,
+        minimum_bytes: request.filters.minimum_bytes,
+        maximum_bytes: request.filters.maximum_bytes,
+    };
+    let value = NormalizedQueryRequest {
+        format: QUERY_REQUEST_FORMAT,
+        scope,
+        filters: NormalizedQueryFilters {
+            paths: filters.paths.clone(),
+            path_prefixes: filters.path_prefixes.clone(),
+            kinds: filters.kinds.clone(),
+            lifecycles: filters.lifecycles.clone(),
+            object_ids: filters.object_ids.clone(),
+            object_version_ids: filters.object_version_ids.clone(),
+            minimum_bytes: filters.minimum_bytes,
+            maximum_bytes: filters.maximum_bytes,
+        },
+        page: NormalizedQueryPage {
+            limit: request.page.limit,
+        },
+    };
+    Ok(NormalizedRequest {
+        value,
+        filters,
+        limit: request.page.limit,
+    })
+}
+
+fn validate_filter_bounds(filters: &QueryFilters) -> Result<(), QueryError> {
+    for (length, maximum, label) in [
+        (filters.paths.len(), 256, "paths"),
+        (filters.path_prefixes.len(), 256, "path_prefixes"),
+        (filters.kinds.len(), 4, "kinds"),
+        (filters.lifecycles.len(), 2, "lifecycles"),
+        (filters.object_ids.len(), 256, "object_ids"),
+        (filters.object_version_ids.len(), 256, "object_version_ids"),
+    ] {
+        if length > maximum {
+            return Err(QueryError::InvalidQueryRequest(format!(
+                "{label} exceeds its bounded item limit"
+            )));
+        }
+    }
+    if filters.minimum_bytes > filters.maximum_bytes && filters.maximum_bytes.is_some() {
+        return Err(QueryError::InvalidQueryRequest(
+            "minimum_bytes must not exceed maximum_bytes".to_owned(),
+        ));
+    }
+    if filters
+        .minimum_bytes
+        .into_iter()
+        .chain(filters.maximum_bytes)
+        .any(|bytes| bytes > 1_099_511_627_776)
+    {
+        return Err(QueryError::InvalidQueryRequest(
+            "byte filter exceeds 1 TiB".to_owned(),
+        ));
+    }
     Ok(())
+}
+
+fn normalize_paths(values: &[String], label: &str) -> Result<Vec<String>, QueryError> {
+    let mut exact = BTreeSet::new();
+    let mut nfc = BTreeMap::new();
+    let mut folded = BTreeMap::new();
+    for path in values {
+        validate_capture_path(path)
+            .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
+        let nfc_key = path.nfc().collect::<String>();
+        let folded_key = nfc_key
+            .case_fold()
+            .collect::<String>()
+            .nfc()
+            .collect::<String>();
+        for (index, key) in [(&mut nfc, nfc_key), (&mut folded, folded_key)] {
+            if index
+                .insert(key, path.as_str())
+                .is_some_and(|existing| existing != path)
+            {
+                return Err(QueryError::InvalidQueryRequest(format!(
+                    "{label} contains a portable-path collision"
+                )));
+            }
+        }
+        exact.insert(path.clone());
+    }
+    Ok(exact.into_iter().collect())
+}
+
+fn normalize_identifiers(
+    values: &[String],
+    prefix: &str,
+    label: &str,
+) -> Result<Vec<String>, QueryError> {
+    let mut normalized = BTreeSet::new();
+    for value in values {
+        let uuid = value.strip_prefix(prefix).ok_or_else(|| {
+            QueryError::InvalidQueryRequest(format!("{label} contains the wrong namespace"))
+        })?;
+        let parsed = Uuid::parse_str(uuid).map_err(|_| {
+            QueryError::InvalidQueryRequest(format!("{label} contains an invalid UUID"))
+        })?;
+        if parsed.hyphenated().to_string() != uuid
+            || !(1..=8).contains(&(parsed.as_bytes()[6] >> 4))
+            || parsed.as_bytes()[8] & 0xc0 != 0x80
+        {
+            return Err(QueryError::InvalidQueryRequest(format!(
+                "{label} contains an unsupported UUID"
+            )));
+        }
+        normalized.insert(value.clone());
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn normalize_set<T: Ord + Copy>(values: &[T]) -> Vec<T> {
+    values
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+struct QueryObservation {
+    root: PathBuf,
+    folderbase_id: String,
+    generation: String,
+    entries: Vec<QueryEntry>,
+    exclusions: Vec<QueryExclusion>,
+}
+
+fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {
+    let plan = FolderbaseVersionStore::open(root)?.plan_capture()?;
+    let generation = live_observation_generation(&plan)?;
+    let mut entries = project_live_entries(&plan);
+    if let Some(head) = plan.current_local_head()
+        && let Ok(version) = read_historical_version(plan.root(), head.version_id())
+        && version.folderbase_id() == plan.folderbase_id()
+        && version.canonical_digest().ok().as_deref() == Some(head.version_sha256())
+    {
+        for entry in &mut entries {
+            let Some(binding) = version.lookup_binding(&entry.path) else {
+                continue;
+            };
+            let compatible = matches!(
+                (entry.kind, binding.kind()),
+                (QueryEntryKind::Directory, PathBindingKind::Directory)
+                    | (QueryEntryKind::RegularFile, PathBindingKind::RegularFile)
+                    | (QueryEntryKind::Symlink, PathBindingKind::Symlink)
+            );
+            if compatible {
+                entry.object_id = Some(binding.object_id().to_owned());
+                entry.object_version_id = binding.object_version_id().map(str::to_owned);
+            }
+        }
+    }
+    Ok(QueryObservation {
+        root: plan.root().to_path_buf(),
+        folderbase_id: plan.folderbase_id().to_owned(),
+        generation,
+        entries,
+        exclusions: project_live_exclusions(&plan),
+    })
+}
+
+fn observe_historical(root: &Path, version_id: &str) -> Result<QueryObservation, QueryError> {
+    let attestation = attest_folderbase_root(root).map_err(FolderbaseCaptureError::from)?;
+    let version = read_historical_version(&attestation.root, version_id)?;
+    if version.version_id() != version_id || version.folderbase_id() != attestation.folderbase_id {
+        return Err(QueryError::ScopeVersionInvalid {
+            version_id: version_id.to_owned(),
+            message: "Version identity does not bind the requested Folderbase".to_owned(),
+        });
+    }
+    let canonical_digest =
+        version
+            .canonical_digest()
+            .map_err(|error| QueryError::ScopeVersionInvalid {
+                version_id: version_id.to_owned(),
+                message: error.to_string(),
+            })?;
+    let mut entries = version
+        .bindings()
+        .iter()
+        .map(|binding| QueryEntry {
+            path: binding.path().to_owned(),
+            kind: query_binding_kind(binding.kind()),
+            lifecycle: QueryLifecycle::Live,
+            bytes: binding.bytes(),
+            executable: binding.executable(),
+            symlink_target: binding.symlink_target().map(str::to_owned),
+            object_id: Some(binding.object_id().to_owned()),
+            object_version_id: binding.object_version_id().map(str::to_owned),
+            folderbase_version_id: Some(version_id.to_owned()),
+            source: QuerySource::FolderbaseVersion,
+            boundary_reason: None,
+        })
+        .collect::<Vec<_>>();
+    entries.extend(version.tombstones().iter().map(|tombstone| QueryEntry {
+        path: tombstone.path().to_owned(),
+        kind: match tombstone.deleted_kind() {
+            DeletedKind::Directory => QueryEntryKind::Directory,
+            DeletedKind::RegularFile => QueryEntryKind::RegularFile,
+            DeletedKind::Symlink => QueryEntryKind::Symlink,
+        },
+        lifecycle: QueryLifecycle::Deleted,
+        bytes: None,
+        executable: None,
+        symlink_target: None,
+        object_id: Some(tombstone.object_id().to_owned()),
+        object_version_id: tombstone.last_object_version_id().map(str::to_owned),
+        folderbase_version_id: Some(version_id.to_owned()),
+        source: QuerySource::FolderbaseVersion,
+        boundary_reason: None,
+    }));
+    entries.extend(
+        version
+            .exclusions()
+            .iter()
+            .filter(|exclusion| exclusion.kind() == ExclusionKind::NestedFolderbase)
+            .map(|exclusion| QueryEntry {
+                path: exclusion.path().to_owned(),
+                kind: QueryEntryKind::NestedFolderbase,
+                lifecycle: QueryLifecycle::Live,
+                bytes: None,
+                executable: None,
+                symlink_target: None,
+                object_id: None,
+                object_version_id: None,
+                folderbase_version_id: Some(version_id.to_owned()),
+                source: QuerySource::FolderbaseVersion,
+                boundary_reason: Some("nested-folderbase-boundary".to_owned()),
+            }),
+    );
+    entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    let exclusions = version
+        .exclusions()
+        .iter()
+        .map(|exclusion| QueryExclusion {
+            path: exclusion.path().to_owned(),
+            reason: match exclusion.kind() {
+                ExclusionKind::NestedFolderbase => "nested-folderbase-boundary",
+                _ => "unsupported-v1",
+            }
+            .to_owned(),
+            kind: Some(query_version_exclusion_kind(exclusion.kind())),
+        })
+        .collect();
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-query-historical-observation-v1\0");
+    digest.update(attestation.root_instance_sha256.as_bytes());
+    digest.update(version_id.as_bytes());
+    digest.update(canonical_digest.as_bytes());
+    Ok(QueryObservation {
+        root: attestation.root,
+        folderbase_id: attestation.folderbase_id,
+        generation: format!("{:x}", digest.finalize()),
+        entries,
+        exclusions,
+    })
+}
+
+fn read_historical_version(root: &Path, version_id: &str) -> Result<FolderbaseVersion, QueryError> {
+    validate_capture_version_id(version_id)
+        .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
+    let state = FolderbaseState::open_existing_read_only(root).map_err(|error| {
+        QueryError::ScopeVersionInvalid {
+            version_id: version_id.to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    let relative = Path::new(".folderbase/versions/folderbase").join(format!("{version_id}.json"));
+    let encoded = state
+        .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)
+        .map_err(|error| QueryError::ScopeVersionInvalid {
+            version_id: version_id.to_owned(),
+            message: error.to_string(),
+        })?
+        .ok_or_else(|| QueryError::ScopeVersionMissing {
+            version_id: version_id.to_owned(),
+        })?;
+    FolderbaseVersion::decode_bounded(encoded.as_slice()).map_err(|error| {
+        QueryError::ScopeVersionInvalid {
+            version_id: version_id.to_owned(),
+            message: error.to_string(),
+        }
+    })
+}
+
+fn query_binding_kind(kind: PathBindingKind) -> QueryEntryKind {
+    match kind {
+        PathBindingKind::Directory => QueryEntryKind::Directory,
+        PathBindingKind::RegularFile => QueryEntryKind::RegularFile,
+        PathBindingKind::Symlink => QueryEntryKind::Symlink,
+    }
+}
+
+fn query_version_exclusion_kind(kind: ExclusionKind) -> QueryExclusionKind {
+    match kind {
+        ExclusionKind::NestedFolderbase => QueryExclusionKind::NestedFolderbase,
+        ExclusionKind::HardLink => QueryExclusionKind::HardLink,
+        ExclusionKind::Fifo => QueryExclusionKind::Fifo,
+        ExclusionKind::Socket => QueryExclusionKind::Socket,
+        ExclusionKind::BlockDevice => QueryExclusionKind::BlockDevice,
+        ExclusionKind::CharacterDevice => QueryExclusionKind::CharacterDevice,
+        ExclusionKind::OtherSpecial => QueryExclusionKind::OtherSpecial,
+    }
 }
 
 fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
@@ -376,8 +824,8 @@ fn project_live_exclusions(plan: &CapturePlan) -> Vec<QueryExclusion> {
     exclusions
 }
 
-fn request_sha256(request: &QueryRequest) -> Result<String, QueryError> {
-    let bytes = serde_json::to_vec(request)
+fn request_sha256(request: &NormalizedRequest<'_>) -> Result<String, QueryError> {
+    let bytes = serde_json::to_vec(&request.value)
         .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
     let mut digest = Sha256::new();
     digest.update(b"folderbase-query-request-v1\0");

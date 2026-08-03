@@ -113,6 +113,14 @@ fn live_query_projects_the_capture_plan_without_opening_ordinary_file_bytes() {
 fn historical_query_projects_one_verified_version_with_exact_identity() {
     const VERSION_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000001";
     let root = folderbase();
+    fs::write(
+        root.path().join(".folderbase/manifest.json"),
+        String::from_utf8_lossy(MANIFEST).replace(
+            "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+            "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+        ),
+    )
+    .expect("matching historical Folderbase identity");
     let versions = root.path().join(".folderbase/versions/folderbase");
     fs::create_dir_all(&versions).expect("Folderbase Version directory");
     fs::copy(
