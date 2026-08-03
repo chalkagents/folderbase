@@ -1871,10 +1871,23 @@ fn read_stable_symlink(
     if rechecked != target {
         return Err(FolderbaseCaptureError::PlanningStateChanged);
     }
-    target
-        .to_str()
-        .map(str::to_owned)
+    portable_symlink_target(&target)
         .ok_or_else(|| FolderbaseCaptureError::UnsafeSymlinkTarget(relative.to_path_buf()))
+}
+
+fn portable_symlink_target(target: &Path) -> Option<String> {
+    let target = target.to_str()?;
+    #[cfg(windows)]
+    {
+        // Windows exposes path separators in link targets as `\`. Folderbase
+        // records use `/` on every platform; validation still rejects drive,
+        // UNC, absolute, escaping, and otherwise unsafe targets afterwards.
+        Some(target.replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(target.to_owned())
+    }
 }
 
 fn ensure_record_capacity(current: usize, path: &Path) -> Result<(), FolderbaseCaptureError> {
@@ -2235,6 +2248,19 @@ mod capability_tests {
         fs::create_dir(root).expect("Folderbase root");
         fs::create_dir(root.join(".folderbase")).expect("state");
         fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_symlink_targets_are_canonicalized_before_portable_validation() {
+        assert_eq!(
+            portable_symlink_target(Path::new(r"..\notes\Brief.md")).as_deref(),
+            Some("../notes/Brief.md")
+        );
+        assert_eq!(
+            portable_symlink_target(Path::new(r"C:\outside\secret.md")).as_deref(),
+            Some("C:/outside/secret.md")
+        );
     }
 
     #[cfg(unix)]
