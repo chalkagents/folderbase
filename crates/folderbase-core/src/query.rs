@@ -1022,13 +1022,10 @@ fn read_index(root: &Path, observation: &QueryObservation) -> IndexRead {
 
 fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {
     let plan = FolderbaseVersionStore::open(root)?.plan_capture()?;
-    let generation = live_observation_generation(&plan)?;
+    let identity = resolve_live_identity(&plan);
+    let generation = live_observation_generation(&plan, &identity)?;
     let mut entries = project_live_entries(&plan);
-    if let Some(head) = plan.current_local_head()
-        && let Ok(version) = read_historical_version(plan.root(), head.version_id())
-        && version.folderbase_id() == plan.folderbase_id()
-        && version.canonical_digest().ok().as_deref() == Some(head.version_sha256())
-    {
+    if let Some(version) = identity.version.as_ref() {
         for entry in &mut entries {
             let Some(binding) = version.lookup_binding(&entry.path) else {
                 continue;
@@ -1053,6 +1050,49 @@ fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {
         entries,
         exclusions: project_live_exclusions(&plan),
     })
+}
+
+struct LiveIdentityProjection {
+    state: &'static str,
+    canonical_digest: Option<String>,
+    version: Option<FolderbaseVersion>,
+}
+
+fn resolve_live_identity(plan: &CapturePlan) -> LiveIdentityProjection {
+    let Some(head) = plan.current_local_head() else {
+        return LiveIdentityProjection {
+            state: "absent",
+            canonical_digest: None,
+            version: None,
+        };
+    };
+    let Ok(version) = read_historical_version(plan.root(), head.version_id()) else {
+        return LiveIdentityProjection {
+            state: "unresolved",
+            canonical_digest: None,
+            version: None,
+        };
+    };
+    let Ok(canonical_digest) = version.canonical_digest() else {
+        return LiveIdentityProjection {
+            state: "unresolved",
+            canonical_digest: None,
+            version: None,
+        };
+    };
+    if version.folderbase_id() != plan.folderbase_id() || canonical_digest != head.version_sha256()
+    {
+        return LiveIdentityProjection {
+            state: "unresolved",
+            canonical_digest: None,
+            version: None,
+        };
+    }
+    LiveIdentityProjection {
+        state: "verified",
+        canonical_digest: Some(canonical_digest),
+        version: Some(version),
+    }
 }
 
 fn observe_historical(root: &Path, version_id: &str) -> Result<QueryObservation, QueryError> {
@@ -1373,7 +1413,10 @@ fn request_sha256(request: &NormalizedRequest<'_>) -> Result<String, QueryError>
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError> {
+fn live_observation_generation(
+    plan: &CapturePlan,
+    identity: &LiveIdentityProjection,
+) -> Result<String, QueryError> {
     #[derive(Serialize)]
     struct ObservationEntry<'a> {
         path: &'a str,
@@ -1390,8 +1433,16 @@ fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError>
         folderbase_id: &'a str,
         root_manifest_sha256: &'a str,
         root_manifest_bytes: u64,
+        root_manifest_observed: &'a crate::folderbase_capture::CaptureMetadataFingerprint,
         ignore_policy_sha256: &'a str,
-        local_head: Option<(&'a str, &'a str, &'a str)>,
+        local_head: Option<(
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a crate::folderbase_capture::CaptureMetadataFingerprint,
+        )>,
+        identity_projection: (&'a str, Option<&'a str>),
         entries: Vec<ObservationEntry<'a>>,
         exclusions: Vec<(&'a str, CaptureExclusionKind, CaptureExclusionReason)>,
         ignored_paths: Vec<&'a str>,
@@ -1401,6 +1452,8 @@ fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError>
             head.version_id(),
             head.version_sha256(),
             head.authority().sha256(),
+            head.encoded_sha256(),
+            head.observed(),
         )
     });
     let observation = Observation {
@@ -1408,8 +1461,10 @@ fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError>
         folderbase_id: plan.folderbase_id(),
         root_manifest_sha256: plan.root_manifest_sha256(),
         root_manifest_bytes: plan.root_manifest_bytes(),
+        root_manifest_observed: plan.root_manifest_observed(),
         ignore_policy_sha256: plan.ignore_policy_sha256(),
         local_head,
+        identity_projection: (identity.state, identity.canonical_digest.as_deref()),
         entries: plan
             .entries()
             .iter()

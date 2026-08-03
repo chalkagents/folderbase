@@ -368,6 +368,8 @@ pub struct CaptureLocalHead {
     version_id: String,
     version_sha256: String,
     authority: LocalHeadAuthority,
+    encoded_sha256: String,
+    observed: CaptureMetadataFingerprint,
 }
 
 /// The closed meaning of one Local Head authority digest.
@@ -459,6 +461,14 @@ impl CaptureLocalHead {
     pub fn authority(&self) -> &LocalHeadAuthority {
         &self.authority
     }
+
+    pub(crate) fn encoded_sha256(&self) -> &str {
+        &self.encoded_sha256
+    }
+
+    pub(crate) fn observed(&self) -> &CaptureMetadataFingerprint {
+        &self.observed
+    }
 }
 
 /// An opaque, read-only metadata inventory bound to one physical root.
@@ -466,6 +476,7 @@ impl CaptureLocalHead {
 pub struct CapturePlan {
     root_attestation: FolderbaseRootAttestation,
     root_manifest_bytes: u64,
+    root_manifest_observed: CaptureMetadataFingerprint,
     folderbase_version_protocol: &'static str,
     current_local_head: Option<CaptureLocalHead>,
     ignore_policy_sha256: String,
@@ -493,6 +504,10 @@ impl CapturePlan {
 
     pub fn root_manifest_bytes(&self) -> u64 {
         self.root_manifest_bytes
+    }
+
+    pub(crate) fn root_manifest_observed(&self) -> &CaptureMetadataFingerprint {
+        &self.root_manifest_observed
     }
 
     pub(crate) fn folderbase_version_protocol(&self) -> &'static str {
@@ -702,11 +717,12 @@ impl FolderbaseVersionStore {
                 Path::new(".folderbaseignore"),
             )?;
         }
-        let root_manifest_bytes = protocol_file_length(
+        let root_manifest_observed = protocol_file_observation(
             &root_capability,
             &current.root,
             Path::new(".folderbase/manifest.json"),
         )?;
+        let root_manifest_bytes = root_manifest_observed.bytes;
         let ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let current_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
@@ -749,7 +765,7 @@ impl FolderbaseVersionStore {
         let final_ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let final_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
-        let final_manifest_bytes = protocol_file_length(
+        let final_manifest_observed = protocol_file_observation(
             &root_capability,
             &current.root,
             Path::new(".folderbase/manifest.json"),
@@ -761,7 +777,7 @@ impl FolderbaseVersionStore {
             || final_ignore.sha256 != ignore.sha256
             || final_attestation != current
             || final_profile != current_profile
-            || final_manifest_bytes != root_manifest_bytes
+            || final_manifest_observed != root_manifest_observed
         {
             return Err(FolderbaseCaptureError::PlanningStateChanged);
         }
@@ -769,6 +785,7 @@ impl FolderbaseVersionStore {
         Ok(CapturePlan {
             root_attestation: current,
             root_manifest_bytes,
+            root_manifest_observed,
             folderbase_version_protocol: current_profile.folderbase_version_protocol(),
             current_local_head,
             ignore_policy_sha256: ignore.sha256,
@@ -1826,6 +1843,13 @@ fn read_local_head(
     }
     let mut file = open_regular_nofollow(&local, Path::new("head.json"))
         .map_err(|_| FolderbaseCaptureError::UnsafeLocalHead)?;
+    let observed =
+        CaptureMetadataFingerprint::from_std_metadata(&file.metadata().map_err(|source| {
+            FolderbaseCaptureError::Io {
+                path: path.clone(),
+                source,
+            }
+        })?);
     let mut encoded = Vec::new();
     file.by_ref()
         .take(MAX_LOCAL_HEAD_BYTES + 1)
@@ -1839,6 +1863,17 @@ fn read_local_head(
             maximum_bytes: MAX_LOCAL_HEAD_BYTES,
         });
     }
+    let final_observed =
+        CaptureMetadataFingerprint::from_std_metadata(&file.metadata().map_err(|source| {
+            FolderbaseCaptureError::Io {
+                path: path.clone(),
+                source,
+            }
+        })?);
+    if final_observed != observed {
+        return Err(FolderbaseCaptureError::PlanningStateChanged);
+    }
+    let encoded_sha256 = format!("{:x}", Sha256::digest(&encoded));
     let head: LocalHeadWire = serde_json::from_slice(&encoded)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
     let (folderbase_id, root_instance_sha256, version_id, version_sha256, authority) = match head {
@@ -1899,6 +1934,8 @@ fn read_local_head(
         version_id,
         version_sha256,
         authority,
+        encoded_sha256,
+        observed,
     }))
 }
 
@@ -2027,11 +2064,11 @@ fn require_regular_marker(
     Ok(())
 }
 
-fn protocol_file_length(
+fn protocol_file_observation(
     root_directory: &Dir,
     root: &Path,
     relative: &Path,
-) -> Result<u64, FolderbaseCaptureError> {
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
     let path = root.join(relative);
     let state_directory = root_directory
         .open_dir_nofollow(".folderbase")
@@ -2052,7 +2089,7 @@ fn protocol_file_length(
     if !metadata.is_file() {
         return Err(FolderbaseCaptureError::RequiredMarker(root.join(relative)));
     }
-    Ok(metadata.len())
+    Ok(CaptureMetadataFingerprint::from_std_metadata(&metadata))
 }
 
 fn open_regular_nofollow(root: &Dir, relative: &Path) -> io::Result<fs::File> {
