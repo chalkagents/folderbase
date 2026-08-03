@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -26,6 +26,8 @@ use folderbase_core::{
     save_workspace_text, validate,
 };
 use serde::{Deserialize, Serialize};
+
+mod query_capability;
 
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_INVALID: u8 = 1;
@@ -188,6 +190,12 @@ enum Command {
         command: WorkspaceCommand,
     },
 
+    /// Query one exact Folderbase observation through the optional query capability.
+    Query {
+        #[command(subcommand)]
+        command: QueryCommand,
+    },
+
     /// Check portable protocol records through a bounded implementation-neutral interface.
     Protocol {
         #[command(subcommand)]
@@ -276,6 +284,22 @@ enum WorkspaceCommand {
         #[arg(long)]
         stdin: bool,
         #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QueryCommand {
+    /// Run one bounded metadata query read from standard input.
+    Run {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Explain one bounded metadata query read from standard input.
+    Explain {
+        root: PathBuf,
+        #[arg(long, required = true)]
         json: bool,
     },
 }
@@ -932,6 +956,24 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
             Ok(EXIT_SUCCESS)
         }
+        Command::Query { command } => {
+            let (root, operation) = match command {
+                QueryCommand::Run { root, json: _ } => {
+                    (root, query_capability::QueryOperation::Run)
+                }
+                QueryCommand::Explain { root, json: _ } => {
+                    (root, query_capability::QueryOperation::Explain)
+                }
+            };
+            let transport = query_capability::execute(operation, root, std::io::stdin().lock());
+            if !transport.stdout.is_empty() {
+                let _ = std::io::stdout().lock().write_all(&transport.stdout);
+            }
+            if !transport.stderr.is_empty() {
+                let _ = std::io::stderr().lock().write_all(&transport.stderr);
+            }
+            Ok(transport.exit_code)
+        }
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } => {
                 if json {
@@ -1055,6 +1097,9 @@ fn command_emits_json_errors(command: &Command) -> bool {
             WorkspaceCommand::List { json, .. }
             | WorkspaceCommand::Read { json, .. }
             | WorkspaceCommand::Save { json, .. } => *json,
+        },
+        Command::Query { command } => match command {
+            QueryCommand::Run { json, .. } | QueryCommand::Explain { json, .. } => *json,
         },
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } | ProtocolCommand::Check { json, .. } => *json,
