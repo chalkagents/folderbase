@@ -146,6 +146,39 @@ fn live_query_projects_the_capture_plan_without_opening_ordinary_file_bytes() {
 }
 
 #[test]
+fn query_and_explain_cap_exclusions_in_deterministic_path_order() {
+    let root = folderbase();
+    let manifest = String::from_utf8_lossy(MANIFEST)
+        .replace(r#""rules": ["ignored/"]"#, r#""rules": ["ignored-*.txt"]"#);
+    fs::write(root.path().join(".folderbase/manifest.json"), manifest)
+        .expect("large-ignore manifest");
+    for index in 0..1_005 {
+        fs::write(
+            root.path().join(format!("ignored-{index:04}.txt")),
+            b"ignored\n",
+        )
+        .expect("ignored fixture");
+    }
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+
+    let result = engine
+        .run(&QueryRequest::live(1_000))
+        .expect("bounded exclusions");
+    assert_eq!(result.exclusions().len(), 1_000);
+    assert!(result.exclusions_truncated());
+    assert_eq!(result.exclusions()[0].path(), "ignored-0000.txt");
+    assert_eq!(result.exclusions()[999].path(), "ignored-0999.txt");
+
+    let explain = engine
+        .explain(&QueryRequest::live(1_000))
+        .expect("bounded explain exclusions");
+    assert_eq!(explain.excluded().len(), 1_000);
+    assert!(explain.excluded_truncated());
+    assert_eq!(explain.excluded()[0].path(), "ignored-0000.txt");
+    assert_eq!(explain.excluded()[999].path(), "ignored-0999.txt");
+}
+
+#[test]
 fn historical_query_projects_one_verified_version_with_exact_identity() {
     const VERSION_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000001";
     let root = folderbase();
