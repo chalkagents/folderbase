@@ -34,6 +34,9 @@ const MAX_INDEX_RECORDS: usize = 16_384;
 const INDEX_ROOT: &str = ".folderbase/local/query-index-v1";
 const INDEX_RECORD: &str = ".folderbase/local/query-index-v1/index.json";
 const INDEX_FORMAT: &str = "folderbase-query-private-index-v1";
+#[cfg(test)]
+static LIVE_ROW_PROJECTIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// A root-bound handle for read-only query and explicit disposable-index work.
 #[derive(Debug)]
@@ -1437,6 +1440,8 @@ fn query_version_exclusion_kind(kind: ExclusionKind) -> QueryExclusionKind {
 }
 
 fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
+    #[cfg(test)]
+    LIVE_ROW_PROJECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut entries = plan
         .entries()
         .iter()
@@ -1607,11 +1612,14 @@ fn live_observation_generation(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io};
+    use std::{fs, io, sync::atomic::Ordering};
 
     use tempfile::tempdir;
 
-    use super::{FolderbaseQueryEngine, INDEX_RECORD, QueryIndexState};
+    use super::{
+        FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, QueryExecution, QueryIndexState,
+        QueryRequest,
+    };
 
     const MANIFEST: &[u8] = br#"{
       "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
@@ -1632,6 +1640,26 @@ mod tests {
         "capture_ignore": {"format": "folderbase-capture-ignore-v1", "rules": []}
       }
     }"#;
+
+    #[test]
+    fn a_fresh_index_skips_duplicate_live_row_projection() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+        fs::write(root.path().join("ordinary.md"), b"ordinary\n").expect("ordinary file");
+        let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+        engine.rebuild_index().expect("fresh index");
+
+        LIVE_ROW_PROJECTIONS.store(0, Ordering::Relaxed);
+        let indexed = engine.run(&QueryRequest::live(10)).expect("indexed query");
+        assert_eq!(indexed.execution(), QueryExecution::PrivateIndex);
+        assert_eq!(LIVE_ROW_PROJECTIONS.load(Ordering::Relaxed), 0);
+
+        fs::write(root.path().join("second.md"), b"second\n").expect("stale index");
+        let scanned = engine.run(&QueryRequest::live(10)).expect("fallback query");
+        assert_eq!(scanned.execution(), QueryExecution::BoundedScan);
+        assert_eq!(LIVE_ROW_PROJECTIONS.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn failure_before_index_publication_preserves_the_previous_generation() {
