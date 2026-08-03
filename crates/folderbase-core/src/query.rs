@@ -75,6 +75,8 @@ struct QueryFilters {
 #[serde(deny_unknown_fields)]
 struct QueryPage {
     limit: usize,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 impl QueryRequest {
@@ -84,7 +86,10 @@ impl QueryRequest {
             format: QUERY_REQUEST_FORMAT.to_owned(),
             scope: QueryScope::Live,
             filters: QueryFilters::default(),
-            page: QueryPage { limit },
+            page: QueryPage {
+                limit,
+                cursor: None,
+            },
         }
     }
 }
@@ -282,6 +287,10 @@ impl QueryResult {
 pub enum QueryError {
     #[error("invalid query request: {0}")]
     InvalidQueryRequest(String),
+    #[error("invalid query cursor")]
+    InvalidQueryCursor,
+    #[error("the query observation changed; retry without a cursor")]
+    QuerySnapshotChanged,
     #[error("the exact historical Folderbase Version is missing: {version_id}")]
     ScopeVersionMissing { version_id: String },
     #[error("the exact historical Folderbase Version is invalid: {version_id}: {message}")]
@@ -308,17 +317,47 @@ impl FolderbaseQueryEngine {
                 folderbase_version_id,
             } => observe_historical(&self.root, folderbase_version_id)?,
         };
+        let request_sha256 = request_sha256(&normalized)?;
+        let after_path = if let Some(cursor) = request.page.cursor.as_deref() {
+            let cursor = decode_cursor(cursor)?;
+            if cursor.root_instance_sha256 != observation.root_instance_sha256
+                || cursor.request_sha256 != request_sha256
+            {
+                return Err(QueryError::InvalidQueryCursor);
+            }
+            if cursor.observation_generation != observation.generation {
+                return Err(QueryError::QuerySnapshotChanged);
+            }
+            Some(cursor.last_path)
+        } else {
+            None
+        };
         let entries = observation
             .entries
             .into_iter()
             .filter(|entry| normalized.filters.applies(entry))
+            .filter(|entry| {
+                after_path
+                    .as_ref()
+                    .is_none_or(|path| entry.path.as_bytes() > path.as_bytes())
+            })
             .collect::<Vec<_>>();
         let returned = entries.len().min(normalized.limit);
         let has_more = returned < entries.len();
+        let next_cursor = has_more
+            .then(|| {
+                encode_cursor(&QueryCursorPayload {
+                    root_instance_sha256: observation.root_instance_sha256.clone(),
+                    request_sha256: request_sha256.clone(),
+                    observation_generation: observation.generation.clone(),
+                    last_path: entries[returned - 1].path.clone(),
+                })
+            })
+            .transpose()?;
         Ok(QueryResult {
             root: observation.root,
             folderbase_id: observation.folderbase_id,
-            request_sha256: request_sha256(&normalized)?,
+            request_sha256,
             observation_generation: observation.generation,
             execution: QueryExecution::BoundedScan,
             entries: entries.into_iter().take(returned).collect(),
@@ -328,7 +367,7 @@ impl FolderbaseQueryEngine {
                 limit: normalized.limit,
                 returned,
                 has_more,
-                next_cursor: None,
+                next_cursor,
             },
         })
     }
@@ -566,6 +605,7 @@ fn normalize_set<T: Ord + Copy>(values: &[T]) -> Vec<T> {
 
 struct QueryObservation {
     root: PathBuf,
+    root_instance_sha256: String,
     folderbase_id: String,
     generation: String,
     entries: Vec<QueryEntry>,
@@ -599,6 +639,7 @@ fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {
     }
     Ok(QueryObservation {
         root: plan.root().to_path_buf(),
+        root_instance_sha256: plan.root_instance_sha256().to_owned(),
         folderbase_id: plan.folderbase_id().to_owned(),
         generation,
         entries,
@@ -696,11 +737,99 @@ fn observe_historical(root: &Path, version_id: &str) -> Result<QueryObservation,
     digest.update(canonical_digest.as_bytes());
     Ok(QueryObservation {
         root: attestation.root,
+        root_instance_sha256: attestation.root_instance_sha256,
         folderbase_id: attestation.folderbase_id,
         generation: format!("{:x}", digest.finalize()),
         entries,
         exclusions,
     })
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryCursorPayload {
+    root_instance_sha256: String,
+    request_sha256: String,
+    observation_generation: String,
+    last_path: String,
+}
+
+fn encode_cursor(payload: &QueryCursorPayload) -> Result<String, QueryError> {
+    let bytes = serde_json::to_vec(payload).map_err(|_| QueryError::InvalidQueryCursor)?;
+    let mut checksum = Sha256::new();
+    checksum.update(b"folderbase-query-cursor-v1\0");
+    checksum.update(&bytes);
+    let mut encoded = String::with_capacity(5 + bytes.len() * 2 + 64);
+    encoded.push_str("fbq1_");
+    append_hex(&mut encoded, &bytes);
+    append_hex(&mut encoded, &checksum.finalize());
+    if encoded.len() > 8_192 {
+        return Err(QueryError::InvalidQueryCursor);
+    }
+    Ok(encoded)
+}
+
+fn decode_cursor(cursor: &str) -> Result<QueryCursorPayload, QueryError> {
+    let encoded = cursor
+        .strip_prefix("fbq1_")
+        .ok_or(QueryError::InvalidQueryCursor)?;
+    if cursor.len() > 8_192 || encoded.len() < 66 || encoded.len() % 2 != 0 {
+        return Err(QueryError::InvalidQueryCursor);
+    }
+    let (payload, checksum) = encoded.split_at(encoded.len() - 64);
+    let bytes = decode_hex(payload)?;
+    let expected = decode_hex(checksum)?;
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-query-cursor-v1\0");
+    digest.update(&bytes);
+    if digest.finalize().as_slice() != expected {
+        return Err(QueryError::InvalidQueryCursor);
+    }
+    let payload: QueryCursorPayload =
+        serde_json::from_slice(&bytes).map_err(|_| QueryError::InvalidQueryCursor)?;
+    if !is_sha256(&payload.root_instance_sha256)
+        || !is_sha256(&payload.request_sha256)
+        || !is_sha256(&payload.observation_generation)
+        || validate_capture_path(&payload.last_path).is_err()
+    {
+        return Err(QueryError::InvalidQueryCursor);
+    }
+    Ok(payload)
+}
+
+fn append_hex(output: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(char::from(HEX[(byte >> 4) as usize]));
+        output.push(char::from(HEX[(byte & 0xf) as usize]));
+    }
+}
+
+fn decode_hex(encoded: &str) -> Result<Vec<u8>, QueryError> {
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_nibble(pair[0]).ok_or(QueryError::InvalidQueryCursor)?;
+            let low = hex_nibble(pair[1]).ok_or(QueryError::InvalidQueryCursor)?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn read_historical_version(root: &Path, version_id: &str) -> Result<FolderbaseVersion, QueryError> {

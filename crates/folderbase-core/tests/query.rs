@@ -309,3 +309,27 @@ fn opaque_cursors_are_snapshot_safe_and_bound_to_root_request_and_sort_key() {
         .expect_err("malformed cursor");
     assert!(matches!(malformed, QueryError::InvalidQueryCursor));
 }
+
+#[test]
+fn normalized_request_digest_matches_the_independent_fixed_vectors() {
+    let root = folderbase();
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    let fixtures = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/requests/valid"
+    );
+    for stem in ["canonical-request", "canonical-unicode-request"] {
+        let encoded = fs::read(format!("{fixtures}/{stem}.json")).expect("request vector");
+        let request = serde_json::from_slice(&encoded).expect("typed request vector");
+        let expected =
+            fs::read_to_string(format!("{fixtures}/{stem}.sha256")).expect("digest vector");
+        assert_eq!(
+            engine
+                .run(&request)
+                .expect("query with fixed request")
+                .request_sha256(),
+            expected.trim(),
+            "{stem}"
+        );
+    }
+}
