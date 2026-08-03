@@ -4,9 +4,10 @@ This package is a separately advertised optional capability. It does not add a
 command to Compatibility Contract v1 or a definition to Folderbase CLI JSON v1.
 
 The package entry in `capability.json` is deliberately the same closed shape
-accepted by the optional-capability registry introduced by ADR-0010. A registry
-may copy that entry once an implementation advertises and passes the complete
-suite. Until then the released 0.5 executable correctly does not advertise it.
+accepted by the optional-capability registry introduced by ADR-0010. The
+post-0.5 reference CLI copies that exact entry into its registry only after
+passing the complete suite. The immutable 0.5 executable correctly does not
+advertise this later capability.
 
 Normative surfaces:
 
