@@ -30,6 +30,62 @@ require_file_fragment_minimum_count() {
   fi
 }
 
+reject_workflow_job_fragment() {
+  local file=$1
+  local job_name=$2
+  local fragment=$3
+  local message=$4
+
+  if awk -v job_name="$job_name" -v fragment="$fragment" '
+    $0 == "  " job_name ":" {
+      in_job = 1
+      next
+    }
+    in_job && $0 ~ /^  [^ ]/ {
+      exit
+    }
+    in_job {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    in_job && line !~ /^#/ && index(line, fragment) {
+      found = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$file"; then
+    printf '%s\n' "$message" >&2
+    exit 1
+  fi
+}
+
+require_workflow_job_exact_line() {
+  local file=$1
+  local job_name=$2
+  local exact_line=$3
+  local message=$4
+
+  if ! awk -v job_name="$job_name" -v exact_line="$exact_line" '
+    $0 == "  " job_name ":" {
+      in_job = 1
+      next
+    }
+    in_job && $0 ~ /^  [^ ]/ {
+      exit
+    }
+    in_job && $0 == exact_line {
+      count += 1
+    }
+    END {
+      exit count == 1 ? 0 : 1
+    }
+  ' "$file"; then
+    printf '%s\n' "$message" >&2
+    exit 1
+  fi
+}
+
 require_release_fragment() {
   local fragment=$1
   local message=$2
@@ -259,6 +315,74 @@ if ! grep -Fqx "  pull_request:" "$workflow"; then
   echo "CI must run for pull requests." >&2
   exit 1
 fi
+
+if ! grep -Fqx "  cancel-in-progress: true" "$workflow"; then
+  echo "CI must cancel superseded CI runs." >&2
+  exit 1
+fi
+
+for required_ci_line in \
+  '  schedule:' \
+  '  workflow_dispatch:' \
+  '  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event_name }}-${{ github.ref }}'
+do
+  if ! grep -Fqx "$required_ci_line" "$workflow"; then
+    printf 'CI optimization control is missing: %s\n' "$required_ci_line" >&2
+    exit 1
+  fi
+done
+
+require_file_fragment_minimum_count \
+  "$workflow" \
+  "scripts/ci/classify-changes.mjs" \
+  3 \
+  "CI must classify changed paths and fail safe to full confidence."
+
+reject_workflow_job_fragment \
+  "$workflow" \
+  "rust" \
+  "scripts/test-package-install.sh" \
+  "Fresh installation proof must remain in its separate scoped job."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "npm-cli" \
+  "    if: needs.plan.outputs.npm == 'true'" \
+  "The npm lane must remain change-aware."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "rust" \
+  "    if: needs.plan.outputs.rust == 'true'" \
+  "The Linux Core lane must remain change-aware."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "package-install" \
+  "    if: needs.plan.outputs.install == 'true'" \
+  "Fresh installation proof must remain change-aware."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "package-install" \
+  "        run: scripts/test-package-install.sh" \
+  "Fresh installation proof must remain in its scoped job."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "core-platforms" \
+  "    if: github.event_name != 'pull_request' && needs.plan.outputs.platform == 'true'" \
+  "Cross-platform runners must not run for pull requests."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "required" \
+  "    name: Rust quality gate" \
+  "The protected required-check name must remain stable."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "required" \
+  "    needs: [plan, npm-cli, rust, package-install, core-platforms]" \
+  "The required check must aggregate every CI lane."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "required" \
+  "    if: always()" \
+  "The required check must report dependency failures and skips."
 
 if ! awk '
   $0 == "  push:" {

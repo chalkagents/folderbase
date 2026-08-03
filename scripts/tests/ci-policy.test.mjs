@@ -8,6 +8,7 @@ import test from "node:test";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const policy = join(repositoryRoot, "scripts", "check-ci-policy.sh");
+const ciWorkflow = join(repositoryRoot, ".github", "workflows", "ci.yml");
 const releaseWorkflow = join(
   repositoryRoot,
   ".github",
@@ -20,13 +21,13 @@ const decisionEntrypoint = "scripts/release/decide-publication-state.sh";
 const publicationEntrypoint = "scripts/release/publish-github-release.sh";
 const decisionScript = join(repositoryRoot, decisionEntrypoint);
 
-function runPolicy(releaseWorkflowPath) {
+function runPolicy(releaseWorkflowPath, ciWorkflowPath = ciWorkflow) {
   return new Promise((resolve, reject) => {
     const child = spawn("bash", [policy], {
       cwd: repositoryRoot,
       env: {
         ...process.env,
-        CI_WORKFLOW: join(repositoryRoot, ".github", "workflows", "ci.yml"),
+        CI_WORKFLOW: ciWorkflowPath,
         RELEASE_WORKFLOW: releaseWorkflowPath,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -57,6 +58,65 @@ function moveStepBefore(source, stepName, beforeStepName) {
 test("the canonical release workflow satisfies scoped policy", async () => {
   const result = await runPolicy(releaseWorkflow);
   assert.equal(result.code, 0, result.stderr);
+});
+
+test("superseded CI runs must remain cancellable", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    await writeFile(
+      fixture,
+      source.replace("  cancel-in-progress: true", "  cancel-in-progress: false"),
+    );
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /superseded CI/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("fresh installation proof cannot return to the Linux Core lane", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const boundary = "      - name: Run public implementation-neutral conformance";
+    assert(source.includes(boundary));
+    await writeFile(
+      fixture,
+      source.replace(
+        boundary,
+        `      - name: Unsafe duplicate installation proof\n        run: scripts/test-package-install.sh\n\n${boundary}`,
+      ),
+    );
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /separate scoped job/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("pull requests cannot spend cross-platform runner minutes", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const scoped =
+      "    if: github.event_name != 'pull_request' && needs.plan.outputs.platform == 'true'";
+    assert(source.includes(scoped));
+    await writeFile(
+      fixture,
+      source.replace(scoped, "    if: needs.plan.outputs.platform == 'true'"),
+    );
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /pull requests/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("the registry-state step cannot call a different entrypoint", async () => {
