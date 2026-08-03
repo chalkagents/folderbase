@@ -1682,8 +1682,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, QueryExecution, QueryIndexState,
-        QueryRequest,
+        FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, PrivateIndexRecord,
+        QueryExecution, QueryIndexState, QueryRequest, private_index_content_sha256,
     };
 
     const MANIFEST: &[u8] = br#"{
@@ -1735,6 +1735,31 @@ mod tests {
         let scanned = engine.run(&QueryRequest::live(10)).expect("fallback query");
         assert_eq!(scanned.execution(), QueryExecution::BoundedScan);
         LIVE_ROW_PROJECTIONS.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn a_coherently_rehashed_forged_index_never_supplies_query_rows() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+        fs::write(root.path().join("ordinary.md"), b"ordinary\n").expect("ordinary file");
+        let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+        engine.rebuild_index().expect("fresh index");
+
+        let mut record: PrivateIndexRecord =
+            serde_json::from_slice(&fs::read(root.path().join(INDEX_RECORD)).expect("index bytes"))
+                .expect("private index record");
+        record.entries[0].bytes = Some(999_999);
+        record.content_sha256 = private_index_content_sha256(&record).expect("coherent forgery");
+        fs::write(
+            root.path().join(INDEX_RECORD),
+            serde_json::to_vec(&record).expect("forged index bytes"),
+        )
+        .expect("replace private index");
+
+        let result = engine.run(&QueryRequest::live(10)).expect("safe fallback");
+        assert_eq!(result.execution(), QueryExecution::BoundedScan);
+        assert_eq!(result.entries()[0].bytes(), Some(9));
     }
 
     #[test]
