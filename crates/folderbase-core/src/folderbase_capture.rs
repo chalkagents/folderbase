@@ -649,6 +649,8 @@ pub struct FolderbaseVersionStore {
     pub(crate) root_attestation: FolderbaseRootAttestation,
     pub(crate) root_instance_authority: RootInstanceAuthority,
     pub(crate) protocol_profile: ManifestProtocolProfile,
+    root_capability: Dir,
+    root_physical_identity: PhysicalIdentity,
 }
 
 impl FolderbaseVersionStore {
@@ -690,11 +692,18 @@ impl FolderbaseVersionStore {
             &root_capability,
         )?;
         verify_root_capability(&root_capability, &canonical_root)?;
+        let root_physical_identity = directory_identity(&root_capability, &canonical_root)?;
         Ok(Self {
             root_attestation,
             root_instance_authority,
             protocol_profile,
+            root_capability,
+            root_physical_identity,
         })
+    }
+
+    pub(crate) fn root_physical_identity(&self) -> &PhysicalIdentity {
+        &self.root_physical_identity
     }
 
     /// Plan a bounded metadata inventory without reading ordinary file bytes.
@@ -707,7 +716,13 @@ impl FolderbaseVersionStore {
         if current_profile != self.protocol_profile {
             return Err(RootAttestationError::RootChangedDuringAttestation.into());
         }
-        let root_capability = open_planning_root(&current.root)?;
+        let root_capability =
+            self.root_capability
+                .try_clone()
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: current.root.clone(),
+                    source,
+                })?;
         verify_root_capability(&root_capability, &current.root)?;
         let legacy_root_files = current_profile.requires_legacy_root_files();
         if legacy_root_files {

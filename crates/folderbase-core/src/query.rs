@@ -24,7 +24,6 @@ use crate::{
         DeletedKind, ExclusionKind, FolderbaseVersion, MAX_ENCODED_VERSION_BYTES, PathBindingKind,
         validate_capture_path, validate_capture_version_id,
     },
-    root_attestation::attest_folderbase_root,
 };
 
 const QUERY_REQUEST_FORMAT: &str = "folderbase-query-request-v1";
@@ -41,10 +40,24 @@ thread_local! {
 }
 
 /// A root-bound handle for read-only query and explicit disposable-index work.
-#[derive(Debug)]
 pub struct FolderbaseQueryEngine {
     root: PathBuf,
     opening_root_instance_sha256: String,
+    store: FolderbaseVersionStore,
+    state: FolderbaseState,
+}
+
+impl std::fmt::Debug for FolderbaseQueryEngine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FolderbaseQueryEngine")
+            .field("root", &self.root)
+            .field(
+                "opening_root_instance_sha256",
+                &self.opening_root_instance_sha256,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// One bounded query request.
@@ -542,19 +555,23 @@ impl FolderbaseQueryEngine {
     /// Open one exact Folderbase Root without writing state.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, QueryError> {
         let store = FolderbaseVersionStore::open(root)?;
+        let state = FolderbaseState::open_existing(&store.root_attestation.root)
+            .map_err(|_| QueryError::RootAuthorityChanged)?;
+        state
+            .verify_root_identity(store.root_physical_identity())
+            .map_err(|_| QueryError::RootAuthorityChanged)?;
         Ok(Self {
             root: store.root_attestation.root.clone(),
-            opening_root_instance_sha256: store.root_attestation.root_instance_sha256,
+            opening_root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
+            store,
+            state,
         })
     }
 
     fn ensure_root_authority(&self) -> Result<(), QueryError> {
-        let current =
-            attest_folderbase_root(&self.root).map_err(|_| QueryError::RootAuthorityChanged)?;
-        if current.root_instance_sha256 != self.opening_root_instance_sha256 {
-            return Err(QueryError::RootAuthorityChanged);
-        }
-        Ok(())
+        self.state
+            .verify_root_identity(self.store.root_physical_identity())
+            .map_err(|_| QueryError::RootAuthorityChanged)
     }
 
     fn ensure_observation_authority(
@@ -567,12 +584,16 @@ impl FolderbaseQueryEngine {
         self.ensure_root_authority()
     }
 
-    fn observe_live_query(&self) -> Result<(QueryObservation, QueryExecution), QueryError> {
-        let state = observe_live_state(&self.root)?;
+    fn observe_live_query_with_after_observation<G>(
+        &self,
+        after_observation: impl FnOnce() -> G,
+    ) -> Result<(QueryObservation, QueryExecution), QueryError> {
+        let state = observe_live_state(&self.store, &self.state)?;
         if state.plan.root_instance_sha256() != self.opening_root_instance_sha256 {
             return Err(QueryError::RootAuthorityChanged);
         }
-        let index = read_index(&self.root, &state);
+        let observation_guard = after_observation();
+        let index = read_index(&self.state, &state);
         let selected = if index.state == QueryIndexState::Fresh {
             let record = index.record.expect("fresh index has a verified record");
             (
@@ -585,20 +606,46 @@ impl FolderbaseQueryEngine {
                 QueryExecution::BoundedScan,
             )
         };
+        drop(observation_guard);
         self.ensure_observation_authority(&selected.0)?;
         Ok(selected)
     }
 
+    fn observe_historical_query_with_after_root_check<G>(
+        &self,
+        version_id: &str,
+        after_root_check: impl FnOnce() -> G,
+    ) -> Result<QueryObservation, QueryError> {
+        let root_guard = after_root_check();
+        let observation = observe_historical(&self.store, &self.state, version_id);
+        drop(root_guard);
+        observation
+    }
+
     /// Run one bounded query against a newly observed scope.
     pub fn run(&self, request: &QueryRequest) -> Result<QueryResult, QueryError> {
+        self.run_with_observation_hooks(request, || (), || ())
+    }
+
+    fn run_with_observation_hooks<LiveGuard, HistoricalGuard>(
+        &self,
+        request: &QueryRequest,
+        after_live_observation: impl FnOnce() -> LiveGuard,
+        after_historical_root_check: impl FnOnce() -> HistoricalGuard,
+    ) -> Result<QueryResult, QueryError> {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
         let (mut observation, execution) = match &request.scope {
-            QueryScope::Live => self.observe_live_query()?,
+            QueryScope::Live => {
+                self.observe_live_query_with_after_observation(after_live_observation)?
+            }
             QueryScope::Historical {
                 folderbase_version_id,
             } => (
-                observe_historical(&self.root, folderbase_version_id)?,
+                self.observe_historical_query_with_after_root_check(
+                    folderbase_version_id,
+                    after_historical_root_check,
+                )?,
                 QueryExecution::BoundedScan,
             ),
         };
@@ -662,15 +709,25 @@ impl FolderbaseQueryEngine {
 
     /// Explain one query using the same normalized request and observation.
     pub fn explain(&self, request: &QueryRequest) -> Result<QueryExplain, QueryError> {
+        self.explain_with_after_live_observation(request, || ())
+    }
+
+    fn explain_with_after_live_observation<G>(
+        &self,
+        request: &QueryRequest,
+        after_live_observation: impl FnOnce() -> G,
+    ) -> Result<QueryExplain, QueryError> {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
         let live = matches!(&request.scope, QueryScope::Live);
         let (mut observation, index_strategy) = match &request.scope {
-            QueryScope::Live => self.observe_live_query()?,
+            QueryScope::Live => {
+                self.observe_live_query_with_after_observation(after_live_observation)?
+            }
             QueryScope::Historical {
                 folderbase_version_id,
             } => (
-                observe_historical(&self.root, folderbase_version_id)?,
+                observe_historical(&self.store, &self.state, folderbase_version_id)?,
                 QueryExecution::BoundedScan,
             ),
         };
@@ -716,13 +773,23 @@ impl FolderbaseQueryEngine {
 
     /// Inspect disposable-index freshness without writing state.
     pub fn index_status(&self) -> Result<QueryIndexStatus, QueryError> {
+        self.index_status_with_after_observation(|| ())
+    }
+
+    fn index_status_with_after_observation<G>(
+        &self,
+        after_observation: impl FnOnce() -> G,
+    ) -> Result<QueryIndexStatus, QueryError> {
         self.ensure_root_authority()?;
-        let observation = observe_live_state(&self.root)?;
+        let observation = observe_live_state(&self.store, &self.state)?;
         if observation.plan.root_instance_sha256() != self.opening_root_instance_sha256 {
             return Err(QueryError::RootAuthorityChanged);
         }
         self.ensure_root_authority()?;
-        let index = read_index(&self.root, &observation);
+        let observation_guard = after_observation();
+        let index = read_index(&self.state, &observation);
+        drop(observation_guard);
+        self.ensure_root_authority()?;
         Ok(QueryIndexStatus {
             root: observation.plan.root().to_path_buf(),
             folderbase_id: observation.plan.folderbase_id().to_owned(),
@@ -742,8 +809,16 @@ impl FolderbaseQueryEngine {
         &self,
         before_publish: impl FnOnce() -> std::io::Result<()>,
     ) -> Result<QueryIndexRebuildResult, QueryError> {
+        self.rebuild_index_with_hooks(|| (), before_publish)
+    }
+
+    fn rebuild_index_with_hooks<G>(
+        &self,
+        after_observation: impl FnOnce() -> G,
+        before_publish: impl FnOnce() -> std::io::Result<()>,
+    ) -> Result<QueryIndexRebuildResult, QueryError> {
         self.ensure_root_authority()?;
-        let live_state = observe_live_state(&self.root)?;
+        let live_state = observe_live_state(&self.store, &self.state)?;
         let observation = project_live_observation(&live_state);
         self.ensure_observation_authority(&observation)?;
         if observation.entries.len() + observation.exclusions.len() > MAX_INDEX_RECORDS {
@@ -770,30 +845,34 @@ impl FolderbaseQueryEngine {
                 "derived index exceeds 64 MiB".to_owned(),
             ));
         }
-        let state = FolderbaseState::open_existing(&self.root)
-            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
         self.ensure_root_authority()?;
-        if let Err(first) = state.ensure_private_dir(Path::new(INDEX_ROOT)) {
-            state
-                .remove_durable(Path::new(INDEX_ROOT))
+        let observation_guard = after_observation();
+        let publication: Result<IndexRead, QueryError> = (|| {
+            if let Err(first) = self.state.ensure_private_dir(Path::new(INDEX_ROOT)) {
+                self.state
+                    .remove_durable(Path::new(INDEX_ROOT))
+                    .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+                self.state
+                    .ensure_private_dir(Path::new(INDEX_ROOT))
+                    .map_err(|error| {
+                        QueryError::IndexRebuildFailed(format!("{first}; recovery failed: {error}"))
+                    })?;
+            }
+            self.state
+                .sanitize_private_single_file_namespace(
+                    Path::new(INDEX_ROOT),
+                    Path::new("index.json").as_os_str(),
+                    MAX_INDEX_RECORDS,
+                )
                 .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
-            state
-                .ensure_private_dir(Path::new(INDEX_ROOT))
-                .map_err(|error| {
-                    QueryError::IndexRebuildFailed(format!("{first}; recovery failed: {error}"))
-                })?;
-        }
-        state
-            .sanitize_private_single_file_namespace(
-                Path::new(INDEX_ROOT),
-                Path::new("index.json").as_os_str(),
-                MAX_INDEX_RECORDS,
-            )
-            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
-        state
-            .replace_with_before_publish(Path::new(INDEX_RECORD), &encoded, before_publish)
-            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
-        let verified = read_index(&self.root, &live_state);
+            self.state
+                .replace_with_before_publish(Path::new(INDEX_RECORD), &encoded, before_publish)
+                .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+            Ok(read_index(&self.state, &live_state))
+        })();
+        drop(observation_guard);
+        let verified = publication?;
+        self.ensure_observation_authority(&observation)?;
         if verified.state != QueryIndexState::Fresh {
             return Err(QueryError::IndexRebuildFailed(
                 "published index did not verify against its observation".to_owned(),
@@ -1156,11 +1235,7 @@ impl IndexRead {
     }
 }
 
-fn read_index(root: &Path, observation: &LiveObservationState) -> IndexRead {
-    let state = match FolderbaseState::open_existing_read_only(root) {
-        Ok(state) => state,
-        Err(_) => return IndexRead::stale(None, 0),
-    };
+fn read_index(state: &FolderbaseState, observation: &LiveObservationState) -> IndexRead {
     let encoded = match state.read_bounded_if_present(Path::new(INDEX_RECORD), MAX_INDEX_BYTES) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => return IndexRead::absent(),
@@ -1211,9 +1286,12 @@ fn read_index(root: &Path, observation: &LiveObservationState) -> IndexRead {
     }
 }
 
-fn observe_live_state(root: &Path) -> Result<LiveObservationState, QueryError> {
-    let plan = FolderbaseVersionStore::open(root)?.plan_capture()?;
-    let identity = resolve_live_identity(&plan);
+fn observe_live_state(
+    store: &FolderbaseVersionStore,
+    state: &FolderbaseState,
+) -> Result<LiveObservationState, QueryError> {
+    let plan = store.plan_capture()?;
+    let identity = resolve_live_identity(&plan, state);
     let generation = live_observation_generation(&plan, &identity)?;
     Ok(LiveObservationState {
         plan,
@@ -1250,7 +1328,7 @@ struct LiveIdentityProjection {
     version: Option<FolderbaseVersion>,
 }
 
-fn resolve_live_identity(plan: &CapturePlan) -> LiveIdentityProjection {
+fn resolve_live_identity(plan: &CapturePlan, state: &FolderbaseState) -> LiveIdentityProjection {
     let Some(head) = plan.current_local_head() else {
         return LiveIdentityProjection {
             state: "absent",
@@ -1258,7 +1336,7 @@ fn resolve_live_identity(plan: &CapturePlan) -> LiveIdentityProjection {
             version: None,
         };
     };
-    let Ok(version) = read_historical_version(plan.root(), head.version_id()) else {
+    let Ok(version) = read_historical_version(state, head.version_id()) else {
         return LiveIdentityProjection {
             state: "unresolved",
             canonical_digest: None,
@@ -1287,9 +1365,13 @@ fn resolve_live_identity(plan: &CapturePlan) -> LiveIdentityProjection {
     }
 }
 
-fn observe_historical(root: &Path, version_id: &str) -> Result<QueryObservation, QueryError> {
-    let attestation = attest_folderbase_root(root).map_err(FolderbaseCaptureError::from)?;
-    let version = read_historical_version(&attestation.root, version_id)?;
+fn observe_historical(
+    store: &FolderbaseVersionStore,
+    state: &FolderbaseState,
+    version_id: &str,
+) -> Result<QueryObservation, QueryError> {
+    let attestation = &store.root_attestation;
+    let version = read_historical_version(state, version_id)?;
     if version.version_id() != version_id || version.folderbase_id() != attestation.folderbase_id {
         return Err(QueryError::ScopeVersionInvalid {
             version_id: version_id.to_owned(),
@@ -1376,9 +1458,9 @@ fn observe_historical(root: &Path, version_id: &str) -> Result<QueryObservation,
     digest.update(version_id.as_bytes());
     digest.update(canonical_digest.as_bytes());
     Ok(QueryObservation {
-        root: attestation.root,
-        root_instance_sha256: attestation.root_instance_sha256,
-        folderbase_id: attestation.folderbase_id,
+        root: attestation.root.clone(),
+        root_instance_sha256: attestation.root_instance_sha256.clone(),
+        folderbase_id: attestation.folderbase_id.clone(),
         generation: format!("{:x}", digest.finalize()),
         entries,
         exclusions,
@@ -1472,15 +1554,12 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn read_historical_version(root: &Path, version_id: &str) -> Result<FolderbaseVersion, QueryError> {
+fn read_historical_version(
+    state: &FolderbaseState,
+    version_id: &str,
+) -> Result<FolderbaseVersion, QueryError> {
     validate_capture_version_id(version_id)
         .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
-    let state = FolderbaseState::open_existing_read_only(root).map_err(|error| {
-        QueryError::ScopeVersionInvalid {
-            version_id: version_id.to_owned(),
-            message: error.to_string(),
-        }
-    })?;
     let relative = Path::new(".folderbase/versions/folderbase").join(format!("{version_id}.json"));
     let encoded = match state.read_bounded(&relative, MAX_ENCODED_VERSION_BYTES) {
         Ok(Some(encoded)) => encoded,
@@ -1784,12 +1863,15 @@ fn live_observation_generation(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io};
+    use std::{
+        fs, io,
+        path::{Path, PathBuf},
+    };
 
     use tempfile::tempdir;
 
     use super::{
-        FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, PrivateIndexRecord,
+        FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, PrivateIndexRecord, QueryError,
         QueryExecution, QueryIndexState, QueryRequest, private_index_content_sha256,
         private_index_projection_sha256,
     };
@@ -1813,6 +1895,41 @@ mod tests {
         "capture_ignore": {"format": "folderbase-capture-ignore-v1", "rules": []}
       }
     }"#;
+
+    const MISSING_VERSION_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000099";
+
+    struct AmbientRootSwap {
+        visible: PathBuf,
+        detached: PathBuf,
+        replacement: PathBuf,
+    }
+
+    impl AmbientRootSwap {
+        fn activate(visible: &Path, replacement: &Path) -> Self {
+            let detached = visible.with_file_name("detached-opening-root");
+            fs::rename(visible, &detached).expect("detach opening root");
+            fs::rename(replacement, visible).expect("install replacement root");
+            Self {
+                visible: visible.to_path_buf(),
+                detached,
+                replacement: replacement.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for AmbientRootSwap {
+        fn drop(&mut self) {
+            fs::rename(&self.visible, &self.replacement).expect("remove replacement root");
+            fs::rename(&self.detached, &self.visible).expect("restore opening root");
+        }
+    }
+
+    fn initialize_root(root: &Path, ordinary_name: &str) {
+        fs::create_dir(root).expect("Folderbase root");
+        fs::create_dir(root.join(".folderbase")).expect("state");
+        fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+        fs::write(root.join(ordinary_name), b"content\n").expect("ordinary file");
+    }
 
     #[test]
     fn a_fresh_index_skips_duplicate_live_row_projection() {
@@ -1882,6 +1999,89 @@ mod tests {
             .state
             .verify_root_identity(engine.store.root_physical_identity())
             .expect("retained capabilities name one opening root");
+    }
+
+    #[test]
+    fn ambient_root_aba_never_redirects_query_index_reads_or_writes() {
+        let owner = tempdir().expect("root owner");
+        let visible = owner.path().join("workspace");
+        let replacement = owner.path().join("replacement");
+        initialize_root(&visible, "opening.md");
+        initialize_root(&replacement, "replacement.md");
+        let engine = FolderbaseQueryEngine::open(&visible).expect("query engine");
+        engine.rebuild_index().expect("opening-root index");
+
+        let result = engine
+            .run_with_observation_hooks(
+                &QueryRequest::live(10),
+                || AmbientRootSwap::activate(&visible, &replacement),
+                || (),
+            )
+            .expect("retained indexed query");
+        assert_eq!(result.execution(), QueryExecution::PrivateIndex);
+        assert_eq!(result.entries()[0].path(), "opening.md");
+
+        let explanation = engine
+            .explain_with_after_live_observation(&QueryRequest::live(10), || {
+                AmbientRootSwap::activate(&visible, &replacement)
+            })
+            .expect("retained indexed explanation");
+        assert_eq!(explanation.index_strategy(), QueryExecution::PrivateIndex);
+
+        let status = engine
+            .index_status_with_after_observation(|| {
+                AmbientRootSwap::activate(&visible, &replacement)
+            })
+            .expect("retained indexed status");
+        assert_eq!(status.state(), QueryIndexState::Fresh);
+
+        fs::remove_file(visible.join(INDEX_RECORD)).expect("remove opening-root index");
+        engine
+            .rebuild_index_with_hooks(
+                || AmbientRootSwap::activate(&visible, &replacement),
+                || Ok(()),
+            )
+            .expect("retained index rebuild");
+        assert!(visible.join(INDEX_RECORD).is_file());
+        assert!(!replacement.join(INDEX_RECORD).exists());
+    }
+
+    #[test]
+    fn ambient_root_aba_preserves_historical_missing_taxonomy() {
+        let owner = tempdir().expect("root owner");
+        let visible = owner.path().join("workspace");
+        let replacement = owner.path().join("replacement");
+        initialize_root(&visible, "opening.md");
+        initialize_root(&replacement, "replacement.md");
+        let replacement_version = replacement
+            .join(".folderbase/versions/folderbase")
+            .join(format!("{MISSING_VERSION_ID}.json"));
+        fs::create_dir_all(replacement_version.parent().expect("version parent"))
+            .expect("replacement version directory");
+        fs::write(&replacement_version, b"invalid historical version\n")
+            .expect("invalid replacement version");
+        let engine = FolderbaseQueryEngine::open(&visible).expect("query engine");
+        let request: QueryRequest = serde_json::from_value(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {
+                "kind": "historical",
+                "folderbase_version_id": MISSING_VERSION_ID
+            },
+            "page": {"limit": 10}
+        }))
+        .expect("historical request");
+
+        let error = engine
+            .run_with_observation_hooks(
+                &request,
+                || (),
+                || AmbientRootSwap::activate(&visible, &replacement),
+            )
+            .expect_err("opening root has no historical version");
+        assert!(matches!(
+            error,
+            QueryError::ScopeVersionMissing { version_id } if version_id == MISSING_VERSION_ID
+        ));
     }
 
     #[test]
