@@ -1,8 +1,8 @@
 use std::fs;
 
 use folderbase_core::{
-    FolderbaseQueryEngine, QueryEntryKind, QueryError, QueryExecution, QueryLifecycle,
-    QueryRequest, QuerySource,
+    FolderbaseQueryEngine, QueryEntryKind, QueryError, QueryExecution, QueryIndexState,
+    QueryLifecycle, QueryRequest, QuerySource,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -332,4 +332,169 @@ fn normalized_request_digest_matches_the_independent_fixed_vectors() {
             "{stem}"
         );
     }
+}
+
+#[test]
+fn disposable_index_is_explicit_bounded_and_never_required_for_correctness() {
+    let root = folderbase();
+    fs::create_dir_all(root.path().join(".folderbase/local/other-engine")).expect("sibling state");
+    fs::write(
+        root.path()
+            .join(".folderbase/local/other-engine/sentinel.txt"),
+        b"preserve me\n",
+    )
+    .expect("sibling sentinel");
+    for name in ["a.md", "b.md"] {
+        fs::write(root.path().join(name), format!("{name}\n")).expect("query row");
+    }
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    let index_root = root.path().join(".folderbase/local/query-index-v1");
+
+    let absent = engine.index_status().expect("read-only absent status");
+    assert_eq!(absent.state(), QueryIndexState::Absent);
+    assert!(!index_root.exists(), "status must not create private state");
+
+    let scan = engine.run(&live_page(100, None)).expect("fallback scan");
+    assert_eq!(scan.execution(), QueryExecution::BoundedScan);
+    let expected = scan
+        .entries()
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect::<Vec<_>>();
+
+    let rebuilt = engine.rebuild_index().expect("explicit rebuild");
+    assert_eq!(rebuilt.storage_path(), ".folderbase/local/query-index-v1");
+    assert!(!rebuilt.ordinary_files_changed());
+    assert!(!rebuilt.portable_files_changed());
+    assert_eq!(
+        engine.index_status().expect("fresh status").state(),
+        QueryIndexState::Fresh
+    );
+    assert_eq!(
+        fs::read(
+            root.path()
+                .join(".folderbase/local/other-engine/sentinel.txt")
+        )
+        .unwrap(),
+        b"preserve me\n"
+    );
+
+    let reopened = FolderbaseQueryEngine::open(root.path()).expect("restart query engine");
+    let indexed = reopened
+        .run(&live_page(100, None))
+        .expect("fresh private index");
+    assert_eq!(indexed.execution(), QueryExecution::PrivateIndex);
+    assert_eq!(
+        indexed
+            .entries()
+            .iter()
+            .map(|entry| entry.path().to_owned())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let explained = reopened
+        .explain(&live_page(100, None))
+        .expect("query explanation");
+    assert_eq!(explained.scope_source(), QuerySource::CapturePlan);
+    assert_eq!(explained.index_strategy(), QueryExecution::PrivateIndex);
+    assert_eq!(explained.ordering(), "portable_path_utf8_bytes_ascending");
+    assert_eq!(explained.ordinary_content_access(), "metadata_only");
+
+    fs::write(root.path().join("c.md"), b"c.md\n").expect("stale observation");
+    assert_eq!(
+        reopened.index_status().expect("stale status").state(),
+        QueryIndexState::Stale
+    );
+    assert_eq!(
+        reopened
+            .run(&live_page(100, None))
+            .expect("stale fallback")
+            .execution(),
+        QueryExecution::BoundedScan
+    );
+
+    reopened.rebuild_index().expect("refresh stale index");
+    fs::write(index_root.join("index.json"), b"{corrupt").expect("corrupt index");
+    assert_eq!(
+        reopened.index_status().expect("corrupt status").state(),
+        QueryIndexState::Stale
+    );
+    assert_eq!(
+        reopened
+            .run(&live_page(100, None))
+            .expect("corrupt fallback")
+            .execution(),
+        QueryExecution::BoundedScan
+    );
+    reopened.rebuild_index().expect("recover corrupt index");
+
+    let oversized = fs::File::create(index_root.join("index.json")).expect("oversize index");
+    oversized
+        .set_len(64 * 1024 * 1024 + 1)
+        .expect("bounded oversize");
+    drop(oversized);
+    assert_eq!(
+        reopened.index_status().expect("oversize status").state(),
+        QueryIndexState::Stale
+    );
+    assert_eq!(
+        reopened
+            .run(&live_page(100, None))
+            .expect("oversize fallback")
+            .execution(),
+        QueryExecution::BoundedScan
+    );
+    reopened.rebuild_index().expect("recover oversized index");
+
+    fs::remove_dir_all(&index_root).expect("delete disposable index");
+    let deleted = reopened
+        .run(&live_page(100, None))
+        .expect("deleted fallback");
+    assert_eq!(deleted.execution(), QueryExecution::BoundedScan);
+    assert_eq!(
+        deleted
+            .entries()
+            .iter()
+            .map(|entry| entry.path().to_owned())
+            .collect::<Vec<_>>(),
+        ["a.md", "b.md", "c.md"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn index_symlink_is_never_followed_and_explicit_rebuild_recovers_it() {
+    let root = folderbase();
+    fs::write(root.path().join("a.md"), b"a\n").expect("query row");
+    fs::create_dir_all(root.path().join(".folderbase/local")).expect("local state");
+    let outside = tempdir().expect("outside target");
+    fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+    std::os::unix::fs::symlink(
+        outside.path(),
+        root.path().join(".folderbase/local/query-index-v1"),
+    )
+    .expect("hostile index symlink");
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+
+    assert_eq!(
+        engine.index_status().expect("symlink status").state(),
+        QueryIndexState::Stale
+    );
+    assert_eq!(
+        engine
+            .run(&live_page(10, None))
+            .expect("symlink fallback")
+            .execution(),
+        QueryExecution::BoundedScan
+    );
+    engine.rebuild_index().expect("replace exact index symlink");
+    assert!(
+        fs::symlink_metadata(root.path().join(".folderbase/local/query-index-v1"))
+            .expect("rebuilt index root")
+            .is_dir()
+    );
+    assert_eq!(
+        fs::read(outside.path().join("sentinel")).unwrap(),
+        b"outside\n"
+    );
 }
