@@ -811,6 +811,13 @@ fn rebuild_sanitizes_the_complete_private_index_namespace_without_following_link
     )
     .expect("nested crash leftover");
     fs::write(index_root.join(".replace-orphan.tmp"), b"partial\n").expect("orphan replacement");
+    fs::create_dir_all(index_root.join(".sanitize-crash.tmp/work-previous/nested"))
+        .expect("crashed sanitizer queue");
+    fs::write(
+        index_root.join(".sanitize-crash.tmp/work-previous/nested/orphan"),
+        b"partial\n",
+    )
+    .expect("queued crash leftover");
 
     let outside = tempdir().expect("outside target");
     fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");

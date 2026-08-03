@@ -282,19 +282,12 @@ impl FolderbaseState {
         &self,
         relative: &Path,
         retained_file: &OsStr,
-        maximum_depth: usize,
     ) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
         let directory = self.open_dir(&relative)?;
         let display = self.display_path(&relative);
-        sanitize_private_directory_iterative(
-            directory,
-            display,
-            self.access,
-            retained_file,
-            maximum_depth,
-        )
+        sanitize_private_directory_queued(directory, display, self.access, retained_file)
     }
 
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
@@ -1753,117 +1746,159 @@ impl FolderbaseState {
     }
 }
 
-struct PrivateSanitizeFrame {
-    directory: Dir,
-    display: PathBuf,
-    name_in_parent: Option<OsString>,
-    changed: bool,
-}
-
-fn sanitize_private_directory_iterative(
+fn sanitize_private_directory_queued(
     directory: Dir,
     display: PathBuf,
     access: StateAccess,
     retained_file: &OsStr,
-    maximum_depth: usize,
 ) -> Result<()> {
-    if maximum_depth == 0 {
-        return Err(FolderbaseError::InvalidRecord {
-            path: display,
-            message: "private namespace cleanup depth must be positive".to_owned(),
-        });
-    }
-    let mut stack = vec![PrivateSanitizeFrame {
-        directory,
-        display,
-        name_in_parent: None,
-        changed: false,
-    }];
-    loop {
-        let frame = stack
-            .last()
-            .expect("private sanitizer retains a root frame");
-        let mut child = None;
-        for entry in frame
-            .directory
-            .read_dir(".")
-            .map_err(|source| FolderbaseError::io(&frame.display, source))?
-        {
-            let entry = entry.map_err(|source| FolderbaseError::io(&frame.display, source))?;
-            let name = entry.file_name();
-            let child_display = frame.display.join(&name);
-            let metadata = frame
-                .directory
-                .symlink_metadata(&name)
+    let queue_name = OsString::from(format!(".sanitize-{}.tmp", Uuid::now_v7()));
+    let queue_display = display.join(&queue_name);
+    directory
+        .create_dir_with(&queue_name, &private_directory_builder())
+        .map_err(|source| FolderbaseError::io(&queue_display, source))?;
+    let queue = open_directory_nofollow(&directory, &queue_name, &queue_display, access)
+        .map_err(|source| FolderbaseError::io(&queue_display, source))?;
+    sync_directory(&directory, &display)?;
+
+    let mut root_changed = false;
+    for entry in directory
+        .read_dir(".")
+        .map_err(|source| FolderbaseError::io(&display, source))?
+    {
+        let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+        let name = entry.file_name();
+        if name == queue_name {
+            continue;
+        }
+        let child_display = display.join(&name);
+        let metadata = match directory.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(FolderbaseError::io(&child_display, source)),
+        };
+        if retained_file == name.as_os_str() && private_metadata_is_regular_file(&metadata) {
+            continue;
+        }
+        if private_metadata_is_directory(&metadata) {
+            let queued_name = private_sanitize_work_name();
+            directory
+                .rename(&name, &queue, &queued_name)
                 .map_err(|source| FolderbaseError::io(&child_display, source))?;
-            if stack.len() == 1
-                && retained_file == name.as_os_str()
-                && metadata.is_file()
-                && !metadata.file_type().is_symlink()
-            {
+        } else {
+            remove_private_leaf(&directory, &name, &child_display)?;
+        }
+        root_changed = true;
+    }
+    if root_changed {
+        sync_directory(&directory, &display)?;
+        sync_directory(&queue, &queue_display)?;
+    }
+
+    drain_private_sanitize_queue(&queue, &queue_display, access)?;
+    directory
+        .remove_dir(&queue_name)
+        .map_err(|source| FolderbaseError::io(&queue_display, source))?;
+    sync_directory(&directory, &display)
+}
+
+fn drain_private_sanitize_queue(
+    queue: &Dir,
+    queue_display: &Path,
+    access: StateAccess,
+) -> Result<()> {
+    loop {
+        let mut observed = false;
+        for entry in queue
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(queue_display, source))?
+        {
+            observed = true;
+            let entry = entry.map_err(|source| FolderbaseError::io(queue_display, source))?;
+            let name = entry.file_name();
+            let work_display = queue_display.join(&name);
+            let metadata = match queue.symlink_metadata(&name) {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(FolderbaseError::io(&work_display, source)),
+            };
+            if !private_metadata_is_directory(&metadata) {
+                remove_private_leaf(queue, &name, &work_display)?;
                 continue;
             }
-            child = Some((name, child_display, metadata));
-            break;
-        }
-
-        let Some((name, child_display, metadata)) = child else {
-            if stack.len() == 1 {
-                let root = stack.pop().expect("private sanitizer root frame");
-                if root.changed {
-                    sync_directory(&root.directory, &root.display)?;
-                }
-                return Ok(());
-            }
-            let completed = stack.pop().expect("completed private child frame");
-            if completed.changed {
-                sync_directory(&completed.directory, &completed.display)?;
-            }
-            let parent = stack.last_mut().expect("private sanitizer parent frame");
-            let child_name = completed
-                .name_in_parent
-                .expect("nested private frame has a parent name");
-            parent
-                .directory
-                .remove_dir(&child_name)
-                .map_err(|source| FolderbaseError::io(&completed.display, source))?;
-            parent.changed = true;
-            continue;
-        };
-
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            if stack.len() >= maximum_depth {
-                let frame = stack.last().expect("private sanitizer depth frame");
-                if frame.changed {
-                    sync_directory(&frame.directory, &frame.display)?;
-                }
-                for ancestor in stack.iter().rev().skip(1) {
-                    if ancestor.changed {
-                        sync_directory(&ancestor.directory, &ancestor.display)?;
+            let work = open_directory_nofollow(queue, &name, &work_display, access)
+                .map_err(|source| FolderbaseError::io(&work_display, source))?;
+            loop {
+                let mut work_observed = false;
+                let mut moved_directory = false;
+                for child in work
+                    .read_dir(".")
+                    .map_err(|source| FolderbaseError::io(&work_display, source))?
+                {
+                    work_observed = true;
+                    let child =
+                        child.map_err(|source| FolderbaseError::io(&work_display, source))?;
+                    let child_name = child.file_name();
+                    let child_display = work_display.join(&child_name);
+                    let child_metadata = match work.symlink_metadata(&child_name) {
+                        Ok(metadata) => metadata,
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                        Err(source) => return Err(FolderbaseError::io(&child_display, source)),
+                    };
+                    if private_metadata_is_directory(&child_metadata) {
+                        let queued_name = private_sanitize_work_name();
+                        work.rename(&child_name, queue, &queued_name)
+                            .map_err(|source| FolderbaseError::io(&child_display, source))?;
+                        moved_directory = true;
+                    } else {
+                        remove_private_leaf(&work, &child_name, &child_display)?;
                     }
                 }
-                let path = child_display;
-                return Err(FolderbaseError::InvalidRecord {
-                    path,
-                    message: "private namespace exceeds its bounded nesting depth".to_owned(),
-                });
+                if !work_observed {
+                    break;
+                }
+                if moved_directory {
+                    sync_directory(queue, queue_display)?;
+                }
+                sync_directory(&work, &work_display)?;
             }
-            let parent = stack.last().expect("private sanitizer parent frame");
-            let directory =
-                open_directory_nofollow(&parent.directory, &name, &child_display, access)
-                    .map_err(|source| FolderbaseError::io(&child_display, source))?;
-            stack.push(PrivateSanitizeFrame {
-                directory,
-                display: child_display,
-                name_in_parent: Some(name),
-                changed: false,
-            });
-        } else {
-            let frame = stack.last_mut().expect("private sanitizer leaf frame");
-            remove_private_leaf(&frame.directory, &name, &child_display)?;
-            frame.changed = true;
+            drop(work);
+            queue
+                .remove_dir(&name)
+                .map_err(|source| FolderbaseError::io(&work_display, source))?;
         }
+        if !observed {
+            return Ok(());
+        }
+        sync_directory(queue, queue_display)?;
     }
+}
+
+fn private_sanitize_work_name() -> OsString {
+    OsString::from(format!("work-{}", Uuid::now_v7()))
+}
+
+fn private_metadata_is_regular_file(metadata: &cap_std::fs::Metadata) -> bool {
+    metadata.is_file() && !private_metadata_is_link_or_reparse(metadata)
+}
+
+fn private_metadata_is_directory(metadata: &cap_std::fs::Metadata) -> bool {
+    metadata.is_dir() && !private_metadata_is_link_or_reparse(metadata)
+}
+
+fn private_metadata_is_link_or_reparse(metadata: &cap_std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn remove_private_leaf(parent: &Dir, name: &OsStr, display: &Path) -> Result<()> {
