@@ -17,9 +17,15 @@ Folderbase Core 0.5 was released on August 2, 2026. It turns the open core into 
 
 ## Install
 
+Choose any verified distribution channel:
+
 ```bash
-npx @folderbase/cli@0.5.0 --version
+npx --yes @folderbase/cli@0.5.0 --version
+cargo install folderbase-cli --version 0.5.0 --locked
+brew install chalkagents/tap/folderbase
 ```
+
+Or download the matching native binary and its digest from the immutable [GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.5.0).
 
 ## Verify the contract
 
@@ -29,6 +35,6 @@ npx @folderbase/cli@0.5.0 protocol contract --json
 
 ## Release artifacts
 
-All native artifacts are published with SHA-256 digests in the immutable [GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.5.0).
+All native artifacts are published with SHA-256 digests in the immutable [GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.5.0). The same release is available as [folderbase-cli on crates.io](https://crates.io/crates/folderbase-cli), [@folderbase/cli on npm](https://www.npmjs.com/package/@folderbase/cli), and the [chalkagents Homebrew tap](https://github.com/chalkagents/homebrew-tap).
 
 Protocol and crate `0.x` releases remain pre-stable. Pin your integration and consult the [Compatibility Contract v1](/docs/reference/compatibility-v1) before depending on filesystem or wire behavior.
