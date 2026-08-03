@@ -60,17 +60,21 @@ node --test \
   scripts/tests/ci-policy.test.mjs
 ```
 
-Result: 83 passed, 0 failed.
+Result: 84 passed, 0 failed.
 
-The query suite's minimal JavaScript candidate passed all 21 public black-box
+The query suite's minimal JavaScript candidate passed all 22 public black-box
 cases. They cover the complete deterministic filter algebra; fixed ASCII and
 Unicode request digests including U+2028/U+2029; every portable-path bound and
 complete checked-in Unicode 17 NFC/Unicode 9 full-fold reference; schema-invalid
 and semantically invalid historical Versions; canonical Version-digest
 generation; closed request negatives; root/manifest/ordered CapturePlan ignore
 rules/Local Head/metadata cursor binding; and whole-tree confinement of ignored,
-nested, portable, and sibling-private state. The missing-query candidate exited
-1 with the same intentional runtime gap.
+nested, portable, and sibling-private state. The public ignore corpus fixes
+escaped `!`/`#`, classes/ranges, trailing-space rules, anchors, `**`,
+directory-only matching, ordered negation, last-match-wins, and parent pruning;
+an independent root proves `.folderbaseignore` is optional and that absent and
+present-empty policy generations differ. The missing-query candidate exited 1
+with the same intentional runtime gap.
 
 The runner creates every fixture below one cleanup-owned parent, verifies the
 sparse 10 GiB file occupies no more than 16 MiB, and removes it on every path.
@@ -86,7 +90,7 @@ node protocol/conformance/capabilities/query-index-0.1/run.mjs \
   protocol/conformance/capabilities/query-index-0.1/fixtures/conforming-candidate.mjs
 ```
 
-Result: 21 passed, 0 failed.
+Result: 22 passed, 0 failed.
 
 ```sh
 scripts/check-ci-policy.sh

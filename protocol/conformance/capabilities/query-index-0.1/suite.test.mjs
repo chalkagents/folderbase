@@ -8,6 +8,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { assertQuerySchema } from "./schema.mjs";
+import {
+  compileGitignore,
+  effectiveCaptureIgnoreDigest,
+  ignoredByGitignore,
+} from "./capture-ignore-v2.mjs";
 import { verifyFolderbaseVersion05 } from "./folderbase-version-0.5-verifier.mjs";
 import {
   fullDefaultCaseFoldV9,
@@ -242,6 +247,32 @@ test("mixed fixture covers every opaque file shape and a simulated 10 GiB asset"
   assert.equal(fixture.ordinary_content_access, "metadata_only");
 });
 
+test("public Gitignore corpus freezes ordered edge semantics", async () => {
+  const corpus = await json(join(fixtureDirectory, "gitignore-edge-corpus.json"));
+  const rules = compileGitignore([...corpus.engine_rules, ...corpus.folderbaseignore_lines]);
+  for (const vector of corpus.cases) {
+    assert.equal(
+      ignoredByGitignore(vector.path, vector.is_directory, rules),
+      vector.ignored,
+      `${vector.feature}: ${vector.path}`,
+    );
+  }
+  const pruning = corpus.parent_pruning;
+  assert.equal(ignoredByGitignore(pruning.ignored_parent, true, rules), true);
+  assert.equal(ignoredByGitignore(pruning.unignored_child, false, rules), false);
+  assert.equal(
+    !ignoredByGitignore(pruning.ignored_parent, true, rules) &&
+      !ignoredByGitignore(pruning.unignored_child, false, rules),
+    false,
+    pruning.expected_traversal,
+  );
+  assert.notEqual(
+    effectiveCaptureIgnoreDigest(corpus.engine_rules, Buffer.alloc(0), false),
+    effectiveCaptureIgnoreDigest(corpus.engine_rules, Buffer.alloc(0), true),
+    "absent and present-empty ignore policies have distinct v2 digests",
+  );
+});
+
 test("historical fixture digest is fixed by the independent Version reference", async () => {
   const expected = (
     await readFile(join(fixtureDirectory, "historical-version.sha256"), "utf8")
@@ -301,7 +332,7 @@ test("minimal non-Rust candidate passes the complete black-box runner", () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.capability, "folderbase.query-index@0.1.0");
   assert.equal(report.failed, 0);
-  assert.equal(report.passed, 21);
+  assert.equal(report.passed, 22);
 });
 
 test("the runner hard-kills hanging and overproducing candidate commands", async () => {

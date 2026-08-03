@@ -107,13 +107,24 @@ async function liveObservation(root) {
   if (folderbaseId !== FOLDERBASE_ID) throw new Error("fixture Folderbase identity changed");
   const manifestMetadata = await lstat(manifestPath, { bigint: true });
   const ignorePath = join(exactRoot, ".folderbaseignore");
-  const ignoreBytes = await readFile(ignorePath);
+  let ignoreBytes = Buffer.alloc(0);
+  let ignorePresent = true;
+  try {
+    ignoreBytes = await readFile(ignorePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    ignorePresent = false;
+  }
   const engineRules = manifest.policies?.capture_ignore?.rules ?? [];
   const ignoreRules = compileGitignore([
     ...engineRules,
     ...ignoreBytes.toString("utf8").split(/\r?\n/u),
   ]);
-  const effectiveIgnoreDigest = effectiveCaptureIgnoreDigest(engineRules, ignoreBytes);
+  const effectiveIgnoreDigest = effectiveCaptureIgnoreDigest(
+    engineRules,
+    ignoreBytes,
+    ignorePresent,
+  );
   const entries = [];
   const exclusions = [];
   const observed = [];

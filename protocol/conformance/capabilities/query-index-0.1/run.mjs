@@ -118,17 +118,35 @@ function execute(implementation, arguments_, input) {
   return result;
 }
 
-function wholeTreeSnapshot(root) {
+function wholeTreeSnapshot(root, {
+  excludeIndex = false,
+  allowIndexParentMutation = false,
+} = {}) {
   const records = [];
   function visit(relative) {
     const absolute = join(root, relative);
     for (const name of readdirSync(absolute).sort((left, right) =>
       Buffer.compare(Buffer.from(left), Buffer.from(right)))) {
       const path = relative ? `${relative}/${name}` : name;
-      if (path === ".folderbase/local/query-index-v1") continue;
+      if (excludeIndex && path === ".folderbase/local/query-index-v1") continue;
       const metadata = lstatSync(join(root, path), { bigint: true });
       if (metadata.isDirectory()) {
-        records.push({ path, kind: "directory" });
+        const stable = {
+          path,
+          kind: "directory",
+          mode: metadata.mode.toString(),
+          device: metadata.dev.toString(),
+          inode: metadata.ino.toString(),
+        };
+        records.push(allowIndexParentMutation && path === ".folderbase/local"
+          ? stable
+          : {
+              ...stable,
+              size: metadata.size.toString(),
+              mtime_ns: metadata.mtimeNs.toString(),
+              ctime_ns: metadata.ctimeNs.toString(),
+              blocks: metadata.blocks?.toString() ?? null,
+            });
         visit(path);
       } else if (metadata.isSymbolicLink()) {
         records.push({
@@ -180,13 +198,23 @@ function wholeTreeSnapshot(root) {
 }
 
 function executeAtRoot(implementation, arguments_, input, root) {
-  const before = wholeTreeSnapshot(root);
+  const explicitRebuild = arguments_[0] === "index" && arguments_[1] === "rebuild";
+  const snapshotOptions = explicitRebuild
+    ? { excludeIndex: true, allowIndexParentMutation: true }
+    : {};
+  const before = wholeTreeSnapshot(root, snapshotOptions);
   try {
     return execute(implementation, arguments_, input);
   } finally {
-    assert.deepEqual(wholeTreeSnapshot(root), before,
+    assert.deepEqual(wholeTreeSnapshot(root, snapshotOptions), before,
       "candidate changed content outside its exact disposable query-index namespace");
   }
+}
+
+function indexNamespaceSnapshot(root) {
+  return wholeTreeSnapshot(root).filter(({ path }) =>
+    path === ".folderbase/local/query-index-v1" ||
+      path.startsWith(".folderbase/local/query-index-v1/"));
 }
 
 function successJson(implementation, arguments_, definition, input, root) {
@@ -311,7 +339,7 @@ async function privateStatePaths(root) {
   return paths.sort();
 }
 
-async function createFixtureRoot(owner, name) {
+async function createFixtureRoot(owner, name, { folderbaseignore = true } = {}) {
   const root = join(owner, name);
   await mkdir(root);
   for (const path of [
@@ -367,7 +395,10 @@ async function createFixtureRoot(owner, name) {
       await readFile(join(fixtures, "historical-version.json")),
     ],
   ];
-  for (const [path, bytes] of writes) await writeFile(join(root, path), bytes);
+  for (const [path, bytes] of writes) {
+    if (path === ".folderbaseignore" && !folderbaseignore) continue;
+    await writeFile(join(root, path), bytes);
+  }
   const sparsePath = join(root, "media/archive.mov");
   await writeFile(sparsePath, "");
   await truncate(sparsePath, LARGE_BYTES);
@@ -487,6 +518,33 @@ try {
         assert.equal(output.entries.find((entry) => entry.path === "links/brief-link").kind, "symlink");
         assert.ok(!paths(output).includes("ignored/private.txt"));
         assert.ok(!paths(output).includes("vendors/nested/secret/video.mp4"));
+      },
+    },
+    {
+      id: "query-live-supports-an-optional-folderbaseignore",
+      async run() {
+        const noIgnoreRoot = await createFixtureRoot(cleanupRoot, "without-ignore", {
+          folderbaseignore: false,
+        });
+        const output = query(implementation, "run", noIgnoreRoot, liveRequest(1000));
+        const expected = JSON.parse(
+          await readFile(join(fixtures, "no-folderbaseignore-observation.json"), "utf8"),
+        );
+        assert.equal(expected.folderbaseignore_present, false);
+        assert.ok(!paths(output).includes(expected.absent_path));
+        assert.ok(!paths(output).includes(expected.engine_exclusion.path));
+        assert.ok(output.exclusions.some(({ path, reason }) =>
+          path === expected.engine_exclusion.path &&
+            reason === expected.engine_exclusion.reason));
+        assert.ok(paths(output).includes(expected.ordinary_included_path),
+          "without the optional user file, only manifest engine rules apply");
+        const optionalPath = join(noIgnoreRoot, ".folderbaseignore");
+        const absentGeneration = output.observation_generation;
+        try {
+          await writeFile(optionalPath, "");
+          const presentEmpty = query(implementation, "run", noIgnoreRoot, liveRequest(1000));
+          assert.notEqual(presentEmpty.observation_generation, absentGeneration);
+        } finally { await rm(optionalPath, { force: true }); }
       },
     },
     {
@@ -742,11 +800,23 @@ try {
           ),
           beforeState,
         );
+        const exactIndex = indexNamespaceSnapshot(root);
+        assert.ok(exactIndex.length >= 2, "rebuilt index snapshot is non-empty");
         assert.equal(index(implementation, "status", root).state, "fresh");
+        assert.deepEqual(indexNamespaceSnapshot(root), exactIndex,
+          "index status mutated the exact rebuilt index");
         assert.equal(
           query(implementation, "run", root, await fixtureRequest("live-all.json")).execution,
           "private_index",
         );
+        assert.deepEqual(indexNamespaceSnapshot(root), exactIndex,
+          "query run mutated the exact rebuilt index");
+        assert.equal(
+          query(implementation, "explain", root, await fixtureRequest("live-all.json")).index_strategy,
+          "private_index",
+        );
+        assert.deepEqual(indexNamespaceSnapshot(root), exactIndex,
+          "query explain mutated the exact rebuilt index");
       },
     },
     {

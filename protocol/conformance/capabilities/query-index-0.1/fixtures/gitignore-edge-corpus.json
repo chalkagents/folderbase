@@ -1,0 +1,54 @@
+{
+  "format": "folderbase-gitignore-edge-corpus-v1",
+  "engine_rules": [
+    "*.tmp",
+    "build/",
+    "generated/**",
+    "/root-only.txt",
+    "logs/[0-9].log",
+    "classes/[!a-c].txt"
+  ],
+  "folderbaseignore_lines": [
+    "\\!literal.txt",
+    "\\#literal.txt",
+    "!generated/keep/",
+    "!generated/keep/**",
+    "generated/keep/reignored.txt",
+    "literal-space\\ ",
+    "trimmed-space   ",
+    "/anchored.txt",
+    "docs/**/draft[0-9].md",
+    "!docs/**/draft[5-7].md",
+    "!build/child.txt"
+  ],
+  "cases": [
+    { "path": "!literal.txt", "is_directory": false, "ignored": true, "feature": "escaped-leading-negation" },
+    { "path": "#literal.txt", "is_directory": false, "ignored": true, "feature": "escaped-leading-comment" },
+    { "path": "nested/file.tmp", "is_directory": false, "ignored": true, "feature": "unanchored-basename" },
+    { "path": "root-only.txt", "is_directory": false, "ignored": true, "feature": "root-anchor" },
+    { "path": "nested/root-only.txt", "is_directory": false, "ignored": false, "feature": "root-anchor" },
+    { "path": "anchored.txt", "is_directory": false, "ignored": true, "feature": "user-root-anchor" },
+    { "path": "nested/anchored.txt", "is_directory": false, "ignored": false, "feature": "user-root-anchor" },
+    { "path": "logs/7.log", "is_directory": false, "ignored": true, "feature": "character-range" },
+    { "path": "logs/x.log", "is_directory": false, "ignored": false, "feature": "character-range" },
+    { "path": "classes/z.txt", "is_directory": false, "ignored": true, "feature": "negated-character-class" },
+    { "path": "classes/b.txt", "is_directory": false, "ignored": false, "feature": "negated-character-class" },
+    { "path": "literal-space ", "is_directory": false, "ignored": true, "feature": "escaped-trailing-space" },
+    { "path": "trimmed-space", "is_directory": false, "ignored": true, "feature": "trimmed-trailing-space" },
+    { "path": "trimmed-space ", "is_directory": false, "ignored": false, "feature": "trimmed-trailing-space" },
+    { "path": "generated/drop.txt", "is_directory": false, "ignored": true, "feature": "double-star" },
+    { "path": "generated/keep", "is_directory": true, "ignored": false, "feature": "parent-reinclusion" },
+    { "path": "generated/keep/context.txt", "is_directory": false, "ignored": false, "feature": "engine-rule-negation" },
+    { "path": "generated/keep/reignored.txt", "is_directory": false, "ignored": true, "feature": "last-match-wins" },
+    { "path": "docs/a/b/draft4.md", "is_directory": false, "ignored": true, "feature": "double-star-and-range" },
+    { "path": "docs/draft6.md", "is_directory": false, "ignored": false, "feature": "double-star-range-negation" },
+    { "path": "build", "is_directory": true, "ignored": true, "feature": "directory-only" },
+    { "path": "build/child.txt", "is_directory": false, "ignored": false, "feature": "parent-pruning-direct-match" },
+    { "path": "build", "is_directory": false, "ignored": false, "feature": "directory-only-file" }
+  ],
+  "parent_pruning": {
+    "ignored_parent": "build",
+    "unignored_child": "build/child.txt",
+    "expected_traversal": "parent-pruned-before-child"
+  }
+}

@@ -13,6 +13,14 @@ Folderbase Versions for exact historical state. Building query on `workspace
 list`, or adding a third filesystem scanner, would create conflicting ignore,
 nested-boundary, file-reading, and race semantics.
 
+The root `.folderbaseignore` file is optional in protocol 0.5. Its effective
+policy digest distinguishes absent from present-empty bytes, applies manifest
+engine rules first, and then applies user lines in order. Public vectors cover
+escaped leading `!`/`#`, classes and ranges, trailing and escaped spaces,
+anchored and unanchored patterns, `**`, directory-only rules, negation,
+last-match-wins, and the rule that an ignored parent is pruned before a child
+can be re-included.
+
 Query is post-0.5 work. It must not expand Compatibility Contract v1, CLI JSON
 v1, or the immutable 0.5 release closure merely by existing in the repository.
 
@@ -152,8 +160,12 @@ namespaces under `.folderbase/local/**` across query, explain, status, and
 rebuild. Only the exact query-index namespace may differ after rebuild.
 Protection is a complete no-follow tree snapshot: bounded regular files are
 hashed, large sparse files use metadata and bounded edge samples, and symlink
-targets are recorded. Rebuilt private index state is independently bounded and
-may not be a symlink.
+targets and stable directory metadata are recorded. Only explicit rebuild may
+exclude the exact index namespace from its before/after comparison, with the
+single expected mutable parent-directory size/time exception at
+`.folderbase/local`. Rebuilt private index state is independently bounded and
+may not be a symlink. After publication, query run, explain, and status snapshot
+the exact index bytes and metadata and prove they do not mutate it.
 
 ### Process surface
 

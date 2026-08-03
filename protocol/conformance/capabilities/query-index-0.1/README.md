@@ -20,6 +20,8 @@ candidate fails.
 The suite proves:
 
 - live scope uses metadata-first rows and never descends ignored or nested trees;
+- `.folderbaseignore` is optional, present-empty differs from absent, and the
+  public Gitignore edge corpus fixes ordered engine/user matching and pruning;
 - historical scope selects one exact Version and preserves Object identity and
   `live`/`deleted` lifecycle;
 - path prefixes are component-aware and filter families have deterministic
@@ -36,7 +38,8 @@ The suite proves:
 - explain reports observation source, ordering, content access, and exclusions;
 - every command is surrounded by a complete no-follow tree snapshot and cannot
   alter ordinary, portable, ignored, nested-boundary, or sibling-private state;
-- explicit rebuild writes only `.folderbase/local/query-index-v1/**`;
+- explicit rebuild alone may replace `.folderbase/local/query-index-v1/**`;
+  subsequent run, explain, and status preserve its exact tree snapshot;
 - cursors bind the physical root, manifest, effective ignore policy, optional
   Local Head, and complete CapturePlan-like metadata fingerprints; and
 - a continued live query returns `query_snapshot_changed` after any bound
