@@ -12,6 +12,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::model::{
@@ -1424,7 +1425,16 @@ pub(crate) fn validate_template_path_collisions<'a>(
             let text = path
                 .to_str()
                 .ok_or_else(|| FolderbaseError::UnsafePath(path.to_path_buf()))?;
-            Ok((path, text.case_fold().collect::<String>(), is_directory))
+            Ok((
+                path,
+                text.nfc()
+                    .collect::<String>()
+                    .case_fold()
+                    .collect::<String>()
+                    .nfc()
+                    .collect::<String>(),
+                is_directory,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     planned.sort_by(|left, right| left.1.cmp(&right.1));
@@ -1479,7 +1489,13 @@ pub(crate) fn validate_template_paths_against_existing_casefold<'a>(
             let component_text = component
                 .to_str()
                 .ok_or_else(|| FolderbaseError::UnsafePath(planned.to_path_buf()))?;
-            let folded_component = component_text.case_fold().collect::<String>();
+            let folded_component = component_text
+                .nfc()
+                .collect::<String>()
+                .case_fold()
+                .collect::<String>()
+                .nfc()
+                .collect::<String>();
             let mut exact = None;
             for entry in
                 fs::read_dir(&parent).map_err(|source| FolderbaseError::io(&parent, source))?
@@ -1492,7 +1508,15 @@ pub(crate) fn validate_template_paths_against_existing_casefold<'a>(
                     // alias and remains preserved as ordinary user content.
                     continue;
                 };
-                if name_text.case_fold().collect::<String>() != folded_component {
+                if name_text
+                    .nfc()
+                    .collect::<String>()
+                    .case_fold()
+                    .collect::<String>()
+                    .nfc()
+                    .collect::<String>()
+                    != folded_component
+                {
                     continue;
                 }
                 if name == component {

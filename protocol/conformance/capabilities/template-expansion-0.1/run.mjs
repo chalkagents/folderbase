@@ -201,7 +201,8 @@ async function main() {
     await check("stale-approved-digest-fails-before-template-writes", () => {
       const root = createRoot(owner, "stale");
       const planned = plan(implementation, root, request);
-      writeFileSync(join(root, "Notes"), "concurrent user file\n");
+      const manifest = join(root, ".folderbase/manifest.json");
+      writeFileSync(manifest, `${readFileSync(manifest, "utf8")}\n`);
       const before = treeSnapshot(root);
       attention(
         implementation,
@@ -256,10 +257,14 @@ async function main() {
 
     await check("stdin-is-bounded-before-json-decoding", () => {
       const root = createRoot(owner, "bounded");
+      const prefix = "{\"format\":\"folderbase-template-expansion-request-v1\",\"padding\":\"";
+      const suffix = "\"}";
+      const oversized = `${prefix}${"x".repeat(MAX_INPUT_BYTES + 1 - prefix.length - suffix.length)}${suffix}`;
+      assert.equal(Buffer.byteLength(oversized), MAX_INPUT_BYTES + 1);
       operationalError(
         implementation,
         ["template", "plan", root, "--stdin", "--json"],
-        `{"format":"folderbase-template-expansion-request-v1","padding":"${"x".repeat(MAX_INPUT_BYTES)}"}`,
+        oversized,
         "template_request_too_large",
       );
     });

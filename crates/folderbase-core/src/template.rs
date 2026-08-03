@@ -7,6 +7,7 @@ use semver::Version;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::{
@@ -405,6 +406,14 @@ fn read_package(path: &Path) -> Result<TemplatePackage> {
 }
 
 pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -> Result<()> {
+    if unicode_normalization::UNICODE_VERSION != (17, 0, 0)
+        || unicode_casefold::UNICODE_VERSION != (9, 0, 0)
+    {
+        return invalid_template(
+            path,
+            "template path policy requires Unicode NFC 17.0.0 and full-default case folding 9.0.0",
+        );
+    }
     if !supported_protocol_version(&package.protocol_version) {
         return invalid_template(
             path,
@@ -466,7 +475,13 @@ pub(crate) fn validate_runtime_package(path: &Path, package: &TemplatePackage) -
             .target
             .to_str()
             .expect("safe_artifact_target accepted only UTF-8");
-        let folded = target_text.case_fold().collect::<String>();
+        let folded = target_text
+            .nfc()
+            .collect::<String>()
+            .case_fold()
+            .collect::<String>()
+            .nfc()
+            .collect::<String>();
         if !targets.insert(folded) {
             return invalid_template(
                 path,
@@ -642,6 +657,7 @@ fn safe_artifact_target(target: &Path) -> bool {
         return false;
     };
     if text.is_empty()
+        || text.len() > 4096
         || target.is_absolute()
         || text.contains('\\')
         || text.contains("//")
@@ -651,9 +667,59 @@ fn safe_artifact_target(target: &Path) -> bool {
     {
         return false;
     }
-    target
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
+    let components = target.components().collect::<Vec<_>>();
+    if components.len() > 128 {
+        return false;
+    }
+    components.into_iter().all(|component| {
+        let Component::Normal(component) = component else {
+            return false;
+        };
+        let Some(component) = component.to_str() else {
+            return false;
+        };
+        if component.is_empty()
+            || component.len() > 255
+            || component.ends_with(['.', ' '])
+            || component
+                .chars()
+                .any(|character| character <= '\u{1f}' || r#"<>:"|?*"#.contains(character))
+        {
+            return false;
+        }
+        let stem = component.split('.').next().unwrap_or(component);
+        !matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+                | "COM¹"
+                | "COM²"
+                | "COM³"
+                | "LPT¹"
+                | "LPT²"
+                | "LPT³"
+        )
+    })
 }
 
 fn supported_protocol_version(version: &str) -> bool {

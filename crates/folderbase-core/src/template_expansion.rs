@@ -27,6 +27,7 @@ use crate::{
     TemplateExpansionPlan, TemplatePackage, TemplatePlanDigest, TemplateStructuralChange,
     TemplateStructuralChangeKind, attest_folderbase_root, render_template,
 };
+use crate::{folderbase_state::FolderbaseState, local_versions::LocalVersionStore};
 
 const MANIFEST: &str = ".folderbase/manifest.json";
 const APPLICATIONS: &str = ".folderbase/template-applications";
@@ -411,6 +412,39 @@ pub fn apply_template_expansion(plan: &TemplateExpansionPlan) -> Result<Template
     })
 }
 
+/// Re-plan and apply one exact data-only template package under Folderbase's
+/// shared transaction lease.
+///
+/// The caller supplies only the reviewed digest, never a deserialized plan.
+/// Core derives the live plan again after the lease is held and fails before
+/// any template write when it no longer matches the approval.
+pub fn apply_template_expansion_with_expected_plan_digest(
+    root: impl AsRef<Path>,
+    target: &TemplatePackage,
+    answers: &BTreeMap<String, TemplateAnswerValue>,
+    expected_plan_digest: &str,
+) -> Result<(TemplateExpansionPlan, TemplateApplicationResult)> {
+    if expected_plan_digest.len() != 64
+        || !expected_plan_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(FolderbaseError::InvalidTemplateExpansionPlanDigest);
+    }
+
+    let state = FolderbaseState::open_existing(root.as_ref())?;
+    let _lease = LocalVersionStore::acquire_transaction_lock_for_state(root.as_ref(), &state)?;
+    let plan = plan_template_expansion(root.as_ref(), target, answers)?;
+    if plan.plan_digest.digest != expected_plan_digest {
+        return Err(FolderbaseError::TemplateExpansionPlanChanged {
+            expected: expected_plan_digest.to_owned(),
+            actual: plan.plan_digest.digest.clone(),
+        });
+    }
+    let result = apply_template_expansion(&plan)?;
+    Ok((plan, result))
+}
+
 pub fn template_application_history(
     root: impl AsRef<Path>,
 ) -> Result<Vec<TemplateApplicationRecord>> {
@@ -493,6 +527,23 @@ fn derive_comparison(
                 },
                 source: TemplateComparisonSource::Unmanaged,
                 application_id: None,
+            });
+        }
+        let predecessor_ids = history
+            .iter()
+            .filter_map(|record| record.comparison.application_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        let terminals = history
+            .iter()
+            .filter(|record| !predecessor_ids.contains(record.id.as_str()))
+            .collect::<Vec<_>>();
+        if let [record] = terminals.as_slice() {
+            return Ok(Comparison {
+                template_id: record.template.id.clone(),
+                version: record.template.version.clone(),
+                package_digest: record.template.package_digest.clone(),
+                source: TemplateComparisonSource::Application,
+                application_id: Some(record.id.clone()),
             });
         }
         return Err(FolderbaseError::InvalidRecord {
