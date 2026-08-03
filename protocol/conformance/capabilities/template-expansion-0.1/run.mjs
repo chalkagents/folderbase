@@ -22,12 +22,36 @@ const FORMAT = "folderbase-capability-suite-report-v1";
 const CAPABILITY = "folderbase.template-expansion@0.1.0";
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const directory = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(directory, "fixtures");
 const schema = JSON.parse(readFileSync(resolve(
   directory,
   "../../../schemas/capabilities/template-expansion/0.1/template-expansion.schema.json",
 ), "utf8"));
+
+function boundedEnvironmentInteger(name, fallback, minimum, maximum) {
+  const source = process.env[name];
+  if (source === undefined) return fallback;
+  const value = Number(source);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} through ${maximum}`);
+  }
+  return value;
+}
+
+const commandTimeoutMs = boundedEnvironmentInteger(
+  "FOLDERBASE_TEMPLATE_CONFORMANCE_COMMAND_TIMEOUT_MS",
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  100,
+  300_000,
+);
+const commandMaxBytes = boundedEnvironmentInteger(
+  "FOLDERBASE_TEMPLATE_CONFORMANCE_COMMAND_MAX_BYTES",
+  MAX_OUTPUT_BYTES,
+  1_024,
+  16 * 1024 * 1024,
+);
 
 function implementationArgument(argv) {
   const flag = argv.indexOf("--implementation");
@@ -43,15 +67,32 @@ function execute(implementation, arguments_, input = "") {
     ? process.execPath
     : implementation;
   const args = command === process.execPath ? [implementation, ...arguments_] : arguments_;
-  const result = spawnSync(command, args, {
-    encoding: "utf8",
-    input,
-    killSignal: "SIGKILL",
-    maxBuffer: MAX_OUTPUT_BYTES,
-    timeout: 30_000,
+  const payload = JSON.stringify({
+    command,
+    args,
+    input: Buffer.from(input).toString("base64"),
+    timeoutMs: commandTimeoutMs,
+    maxBytes: commandMaxBytes,
   });
-  if (result.error?.code === "ETIMEDOUT") throw new Error("candidate command timed out");
-  if (result.error) throw result.error;
+  const supervised = spawnSync(process.execPath, [join(directory, "command-supervisor.mjs")], {
+    encoding: "utf8",
+    input: payload,
+    killSignal: "SIGKILL",
+    maxBuffer: commandMaxBytes + 1024 * 1024,
+    timeout: commandTimeoutMs + 10_000,
+  });
+  if (supervised.error?.code === "ETIMEDOUT") {
+    throw new Error("candidate process supervisor failed to reap its process tree");
+  }
+  if (supervised.error) throw supervised.error;
+  const result = JSON.parse(supervised.stdout);
+  if (result.bound === "timeout") {
+    throw new Error(`candidate command timed out after ${commandTimeoutMs} ms`);
+  }
+  if (result.bound === "output") {
+    throw new Error(`candidate command exceeded the ${commandMaxBytes}-byte output limit`);
+  }
+  if (result.error) throw Object.assign(new Error(result.error.message), { code: result.error.code });
   return result;
 }
 

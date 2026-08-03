@@ -28,5 +28,12 @@ The public schema is
 The independent black-box suite is
 `protocol/conformance/capabilities/template-expansion-0.1/run.mjs`.
 
+The runner invokes candidates without a shell, bounds each command to 30
+seconds and 8 MiB of combined output by default, and hard-terminates the whole
+candidate process tree on timeout or output overflow. Conformance hosts may
+use the runner's closed, validated timeout and output environment controls for
+faster hostile-candidate proofs; those controls do not change capability
+semantics.
+
 Implementations must not advertise this capability until that suite passes in
 full.
