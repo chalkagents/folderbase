@@ -1,4 +1,4 @@
-use std::fs;
+use std::{collections::BTreeMap, fs, path::Path};
 
 use folderbase_core::{
     FolderbaseQueryEngine, QueryEntryKind, QueryError, QueryExecution, QueryIndexState,
@@ -497,4 +497,108 @@ fn index_symlink_is_never_followed_and_explicit_rebuild_recovers_it() {
         fs::read(outside.path().join("sentinel")).unwrap(),
         b"outside\n"
     );
+}
+
+fn tree_snapshot_without_index(root: &Path) -> BTreeMap<String, (String, Vec<u8>)> {
+    let mut snapshot = BTreeMap::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry.expect("snapshot entry");
+        let relative = entry.path().strip_prefix(root).expect("relative path");
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let portable = relative.to_string_lossy().replace('\\', "/");
+        if portable == ".folderbase/local/query-index-v1"
+            || portable.starts_with(".folderbase/local/query-index-v1/")
+        {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path()).expect("snapshot metadata");
+        let record = if metadata.file_type().is_symlink() {
+            (
+                "symlink".to_owned(),
+                fs::read_link(entry.path())
+                    .expect("symlink target")
+                    .to_string_lossy()
+                    .as_bytes()
+                    .to_vec(),
+            )
+        } else if metadata.is_file() {
+            (
+                "file".to_owned(),
+                fs::read(entry.path()).expect("snapshot bytes"),
+            )
+        } else {
+            ("directory".to_owned(), Vec::new())
+        };
+        snapshot.insert(portable, record);
+    }
+    snapshot
+}
+
+#[test]
+fn repeated_rebuild_and_read_only_operations_are_whole_tree_confined() {
+    let root = folderbase();
+    fs::create_dir_all(root.path().join("ignored/private")).expect("ignored tree");
+    fs::write(root.path().join("ignored/private/secret.txt"), b"ignored\n").expect("ignored bytes");
+    fs::create_dir_all(root.path().join("nested/.folderbase")).expect("nested state");
+    fs::write(
+        root.path().join("nested/.folderbase/manifest.json"),
+        b"opaque nested bytes\n",
+    )
+    .expect("nested marker");
+    fs::write(root.path().join("nested/private.bin"), b"nested bytes\n").expect("nested bytes");
+    fs::write(root.path().join("ordinary.md"), b"ordinary bytes\n").expect("ordinary bytes");
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    let before = tree_snapshot_without_index(root.path());
+
+    engine.run(&live_page(100, None)).expect("scan");
+    engine.explain(&live_page(100, None)).expect("explain");
+    engine.index_status().expect("status");
+    assert_eq!(tree_snapshot_without_index(root.path()), before);
+
+    engine.rebuild_index().expect("first rebuild");
+    assert_eq!(tree_snapshot_without_index(root.path()), before);
+    let index_path = root
+        .path()
+        .join(".folderbase/local/query-index-v1/index.json");
+    let first_index = fs::read(&index_path).expect("first index bytes");
+    let first_metadata = fs::metadata(&index_path).expect("first index metadata");
+
+    engine.run(&live_page(100, None)).expect("indexed run");
+    engine
+        .explain(&live_page(100, None))
+        .expect("indexed explain");
+    engine.index_status().expect("indexed status");
+    assert_eq!(fs::read(&index_path).unwrap(), first_index);
+    assert_eq!(
+        fs::metadata(&index_path).unwrap().modified().unwrap(),
+        first_metadata.modified().unwrap()
+    );
+    assert_eq!(tree_snapshot_without_index(root.path()), before);
+
+    engine
+        .rebuild_index()
+        .expect("deterministic repeated rebuild");
+    assert_eq!(fs::read(&index_path).unwrap(), first_index);
+    assert_eq!(tree_snapshot_without_index(root.path()), before);
+
+    let indexed_paths = engine
+        .run(&live_page(100, None))
+        .expect("indexed query")
+        .entries()
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect::<Vec<_>>();
+    fs::remove_dir_all(root.path().join(".folderbase/local/query-index-v1"))
+        .expect("delete disposable state");
+    let scanned_paths = engine
+        .run(&live_page(100, None))
+        .expect("fallback query")
+        .entries()
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(scanned_paths, indexed_paths);
+    assert_eq!(tree_snapshot_without_index(root.path()), before);
 }

@@ -1397,3 +1397,59 @@ fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError>
     digest.update(bytes);
     Ok(format!("{:x}", digest.finalize()))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io};
+
+    use tempfile::tempdir;
+
+    use super::{FolderbaseQueryEngine, INDEX_RECORD, QueryIndexState};
+
+    const MANIFEST: &[u8] = br#"{
+      "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+      "protocol_version": "0.5.0",
+      "folderbase": {
+        "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+        "name": "Query failure fixture",
+        "kind": "project",
+        "status": "active",
+        "created_at": "2026-08-04T00:00:00Z"
+      },
+      "adapters": [],
+      "policies": {
+        "availability": "keep_local",
+        "structural_changes": "approve",
+        "archive": "manual",
+        "cloud_sync": "disabled",
+        "capture_ignore": {"format": "folderbase-capture-ignore-v1", "rules": []}
+      }
+    }"#;
+
+    #[test]
+    fn failure_before_index_publication_preserves_the_previous_generation() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state");
+        fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+        fs::write(root.path().join("ordinary.md"), b"ordinary\n").expect("ordinary file");
+        let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+        engine.rebuild_index().expect("initial index");
+        let before = fs::read(root.path().join(INDEX_RECORD)).expect("initial bytes");
+
+        let failure = engine
+            .rebuild_index_with_before_publish(|| {
+                Err(io::Error::other("injected pre-publication failure"))
+            })
+            .expect_err("injected rebuild failure");
+        assert!(
+            failure
+                .to_string()
+                .contains("injected pre-publication failure")
+        );
+        assert_eq!(fs::read(root.path().join(INDEX_RECORD)).unwrap(), before);
+        assert_eq!(
+            engine.index_status().unwrap().state(),
+            QueryIndexState::Fresh
+        );
+    }
+}
