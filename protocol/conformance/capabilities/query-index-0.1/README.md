@@ -37,6 +37,8 @@ The suite proves:
   ordering, including same-path recreation rows;
 - missing and invalid exact historical Versions use distinct typed exit-2
   errors with empty stdout;
+- query/index syntax failures for missing roots or `--json`, unknown flags,
+  and unknown subcommands use the same typed exit-2 capability envelope;
 - explain reports observation source, ordering, content access, and exclusions;
 - run and explain cap exclusions at 1,000 in path order and signal truncation;
 - every command is surrounded by a complete no-follow tree snapshot and cannot

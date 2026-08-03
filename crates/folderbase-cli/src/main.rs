@@ -425,6 +425,10 @@ enum CliError {
     Capture(FolderbaseCaptureError),
     RootAttestation(RootAttestationError),
     OutputSerialization(serde_json::Error),
+    OutputWrite {
+        stream: &'static str,
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for CliError {
@@ -435,6 +439,9 @@ impl fmt::Display for CliError {
             Self::RootAttestation(source) => source.fmt(formatter),
             Self::OutputSerialization(source) => {
                 write!(formatter, "failed to serialize command output: {source}")
+            }
+            Self::OutputWrite { stream, source } => {
+                write!(formatter, "failed to write command {stream}: {source}")
             }
         }
     }
@@ -447,6 +454,7 @@ impl std::error::Error for CliError {
             Self::Capture(source) => Some(source),
             Self::RootAttestation(source) => Some(source),
             Self::OutputSerialization(source) => Some(source),
+            Self::OutputWrite { source, .. } => Some(source),
         }
     }
 }
@@ -479,7 +487,29 @@ impl From<ValidationLevelArg> for ValidationLevel {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.exit_code() != 0 && argv_selects_query_capability() => {
+            let transport = query_capability::invalid_invocation(error.to_string());
+            return match write_query_transport(transport) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
+        Err(error) => {
+            let exit_code = error.exit_code();
+            return match error.print() {
+                Ok(()) => ExitCode::from(u8::try_from(exit_code).unwrap_or(EXIT_OPERATIONAL_ERROR)),
+                Err(source) => {
+                    eprintln!("error: failed to write command output: {source}");
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
+    };
     let json_errors = command_emits_json_errors(&cli.command);
 
     match run(cli) {
@@ -504,6 +534,16 @@ fn main() -> ExitCode {
             ExitCode::from(EXIT_OPERATIONAL_ERROR)
         }
     }
+}
+
+fn argv_selects_query_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("query" | "index")
+    )
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
@@ -1035,13 +1075,36 @@ fn run(cli: Cli) -> Result<u8, CliError> {
 }
 
 fn write_query_transport(transport: query_capability::QueryTransport) -> Result<u8, CliError> {
-    if !transport.stdout.is_empty() {
-        let _ = std::io::stdout().lock().write_all(&transport.stdout);
-    }
-    if !transport.stderr.is_empty() {
-        let _ = std::io::stderr().lock().write_all(&transport.stderr);
-    }
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    write_query_transport_to(transport, &mut stdout.lock(), &mut stderr.lock())
+}
+
+fn write_query_transport_to(
+    transport: query_capability::QueryTransport,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<u8, CliError> {
+    write_transport_stream(stdout, &transport.stdout, "stdout")?;
+    write_transport_stream(stderr, &transport.stderr, "stderr")?;
     Ok(transport.exit_code)
+}
+
+fn write_transport_stream(
+    stream: &mut impl Write,
+    bytes: &[u8],
+    name: &'static str,
+) -> Result<(), CliError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    stream
+        .write_all(bytes)
+        .and_then(|()| stream.flush())
+        .map_err(|source| CliError::OutputWrite {
+            stream: name,
+            source,
+        })
 }
 
 fn run_protocol_check(artifact: ProtocolArtifactArg, json: bool) -> Result<u8, CliError> {
@@ -1173,6 +1236,7 @@ fn error_code(error: &CliError) -> &'static str {
         }
         CliError::RootAttestation(error) => return error.code(),
         CliError::OutputSerialization(_) => return "output_serialization",
+        CliError::OutputWrite { .. } => return "output_write_failed",
     };
     match error {
         FolderbaseError::InvalidRoot(_) => "invalid_root",
@@ -1680,6 +1744,53 @@ fn validation_severity_label(severity: ValidationSeverity) -> &'static str {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    struct RejectsWrites;
+
+    impl Write for RejectsWrites {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed test stream",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn query_transport_stdout_write_failure_is_operational() {
+        let transport = query_capability::QueryTransport {
+            exit_code: EXIT_SUCCESS,
+            stdout: b"success document\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        let mut stdout = RejectsWrites;
+        let mut stderr = Vec::new();
+
+        let error = write_query_transport_to(transport, &mut stdout, &mut stderr)
+            .expect_err("a closed stdout must not report success");
+
+        assert_eq!(error_code(&error), "output_write_failed");
+    }
+
+    #[test]
+    fn query_transport_stderr_write_failure_is_operational() {
+        let transport = query_capability::QueryTransport {
+            exit_code: EXIT_OPERATIONAL_ERROR,
+            stdout: Vec::new(),
+            stderr: b"error document\n".to_vec(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = RejectsWrites;
+
+        let error = write_query_transport_to(transport, &mut stdout, &mut stderr)
+            .expect_err("a closed stderr must remain an operational failure");
+
+        assert_eq!(error_code(&error), "output_write_failed");
+    }
 
     #[test]
     fn reports_the_shared_nested_boundary_work_limit() {

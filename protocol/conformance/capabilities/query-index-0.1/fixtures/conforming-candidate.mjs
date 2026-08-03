@@ -522,8 +522,9 @@ async function index(command, root) {
 }
 
 try {
-  const [family, command, root, json] = process.argv.slice(2);
-  if (json !== "--json" || !["query", "index"].includes(family)) {
+  const invocation = process.argv.slice(2);
+  const [family, command, root, json] = invocation;
+  if (invocation.length !== 4 || json !== "--json" || !["query", "index"].includes(family)) {
     throw new Error("unsupported invocation");
   }
   if (family === "query" && ["run", "explain"].includes(command)) {

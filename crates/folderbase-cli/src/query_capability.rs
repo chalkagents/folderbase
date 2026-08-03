@@ -127,6 +127,10 @@ pub(crate) fn execute_index(operation: IndexOperation, root: PathBuf) -> QueryTr
     }
 }
 
+pub(crate) fn invalid_invocation(message: impl Into<String>) -> QueryTransport {
+    QueryTransport::error("invalid_query_request", message)
+}
+
 fn read_request(mut input: impl Read) -> Result<QueryRequest, QueryError> {
     let mut bytes = Vec::new();
     input

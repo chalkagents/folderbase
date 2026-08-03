@@ -195,9 +195,15 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert.match(guide, /folderbase query explain \. --json/u);
   assert.match(guide, /folderbase index status \. --json/u);
   assert.match(guide, /folderbase index rebuild \. --json/u);
+  assert.doesNotMatch(guide, /\bfbv1_/u);
+  assert.match(
+    guide,
+    /"folderbase_version_id": "fbversion_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"/u,
+  );
   assert.match(reference, /folderbase-query-request-v1/u);
   assert.match(reference, /query_snapshot_changed/u);
   assert.match(reference, /invalid_query_cursor/u);
+  assert.match(reference, /syntax failures/u);
   assert.match(reference, /Exit `1`/u);
   assert.match(reference, /Exit `2`/u);
   assert.match(release, /not part of the immutable Core 0\.5 release/u);

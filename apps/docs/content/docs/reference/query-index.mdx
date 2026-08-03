@@ -57,7 +57,7 @@ contains `folderbase-query-error-v1` with one of these codes:
 
 | Code | Meaning |
 | --- | --- |
-| `invalid_query_request` | JSON, request shape, path, filter, or request bound is invalid. |
+| `invalid_query_request` | Invocation syntax, JSON, request shape, path, filter, or request bound is invalid. |
 | `invalid_query_cursor` | Cursor encoding or its request/root binding is invalid. |
 | `query_root_changed` | Root authority or required observable root state is unsafe or changed. |
 | `query_inventory_limit_exceeded` | A bounded live inventory cannot be represented safely. |
@@ -66,6 +66,11 @@ contains `folderbase-query-error-v1` with one of these codes:
 | `query_index_rebuild_failed` | The disposable index could not be rebuilt safely. |
 
 Messages are explanatory and must not be parsed.
+
+Once the first argument selects `query` or `index`, syntax failures are also
+capability failures: a missing root or `--json`, an unknown option, or an
+unknown subcommand exits `2` with empty stdout and the typed error document on
+stderr. Help and version output remain ordinary successful CLI output.
 
 ## Metadata and file types
 
