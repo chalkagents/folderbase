@@ -105,7 +105,7 @@ jobs:
         run: node scripts/test-npm-cli-package.mjs
 
       - name: Test release publication policy
-        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-required-results.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
+        run: node --test protocol/conformance/cli-json-v1/schema.test.mjs protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-required-results.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Verify packaged legal notices
         run: |
@@ -166,6 +166,9 @@ jobs:
 
       - name: Run public implementation-neutral conformance
         run: node protocol/conformance/cli-json-v1/run.mjs --implementation ./target/debug/folderbase
+
+      - name: Run advertised optional-capability conformance
+        run: node protocol/conformance/capabilities/run.mjs --implementation ./target/debug/folderbase
 
   package-install:
     name: Fresh package installation gate

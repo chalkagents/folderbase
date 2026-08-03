@@ -108,6 +108,8 @@ jobs:
             jq -e '.format == "folderbase-compatibility-contract-v1" and .contract_version == "1.0.0"'
           node native-source/protocol/conformance/cli-json-v1/run.mjs \
             --implementation "$binary"
+          node native-source/protocol/conformance/capabilities/run.mjs \
+            --implementation "$binary"
           test -f "$smoke_root/.folderbase/manifest.json"
           mkdir -p dist
           install -m 0755 \
@@ -194,7 +196,7 @@ jobs:
         run: |
           npm test --prefix packages/npm-cli
           node scripts/test-npm-cli-package.mjs
-          node --test protocol/conformance/cli-json-v1/schema.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
+          node --test protocol/conformance/cli-json-v1/schema.test.mjs protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Require repository immutable releases
         env:

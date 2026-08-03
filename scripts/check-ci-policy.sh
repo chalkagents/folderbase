@@ -338,6 +338,28 @@ require_file_fragment_minimum_count \
   3 \
   "CI must classify changed paths and fail safe to full confidence."
 
+require_file_fragment_minimum_count \
+  "$workflow" \
+  "protocol/conformance/capabilities/run.mjs" \
+  1 \
+  "CI must run every advertised optional-capability profile."
+require_file_fragment_minimum_count \
+  "$workflow" \
+  "protocol/conformance/capabilities/run.test.mjs" \
+  1 \
+  "CI must test optional-capability selection."
+require_file_fragment_minimum_count \
+  "$workflow" \
+  "scripts/tests/capability-contract.test.mjs" \
+  1 \
+  "CI must test the public capability registry contract."
+require_release_fragment \
+  "native-source/protocol/conformance/capabilities/run.mjs" \
+  "Native releases must pass every advertised capability suite."
+require_release_fragment \
+  "protocol/conformance/capabilities/run.test.mjs" \
+  "Release policy must test optional-capability selection."
+
 reject_workflow_job_fragment \
   "$workflow" \
   "rust" \
@@ -634,7 +656,7 @@ require_script_fragment \
 # escapes, or policy-script changes cannot silently alter release authority.
 require_sealed_release_control \
   "$release_workflow" \
-  "347009be2705c316084e0bedc505662ef9d09855225414b35ea92bb44430f733"
+  "ae981a245e544527880673b8dceb5854e512dd46e2e4fd61ca8b827c483de91b"
 require_sealed_release_control \
   "$immutable_script" \
   "1898cdb0efcb49cbf346d7057cac0dc34e838305ec8b14a7bd42082e20ffe627"

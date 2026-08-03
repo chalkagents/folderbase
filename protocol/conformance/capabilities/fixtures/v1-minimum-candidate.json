@@ -1,0 +1,21 @@
+{
+  "format": "folderbase-compatibility-contract-v1",
+  "contract_version": "1.0.0",
+  "cli_json": {
+    "commands": [
+      "inspect",
+      "attest",
+      "init.plan",
+      "init.apply",
+      "upgrade.plan",
+      "upgrade.apply",
+      "validate.shallow",
+      "protocol.contract",
+      "protocol.check.chunk-manifest",
+      "protocol.check.folderbase-version",
+      "workspace.list",
+      "workspace.read",
+      "workspace.save"
+    ]
+  }
+}

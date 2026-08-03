@@ -12,18 +12,37 @@ const UNKNOWN_CHUNK_MANIFEST_FORMAT: &[u8] =
 
 #[test]
 fn protocol_contract_discovers_the_stable_machine_interface() {
-    folderbase()
+    let output = folderbase()
         .args(["protocol", "contract", "--json"])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty())
-        .stdout(predicate::str::contains(
-            "\"format\": \"folderbase-compatibility-contract-v1\"",
-        ))
-        .stdout(predicate::str::contains("\"contract_version\": \"1.0.0\""))
-        .stdout(predicate::str::contains(
-            "\"cli_json\": \"folderbase-cli-json-v1\"",
-        ));
+        .output()
+        .expect("protocol contract output");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("protocol contract JSON");
+    let repeated = folderbase()
+        .args(["protocol", "contract", "--json"])
+        .output()
+        .expect("repeated protocol contract output");
+    assert!(repeated.status.success(), "{repeated:?}");
+    assert_eq!(
+        repeated.stdout, output.stdout,
+        "discovery JSON is deterministic"
+    );
+
+    assert_eq!(descriptor["format"], "folderbase-compatibility-contract-v1");
+    assert_eq!(descriptor["contract_version"], "1.0.0");
+    assert_eq!(descriptor["cli_json"], "folderbase-cli-json-v1");
+    assert_eq!(
+        descriptor["capabilities"],
+        serde_json::json!([
+            {
+                "name": "folderbase.version-cli-json",
+                "version": "0.1.0",
+                "stability": "experimental"
+            }
+        ])
+    );
 }
 
 #[test]

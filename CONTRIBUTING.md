@@ -30,6 +30,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features --locked
 node protocol/conformance/cli-json-v1/run.mjs --implementation ./target/debug/folderbase
+node protocol/conformance/capabilities/run.mjs --implementation ./target/debug/folderbase
+node --test protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs
 ```
 
 For npm launcher changes, run:

@@ -25,11 +25,27 @@ use folderbase_core::{
     plan_protocol_upgrade, plan_template_initialization, preview_migration, read_workspace_text,
     save_workspace_text, validate,
 };
+use serde::{Deserialize, Serialize};
 
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_INVALID: u8 = 1;
 const EXIT_OPERATIONAL_ERROR: u8 = 2;
 const MAX_MIGRATION_ANSWERS_BYTES: u64 = 2 * 1024 * 1024;
+const CAPABILITY_REGISTRY: &str = include_str!("../assets/capability-registry-v1.json");
+
+#[derive(Debug, Deserialize)]
+struct EmbeddedCapabilityRegistry {
+    capabilities: Vec<CapabilityProfile>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CapabilityProfile {
+    name: String,
+    version: String,
+    stability: String,
+    #[serde(rename = "conformance_runner", skip_serializing)]
+    _conformance_runner: String,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -919,6 +935,9 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } => {
                 if json {
+                    let registry: EmbeddedCapabilityRegistry =
+                        serde_json::from_str(CAPABILITY_REGISTRY)
+                            .expect("embedded capability registry must be valid JSON");
                     print_json(&serde_json::json!({
                         "format": "folderbase-compatibility-contract-v1",
                         "contract_version": "1.0.0",
@@ -928,6 +947,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                             "folderbase_version": ["0.4", "0.5"],
                             "chunk_manifest": ["folderbase-chunk-manifest-v1"],
                         },
+                        "capabilities": registry.capabilities,
                     }))?;
                 } else {
                     println!("Folderbase Compatibility Contract v1.0.0");

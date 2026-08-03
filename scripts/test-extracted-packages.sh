@@ -94,6 +94,8 @@ cargo install \
 
 folderbase="$extraction_root/install/bin/folderbase"
 test "$("$folderbase" --version)" = "folderbase 0.5.0"
+node "$repository_root/protocol/conformance/capabilities/run.mjs" \
+  --implementation "$folderbase"
 
 mkdir -p "$extraction_root/outside-checkout/unmanaged"
 cd "$extraction_root/outside-checkout"
