@@ -494,7 +494,7 @@ fn main() -> ExitCode {
             return match write_query_transport(transport) {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
-                    eprintln!("error: {error}");
+                    write_stderr_best_effort(format_args!("error: {error}"));
                     ExitCode::from(EXIT_OPERATIONAL_ERROR)
                 }
             };
@@ -504,7 +504,9 @@ fn main() -> ExitCode {
             return match error.print() {
                 Ok(()) => ExitCode::from(u8::try_from(exit_code).unwrap_or(EXIT_OPERATIONAL_ERROR)),
                 Err(source) => {
-                    eprintln!("error: failed to write command output: {source}");
+                    write_stderr_best_effort(format_args!(
+                        "error: failed to write command output: {source}"
+                    ));
                     ExitCode::from(EXIT_OPERATIONAL_ERROR)
                 }
             };
@@ -523,17 +525,26 @@ fn main() -> ExitCode {
                     }
                 });
                 match serde_json::to_string_pretty(&envelope) {
-                    Ok(encoded) => eprintln!("{encoded}"),
+                    Ok(encoded) => write_stderr_best_effort(format_args!("{encoded}")),
                     Err(serialization) => {
-                        eprintln!("error: {error} (JSON serialization failed: {serialization})");
+                        write_stderr_best_effort(format_args!(
+                            "error: {error} (JSON serialization failed: {serialization})"
+                        ));
                     }
                 }
             } else {
-                eprintln!("error: {error}");
+                write_stderr_best_effort(format_args!("error: {error}"));
             }
             ExitCode::from(EXIT_OPERATIONAL_ERROR)
         }
     }
+}
+
+fn write_stderr_best_effort(arguments: fmt::Arguments<'_>) {
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = stderr.write_fmt(arguments);
+    let _ = stderr.write_all(b"\n");
 }
 
 fn argv_selects_query_capability() -> bool {

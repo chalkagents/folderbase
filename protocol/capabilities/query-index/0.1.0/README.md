@@ -16,3 +16,7 @@ Normative surfaces:
 - request digest vectors and mixed-file fixtures:
   `protocol/conformance/capabilities/query-index-0.1/`; and
 - independent runner: `protocol/conformance/capabilities/query-index-0.1/run.mjs`.
+
+The process contract has one physical delivery carve-out: when a host output
+stream is unavailable, implementations exit 2 and report best-effort without
+panicking, but cannot guarantee a typed document on that unusable stream.

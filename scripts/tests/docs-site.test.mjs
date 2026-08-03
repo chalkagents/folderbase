@@ -204,6 +204,7 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert.match(reference, /query_snapshot_changed/u);
   assert.match(reference, /invalid_query_cursor/u);
   assert.match(reference, /syntax failures/u);
+  assert.match(reference, /host output-stream failure/u);
   assert.match(reference, /Exit `1`/u);
   assert.match(reference, /Exit `2`/u);
   assert.match(release, /not part of the immutable Core 0\.5 release/u);

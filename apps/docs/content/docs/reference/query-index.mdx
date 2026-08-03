@@ -72,6 +72,13 @@ capability failures: a missing root or `--json`, an unknown option, or an
 unknown subcommand exits `2` with empty stdout and the typed error document on
 stderr. Help and version output remain ordinary successful CLI output.
 
+A host output-stream failure is the sole delivery exception. If stdout or
+stderr is unavailable, Folderbase still exits `2` and attempts a non-panicking,
+best-effort diagnostic on stderr, but no program can guarantee typed JSON
+delivery to an unusable stream. This includes a failed stdout write. Normal
+invocation, domain, and operational failures still require the typed envelope
+whenever the destination stream is usable.
+
 ## Metadata and file types
 
 Rows can represent directories, regular files, symlinks, and opaque nested

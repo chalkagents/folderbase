@@ -55,6 +55,12 @@ with a behavioral failure, including the expected result for the released 0.5
 binary because it does not implement or advertise this post-0.5 capability.
 Bad runner arguments exit 2.
 
+Host output-stream failure is the sole delivery carve-out: an implementation
+must remain non-panicking and exit 2, with a best-effort stderr diagnostic, but
+cannot guarantee a typed JSON document when stdout or stderr itself is
+unavailable. Normal invocation and operational failures retain the typed
+envelope requirement.
+
 Each candidate command has a 30-second wall-clock bound and an 8 MiB combined
 output bound by default. A conformance host may lower or
 raise them only within the runner's closed bounds through
