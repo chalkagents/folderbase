@@ -196,6 +196,12 @@ enum Command {
         command: QueryCommand,
     },
 
+    /// Inspect or explicitly rebuild the disposable private query index.
+    Index {
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+
     /// Check portable protocol records through a bounded implementation-neutral interface.
     Protocol {
         #[command(subcommand)]
@@ -298,6 +304,22 @@ enum QueryCommand {
     },
     /// Explain one bounded metadata query read from standard input.
     Explain {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IndexCommand {
+    /// Inspect index freshness without changing state.
+    Status {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Explicitly replace only the disposable query-index namespace.
+    Rebuild {
         root: PathBuf,
         #[arg(long, required = true)]
         json: bool,
@@ -965,14 +987,20 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     (root, query_capability::QueryOperation::Explain)
                 }
             };
-            let transport = query_capability::execute(operation, root, std::io::stdin().lock());
-            if !transport.stdout.is_empty() {
-                let _ = std::io::stdout().lock().write_all(&transport.stdout);
-            }
-            if !transport.stderr.is_empty() {
-                let _ = std::io::stderr().lock().write_all(&transport.stderr);
-            }
-            Ok(transport.exit_code)
+            let transport =
+                query_capability::execute_query(operation, root, std::io::stdin().lock());
+            write_query_transport(transport)
+        }
+        Command::Index { command } => {
+            let (root, operation) = match command {
+                IndexCommand::Status { root, json: _ } => {
+                    (root, query_capability::IndexOperation::Status)
+                }
+                IndexCommand::Rebuild { root, json: _ } => {
+                    (root, query_capability::IndexOperation::Rebuild)
+                }
+            };
+            write_query_transport(query_capability::execute_index(operation, root))
         }
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } => {
@@ -1004,6 +1032,16 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             } => run_protocol_check(artifact, json),
         },
     }
+}
+
+fn write_query_transport(transport: query_capability::QueryTransport) -> Result<u8, CliError> {
+    if !transport.stdout.is_empty() {
+        let _ = std::io::stdout().lock().write_all(&transport.stdout);
+    }
+    if !transport.stderr.is_empty() {
+        let _ = std::io::stderr().lock().write_all(&transport.stderr);
+    }
+    Ok(transport.exit_code)
 }
 
 fn run_protocol_check(artifact: ProtocolArtifactArg, json: bool) -> Result<u8, CliError> {
@@ -1100,6 +1138,9 @@ fn command_emits_json_errors(command: &Command) -> bool {
         },
         Command::Query { command } => match command {
             QueryCommand::Run { json, .. } | QueryCommand::Explain { json, .. } => *json,
+        },
+        Command::Index { command } => match command {
+            IndexCommand::Status { json, .. } | IndexCommand::Rebuild { json, .. } => *json,
         },
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } | ProtocolCommand::Check { json, .. } => *json,

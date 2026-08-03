@@ -11,8 +11,8 @@ use std::{
 
 use folderbase_core::{
     FolderbaseCaptureError, FolderbaseQueryEngine, QueryEntry, QueryEntryKind, QueryError,
-    QueryExclusion, QueryExclusionKind, QueryExecution, QueryExplain, QueryLifecycle, QueryRequest,
-    QueryResult, QuerySource,
+    QueryExclusion, QueryExclusionKind, QueryExecution, QueryExplain, QueryIndexRebuildResult,
+    QueryIndexState, QueryIndexStatus, QueryLifecycle, QueryRequest, QueryResult, QuerySource,
 };
 use serde::Serialize;
 
@@ -27,6 +27,12 @@ const MAX_QUERY_MESSAGE_SCALARS: usize = 4_096;
 pub(crate) enum QueryOperation {
     Run,
     Explain,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum IndexOperation {
+    Status,
+    Rebuild,
 }
 
 pub(crate) struct QueryTransport {
@@ -79,7 +85,7 @@ impl QueryTransport {
     }
 }
 
-pub(crate) fn execute(
+pub(crate) fn execute_query(
     operation: QueryOperation,
     root: PathBuf,
     input: impl Read,
@@ -99,6 +105,23 @@ pub(crate) fn execute(
         },
         QueryOperation::Explain => match engine.explain(&request) {
             Ok(explanation) => QueryTransport::success(&QueryExplainDocument::from(&explanation)),
+            Err(error) => query_error_transport(error),
+        },
+    }
+}
+
+pub(crate) fn execute_index(operation: IndexOperation, root: PathBuf) -> QueryTransport {
+    let engine = match FolderbaseQueryEngine::open(&root) {
+        Ok(engine) => engine,
+        Err(error) => return query_error_transport(error),
+    };
+    match operation {
+        IndexOperation::Status => match engine.index_status() {
+            Ok(status) => QueryTransport::success(&QueryIndexStatusDocument::from(&status)),
+            Err(error) => query_error_transport(error),
+        },
+        IndexOperation::Rebuild => match engine.rebuild_index() {
+            Ok(result) => QueryTransport::success(&QueryIndexRebuildDocument::from(&result)),
             Err(error) => query_error_transport(error),
         },
     }
@@ -294,6 +317,64 @@ struct QueryExplainDocument<'a> {
     matched: usize,
     excluded: Vec<QueryExclusionDocument<'a>>,
     excluded_truncated: bool,
+}
+
+#[derive(Serialize)]
+struct QueryIndexStatusDocument<'a> {
+    format: &'static str,
+    root: Cow<'a, str>,
+    folderbase_id: &'a str,
+    state: QueryIndexState,
+    generation: Option<&'a str>,
+    observed_generation: &'a str,
+    records: usize,
+    storage_path: &'static str,
+    disposable: bool,
+}
+
+impl<'a> From<&'a QueryIndexStatus> for QueryIndexStatusDocument<'a> {
+    fn from(status: &'a QueryIndexStatus) -> Self {
+        Self {
+            format: "folderbase-query-index-status-v1",
+            root: wire_root(status.root()),
+            folderbase_id: status.folderbase_id(),
+            state: status.state(),
+            generation: status.generation(),
+            observed_generation: status.observed_generation(),
+            records: status.records(),
+            storage_path: status.storage_path(),
+            disposable: status.disposable(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct QueryIndexRebuildDocument<'a> {
+    format: &'static str,
+    root: Cow<'a, str>,
+    folderbase_id: &'a str,
+    generation: &'a str,
+    records: usize,
+    exclusions: usize,
+    storage_path: &'static str,
+    portable_files_changed: bool,
+    ordinary_files_changed: bool,
+}
+
+impl<'a> From<&'a QueryIndexRebuildResult> for QueryIndexRebuildDocument<'a> {
+    fn from(result: &'a QueryIndexRebuildResult) -> Self {
+        Self {
+            format: "folderbase-query-index-rebuild-result-v1",
+            root: wire_root(result.root()),
+            folderbase_id: result.folderbase_id(),
+            generation: result.generation(),
+            records: result.records(),
+            exclusions: result.exclusions(),
+            storage_path: result.storage_path(),
+            portable_files_changed: result.portable_files_changed(),
+            ordinary_files_changed: result.ordinary_files_changed(),
+        }
+    }
 }
 
 impl<'a> From<&'a QueryExplain> for QueryExplainDocument<'a> {
