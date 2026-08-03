@@ -16,8 +16,9 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::{
-    CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CapturePlan,
-    FolderbaseCaptureError, FolderbaseError, FolderbaseVersionStore,
+    CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureIgnoredPath,
+    CapturePlan, CapturePlanEntry, CapturePlanExclusion, FolderbaseCaptureError, FolderbaseError,
+    FolderbaseVersionStore,
     folderbase_state::FolderbaseState,
     folderbase_version::{
         DeletedKind, ExclusionKind, FolderbaseVersion, MAX_ENCODED_VERSION_BYTES, PathBindingKind,
@@ -755,6 +756,7 @@ impl FolderbaseQueryEngine {
             generation: observation.generation.clone(),
             root_instance_sha256: observation.root_instance_sha256.clone(),
             folderbase_id: observation.folderbase_id.clone(),
+            projection_sha256: live_projection_sha256(&live_state),
             content_sha256: String::new(),
             entries: observation.entries.clone(),
             exclusions: observation.exclusions.clone(),
@@ -1076,6 +1078,7 @@ struct PrivateIndexRecord {
     generation: String,
     root_instance_sha256: String,
     folderbase_id: String,
+    projection_sha256: String,
     content_sha256: String,
     entries: Vec<QueryEntry>,
     exclusions: Vec<QueryExclusion>,
@@ -1088,6 +1091,7 @@ fn private_index_content_sha256(record: &PrivateIndexRecord) -> Result<String, s
         generation: &'a str,
         root_instance_sha256: &'a str,
         folderbase_id: &'a str,
+        projection_sha256: &'a str,
         entries: &'a [QueryEntry],
         exclusions: &'a [QueryExclusion],
     }
@@ -1096,6 +1100,7 @@ fn private_index_content_sha256(record: &PrivateIndexRecord) -> Result<String, s
         generation: &record.generation,
         root_instance_sha256: &record.root_instance_sha256,
         folderbase_id: &record.folderbase_id,
+        projection_sha256: &record.projection_sha256,
         entries: &record.entries,
         exclusions: &record.exclusions,
     })?;
@@ -1103,6 +1108,25 @@ fn private_index_content_sha256(record: &PrivateIndexRecord) -> Result<String, s
     digest.update(b"folderbase-query-private-index-content-v1\0");
     digest.update(encoded);
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn private_index_projection_sha256(record: &PrivateIndexRecord) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-query-live-projection-v1\0");
+    for entry in &record.entries {
+        update_projection_digest(&mut digest, b'E', entry);
+    }
+    for exclusion in &record.exclusions {
+        update_projection_digest(&mut digest, b'X', exclusion);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn update_projection_digest<T: Serialize>(digest: &mut Sha256, tag: u8, value: &T) {
+    let encoded = serde_json::to_vec(value).expect("typed query projections serialize to JSON");
+    digest.update([tag]);
+    digest.update((encoded.len() as u64).to_be_bytes());
+    digest.update(encoded);
 }
 
 struct IndexRead {
@@ -1168,11 +1192,14 @@ fn read_index(root: &Path, observation: &LiveObservationState) -> IndexRead {
     let content_valid = is_sha256(&record.content_sha256)
         && private_index_content_sha256(&record).ok().as_deref()
             == Some(record.content_sha256.as_str());
+    let projection_valid = is_sha256(&record.projection_sha256)
+        && private_index_projection_sha256(&record) == record.projection_sha256
+        && live_projection_sha256(observation) == record.projection_sha256;
     let equivalent = record.format == INDEX_FORMAT
         && record.generation == observation.generation
         && record.root_instance_sha256 == observation.plan.root_instance_sha256()
         && record.folderbase_id == observation.plan.folderbase_id();
-    if bounded && ordered && paths_valid && content_valid && equivalent {
+    if bounded && ordered && paths_valid && content_valid && projection_valid && equivalent {
         IndexRead {
             state: QueryIndexState::Fresh,
             generation,
@@ -1504,47 +1531,149 @@ fn query_version_exclusion_kind(kind: ExclusionKind) -> QueryExclusionKind {
     }
 }
 
+fn live_capture_entry(entry: &CapturePlanEntry) -> QueryEntry {
+    QueryEntry {
+        path: entry.path().to_owned(),
+        kind: match entry.kind() {
+            CaptureEntryKind::Directory => QueryEntryKind::Directory,
+            CaptureEntryKind::RegularFile => QueryEntryKind::RegularFile,
+            CaptureEntryKind::Symlink => QueryEntryKind::Symlink,
+        },
+        lifecycle: QueryLifecycle::Live,
+        bytes: entry.bytes(),
+        executable: entry.executable(),
+        symlink_target: entry.symlink_target().map(str::to_owned),
+        object_id: None,
+        object_version_id: None,
+        folderbase_version_id: None,
+        source: QuerySource::CapturePlan,
+        boundary_reason: None,
+    }
+}
+
+fn live_boundary_entry(exclusion: &CapturePlanExclusion) -> QueryEntry {
+    QueryEntry {
+        path: exclusion.path().to_owned(),
+        kind: QueryEntryKind::NestedFolderbase,
+        lifecycle: QueryLifecycle::Live,
+        bytes: None,
+        executable: None,
+        symlink_target: None,
+        object_id: None,
+        object_version_id: None,
+        folderbase_version_id: None,
+        source: QuerySource::CapturePlan,
+        boundary_reason: Some("nested-folderbase-boundary".to_owned()),
+    }
+}
+
+fn attach_live_identity(state: &LiveObservationState, entry: &mut QueryEntry) {
+    let Some(version) = state.identity.version.as_ref() else {
+        return;
+    };
+    let Some(binding) = version.lookup_binding(&entry.path) else {
+        return;
+    };
+    let compatible = matches!(
+        (entry.kind, binding.kind()),
+        (QueryEntryKind::Directory, PathBindingKind::Directory)
+            | (QueryEntryKind::RegularFile, PathBindingKind::RegularFile)
+            | (QueryEntryKind::Symlink, PathBindingKind::Symlink)
+    );
+    if compatible {
+        entry.object_id = Some(binding.object_id().to_owned());
+        entry.object_version_id = binding.object_version_id().map(str::to_owned);
+    }
+}
+
+fn live_ignored_exclusion(ignored: &CaptureIgnoredPath) -> QueryExclusion {
+    QueryExclusion {
+        path: ignored.path().to_owned(),
+        reason: "capture-ignore-policy".to_owned(),
+        kind: None,
+    }
+}
+
+fn live_plan_exclusion(exclusion: &CapturePlanExclusion) -> QueryExclusion {
+    QueryExclusion {
+        path: exclusion.path().to_owned(),
+        reason: match exclusion.reason() {
+            CaptureExclusionReason::NestedFolderbaseBoundary => "nested-folderbase-boundary",
+            CaptureExclusionReason::UnsupportedV1 => "unsupported-v1",
+        }
+        .to_owned(),
+        kind: Some(match exclusion.kind() {
+            CaptureExclusionKind::NestedFolderbase => QueryExclusionKind::NestedFolderbase,
+            CaptureExclusionKind::HardLink => QueryExclusionKind::HardLink,
+            CaptureExclusionKind::Fifo => QueryExclusionKind::Fifo,
+            CaptureExclusionKind::Socket => QueryExclusionKind::Socket,
+            CaptureExclusionKind::BlockDevice => QueryExclusionKind::BlockDevice,
+            CaptureExclusionKind::CharacterDevice => QueryExclusionKind::CharacterDevice,
+            CaptureExclusionKind::OtherSpecial => QueryExclusionKind::OtherSpecial,
+        }),
+    }
+}
+
+fn live_projection_sha256(state: &LiveObservationState) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-query-live-projection-v1\0");
+    let mut entries = state.plan.entries().iter().peekable();
+    let mut boundaries = state
+        .plan
+        .exclusions()
+        .iter()
+        .filter(|exclusion| exclusion.kind() == CaptureExclusionKind::NestedFolderbase)
+        .peekable();
+    while entries.peek().is_some() || boundaries.peek().is_some() {
+        let take_entry = match (entries.peek(), boundaries.peek()) {
+            (Some(entry), Some(boundary)) => entry.path().as_bytes() <= boundary.path().as_bytes(),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => unreachable!(),
+        };
+        let mut entry = if take_entry {
+            live_capture_entry(entries.next().expect("peeked entry"))
+        } else {
+            live_boundary_entry(boundaries.next().expect("peeked boundary"))
+        };
+        attach_live_identity(state, &mut entry);
+        update_projection_digest(&mut digest, b'E', &entry);
+    }
+
+    let mut ignored = state.plan.ignored_paths().iter().peekable();
+    let mut exclusions = state.plan.exclusions().iter().peekable();
+    while ignored.peek().is_some() || exclusions.peek().is_some() {
+        let take_ignored = match (ignored.peek(), exclusions.peek()) {
+            (Some(ignored), Some(exclusion)) => {
+                ignored.path().as_bytes() <= exclusion.path().as_bytes()
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => unreachable!(),
+        };
+        let exclusion = if take_ignored {
+            live_ignored_exclusion(ignored.next().expect("peeked ignored path"))
+        } else {
+            live_plan_exclusion(exclusions.next().expect("peeked exclusion"))
+        };
+        update_projection_digest(&mut digest, b'X', &exclusion);
+    }
+    format!("{:x}", digest.finalize())
+}
+
 fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
     #[cfg(test)]
     LIVE_ROW_PROJECTIONS.with(|count| count.set(count.get() + 1));
     let mut entries = plan
         .entries()
         .iter()
-        .map(|entry| QueryEntry {
-            path: entry.path().to_owned(),
-            kind: match entry.kind() {
-                CaptureEntryKind::Directory => QueryEntryKind::Directory,
-                CaptureEntryKind::RegularFile => QueryEntryKind::RegularFile,
-                CaptureEntryKind::Symlink => QueryEntryKind::Symlink,
-            },
-            lifecycle: QueryLifecycle::Live,
-            bytes: entry.bytes(),
-            executable: entry.executable(),
-            symlink_target: entry.symlink_target().map(str::to_owned),
-            object_id: None,
-            object_version_id: None,
-            folderbase_version_id: None,
-            source: QuerySource::CapturePlan,
-            boundary_reason: None,
-        })
+        .map(live_capture_entry)
         .collect::<Vec<_>>();
     entries.extend(
         plan.exclusions()
             .iter()
             .filter(|exclusion| exclusion.kind() == CaptureExclusionKind::NestedFolderbase)
-            .map(|exclusion| QueryEntry {
-                path: exclusion.path().to_owned(),
-                kind: QueryEntryKind::NestedFolderbase,
-                lifecycle: QueryLifecycle::Live,
-                bytes: None,
-                executable: None,
-                symlink_target: None,
-                object_id: None,
-                object_version_id: None,
-                folderbase_version_id: None,
-                source: QuerySource::CapturePlan,
-                boundary_reason: Some("nested-folderbase-boundary".to_owned()),
-            }),
+            .map(live_boundary_entry),
     );
     entries.sort_by(compare_entries);
     entries
@@ -1554,31 +1683,9 @@ fn project_live_exclusions(plan: &CapturePlan) -> Vec<QueryExclusion> {
     let mut exclusions = plan
         .ignored_paths()
         .iter()
-        .map(|ignored| QueryExclusion {
-            path: ignored.path().to_owned(),
-            reason: "capture-ignore-policy".to_owned(),
-            kind: None,
-        })
+        .map(live_ignored_exclusion)
         .collect::<Vec<_>>();
-    exclusions.extend(plan.exclusions().iter().map(|exclusion| {
-        QueryExclusion {
-            path: exclusion.path().to_owned(),
-            reason: match exclusion.reason() {
-                CaptureExclusionReason::NestedFolderbaseBoundary => "nested-folderbase-boundary",
-                CaptureExclusionReason::UnsupportedV1 => "unsupported-v1",
-            }
-            .to_owned(),
-            kind: Some(match exclusion.kind() {
-                CaptureExclusionKind::NestedFolderbase => QueryExclusionKind::NestedFolderbase,
-                CaptureExclusionKind::HardLink => QueryExclusionKind::HardLink,
-                CaptureExclusionKind::Fifo => QueryExclusionKind::Fifo,
-                CaptureExclusionKind::Socket => QueryExclusionKind::Socket,
-                CaptureExclusionKind::BlockDevice => QueryExclusionKind::BlockDevice,
-                CaptureExclusionKind::CharacterDevice => QueryExclusionKind::CharacterDevice,
-                CaptureExclusionKind::OtherSpecial => QueryExclusionKind::OtherSpecial,
-            }),
-        }
-    }));
+    exclusions.extend(plan.exclusions().iter().map(live_plan_exclusion));
     exclusions.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
     exclusions
 }
@@ -1684,6 +1791,7 @@ mod tests {
     use super::{
         FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, PrivateIndexRecord,
         QueryExecution, QueryIndexState, QueryRequest, private_index_content_sha256,
+        private_index_projection_sha256,
     };
 
     const MANIFEST: &[u8] = br#"{
@@ -1750,6 +1858,7 @@ mod tests {
             serde_json::from_slice(&fs::read(root.path().join(INDEX_RECORD)).expect("index bytes"))
                 .expect("private index record");
         record.entries[0].bytes = Some(999_999);
+        record.projection_sha256 = private_index_projection_sha256(&record);
         record.content_sha256 = private_index_content_sha256(&record).expect("coherent forgery");
         fs::write(
             root.path().join(INDEX_RECORD),
