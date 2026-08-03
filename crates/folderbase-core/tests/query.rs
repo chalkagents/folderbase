@@ -499,14 +499,51 @@ fn sealed_cursor_fixture() -> (TempDir, FolderbaseQueryEngine, String, String) {
     (root, engine, cursor, version_id)
 }
 
+fn replace_with_same_bytes_and_metadata(path: &Path) {
+    let original_metadata = fs::metadata(path).expect("original metadata");
+    let original_modified = original_metadata
+        .modified()
+        .expect("original modified time");
+    let replacement = path.with_extension("same-metadata-replacement");
+    let detached = path.with_extension("detached-original");
+    fs::write(&replacement, fs::read(path).expect("original bytes"))
+        .expect("same-bytes replacement");
+    fs::set_permissions(&replacement, original_metadata.permissions())
+        .expect("same replacement permissions");
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .expect("replacement file")
+        .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+        .expect("same replacement modified time");
+    let replacement_metadata = fs::metadata(&replacement).expect("replacement metadata");
+    assert_eq!(replacement_metadata.len(), original_metadata.len());
+    assert_eq!(
+        replacement_metadata.permissions().readonly(),
+        original_metadata.permissions().readonly()
+    );
+    assert_eq!(
+        replacement_metadata.modified().expect("replacement time"),
+        original_modified
+    );
+    fs::rename(path, &detached).expect("detach original file");
+    fs::rename(&replacement, path).expect("install metadata-equivalent replacement");
+    fs::remove_file(detached).expect("remove detached original");
+}
+
 #[test]
 fn live_cursors_bind_protocol_metadata_local_head_bytes_and_identity_projection() {
     let (root, engine, cursor, _) = sealed_cursor_fixture();
     let manifest = root.path().join(".folderbase/manifest.json");
-    let replacement = root.path().join(".folderbase/manifest.replacement");
-    fs::write(&replacement, fs::read(&manifest).expect("manifest bytes"))
-        .expect("replacement manifest");
-    fs::rename(replacement, manifest).expect("change manifest metadata only");
+    replace_with_same_bytes_and_metadata(&manifest);
+    assert!(matches!(
+        engine.run(&live_page(1, Some(&cursor))),
+        Err(QueryError::QuerySnapshotChanged)
+    ));
+
+    let (root, engine, cursor, _) = sealed_cursor_fixture();
+    let head = root.path().join(".folderbase/local/head.json");
+    replace_with_same_bytes_and_metadata(&head);
     assert!(matches!(
         engine.run(&live_page(1, Some(&cursor))),
         Err(QueryError::QuerySnapshotChanged)
