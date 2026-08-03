@@ -874,9 +874,20 @@ try {
         await cursorThenMutate(
           implementation,
           root,
-          () => chmod(path, 0o755),
+          // Windows chmod only models the write bit. Making the fixture
+          // read-only changes the portable metadata fingerprint on every
+          // supported host; an executable-bit-only mutation does not.
+          () => chmod(path, 0o444),
           () => chmod(path, metadata.mode),
         );
+        if (process.platform !== "win32") {
+          await cursorThenMutate(
+            implementation,
+            root,
+            () => chmod(path, 0o755),
+            () => chmod(path, metadata.mode),
+          );
+        }
         await cursorThenMutate(
           implementation,
           root,
