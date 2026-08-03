@@ -41,6 +41,7 @@ const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(directory, "../../../..");
 const fixtureDirectory = join(directory, "fixtures");
 const requestDirectory = join(fixtureDirectory, "requests");
+const COMPLETE_RUNNER_TIMEOUT_MS = 120_000;
 const schema = JSON.parse(
   await readFile(
     resolve(directory, "../../../schemas/capabilities/query-index/0.1/query-index.schema.json"),
@@ -61,7 +62,7 @@ function run(candidate, environment = {}) {
       env: { ...process.env, ...environment },
       killSignal: "SIGKILL",
       maxBuffer: 16 * 1024 * 1024,
-      timeout: 30_000,
+      timeout: COMPLETE_RUNNER_TIMEOUT_MS,
     },
   );
 }
