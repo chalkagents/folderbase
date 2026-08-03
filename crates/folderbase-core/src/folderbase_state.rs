@@ -278,6 +278,18 @@ impl FolderbaseState {
         }
     }
 
+    pub(crate) fn sanitize_private_single_file_namespace(
+        &self,
+        relative: &Path,
+        retained_file: &OsStr,
+    ) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let directory = self.open_dir(&relative)?;
+        let display = self.display_path(&relative);
+        sanitize_private_directory_queued(directory, display, self.access, retained_file)
+    }
+
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
         self.publish_new_with_hook(relative, bytes, || {})
     }
@@ -1366,12 +1378,25 @@ impl FolderbaseState {
     }
 
     pub(crate) fn replace(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
+        self.replace_with_before_publish(relative, bytes, || Ok(()))
+    }
+
+    pub(crate) fn replace_with_before_publish(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+        before_publish: impl FnOnce() -> io::Result<()>,
+    ) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
         let (parent, name) = self.open_parent(&relative)?;
         let display = self.display_path(&relative);
         let temporary = OsString::from(format!(".replace-{}.tmp", Uuid::now_v7()));
         write_staged(&parent, &temporary, bytes, &display)?;
+        if let Err(source) = before_publish() {
+            let _ = parent.remove_file(&temporary);
+            return Err(FolderbaseError::io(display, source));
+        }
         if let Err(source) = parent.rename(&temporary, &parent, &name) {
             let _ = parent.remove_file(&temporary);
             return Err(FolderbaseError::io(display, source));
@@ -1520,6 +1545,33 @@ impl FolderbaseState {
             Ok(()) => sync_directory(&parent, &display),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(FolderbaseError::io(display, source)),
+        }
+    }
+
+    pub(crate) fn remove_private_leaf_durable(&self, relative: &Path) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let (parent, name) = match self.open_parent(&relative) {
+            Ok(parent) => parent,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let display = self.display_path(&relative);
+        match remove_private_leaf(&parent, &name, &display) {
+            Ok(()) => {
+                let parent_display = display.parent().unwrap_or(&display);
+                sync_directory(&parent, parent_display)
+            }
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1691,6 +1743,203 @@ impl FolderbaseState {
 
     fn display_path(&self, relative: &Path) -> PathBuf {
         self.display_root.join(STATE_COMPONENT).join(relative)
+    }
+}
+
+fn sanitize_private_directory_queued(
+    directory: Dir,
+    display: PathBuf,
+    access: StateAccess,
+    retained_file: &OsStr,
+) -> Result<()> {
+    sanitize_private_directory_queued_with_root_entry_visibility(
+        directory,
+        display,
+        access,
+        retained_file,
+        |_, _| true,
+    )
+}
+
+fn sanitize_private_directory_queued_with_root_entry_visibility(
+    directory: Dir,
+    display: PathBuf,
+    access: StateAccess,
+    retained_file: &OsStr,
+    mut root_entry_is_visible: impl FnMut(usize, &OsStr) -> bool,
+) -> Result<()> {
+    let queue_name = OsString::from(format!(".sanitize-{}.tmp", Uuid::now_v7()));
+    let queue_display = display.join(&queue_name);
+    directory
+        .create_dir_with(&queue_name, &private_directory_builder())
+        .map_err(|source| FolderbaseError::io(&queue_display, source))?;
+    let queue = open_directory_nofollow(&directory, &queue_name, &queue_display, access)
+        .map_err(|source| FolderbaseError::io(&queue_display, source))?;
+    sync_directory(&directory, &display)?;
+
+    let mut pass = 0_usize;
+    loop {
+        let mut root_changed = false;
+        for entry in directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&display, source))?
+        {
+            let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
+            let name = entry.file_name();
+            if !root_entry_is_visible(pass, &name) {
+                continue;
+            }
+            if name == queue_name {
+                continue;
+            }
+            let child_display = display.join(&name);
+            let metadata = match directory.symlink_metadata(&name) {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(FolderbaseError::io(&child_display, source)),
+            };
+            if retained_file == name.as_os_str() && private_metadata_is_regular_file(&metadata) {
+                continue;
+            }
+            if private_metadata_is_directory(&metadata) {
+                let queued_name = private_sanitize_work_name();
+                directory
+                    .rename(&name, &queue, &queued_name)
+                    .map_err(|source| FolderbaseError::io(&child_display, source))?;
+            } else {
+                remove_private_leaf(&directory, &name, &child_display)?;
+            }
+            root_changed = true;
+        }
+        if !root_changed {
+            break;
+        }
+        sync_directory(&directory, &display)?;
+        sync_directory(&queue, &queue_display)?;
+        pass = pass.saturating_add(1);
+    }
+
+    drain_private_sanitize_queue(&queue, &queue_display, access)?;
+    directory
+        .remove_dir(&queue_name)
+        .map_err(|source| FolderbaseError::io(&queue_display, source))?;
+    sync_directory(&directory, &display)
+}
+
+fn drain_private_sanitize_queue(
+    queue: &Dir,
+    queue_display: &Path,
+    access: StateAccess,
+) -> Result<()> {
+    loop {
+        let mut observed = false;
+        for entry in queue
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(queue_display, source))?
+        {
+            observed = true;
+            let entry = entry.map_err(|source| FolderbaseError::io(queue_display, source))?;
+            let name = entry.file_name();
+            let work_display = queue_display.join(&name);
+            let metadata = match queue.symlink_metadata(&name) {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(FolderbaseError::io(&work_display, source)),
+            };
+            if !private_metadata_is_directory(&metadata) {
+                remove_private_leaf(queue, &name, &work_display)?;
+                continue;
+            }
+            let work = open_directory_nofollow(queue, &name, &work_display, access)
+                .map_err(|source| FolderbaseError::io(&work_display, source))?;
+            loop {
+                let mut work_observed = false;
+                let mut moved_directory = false;
+                for child in work
+                    .read_dir(".")
+                    .map_err(|source| FolderbaseError::io(&work_display, source))?
+                {
+                    work_observed = true;
+                    let child =
+                        child.map_err(|source| FolderbaseError::io(&work_display, source))?;
+                    let child_name = child.file_name();
+                    let child_display = work_display.join(&child_name);
+                    let child_metadata = match work.symlink_metadata(&child_name) {
+                        Ok(metadata) => metadata,
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                        Err(source) => return Err(FolderbaseError::io(&child_display, source)),
+                    };
+                    if private_metadata_is_directory(&child_metadata) {
+                        let queued_name = private_sanitize_work_name();
+                        work.rename(&child_name, queue, &queued_name)
+                            .map_err(|source| FolderbaseError::io(&child_display, source))?;
+                        moved_directory = true;
+                    } else {
+                        remove_private_leaf(&work, &child_name, &child_display)?;
+                    }
+                }
+                if !work_observed {
+                    break;
+                }
+                if moved_directory {
+                    sync_directory(queue, queue_display)?;
+                }
+                sync_directory(&work, &work_display)?;
+            }
+            drop(work);
+            queue
+                .remove_dir(&name)
+                .map_err(|source| FolderbaseError::io(&work_display, source))?;
+        }
+        if !observed {
+            return Ok(());
+        }
+        sync_directory(queue, queue_display)?;
+    }
+}
+
+fn private_sanitize_work_name() -> OsString {
+    OsString::from(format!("work-{}", Uuid::now_v7()))
+}
+
+fn private_metadata_is_regular_file(metadata: &cap_std::fs::Metadata) -> bool {
+    metadata.is_file() && !private_metadata_is_link_or_reparse(metadata)
+}
+
+fn private_metadata_is_directory(metadata: &cap_std::fs::Metadata) -> bool {
+    metadata.is_dir() && !private_metadata_is_link_or_reparse(metadata)
+}
+
+fn private_metadata_is_link_or_reparse(metadata: &cap_std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn remove_private_leaf(parent: &Dir, name: &OsStr, display: &Path) -> Result<()> {
+    match parent.remove_file(name) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            parent
+                .remove_dir(name)
+                .map_err(|source| FolderbaseError::io(display, source))
+        }
+        Err(source) => Err(FolderbaseError::io(display, source)),
     }
 }
 
@@ -2136,7 +2385,7 @@ fn verify_open_regular_file(
     #[cfg(not(unix))]
     let _ = executable;
     verify_open_regular_metadata(file, bytes, display)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use cap_std::fs::PermissionsExt;
         let observed = file
@@ -2473,6 +2722,47 @@ mod tests {
     const RESTORE_STAGE: &str = ".folderbase/transactions/restore-stage";
     const RESTORE_DESTINATION: &str = "project/restored.bin";
 
+    #[test]
+    fn private_namespace_sanitizer_rescans_after_a_root_entry_is_skipped() {
+        let fixture = tempdir().expect("fixture");
+        let index_root = fixture.path().join(".folderbase/local/query-index-v1");
+        fs::create_dir_all(&index_root).expect("private namespace");
+        fs::write(index_root.join("index.json"), b"retained\n").expect("retained record");
+        fs::write(index_root.join("visible-junk"), b"junk\n").expect("visible crash junk");
+        fs::write(index_root.join("skipped-junk"), b"junk\n").expect("crash junk");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let directory = state
+            .open_dir(Path::new("local/query-index-v1"))
+            .expect("private directory capability");
+        let mut skipped = false;
+
+        sanitize_private_directory_queued_with_root_entry_visibility(
+            directory,
+            index_root.clone(),
+            StateAccess::Mutable,
+            OsStr::new("index.json"),
+            |pass, name| {
+                if pass == 0 && name == OsStr::new("skipped-junk") {
+                    skipped = true;
+                    false
+                } else {
+                    true
+                }
+            },
+        )
+        .expect("sanitize private namespace");
+
+        assert!(
+            skipped,
+            "the seam must omit original junk on the first pass"
+        );
+        let names = fs::read_dir(&index_root)
+            .expect("sanitized namespace")
+            .map(|entry| entry.expect("namespace entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [OsString::from("index.json")]);
+    }
+
     fn prepared_workspace_restore(
         expected: &[u8],
         executable: bool,
@@ -2503,6 +2793,69 @@ mod tests {
             )
             .expect("workspace restore");
         (fixture, state, digest)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_private_leaf_removal_unlinks_a_directory_link_without_following_it() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
+        let outside = tempdir().expect("outside target");
+        fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+        let link = fixture.path().join(".folderbase/local/query-index-v1");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).expect("directory link");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), &link)
+            .expect("GitHub Windows runner can create directory symlinks");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+        state
+            .remove_private_leaf_durable(Path::new(".folderbase/local/query-index-v1"))
+            .expect("unlink exact private leaf");
+
+        assert!(!link.exists());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).expect("outside sentinel remains"),
+            b"outside\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_private_leaf_removal_unlinks_a_windows_junction_without_following_it() {
+        use std::process::Command;
+
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
+        let outside = tempdir().expect("outside target");
+        fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+        let link = fixture.path().join(".folderbase/local/query-index-v1");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .expect("create directory junction");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+        state
+            .remove_private_leaf_durable(Path::new(".folderbase/local/query-index-v1"))
+            .expect("unlink exact private leaf");
+
+        assert!(!link.exists());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).expect("outside sentinel remains"),
+            b"outside\n"
+        );
     }
 
     #[cfg(unix)]

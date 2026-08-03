@@ -2481,7 +2481,9 @@ fn ensure_same_plan(
     {
         return Err(FolderbaseCaptureError::PlanStoreMismatch);
     }
-    if expected.current_local_head() != actual.current_local_head() {
+    if expected.current_local_head().map(JournalHead::from)
+        != actual.current_local_head().map(JournalHead::from)
+    {
         return Err(FolderbaseCaptureError::LocalHeadChanged);
     }
     if expected.root_manifest_sha256() != actual.root_manifest_sha256()

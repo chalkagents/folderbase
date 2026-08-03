@@ -27,6 +27,7 @@ mod model;
 mod physical_identity;
 mod portable_wire_path;
 mod protocol_upgrade;
+mod query;
 mod reorganization;
 mod root_attestation;
 mod sharing;
@@ -84,6 +85,11 @@ pub use model::{
 pub use protocol_upgrade::{
     ProtocolUpgradePlan, ProtocolUpgradePlanDigest, ProtocolUpgradeResult, apply_protocol_upgrade,
     plan_protocol_upgrade,
+};
+pub use query::{
+    FolderbaseQueryEngine, QueryEntry, QueryEntryKind, QueryError, QueryExclusion,
+    QueryExclusionKind, QueryExecution, QueryExplain, QueryIndexRebuildResult, QueryIndexState,
+    QueryIndexStatus, QueryLifecycle, QueryPageResult, QueryRequest, QueryResult, QuerySource,
 };
 pub use reorganization::{
     AnalysisScope, ConsequentialAnswer, ConsequentialAnswerType, ConsequentialQuestion,

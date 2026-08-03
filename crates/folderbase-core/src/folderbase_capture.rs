@@ -368,6 +368,8 @@ pub struct CaptureLocalHead {
     version_id: String,
     version_sha256: String,
     authority: LocalHeadAuthority,
+    encoded_sha256: String,
+    observed: CaptureMetadataFingerprint,
 }
 
 /// The closed meaning of one Local Head authority digest.
@@ -459,6 +461,14 @@ impl CaptureLocalHead {
     pub fn authority(&self) -> &LocalHeadAuthority {
         &self.authority
     }
+
+    pub(crate) fn encoded_sha256(&self) -> &str {
+        &self.encoded_sha256
+    }
+
+    pub(crate) fn observed(&self) -> &CaptureMetadataFingerprint {
+        &self.observed
+    }
 }
 
 /// An opaque, read-only metadata inventory bound to one physical root.
@@ -466,6 +476,7 @@ impl CaptureLocalHead {
 pub struct CapturePlan {
     root_attestation: FolderbaseRootAttestation,
     root_manifest_bytes: u64,
+    root_manifest_observed: CaptureMetadataFingerprint,
     folderbase_version_protocol: &'static str,
     current_local_head: Option<CaptureLocalHead>,
     ignore_policy_sha256: String,
@@ -493,6 +504,10 @@ impl CapturePlan {
 
     pub fn root_manifest_bytes(&self) -> u64 {
         self.root_manifest_bytes
+    }
+
+    pub(crate) fn root_manifest_observed(&self) -> &CaptureMetadataFingerprint {
+        &self.root_manifest_observed
     }
 
     pub(crate) fn folderbase_version_protocol(&self) -> &'static str {
@@ -629,11 +644,24 @@ pub enum FolderbaseCaptureError {
 }
 
 /// Read-only handle for planning Folderbase Version capture.
-#[derive(Debug)]
 pub struct FolderbaseVersionStore {
     pub(crate) root_attestation: FolderbaseRootAttestation,
     pub(crate) root_instance_authority: RootInstanceAuthority,
     pub(crate) protocol_profile: ManifestProtocolProfile,
+    root_capability: Dir,
+    root_physical_identity: PhysicalIdentity,
+    restore_state: FolderbaseState,
+}
+
+impl fmt::Debug for FolderbaseVersionStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FolderbaseVersionStore")
+            .field("root_attestation", &self.root_attestation)
+            .field("root_instance_authority", &self.root_instance_authority)
+            .field("protocol_profile", &self.protocol_profile)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FolderbaseVersionStore {
@@ -675,15 +703,32 @@ impl FolderbaseVersionStore {
             &root_capability,
         )?;
         verify_root_capability(&root_capability, &canonical_root)?;
+        let root_physical_identity = directory_identity(&root_capability, &canonical_root)?;
+        let restore_state = FolderbaseState::open_existing_read_only(&canonical_root)?;
+        restore_state.verify_root_identity(&root_physical_identity)?;
         Ok(Self {
             root_attestation,
             root_instance_authority,
             protocol_profile,
+            root_capability,
+            root_physical_identity,
+            restore_state,
         })
+    }
+
+    pub(crate) fn root_physical_identity(&self) -> &PhysicalIdentity {
+        &self.root_physical_identity
     }
 
     /// Plan a bounded metadata inventory without reading ordinary file bytes.
     pub fn plan_capture(&self) -> Result<CapturePlan, FolderbaseCaptureError> {
+        self.plan_capture_with_after_protocol_observation(|| ())
+    }
+
+    fn plan_capture_with_after_protocol_observation<G>(
+        &self,
+        after_protocol_observation: impl FnOnce() -> G,
+    ) -> Result<CapturePlan, FolderbaseCaptureError> {
         let (current, _, current_profile) =
             attest_folderbase_root_with_profile(&self.root_attestation.root)?;
         if current.root_instance_sha256 != self.root_attestation.root_instance_sha256 {
@@ -692,7 +737,13 @@ impl FolderbaseVersionStore {
         if current_profile != self.protocol_profile {
             return Err(RootAttestationError::RootChangedDuringAttestation.into());
         }
-        let root_capability = open_planning_root(&current.root)?;
+        let root_capability =
+            self.root_capability
+                .try_clone()
+                .map_err(|source| FolderbaseCaptureError::Io {
+                    path: current.root.clone(),
+                    source,
+                })?;
         verify_root_capability(&root_capability, &current.root)?;
         let legacy_root_files = current_profile.requires_legacy_root_files();
         if legacy_root_files {
@@ -702,19 +753,28 @@ impl FolderbaseVersionStore {
                 Path::new(".folderbaseignore"),
             )?;
         }
-        let root_manifest_bytes = protocol_file_length(
+        let root_manifest_observed = protocol_file_observation(
             &root_capability,
             &current.root,
             Path::new(".folderbase/manifest.json"),
         )?;
+        let root_manifest_bytes = root_manifest_observed.bytes;
         let ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let current_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
-        let restore_authorities = read_restore_authorities(
+        let protocol_observation_guard = after_protocol_observation();
+        let restore_authority_records = read_restore_authority_records_unchecked(
             &current,
             &self.root_instance_authority,
+            &self.restore_state,
             MAX_RESTORE_AUTHORITIES,
         )?;
+        drop(protocol_observation_guard);
+        self.restore_state.verify_still_attached()?;
+        let restore_authorities = RestoreAuthorityRegistry {
+            state: &self.restore_state,
+            records: restore_authority_records,
+        };
 
         let mut planner = CapturePlanner::new(
             &current.root,
@@ -749,7 +809,7 @@ impl FolderbaseVersionStore {
         let final_ignore = read_ignore_policy(&root_capability, &current.root, &current_profile)?;
         let final_local_head =
             read_local_head(&current, &self.root_instance_authority, &root_capability)?;
-        let final_manifest_bytes = protocol_file_length(
+        let final_manifest_observed = protocol_file_observation(
             &root_capability,
             &current.root,
             Path::new(".folderbase/manifest.json"),
@@ -761,7 +821,7 @@ impl FolderbaseVersionStore {
             || final_ignore.sha256 != ignore.sha256
             || final_attestation != current
             || final_profile != current_profile
-            || final_manifest_bytes != root_manifest_bytes
+            || final_manifest_observed != root_manifest_observed
         {
             return Err(FolderbaseCaptureError::PlanningStateChanged);
         }
@@ -769,6 +829,7 @@ impl FolderbaseVersionStore {
         Ok(CapturePlan {
             root_attestation: current,
             root_manifest_bytes,
+            root_manifest_observed,
             folderbase_version_protocol: current_profile.folderbase_version_protocol(),
             current_local_head,
             ignore_policy_sha256: ignore.sha256,
@@ -782,7 +843,7 @@ impl FolderbaseVersionStore {
 struct CapturePlanner<'a> {
     root: &'a Path,
     ignore: &'a IgnorePolicy,
-    restore_authorities: RestoreAuthorityRegistry,
+    restore_authorities: RestoreAuthorityRegistry<'a>,
     legacy_root_files: bool,
     entries: Vec<CapturePlanEntry>,
     exclusions: Vec<CapturePlanExclusion>,
@@ -795,12 +856,12 @@ struct ObservedRestoreAuthority {
     encoded: Vec<u8>,
 }
 
-struct RestoreAuthorityRegistry {
-    state: FolderbaseState,
+struct RestoreAuthorityRegistry<'a> {
+    state: &'a FolderbaseState,
     records: Vec<ObservedRestoreAuthority>,
 }
 
-impl RestoreAuthorityRegistry {
+impl RestoreAuthorityRegistry<'_> {
     fn validated_link_commitment(
         &self,
         workspace_identity: &str,
@@ -809,7 +870,7 @@ impl RestoreAuthorityRegistry {
         display_path: &Path,
     ) -> Result<CaptureLinkCommitment, FolderbaseCaptureError> {
         validated_link_commitment(
-            &self.state,
+            self.state,
             &self.records,
             workspace_identity,
             link_count,
@@ -908,25 +969,29 @@ pub(crate) fn restore_authority_count(
     root_instance_authority: &RootInstanceAuthority,
     maximum: usize,
 ) -> Result<usize, FolderbaseCaptureError> {
-    Ok(
-        read_restore_authorities(root_attestation, root_instance_authority, maximum)?
-            .records
-            .len(),
-    )
-}
-
-fn read_restore_authorities(
-    root_attestation: &FolderbaseRootAttestation,
-    root_instance_authority: &RootInstanceAuthority,
-    maximum: usize,
-) -> Result<RestoreAuthorityRegistry, FolderbaseCaptureError> {
     let state = FolderbaseState::open_existing_read_only(&root_attestation.root)?;
     let records =
         read_restore_authority_records(root_attestation, root_instance_authority, &state, maximum)?;
-    Ok(RestoreAuthorityRegistry { state, records })
+    Ok(records.len())
 }
 
 fn read_restore_authority_records(
+    root_attestation: &FolderbaseRootAttestation,
+    root_instance_authority: &RootInstanceAuthority,
+    state: &FolderbaseState,
+    maximum: usize,
+) -> Result<Vec<ObservedRestoreAuthority>, FolderbaseCaptureError> {
+    let records = read_restore_authority_records_unchecked(
+        root_attestation,
+        root_instance_authority,
+        state,
+        maximum,
+    )?;
+    state.verify_still_attached()?;
+    Ok(records)
+}
+
+fn read_restore_authority_records_unchecked(
     root_attestation: &FolderbaseRootAttestation,
     root_instance_authority: &RootInstanceAuthority,
     state: &FolderbaseState,
@@ -974,7 +1039,6 @@ fn read_restore_authority_records(
             return Err(FolderbaseCaptureError::RestoreAuthorityMaintenanceRequired { maximum });
         }
     }
-    state.verify_still_attached()?;
     Ok(records)
 }
 
@@ -1090,7 +1154,7 @@ impl<'a> CapturePlanner<'a> {
     fn new(
         root: &'a Path,
         ignore: &'a IgnorePolicy,
-        restore_authorities: RestoreAuthorityRegistry,
+        restore_authorities: RestoreAuthorityRegistry<'a>,
         legacy_root_files: bool,
     ) -> Self {
         Self {
@@ -1826,6 +1890,12 @@ fn read_local_head(
     }
     let mut file = open_regular_nofollow(&local, Path::new("head.json"))
         .map_err(|_| FolderbaseCaptureError::UnsafeLocalHead)?;
+    let observed = CaptureMetadataFingerprint::from_std_file(&file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        }
+    })?;
     let mut encoded = Vec::new();
     file.by_ref()
         .take(MAX_LOCAL_HEAD_BYTES + 1)
@@ -1839,6 +1909,16 @@ fn read_local_head(
             maximum_bytes: MAX_LOCAL_HEAD_BYTES,
         });
     }
+    let final_observed = CaptureMetadataFingerprint::from_std_file(&file).map_err(|source| {
+        FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        }
+    })?;
+    if final_observed != observed {
+        return Err(FolderbaseCaptureError::PlanningStateChanged);
+    }
+    let encoded_sha256 = format!("{:x}", Sha256::digest(&encoded));
     let head: LocalHeadWire = serde_json::from_slice(&encoded)
         .map_err(|error| FolderbaseCaptureError::InvalidLocalHead(error.to_string()))?;
     let (folderbase_id, root_instance_sha256, version_id, version_sha256, authority) = match head {
@@ -1899,6 +1979,8 @@ fn read_local_head(
         version_id,
         version_sha256,
         authority,
+        encoded_sha256,
+        observed,
     }))
 }
 
@@ -2027,11 +2109,11 @@ fn require_regular_marker(
     Ok(())
 }
 
-fn protocol_file_length(
+fn protocol_file_observation(
     root_directory: &Dir,
     root: &Path,
     relative: &Path,
-) -> Result<u64, FolderbaseCaptureError> {
+) -> Result<CaptureMetadataFingerprint, FolderbaseCaptureError> {
     let path = root.join(relative);
     let state_directory = root_directory
         .open_dir_nofollow(".folderbase")
@@ -2048,11 +2130,15 @@ fn protocol_file_length(
         })?;
     let metadata = file
         .metadata()
-        .map_err(|source| FolderbaseCaptureError::Io { path, source })?;
+        .map_err(|source| FolderbaseCaptureError::Io {
+            path: path.clone(),
+            source,
+        })?;
     if !metadata.is_file() {
         return Err(FolderbaseCaptureError::RequiredMarker(root.join(relative)));
     }
-    Ok(metadata.len())
+    CaptureMetadataFingerprint::from_std_file(&file)
+        .map_err(|source| FolderbaseCaptureError::Io { path, source })
 }
 
 fn open_regular_nofollow(root: &Dir, relative: &Path) -> io::Result<fs::File> {
@@ -2065,6 +2151,58 @@ fn open_regular_nofollow(root: &Dir, relative: &Path) -> io::Result<fs::File> {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+
+    const MANIFEST: &[u8] = br#"{
+      "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+      "protocol_version": "0.5.0",
+      "folderbase": {
+        "id": "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+        "name": "Capture capability fixture",
+        "kind": "project",
+        "status": "active",
+        "created_at": "2026-08-04T00:00:00Z"
+      },
+      "adapters": [],
+      "policies": {
+        "availability": "keep_local",
+        "structural_changes": "approve",
+        "archive": "manual",
+        "cloud_sync": "disabled",
+        "capture_ignore": {"format": "folderbase-capture-ignore-v1", "rules": []}
+      }
+    }"#;
+
+    struct AmbientRootSwap {
+        visible: PathBuf,
+        detached: PathBuf,
+        replacement: PathBuf,
+    }
+
+    impl AmbientRootSwap {
+        fn activate(visible: &Path, replacement: &Path) -> Self {
+            let detached = visible.with_file_name("detached-capture-root");
+            fs::rename(visible, &detached).expect("detach capture root");
+            fs::rename(replacement, visible).expect("install replacement root");
+            Self {
+                visible: visible.to_path_buf(),
+                detached,
+                replacement: replacement.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for AmbientRootSwap {
+        fn drop(&mut self) {
+            fs::rename(&self.visible, &self.replacement).expect("remove replacement root");
+            fs::rename(&self.detached, &self.visible).expect("restore capture root");
+        }
+    }
+
+    fn initialize_root(root: &Path) {
+        fs::create_dir(root).expect("Folderbase root");
+        fs::create_dir(root.join(".folderbase")).expect("state");
+        fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -2093,5 +2231,59 @@ mod capability_tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_restore_authorities_never_cross_an_ambient_root_aba() {
+        let owner = tempfile::tempdir().expect("root owner");
+        let visible = owner.path().join("workspace");
+        let replacement = owner.path().join("replacement");
+        initialize_root(&visible);
+        initialize_root(&replacement);
+        let opening_file = visible.join("ordinary.md");
+        fs::write(&opening_file, b"opening bytes\n").expect("opening file");
+        let store = FolderbaseVersionStore::open(&visible).expect("version store");
+
+        let transaction_id = "fbrestore_019f0000-0000-7000-8000-000000000077";
+        let stage = replacement.join(restore_stage_path(transaction_id));
+        fs::create_dir_all(stage.parent().expect("stage parent")).expect("restore transaction");
+        fs::hard_link(&opening_file, replacement.join("ordinary.md"))
+            .expect("replacement workspace hard link");
+        fs::hard_link(&opening_file, &stage).expect("replacement private authority link");
+        let file = fs::File::open(&opening_file).expect("opening file identity");
+        let record = RestoreAuthorityRecord {
+            format: RESTORE_AUTHORITY_FORMAT_V1.to_owned(),
+            folderbase_id: store.root_attestation.folderbase_id.clone(),
+            root_instance_sha256: store.root_attestation.root_instance_sha256.clone(),
+            transaction_id: transaction_id.to_owned(),
+            workspace_path: "ordinary.md".to_owned(),
+            private_stage_path: restore_stage_path(transaction_id)
+                .to_str()
+                .expect("UTF-8 stage")
+                .to_owned(),
+            published_identity_sha256: stable_file_identity_sha256(&file)
+                .expect("opening identity"),
+        };
+        fs::write(
+            replacement.join(restore_authority_record_path(transaction_id)),
+            serde_json::to_vec(&record).expect("authority record"),
+        )
+        .expect("B-only restore authority");
+
+        let plan = store
+            .plan_capture_with_after_protocol_observation(|| {
+                AmbientRootSwap::activate(&visible, &replacement)
+            })
+            .expect("capture opening root");
+
+        assert!(
+            plan.entries()
+                .iter()
+                .all(|entry| entry.path() != "ordinary.md")
+        );
+        assert!(plan.exclusions().iter().any(|exclusion| {
+            exclusion.path() == "ordinary.md" && exclusion.kind() == CaptureExclusionKind::HardLink
+        }));
     }
 }

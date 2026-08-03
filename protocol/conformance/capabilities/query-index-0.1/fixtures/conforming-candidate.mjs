@@ -49,6 +49,48 @@ function portableCompare(left, right) {
   return Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8"));
 }
 
+const LIFECYCLE_RANK = new Map([["live", 0], ["deleted", 1]]);
+const KIND_RANK = new Map([
+  ["directory", 0],
+  ["regular_file", 1],
+  ["symlink", 2],
+  ["nested_folderbase", 3],
+]);
+const SOURCE_RANK = new Map([["capture_plan", 0], ["folderbase_version", 1]]);
+
+function nullableBytesCompare(left, right) {
+  if (left === null && right === null) return 0;
+  if (left === null) return -1;
+  if (right === null) return 1;
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function queryRowKey(entry) {
+  return {
+    path: entry.path,
+    lifecycle: entry.lifecycle,
+    kind: entry.kind,
+    object_id: entry.object_id ?? null,
+    object_version_id: entry.object_version_id ?? null,
+    folderbase_version_id: entry.folderbase_version_id ?? null,
+    source: entry.source,
+    boundary_reason: entry.boundary_reason ?? null,
+  };
+}
+
+function queryRowCompare(leftEntry, rightEntry) {
+  const left = queryRowKey(leftEntry);
+  const right = queryRowKey(rightEntry);
+  return portableCompare(left, right) ||
+    LIFECYCLE_RANK.get(left.lifecycle) - LIFECYCLE_RANK.get(right.lifecycle) ||
+    KIND_RANK.get(left.kind) - KIND_RANK.get(right.kind) ||
+    nullableBytesCompare(left.object_id, right.object_id) ||
+    nullableBytesCompare(left.object_version_id, right.object_version_id) ||
+    nullableBytesCompare(left.folderbase_version_id, right.folderbase_version_id) ||
+    SOURCE_RANK.get(left.source) - SOURCE_RANK.get(right.source) ||
+    nullableBytesCompare(left.boundary_reason, right.boundary_reason);
+}
+
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -209,7 +251,7 @@ async function liveObservation(root) {
     exclusions: exclusions.sort(portableCompare),
   }));
   return {
-    entries: entries.sort(portableCompare),
+    entries: entries.sort(queryRowCompare),
     exclusions: exclusions.sort(portableCompare),
     generation,
     rootIdentity,
@@ -284,7 +326,7 @@ async function historicalObservation(root, versionId) {
     }
   }
   return {
-    entries: entries.sort(portableCompare),
+    entries: entries.sort(queryRowCompare),
     exclusions: version.exclusions,
     generation: hash(`${resolve(root)}\0${versionId}\0${verified.canonicalDigest}`),
     rootIdentity: await rootInstanceIdentity(root, version.folderbase_id),
@@ -314,12 +356,12 @@ function applies(entry, filters) {
   return true;
 }
 
-function encodeCursor(rootIdentity, requestSha256, generation, lastPath) {
+function encodeCursor(rootIdentity, requestSha256, generation, lastRowKey) {
   const value = Buffer.from(JSON.stringify({
     root: rootIdentity,
     request_sha256: requestSha256,
     generation,
-    last_path: lastPath,
+    last_row_key: lastRowKey,
   })).toString("base64url");
   return `fbq1_${value}`;
 }
@@ -378,7 +420,7 @@ async function query(command, root) {
   const normalized = normalizeQueryRequest(request);
   const requestSha256 = queryRequestSha256(request);
   const observed = await observation(root, request.scope);
-  let lastPath = null;
+  let lastRowKey = null;
   if (request.page.cursor) {
     const cursor = decodeCursor(request.page.cursor);
     if (cursor.root !== observed.rootIdentity || cursor.request_sha256 !== requestSha256) {
@@ -389,13 +431,15 @@ async function query(command, root) {
       writeAttention("the query observation changed; restart without a cursor");
       return;
     }
-    lastPath = cursor.last_path;
+    lastRowKey = cursor.last_row_key;
   }
   const matching = observed.entries
     .filter((entry) => applies(entry, normalized.filters))
-    .filter((entry) => lastPath === null || Buffer.compare(Buffer.from(entry.path), Buffer.from(lastPath)) > 0);
+    .filter((entry) => lastRowKey === null || queryRowCompare(entry, lastRowKey) > 0);
   const pageEntries = matching.slice(0, request.page.limit);
   const hasMore = matching.length > pageEntries.length;
+  const returnedExclusions = observed.exclusions.slice(0, 1000);
+  const exclusionsTruncated = observed.exclusions.length > returnedExclusions.length;
   const index = await indexState(root, observed.generation);
   if (command === "explain") {
     writeSuccess({
@@ -406,12 +450,13 @@ async function query(command, root) {
       observation_generation: observed.generation,
       normalized_request: normalized,
       scope_source: observed.scopeSource,
-      ordering: "portable_path_utf8_bytes_ascending",
+      ordering: "query_row_key_v1",
       filter_algebra: "families_and_values_or",
       ordinary_content_access: "metadata_only",
       index_strategy: index.state === "fresh" ? "private_index" : "bounded_scan",
       matched: matching.length,
-      excluded: observed.exclusions,
+      excluded: returnedExclusions,
+      excluded_truncated: exclusionsTruncated,
     });
     return;
   }
@@ -423,14 +468,19 @@ async function query(command, root) {
     observation_generation: observed.generation,
     execution: index.state === "fresh" ? "private_index" : "bounded_scan",
     entries: pageEntries,
-    exclusions: observed.exclusions,
-    exclusions_truncated: false,
+    exclusions: returnedExclusions,
+    exclusions_truncated: exclusionsTruncated,
     page: {
       limit: request.page.limit,
       returned: pageEntries.length,
       has_more: hasMore,
       next_cursor: hasMore
-        ? encodeCursor(observed.rootIdentity, requestSha256, observed.generation, pageEntries.at(-1).path)
+        ? encodeCursor(
+          observed.rootIdentity,
+          requestSha256,
+          observed.generation,
+          queryRowKey(pageEntries.at(-1)),
+        )
         : null,
     },
   });

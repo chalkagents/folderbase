@@ -642,6 +642,31 @@ try {
       },
     },
     {
+      id: "query-total-row-key-pages-same-path-recreation-without-loss",
+      run() {
+        const request = (limit, cursor) => ({
+          format: "folderbase-query-request-v1",
+          scope: { kind: "historical", folderbase_version_id: VERSION_ID },
+          filters: { paths: ["data/table.csv"] },
+          page: { limit, ...(cursor ? { cursor } : {}) },
+        });
+        const all = query(implementation, "run", root, request(1000));
+        const first = query(implementation, "run", root, request(1));
+        assert.ok(first.page.next_cursor);
+        const second = query(
+          implementation,
+          "run",
+          root,
+          request(1, first.page.next_cursor),
+        );
+        assert.equal(second.page.next_cursor, null);
+        assert.deepEqual([...first.entries, ...second.entries], all.entries);
+        assert.deepEqual(paths(all), ["data/table.csv", "data/table.csv"]);
+        assert.deepEqual(all.entries.map(({ lifecycle }) => lifecycle), ["live", "deleted"]);
+        assert.notEqual(all.entries[0].object_id, all.entries[1].object_id);
+      },
+    },
+    {
       id: "query-invalid-and-tampered-historical-versions-are-typed-operational-errors",
       async run() {
         queryError(implementation, root, historicalRequest(MISSING_VERSION_ID), "query_scope_version_missing");
@@ -747,10 +772,37 @@ try {
       async run() {
         const output = query(implementation, "explain", root, await fixtureRequest("live-all.json"));
         assert.equal(output.scope_source, "capture_plan");
-        assert.equal(output.ordering, "portable_path_utf8_bytes_ascending");
+        assert.equal(output.ordering, "query_row_key_v1");
         assert.equal(output.ordinary_content_access, "metadata_only");
         assert.ok(output.excluded.some((item) => item.reason === "capture-ignore-policy"));
         assert.ok(output.excluded.some((item) => item.reason === "nested-folderbase-boundary"));
+      },
+    },
+    {
+      id: "query-and-explain-bound-ordered-exclusions-with-truncation-signals",
+      async run() {
+        const ignorePath = join(root, ".folderbaseignore");
+        const exactIgnore = await readFile(ignorePath);
+        const bulkPaths = Array.from(
+          { length: 1005 },
+          (_, index) => join(root, `bulk-${String(index).padStart(4, "0")}.tmp`),
+        );
+        try {
+          await writeFile(ignorePath, `${exactIgnore.toString("utf8")}\nbulk-*.tmp\n`);
+          await Promise.all(bulkPaths.map((path) => writeFile(path, "ignored\n")));
+          const output = query(implementation, "run", root, liveRequest(1000));
+          assert.equal(output.exclusions.length, 1000);
+          assert.equal(output.exclusions_truncated, true);
+          assert.equal(output.exclusions[0].path, "bulk-0000.tmp");
+          assert.equal(output.exclusions.at(-1).path, "bulk-0999.tmp");
+          const explained = query(implementation, "explain", root, liveRequest(1000));
+          assert.equal(explained.excluded.length, 1000);
+          assert.equal(explained.excluded_truncated, true);
+          assert.deepEqual(explained.excluded, output.exclusions);
+        } finally {
+          await Promise.all(bulkPaths.map((path) => rm(path, { force: true })));
+          await writeFile(ignorePath, exactIgnore);
+        }
       },
     },
     {

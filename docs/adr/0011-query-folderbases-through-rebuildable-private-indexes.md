@@ -88,11 +88,23 @@ does not delegate portability to the host ICU version. Table provenance,
 license notices, fixed artifact digests, and maintainers' generators live with
 the capability runner.
 
-Rows use ascending raw UTF-8 portable-path byte order. Because Folderbase
-Version portability already rejects exact, NFC, and case-fold collisions, this
-is stable without normalizing the displayed spelling. Exclusions use the same
-ordering. Page limits are bounded. Pages of size 1, 2, or N must concatenate to
-the same ordered logical result without skips or duplicates.
+Rows use the total `query_row_key_v1` order. Compare the raw UTF-8 portable-path
+bytes first; then lifecycle (`live`, `deleted`); kind (`directory`,
+`regular_file`, `symlink`, `nested_folderbase`); nullable Object ID, Object
+Version ID, and Folderbase Version ID (null before a present value, present
+values by raw UTF-8 bytes); source (`capture_plan`, `folderbase_version`); and
+nullable boundary reason by the same null/byte rule. Folderbase Version
+portability rejects path aliases but deliberately permits a current binding and
+an older Tombstone at the same path after recreation, so path alone is not a
+total row key. Exclusions remain ordered by ascending raw UTF-8 path bytes. Page
+limits are bounded. Pages of size 1, 2, or N must concatenate to the same
+ordered logical result without skips or duplicates.
+
+Run and explain each return at most 1,000 exclusions, preserving the exclusion
+path order above. `exclusions_truncated` on a result and `excluded_truncated`
+on an explanation are true exactly when more exclusions belonged to the bound
+observation. Truncation never changes the observation generation or matched-row
+count.
 
 The normalized request fills every filter family, deduplicates and byte-sorts
 set values, normalizes absent byte bounds to `null`, and omits the cursor. Its
@@ -115,7 +127,7 @@ normalized request.
 
 Cursors are opaque values. Their implementation-private payload binds the exact
 Folderbase Root identity, normalized request digest, observation generation,
-and final portable-path sort key. It may additionally authenticate that
+and final complete `query_row_key_v1` sort key. It may additionally authenticate that
 binding. Callers may persist and round-trip a cursor but cannot inspect it for
 authority or ordering.
 
@@ -153,6 +165,17 @@ and observation generation. Index bytes are bounded, private, disposable, and
 excluded from capture. Deleting them changes performance only. A rebuild is a
 derived-state transaction, not Folderbase history and not permission or share
 authority.
+
+Live operations first obtain the authoritative Capture Plan fingerprint and
+resolved identity-source state. A bounded, ordered, content-digested private
+record whose generation matches that fingerprint supplies its already-derived
+rows without materializing or sorting a second full result. Freshness
+verification remains authoritative: Core streams the expected ordered
+projection digest directly from borrowed Capture Plan and verified Version
+fields and compares it with the independently content-digested stored rows.
+Missing, stale, malformed, oversized, or digest-invalid private state is ignored
+and the same authoritative state is projected in memory. Rebuild alone both
+projects rows and publishes their private acceleration record.
 
 Conformance protects ordinary files, ignored descendants, descendants behind a
 nested Folderbase, portable protocol records, and pre-existing sibling
