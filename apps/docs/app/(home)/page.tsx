@@ -34,11 +34,10 @@ export default function HomePage() {
             <p className="terminal-response">✓ ordinary folder inspected</p>
             <p><span>$</span> npx @folderbase/cli init . --dry-run --json</p>
             <p className="terminal-response">✓ additive plan ready for review</p>
-            <p><span>$</span> npx @folderbase/cli init .</p>
+            <p><span>$</span> npx @folderbase/cli init . --expected-plan-digest … --json</p>
             <div className="terminal-tree">
               <strong>.folderbase/</strong>
-              <span>.folderbaseignore</span>
-              <span>FOLDERBASE.md</span>
+              <span>└── manifest.json</span>
               <span>…your existing files</span>
             </div>
           </div>

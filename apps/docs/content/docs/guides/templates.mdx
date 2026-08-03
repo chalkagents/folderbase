@@ -1,0 +1,50 @@
+---
+title: Start from a template
+description: Add optional, no-clobber structure while keeping the folder free to evolve.
+---
+
+Templates are explicit starting guidance. They may add useful ordinary files and directories, but they do not establish authority, freeze the folder layout, or permit silent reorganization later.
+
+**Core 0.5 status:** built-in templates and reviewed application are implemented, but the templates capability is experimental and is not part of Compatibility Contract v1. Pin the exact Core release if you automate it.
+
+## Preview a project template
+
+Pass the exact template identity and its answers during both review and apply:
+
+```bash
+folderbase init /path/to/project \
+  --name "Launch project" \
+  --template folderbase.project@0.2.2 \
+  --answer folderbase_name="Launch project" \
+  --answer purpose="Ship the first usable release" \
+  --answer current_state="Protocol is stable; query work is next" \
+  --answer next_action="Implement the query index" \
+  --dry-run \
+  --json
+```
+
+The response contains `plan_digest.digest`. Review every proposed write, then repeat the same request with that digest:
+
+```bash
+folderbase init /path/to/project \
+  --name "Launch project" \
+  --template folderbase.project@0.2.2 \
+  --answer folderbase_name="Launch project" \
+  --answer purpose="Ship the first usable release" \
+  --answer current_state="Protocol is stable; query work is next" \
+  --answer next_action="Implement the query index" \
+  --expected-plan-digest DIGEST_FROM_DRY_RUN \
+  --json
+```
+
+Template artifacts use no-clobber installation. If the reviewed destination changes or a planned target appears, apply fails instead of replacing existing work.
+
+## Released built-ins
+
+Core 0.5 includes person, organization, customer, engagement, project, temporary, and custom template families under `protocol/templates/0.2/`. Exact IDs and versions are part of the request; integrations should not silently substitute a newer template.
+
+## Evolve after initialization
+
+Template identity describes what was selected at initialization. It is not a permanent schema for the ordinary folder. Humans and agents may add new files and later propose reviewable reorganizations when the folder needs a clearer shape.
+
+The [template protocol](https://github.com/chalkagents/folderbase/blob/main/docs/template-protocol.md) defines canonical plans, questions, installation modes, and digest behavior.

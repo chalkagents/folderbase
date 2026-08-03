@@ -10,7 +10,7 @@ Folderbase turns an ordinary folder into a structured, versioned workspace that 
 <Cards>
   <Card title="Install Folderbase" href="/docs/getting-started/install" description="Choose npx, a native release binary, or Cargo." />
   <Card title="Five-minute quickstart" href="/docs/getting-started/quickstart" description="Inspect, preview, initialize, and validate a folder." />
-  <Card title="Migrate a mixed folder" href="/docs/guides/migrate" description="Generate a reviewable organization plan without applying it." />
+  <Card title="Experimental migration" href="/docs/guides/migrate" description="Generate a reviewable organization plan without applying it." />
   <Card title="Operate from an agent" href="/docs/guides/agents" description="List, read, and save files with explicit concurrency control." />
 </Cards>
 
@@ -18,7 +18,7 @@ Folderbase turns an ordinary folder into a structured, versioned workspace that 
 
 - A stable discoverable CLI JSON contract.
 - A compatibility contract for portable records and extension preservation.
-- Review-first initialization and migration workflows.
+- Review-first initialization with approval bound to the exact plan digest.
 - Local-first operation without a Folderbase account.
 - Native binaries for macOS and Linux through verified release artifacts.
 
@@ -29,7 +29,7 @@ Read [what the compatibility contract protects](/docs/reference/compatibility-v1
 ```bash
 npx @folderbase/cli inspect . --json
 npx @folderbase/cli init . --dry-run --json
-npx @folderbase/cli init .
+npx @folderbase/cli init . --expected-plan-digest DIGEST_FROM_DRY_RUN --json
 npx @folderbase/cli validate . --json
 ```
 
@@ -39,8 +39,7 @@ Folderbase adds its protocol surface alongside your existing work:
 project/
 ├── .folderbase/
 │   └── manifest.json
-├── .folderbaseignore
-├── FOLDERBASE.md
-├── AGENTS.md
 └── …your existing files
 ```
+
+That manifest is the only default write. Narratives, a root `.folderbaseignore` override, agent adapters, and template artifacts are explicit optional additions. The manifest itself always contains Core's required capture-policy fields.

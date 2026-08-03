@@ -6,6 +6,7 @@ import { verifyRequiredResults } from "../ci/verify-required-results.mjs";
 const successfulPlan = {
   planResult: "success",
   lanes: {
+    docs: { required: false, result: "skipped" },
     install: { required: false, result: "skipped" },
     npm: { required: true, result: "success" },
     platform: { required: false, result: "skipped" },

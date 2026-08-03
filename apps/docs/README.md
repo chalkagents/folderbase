@@ -1,45 +1,35 @@
-# docs
+# Folderbase documentation
 
-This is a Next.js application generated with
-[Create Fumadocs](https://github.com/fuma-nama/fumadocs).
+This Next.js/Fumadocs application is the canonical source for
+[docs.folderbase.ai](https://docs.folderbase.ai). It documents released Core
+behavior; proposed or unreleased behavior must be labeled explicitly.
 
-Run development server:
+## Local validation
+
+```bash
+npm ci
+npm test
+```
+
+`npm test` lints, type-checks, and builds every route. To run the development
+server:
 
 ```bash
 npm run dev
-# or
-pnpm dev
-# or
-yarn dev
 ```
 
-Open http://localhost:3000 with your browser to see the result.
+Open http://localhost:3000.
 
-## Explore
+## Source and deployment contract
 
-In the project, you can see:
+- Documentation content lives in `content/docs/`.
+- CI selects the dedicated docs lane for `apps/docs/**` changes and requires
+  lint, type generation, and a production build before merge.
+- Vercel Git deployment is enabled only for `main` in `vercel.json`. Pull
+  request branches are validated by CI but do not consume preview deployments.
+- A successful merge to `main` triggers the production deployment connected to
+  `docs.folderbase.ai`.
 
-- `lib/source.ts`: Code for content source adapter, [`loader()`](https://fumadocs.dev/docs/headless/source-api) provides the interface to access your content.
-- `lib/layout.shared.tsx`: Shared options for layouts, optional but preferred to keep.
-
-| Route                     | Description                                            |
-| ------------------------- | ------------------------------------------------------ |
-| `app/(home)`              | The route group for your landing page and other pages. |
-| `app/docs`                | The documentation layout and pages.                    |
-| `app/api/search/route.ts` | The Route Handler for search.                          |
-
-### Fumadocs MDX
-
-Collections are defined with the [Macro API](https://fumadocs.dev/docs/mdx/macro) in `lib/source.ts`.
-
-Read the [Introduction](https://fumadocs.dev/docs/mdx) for further details.
-
-## Learn More
-
-To learn more about Next.js and Fumadocs, take a look at the following
-resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js
-  features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [Fumadocs](https://fumadocs.dev) - learn about Fumadocs
+Canonical protocol schemas and conformance fixtures remain under the
+repository-level `protocol/` directory. Site prose must agree with those files,
+the stable CLI inventory in `docs/cli-json-v1.md`, and the released executable.

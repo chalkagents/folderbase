@@ -345,6 +345,22 @@ reject_workflow_job_fragment \
   "Fresh installation proof must remain in its separate scoped job."
 require_workflow_job_exact_line \
   "$workflow" \
+  "docs" \
+  "    if: needs.plan.outputs.docs == 'true'" \
+  "The documentation lane must remain change-aware."
+for docs_gate_line in \
+  "        run: node --test scripts/tests/docs-site.test.mjs" \
+  "        run: npm ci --prefix apps/docs" \
+  "        run: npm test --prefix apps/docs"
+do
+  require_workflow_job_exact_line \
+    "$workflow" \
+    "docs" \
+    "$docs_gate_line" \
+    "The documentation gate must retain policy, locked install, and production-build verification."
+done
+require_workflow_job_exact_line \
+  "$workflow" \
   "npm-cli" \
   "    if: needs.plan.outputs.npm == 'true'" \
   "The npm lane must remain change-aware."
@@ -376,7 +392,7 @@ require_workflow_job_exact_line \
 require_workflow_job_exact_line \
   "$workflow" \
   "required" \
-  "    needs: [plan, npm-cli, rust, package-install, core-platforms]" \
+  "    needs: [plan, docs, npm-cli, rust, package-install, core-platforms]" \
   "The required check must aggregate every CI lane."
 require_workflow_job_exact_line \
   "$workflow" \
@@ -390,6 +406,7 @@ require_workflow_job_exact_line \
   "The required check must verify scoped CI results."
 
 for required_result_line in \
+  '      DOCS_REQUIRED: ${{ needs.plan.outputs.docs }}' \
   '      NPM_REQUIRED: ${{ needs.plan.outputs.npm }}' \
   '      RUST_REQUIRED: ${{ needs.plan.outputs.rust }}' \
   '      INSTALL_REQUIRED: ${{ needs.plan.outputs.install }}' \
@@ -404,6 +421,7 @@ done
 
 for dependency_result_line in \
   '      PLAN_RESULT: ${{ needs.plan.result }}' \
+  '      DOCS_RESULT: ${{ needs.docs.result }}' \
   '      NPM_RESULT: ${{ needs.npm-cli.result }}' \
   '      RUST_RESULT: ${{ needs.rust.result }}' \
   '      INSTALL_RESULT: ${{ needs.package-install.result }}' \

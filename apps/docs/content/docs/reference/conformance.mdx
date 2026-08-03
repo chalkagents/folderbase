@@ -1,0 +1,47 @@
+---
+title: Run public conformance
+description: Prove a Rust, Go, TypeScript, or other CLI implements Folderbase Compatibility Contract v1.
+---
+
+The conformance runner is implementation-neutral. It invokes an executable as a process, validates its JSON, exit statuses, and filesystem effects, and does not link to the Rust library.
+
+## Obtain an immutable suite
+
+Use the source archive or tag for the contract you claim. For Core 0.5:
+
+```bash
+git clone https://github.com/chalkagents/folderbase.git
+cd folderbase
+git checkout v0.5.0
+```
+
+The conformance runner uses Node.js built-ins and the checked-in schemas and fixtures, so it does not require a repository-level package install.
+
+## Run another implementation
+
+Build your implementation as an executable, then pass its path to the public runner:
+
+```bash
+node protocol/conformance/cli-json-v1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+The executable may be written in Go, TypeScript, Rust, or another language. It must implement the advertised Compatibility Contract v1 process surface. A passing report exits `0` with `failed: 0`; any incompatible result exits nonzero.
+
+## Verify the reference implementation
+
+```bash
+cargo build --package folderbase-cli --locked
+node protocol/conformance/cli-json-v1/run.mjs \
+  --implementation ./target/debug/folderbase
+```
+
+## What the suite owns
+
+- JSON schemas and portable valid/invalid fixtures;
+- canonical digest vectors and sidecars;
+- stable command result shapes and error transport;
+- exit meanings `0`, `1`, and `2`;
+- black-box filesystem behavior for stable initialization, upgrade, validation, protocol checks, and workspace operations.
+
+Passing one suite proves compatibility only with its named contract and protocol profiles. Query, templates, Change Sets, and other future capabilities require their own advertised capability and conformance closure before third parties can claim them.

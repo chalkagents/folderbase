@@ -154,6 +154,22 @@ test("the required check cannot forge a dependency result", async () => {
   }
 });
 
+test("the documentation gate cannot bypass its locked install and build", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const critical = "        run: npm test --prefix apps/docs";
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, "        run: true"));
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /documentation gate/);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("the registry-state step cannot call a different entrypoint", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {

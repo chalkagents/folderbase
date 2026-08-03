@@ -9,22 +9,25 @@ The `folderbase` executable is the reference interface to Folderbase Core.
 
 ```bash
 folderbase --help
-folderbase --help-json
 folderbase protocol contract --json
 ```
 
-`--help-json` is the machine-readable command inventory. Callers should discover the available surface rather than parse human help text.
+`protocol contract --json` advertises the stable machine contract. Human-readable `--help` can include additional experimental commands and must not be parsed as a compatibility surface.
 
 ## Primary command families
 
-| Command | Purpose |
-| --- | --- |
-| `inspect` | Read folder metadata and boundaries without mutation. |
-| `init` | Preview or add the Folderbase protocol surface. |
-| `validate` | Check protocol records and report diagnostics. |
-| `migrate` | Plan and execute reviewed restructuring through a durable transaction. |
-| `workspace` | List, read, and save ordinary workspace files. |
-| `protocol` | Advertise compatibility and integration contracts. |
+| Command | Core 0.5 status | Purpose |
+| --- | --- | --- |
+| `inspect` | Stable JSON v1 | Read folder metadata and boundaries without mutation. |
+| `attest` | Stable JSON v1 | Verify one exact Folderbase root without mutation. |
+| `init` | Stable JSON v1 | Preview or add the native protocol surface. Template options remain experimental. |
+| `upgrade` | Stable JSON v1 | Preview or apply the explicit legacy-root upgrade. |
+| `validate` | Stable JSON v1 | Check protocol records and report diagnostics. |
+| `workspace` | Stable JSON v1 | List, read, and save bounded UTF-8 workspace files. |
+| `protocol` | Stable JSON v1 | Advertise the contract or check portable records. |
+| `migrate` | Experimental JSON | Analyze and stage reviewed restructuring. |
+| `transform` | Experimental JSON | Run the durable multi-process transform workflow. |
+| `version` | Experimental JSON | Capture, inspect, and restore immutable local file versions. |
 
 ## Machine-readable calls
 

@@ -2,10 +2,15 @@
   "name": "folderbase-docs",
   "version": "0.5.0",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
+  "packageManager": "npm@11.19.0",
   "scripts": {
     "build": "next build",
     "dev": "next dev",
     "start": "next start",
+    "test": "npm run lint && npm run types:check && npm run build",
     "types:check": "next typegen && tsc --noEmit",
     "lint": "eslint"
   },
@@ -23,7 +28,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@types/mdx": "^2.0.14",
-    "@types/node": "^26.1.2",
+    "@types/node": "24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "postcss": "8.5.24",
