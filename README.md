@@ -92,6 +92,16 @@ meanings. Additive fields may appear, so integrations should ignore unknown
 JSON fields. See the [Compatibility Contract](docs/compatibility-v1.md) and
 [CLI JSON specification](docs/cli-json-v1.md).
 
+`protocol contract --json` also returns a deterministic optional-capability
+inventory. This lets an app, agent, or remote VM require an exact stable or
+experimental profile without parsing help text. Verify every advertised known
+profile from a source release with:
+
+```sh
+node protocol/conformance/capabilities/run.mjs \
+  --implementation /path/to/folderbase
+```
+
 ## Design principles
 
 - **Folders stay folders.** Existing repositories, documents, media, PDFs,
@@ -271,6 +281,7 @@ chunk range has been streamed and checked.
 - [Proposed durable migration transaction module](docs/adr/0007-execute-migrations-through-one-durable-transaction-module.md)
 - [Accepted native distribution decision](docs/adr/0008-distribute-native-core-through-thin-installers.md)
 - [Accepted minimal compatibility decision](docs/adr/0009-freeze-the-minimal-core-compatibility-contract.md)
+- [Accepted optional-capability discovery decision](docs/adr/0010-discover-optional-capabilities-without-expanding-base-v1.md)
 
 Cargo packages remain below 1.0, but the surfaces named by Compatibility
 Contract v1 are stable. Experimental surfaces may change between minor Cargo

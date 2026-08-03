@@ -1,0 +1,12 @@
+{
+  "$schema": "https://folderbase.ai/protocol/capabilities/1/registry.schema.json",
+  "format": "folderbase-capability-registry-v1",
+  "capabilities": [
+    {
+      "name": "folderbase.version-cli-json",
+      "version": "0.1.0",
+      "stability": "experimental",
+      "conformance_runner": "protocol/conformance/capabilities/version-cli-json-0.1/run.mjs"
+    }
+  ]
+}

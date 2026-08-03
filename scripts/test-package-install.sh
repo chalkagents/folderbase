@@ -22,6 +22,10 @@ node scripts/verify-folderbase-version-distribution.mjs
 node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 node scripts/verify-folderbase-version-0.5-distribution.mjs
 
+cmp \
+  "protocol/capabilities/v1/registry.json" \
+  "crates/folderbase-cli/assets/capability-registry-v1.json"
+
 for template in \
   person \
   organization \
@@ -43,6 +47,10 @@ cmp \
 cmp \
   "protocol/conformance/chunk-manifest/invalid/unknown-format.json" \
   "crates/folderbase-cli/tests/fixtures/protocol/unknown-chunk-manifest-format.json"
+
+node --test \
+  protocol/conformance/capabilities/run.test.mjs \
+  scripts/tests/capability-contract.test.mjs
 
 for package in folderbase-core folderbase-cli
 do
