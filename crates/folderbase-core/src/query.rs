@@ -27,6 +27,11 @@ use crate::{
 
 const QUERY_REQUEST_FORMAT: &str = "folderbase-query-request-v1";
 const MAX_PAGE_LIMIT: usize = 1_000;
+const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INDEX_RECORDS: usize = 16_384;
+const INDEX_ROOT: &str = ".folderbase/local/query-index-v1";
+const INDEX_RECORD: &str = ".folderbase/local/query-index-v1/index.json";
+const INDEX_FORMAT: &str = "folderbase-query-private-index-v1";
 
 /// A root-bound handle for read-only query and explicit disposable-index work.
 #[derive(Debug)]
@@ -130,6 +135,7 @@ pub enum QueryExecution {
 
 /// One query row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryEntry {
     path: String,
     kind: QueryEntryKind,
@@ -195,6 +201,7 @@ pub enum QueryExclusionKind {
 
 /// One path omitted from ordinary query rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryExclusion {
     path: String,
     reason: String,
@@ -251,6 +258,143 @@ pub struct QueryResult {
     page: QueryPageResult,
 }
 
+/// Read-only state of the disposable private query index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryIndexState {
+    Absent,
+    Fresh,
+    Stale,
+}
+
+/// Result of inspecting the private index without changing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryIndexStatus {
+    root: PathBuf,
+    folderbase_id: String,
+    state: QueryIndexState,
+    generation: Option<String>,
+    observed_generation: String,
+    records: usize,
+}
+
+impl QueryIndexStatus {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn folderbase_id(&self) -> &str {
+        &self.folderbase_id
+    }
+    pub fn state(&self) -> QueryIndexState {
+        self.state
+    }
+    pub fn generation(&self) -> Option<&str> {
+        self.generation.as_deref()
+    }
+    pub fn observed_generation(&self) -> &str {
+        &self.observed_generation
+    }
+    pub fn records(&self) -> usize {
+        self.records
+    }
+    pub fn storage_path(&self) -> &'static str {
+        INDEX_ROOT
+    }
+    pub fn disposable(&self) -> bool {
+        true
+    }
+}
+
+/// Result of explicitly replacing the disposable private index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryIndexRebuildResult {
+    root: PathBuf,
+    folderbase_id: String,
+    generation: String,
+    records: usize,
+    exclusions: usize,
+}
+
+impl QueryIndexRebuildResult {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn folderbase_id(&self) -> &str {
+        &self.folderbase_id
+    }
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+    pub fn records(&self) -> usize {
+        self.records
+    }
+    pub fn exclusions(&self) -> usize {
+        self.exclusions
+    }
+    pub fn storage_path(&self) -> &'static str {
+        INDEX_ROOT
+    }
+    pub fn portable_files_changed(&self) -> bool {
+        false
+    }
+    pub fn ordinary_files_changed(&self) -> bool {
+        false
+    }
+}
+
+/// Read-only explanation of one normalized query plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryExplain {
+    root: PathBuf,
+    folderbase_id: String,
+    request_sha256: String,
+    observation_generation: String,
+    normalized_request: serde_json::Value,
+    scope_source: QuerySource,
+    index_strategy: QueryExecution,
+    matched: usize,
+    excluded: Vec<QueryExclusion>,
+}
+
+impl QueryExplain {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn folderbase_id(&self) -> &str {
+        &self.folderbase_id
+    }
+    pub fn request_sha256(&self) -> &str {
+        &self.request_sha256
+    }
+    pub fn observation_generation(&self) -> &str {
+        &self.observation_generation
+    }
+    pub fn normalized_request(&self) -> &serde_json::Value {
+        &self.normalized_request
+    }
+    pub fn scope_source(&self) -> QuerySource {
+        self.scope_source
+    }
+    pub fn ordering(&self) -> &'static str {
+        "portable_path_utf8_bytes_ascending"
+    }
+    pub fn filter_algebra(&self) -> &'static str {
+        "families_and_values_or"
+    }
+    pub fn ordinary_content_access(&self) -> &'static str {
+        "metadata_only"
+    }
+    pub fn index_strategy(&self) -> QueryExecution {
+        self.index_strategy
+    }
+    pub fn matched(&self) -> usize {
+        self.matched
+    }
+    pub fn excluded(&self) -> &[QueryExclusion] {
+        &self.excluded
+    }
+}
+
 impl QueryResult {
     pub fn root(&self) -> &Path {
         &self.root
@@ -291,6 +435,8 @@ pub enum QueryError {
     InvalidQueryCursor,
     #[error("the query observation changed; retry without a cursor")]
     QuerySnapshotChanged,
+    #[error("query index rebuild failed: {0}")]
+    IndexRebuildFailed(String),
     #[error("the exact historical Folderbase Version is missing: {version_id}")]
     ScopeVersionMissing { version_id: String },
     #[error("the exact historical Folderbase Version is invalid: {version_id}: {message}")]
@@ -311,11 +457,26 @@ impl FolderbaseQueryEngine {
     /// Run one bounded query against a newly observed scope.
     pub fn run(&self, request: &QueryRequest) -> Result<QueryResult, QueryError> {
         let normalized = normalize_request(request)?;
-        let observation = match &request.scope {
+        let live = matches!(&request.scope, QueryScope::Live);
+        let mut observation = match &request.scope {
             QueryScope::Live => observe_live(&self.root)?,
             QueryScope::Historical {
                 folderbase_version_id,
             } => observe_historical(&self.root, folderbase_version_id)?,
+        };
+        let index = live.then(|| read_index(&self.root, &observation));
+        let execution = if index
+            .as_ref()
+            .is_some_and(|index| index.state == QueryIndexState::Fresh)
+        {
+            let record = index
+                .and_then(|index| index.record)
+                .expect("fresh index has a verified record");
+            observation.entries = record.entries;
+            observation.exclusions = record.exclusions;
+            QueryExecution::PrivateIndex
+        } else {
+            QueryExecution::BoundedScan
         };
         let request_sha256 = request_sha256(&normalized)?;
         let after_path = if let Some(cursor) = request.page.cursor.as_deref() {
@@ -359,7 +520,7 @@ impl FolderbaseQueryEngine {
             folderbase_id: observation.folderbase_id,
             request_sha256,
             observation_generation: observation.generation,
-            execution: QueryExecution::BoundedScan,
+            execution,
             entries: entries.into_iter().take(returned).collect(),
             exclusions: observation.exclusions,
             exclusions_truncated: false,
@@ -369,6 +530,125 @@ impl FolderbaseQueryEngine {
                 has_more,
                 next_cursor,
             },
+        })
+    }
+
+    /// Explain one query using the same normalized request and observation.
+    pub fn explain(&self, request: &QueryRequest) -> Result<QueryExplain, QueryError> {
+        let normalized = normalize_request(request)?;
+        let live = matches!(&request.scope, QueryScope::Live);
+        let observation = match &request.scope {
+            QueryScope::Live => observe_live(&self.root)?,
+            QueryScope::Historical {
+                folderbase_version_id,
+            } => observe_historical(&self.root, folderbase_version_id)?,
+        };
+        let request_sha256 = request_sha256(&normalized)?;
+        if let Some(cursor) = request.page.cursor.as_deref() {
+            let cursor = decode_cursor(cursor)?;
+            if cursor.root_instance_sha256 != observation.root_instance_sha256
+                || cursor.request_sha256 != request_sha256
+            {
+                return Err(QueryError::InvalidQueryCursor);
+            }
+            if cursor.observation_generation != observation.generation {
+                return Err(QueryError::QuerySnapshotChanged);
+            }
+        }
+        let index_strategy =
+            if live && read_index(&self.root, &observation).state == QueryIndexState::Fresh {
+                QueryExecution::PrivateIndex
+            } else {
+                QueryExecution::BoundedScan
+            };
+        let matched = observation
+            .entries
+            .iter()
+            .filter(|entry| normalized.filters.applies(entry))
+            .count();
+        let normalized_request = serde_json::to_value(&normalized.value)
+            .map_err(|error| QueryError::InvalidQueryRequest(error.to_string()))?;
+        Ok(QueryExplain {
+            root: observation.root,
+            folderbase_id: observation.folderbase_id,
+            request_sha256,
+            observation_generation: observation.generation,
+            normalized_request,
+            scope_source: if live {
+                QuerySource::CapturePlan
+            } else {
+                QuerySource::FolderbaseVersion
+            },
+            index_strategy,
+            matched,
+            excluded: observation.exclusions,
+        })
+    }
+
+    /// Inspect disposable-index freshness without writing state.
+    pub fn index_status(&self) -> Result<QueryIndexStatus, QueryError> {
+        let observation = observe_live(&self.root)?;
+        let index = read_index(&self.root, &observation);
+        Ok(QueryIndexStatus {
+            root: observation.root,
+            folderbase_id: observation.folderbase_id,
+            state: index.state,
+            generation: index.generation,
+            observed_generation: observation.generation,
+            records: index.records,
+        })
+    }
+
+    /// Explicitly replace the exact disposable query-index namespace.
+    pub fn rebuild_index(&self) -> Result<QueryIndexRebuildResult, QueryError> {
+        let observation = observe_live(&self.root)?;
+        if observation.entries.len() + observation.exclusions.len() > MAX_INDEX_RECORDS {
+            return Err(QueryError::IndexRebuildFailed(
+                "derived record count exceeds the private-index bound".to_owned(),
+            ));
+        }
+        let record = PrivateIndexRecord {
+            format: INDEX_FORMAT.to_owned(),
+            generation: observation.generation.clone(),
+            root_instance_sha256: observation.root_instance_sha256.clone(),
+            folderbase_id: observation.folderbase_id.clone(),
+            entries: observation.entries.clone(),
+            exclusions: observation.exclusions.clone(),
+        };
+        let encoded = serde_json::to_vec(&record)
+            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+        if encoded.len() as u64 > MAX_INDEX_BYTES {
+            return Err(QueryError::IndexRebuildFailed(
+                "derived index exceeds 64 MiB".to_owned(),
+            ));
+        }
+        let state = FolderbaseState::open_existing(&self.root)
+            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+        if let Err(first) = state.ensure_private_dir(Path::new(INDEX_ROOT)) {
+            state
+                .remove_durable(Path::new(INDEX_ROOT))
+                .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+            state
+                .ensure_private_dir(Path::new(INDEX_ROOT))
+                .map_err(|error| {
+                    QueryError::IndexRebuildFailed(format!("{first}; recovery failed: {error}"))
+                })?;
+        }
+        state
+            .replace(Path::new(INDEX_RECORD), &encoded)
+            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+        let verified = read_index(&self.root, &observation);
+        if verified.state != QueryIndexState::Fresh {
+            return Err(QueryError::IndexRebuildFailed(
+                "published index did not verify against its observation".to_owned(),
+            ));
+        }
+        Ok(QueryIndexRebuildResult {
+            root: observation.root,
+            folderbase_id: observation.folderbase_id,
+            generation: observation.generation,
+            records: observation.entries.len(),
+            exclusions: observation.exclusions.len(),
         })
     }
 }
@@ -610,6 +890,95 @@ struct QueryObservation {
     generation: String,
     entries: Vec<QueryEntry>,
     exclusions: Vec<QueryExclusion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateIndexRecord {
+    format: String,
+    generation: String,
+    root_instance_sha256: String,
+    folderbase_id: String,
+    entries: Vec<QueryEntry>,
+    exclusions: Vec<QueryExclusion>,
+}
+
+struct IndexRead {
+    state: QueryIndexState,
+    generation: Option<String>,
+    records: usize,
+    record: Option<PrivateIndexRecord>,
+}
+
+impl IndexRead {
+    fn absent() -> Self {
+        Self {
+            state: QueryIndexState::Absent,
+            generation: None,
+            records: 0,
+            record: None,
+        }
+    }
+
+    fn stale(generation: Option<String>, records: usize) -> Self {
+        Self {
+            state: QueryIndexState::Stale,
+            generation,
+            records,
+            record: None,
+        }
+    }
+}
+
+fn read_index(root: &Path, observation: &QueryObservation) -> IndexRead {
+    let state = match FolderbaseState::open_existing_read_only(root) {
+        Ok(state) => state,
+        Err(_) => return IndexRead::stale(None, 0),
+    };
+    let encoded = match state.read_bounded_if_present(Path::new(INDEX_RECORD), MAX_INDEX_BYTES) {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => return IndexRead::absent(),
+        Err(_) => return IndexRead::stale(None, 0),
+    };
+    let record: PrivateIndexRecord = match serde_json::from_slice(&encoded) {
+        Ok(record) => record,
+        Err(_) => return IndexRead::stale(None, 0),
+    };
+    let generation = is_sha256(&record.generation).then(|| record.generation.clone());
+    let records = record.entries.len();
+    let bounded = record.entries.len() + record.exclusions.len() <= MAX_INDEX_RECORDS;
+    let ordered = record
+        .entries
+        .windows(2)
+        .all(|pair| pair[0].path.as_bytes() < pair[1].path.as_bytes())
+        && record
+            .exclusions
+            .windows(2)
+            .all(|pair| pair[0].path.as_bytes() < pair[1].path.as_bytes());
+    let paths_valid = record
+        .entries
+        .iter()
+        .all(|entry| validate_capture_path(&entry.path).is_ok())
+        && record
+            .exclusions
+            .iter()
+            .all(|entry| validate_capture_path(&entry.path).is_ok());
+    let equivalent = record.format == INDEX_FORMAT
+        && record.generation == observation.generation
+        && record.root_instance_sha256 == observation.root_instance_sha256
+        && record.folderbase_id == observation.folderbase_id
+        && record.entries == observation.entries
+        && record.exclusions == observation.exclusions;
+    if bounded && ordered && paths_valid && equivalent {
+        IndexRead {
+            state: QueryIndexState::Fresh,
+            generation,
+            records,
+            record: Some(record),
+        }
+    } else {
+        IndexRead::stale(generation, records.min(MAX_INDEX_RECORDS))
+    }
 }
 
 fn observe_live(root: &Path) -> Result<QueryObservation, QueryError> {

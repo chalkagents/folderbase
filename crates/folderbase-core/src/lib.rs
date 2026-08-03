@@ -88,8 +88,8 @@ pub use protocol_upgrade::{
 };
 pub use query::{
     FolderbaseQueryEngine, QueryEntry, QueryEntryKind, QueryError, QueryExclusion,
-    QueryExclusionKind, QueryExecution, QueryLifecycle, QueryPageResult, QueryRequest, QueryResult,
-    QuerySource,
+    QueryExclusionKind, QueryExecution, QueryExplain, QueryIndexRebuildResult, QueryIndexState,
+    QueryIndexStatus, QueryLifecycle, QueryPageResult, QueryRequest, QueryResult, QuerySource,
 };
 pub use reorganization::{
     AnalysisScope, ConsequentialAnswer, ConsequentialAnswerType, ConsequentialQuestion,
