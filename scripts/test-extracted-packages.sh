@@ -79,7 +79,6 @@ cargo test \
 
 cargo fetch \
   --manifest-path "$cli_source/Cargo.toml" \
-  --locked \
   --config "patch.crates-io.folderbase-core.path='$core_source'"
 
 cargo test \
