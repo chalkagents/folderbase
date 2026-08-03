@@ -1,0 +1,35 @@
+{
+  "format": "folderbase-query-observation-fixture-v1",
+  "ordinary_content_access": "metadata_only",
+  "entries": [
+    { "path": ".folderbaseignore", "kind": "regular_file", "bytes": 9, "representative_format": "capture-policy" },
+    { "path": "AGENTS.md", "kind": "regular_file", "bytes": 19, "representative_format": "markdown" },
+    { "path": "data", "kind": "directory", "bytes": null, "representative_format": "directory" },
+    { "path": "data/app.sqlite", "kind": "regular_file", "bytes": 16, "representative_format": "sqlite" },
+    { "path": "data/table.csv", "kind": "regular_file", "bytes": 12, "representative_format": "csv" },
+    { "path": "database.md", "kind": "regular_file", "bytes": 20, "representative_format": "markdown" },
+    { "path": "documents", "kind": "directory", "bytes": null, "representative_format": "directory" },
+    { "path": "documents/Brief.pdf", "kind": "regular_file", "bytes": 15, "representative_format": "pdf" },
+    { "path": "links", "kind": "directory", "bytes": null, "representative_format": "directory" },
+    { "path": "links/brief-link", "kind": "symlink", "bytes": null, "representative_format": "symlink" },
+    { "path": "media", "kind": "directory", "bytes": null, "representative_format": "directory" },
+    { "path": "media/archive.mov", "kind": "regular_file", "bytes": 10737418240, "representative_format": "sparse-10-gib-video-metadata" },
+    { "path": "media/clip.mp4", "kind": "regular_file", "bytes": 12, "representative_format": "video" },
+    { "path": "notes", "kind": "directory", "bytes": null, "representative_format": "directory" },
+    { "path": "notes/Brief.md", "kind": "regular_file", "bytes": 16, "representative_format": "markdown" },
+    { "path": "repo", "kind": "directory", "bytes": null, "representative_format": "repository" },
+    { "path": "repo/.git", "kind": "directory", "bytes": null, "representative_format": "git-directory" },
+    { "path": "repo/.git/HEAD", "kind": "regular_file", "bytes": 21, "representative_format": "git-metadata" },
+    { "path": "repo/README.md", "kind": "regular_file", "bytes": 16, "representative_format": "markdown" },
+    { "path": "vendors", "kind": "directory", "bytes": null, "representative_format": "directory" },
+    { "path": "vendors/nested", "kind": "nested_folderbase", "bytes": null, "representative_format": "opaque-boundary" }
+  ],
+  "exclusions": [
+    { "path": "ignored", "reason": "capture-ignore-policy" },
+    { "path": "vendors/nested", "kind": "nested_folderbase", "reason": "nested-folderbase-boundary" }
+  ],
+  "forbidden_descendants": [
+    "ignored/private.txt",
+    "vendors/nested/secret/video.mp4"
+  ]
+}

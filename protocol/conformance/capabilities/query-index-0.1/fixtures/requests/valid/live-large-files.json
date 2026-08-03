@@ -1,0 +1,9 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": { "kind": "live" },
+  "filters": {
+    "kinds": ["regular_file"],
+    "minimum_bytes": 10737418240
+  },
+  "page": { "limit": 10 }
+}

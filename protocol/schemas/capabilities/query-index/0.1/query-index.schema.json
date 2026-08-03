@@ -1,0 +1,442 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/capabilities/query-index/0.1/query-index.schema.json",
+  "title": "Folderbase query/index capability 0.1",
+  "description": "Bounded JSON documents for the separately advertised folderbase.query-index@0.1.0 capability.",
+  "oneOf": [
+    { "$ref": "#/$defs/queryRequest" },
+    { "$ref": "#/$defs/queryResult" },
+    { "$ref": "#/$defs/queryExplain" },
+    { "$ref": "#/$defs/indexStatus" },
+    { "$ref": "#/$defs/indexRebuildResult" },
+    { "$ref": "#/$defs/queryAttention" },
+    { "$ref": "#/$defs/queryError" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "folderbaseVersionId": {
+      "type": "string",
+      "pattern": "^fbversion_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "objectVersionId": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\u0000)(?!.*(?:^|/)\\.folderbase(?:/|$)).+(?<!/)$"
+    },
+    "queryCursor": {
+      "type": "string",
+      "minLength": 6,
+      "maxLength": 8192,
+      "pattern": "^fbq1_[A-Za-z0-9_-]+$"
+    },
+    "queryScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "live" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "folderbase_version_id"],
+          "properties": {
+            "kind": { "const": "historical" },
+            "folderbase_version_id": { "$ref": "#/$defs/folderbaseVersionId" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "queryFilters": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/portablePath" }
+        },
+        "path_prefixes": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/portablePath" }
+        },
+        "kinds": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "enum": ["directory", "nested_folderbase", "regular_file", "symlink"]
+          }
+        },
+        "lifecycles": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "enum": ["deleted", "live"] }
+        },
+        "object_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/objectId" }
+        },
+        "object_version_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/objectVersionId" }
+        },
+        "minimum_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        },
+        "maximum_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        }
+      },
+      "additionalProperties": false
+    },
+    "queryPage": {
+      "type": "object",
+      "required": ["limit"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "cursor": { "$ref": "#/$defs/queryCursor" }
+      },
+      "additionalProperties": false
+    },
+    "queryRequest": {
+      "type": "object",
+      "required": ["format", "scope", "page"],
+      "properties": {
+        "format": { "const": "folderbase-query-request-v1" },
+        "scope": { "$ref": "#/$defs/queryScope" },
+        "filters": { "$ref": "#/$defs/queryFilters" },
+        "page": { "$ref": "#/$defs/queryPage" }
+      },
+      "additionalProperties": false
+    },
+    "nullableObjectId": {
+      "oneOf": [
+        { "$ref": "#/$defs/objectId" },
+        { "type": "null" }
+      ]
+    },
+    "nullableObjectVersionId": {
+      "oneOf": [
+        { "$ref": "#/$defs/objectVersionId" },
+        { "type": "null" }
+      ]
+    },
+    "nullableFolderbaseVersionId": {
+      "oneOf": [
+        { "$ref": "#/$defs/folderbaseVersionId" },
+        { "type": "null" }
+      ]
+    },
+    "nullableBytes": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+        { "type": "null" }
+      ]
+    },
+    "queryEntry": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "lifecycle",
+        "bytes",
+        "object_id",
+        "object_version_id",
+        "folderbase_version_id",
+        "source"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "kind": { "enum": ["directory", "nested_folderbase", "regular_file", "symlink"] },
+        "lifecycle": { "enum": ["deleted", "live"] },
+        "bytes": { "$ref": "#/$defs/nullableBytes" },
+        "executable": { "type": "boolean" },
+        "symlink_target": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "object_id": { "$ref": "#/$defs/nullableObjectId" },
+        "object_version_id": { "$ref": "#/$defs/nullableObjectVersionId" },
+        "folderbase_version_id": { "$ref": "#/$defs/nullableFolderbaseVersionId" },
+        "source": { "enum": ["capture_plan", "folderbase_version"] },
+        "boundary_reason": { "const": "nested-folderbase-boundary" }
+      },
+      "additionalProperties": false
+    },
+    "queryExclusion": {
+      "type": "object",
+      "required": ["path", "reason"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "reason": {
+          "enum": ["capture-ignore-policy", "nested-folderbase-boundary", "unsupported-v1"]
+        },
+        "kind": {
+          "enum": [
+            "block_device",
+            "character_device",
+            "fifo",
+            "hard_link",
+            "nested_folderbase",
+            "other_special",
+            "socket"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "queryPageResult": {
+      "type": "object",
+      "required": ["limit", "returned", "has_more", "next_cursor"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "returned": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "has_more": { "type": "boolean" },
+        "next_cursor": {
+          "oneOf": [
+            { "$ref": "#/$defs/queryCursor" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "queryResult": {
+      "type": "object",
+      "required": [
+        "format",
+        "root",
+        "folderbase_id",
+        "request_sha256",
+        "observation_generation",
+        "execution",
+        "entries",
+        "exclusions",
+        "exclusions_truncated",
+        "page"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-query-result-v1" },
+        "root": { "type": "string", "minLength": 1 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "observation_generation": { "$ref": "#/$defs/sha256" },
+        "execution": { "enum": ["bounded_scan", "private_index"] },
+        "entries": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/queryEntry" }
+        },
+        "exclusions": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/queryExclusion" }
+        },
+        "exclusions_truncated": { "type": "boolean" },
+        "page": { "$ref": "#/$defs/queryPageResult" }
+      },
+      "additionalProperties": false
+    },
+    "normalizedRequest": {
+      "type": "object",
+      "required": ["format", "scope", "filters", "page"],
+      "properties": {
+        "format": { "const": "folderbase-query-request-v1" },
+        "scope": { "$ref": "#/$defs/queryScope" },
+        "filters": {
+          "type": "object",
+          "required": [
+            "paths",
+            "path_prefixes",
+            "kinds",
+            "lifecycles",
+            "object_ids",
+            "object_version_ids",
+            "minimum_bytes",
+            "maximum_bytes"
+          ],
+          "properties": {
+            "paths": { "type": "array", "items": { "$ref": "#/$defs/portablePath" } },
+            "path_prefixes": { "type": "array", "items": { "$ref": "#/$defs/portablePath" } },
+            "kinds": { "type": "array", "items": { "enum": ["directory", "nested_folderbase", "regular_file", "symlink"] } },
+            "lifecycles": { "type": "array", "items": { "enum": ["deleted", "live"] } },
+            "object_ids": { "type": "array", "items": { "$ref": "#/$defs/objectId" } },
+            "object_version_ids": { "type": "array", "items": { "$ref": "#/$defs/objectVersionId" } },
+            "minimum_bytes": { "$ref": "#/$defs/nullableBytes" },
+            "maximum_bytes": { "$ref": "#/$defs/nullableBytes" }
+          },
+          "additionalProperties": false
+        },
+        "page": {
+          "type": "object",
+          "required": ["limit"],
+          "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "queryExplain": {
+      "type": "object",
+      "required": [
+        "format",
+        "root",
+        "folderbase_id",
+        "request_sha256",
+        "observation_generation",
+        "normalized_request",
+        "scope_source",
+        "ordering",
+        "filter_algebra",
+        "ordinary_content_access",
+        "index_strategy",
+        "matched",
+        "excluded"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-query-explain-v1" },
+        "root": { "type": "string", "minLength": 1 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "observation_generation": { "$ref": "#/$defs/sha256" },
+        "normalized_request": { "$ref": "#/$defs/normalizedRequest" },
+        "scope_source": { "enum": ["capture_plan", "folderbase_version"] },
+        "ordering": { "const": "portable_path_utf8_bytes_ascending" },
+        "filter_algebra": { "const": "families_and_values_or" },
+        "ordinary_content_access": { "const": "metadata_only" },
+        "index_strategy": { "enum": ["bounded_scan", "private_index"] },
+        "matched": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "excluded": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/queryExclusion" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "indexStatus": {
+      "type": "object",
+      "required": [
+        "format",
+        "root",
+        "folderbase_id",
+        "state",
+        "generation",
+        "observed_generation",
+        "records",
+        "storage_path",
+        "disposable"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-query-index-status-v1" },
+        "root": { "type": "string", "minLength": 1 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "state": { "enum": ["absent", "fresh", "stale"] },
+        "generation": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "observed_generation": { "$ref": "#/$defs/sha256" },
+        "records": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "storage_path": { "const": ".folderbase/local/query-index-v1" },
+        "disposable": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "indexRebuildResult": {
+      "type": "object",
+      "required": [
+        "format",
+        "root",
+        "folderbase_id",
+        "generation",
+        "records",
+        "exclusions",
+        "storage_path",
+        "portable_files_changed",
+        "ordinary_files_changed"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-query-index-rebuild-result-v1" },
+        "root": { "type": "string", "minLength": 1 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "generation": { "$ref": "#/$defs/sha256" },
+        "records": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "exclusions": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "storage_path": { "const": ".folderbase/local/query-index-v1" },
+        "portable_files_changed": { "const": false },
+        "ordinary_files_changed": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "queryAttention": {
+      "type": "object",
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-query-attention-v1" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "retryable"],
+          "properties": {
+            "code": { "const": "query_snapshot_changed" },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "retryable": { "const": true }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "queryError": {
+      "type": "object",
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-query-error-v1" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_query_cursor",
+                "invalid_query_request",
+                "query_index_rebuild_failed",
+                "query_inventory_limit_exceeded",
+                "query_root_changed",
+                "query_scope_version_invalid",
+                "query_scope_version_missing"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

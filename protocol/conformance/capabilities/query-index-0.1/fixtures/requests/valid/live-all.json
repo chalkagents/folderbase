@@ -1,0 +1,5 @@
+{
+  "format": "folderbase-query-request-v1",
+  "scope": { "kind": "live" },
+  "page": { "limit": 1000 }
+}
