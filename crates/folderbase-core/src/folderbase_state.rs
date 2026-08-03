@@ -278,6 +278,27 @@ impl FolderbaseState {
         }
     }
 
+    pub(crate) fn sanitize_private_single_file_namespace(
+        &self,
+        relative: &Path,
+        retained_file: &OsStr,
+        maximum_entries: usize,
+    ) -> Result<()> {
+        let relative = state_relative(relative)?;
+        self.require_mutable(&relative)?;
+        let directory = self.open_dir(&relative)?;
+        let display = self.display_path(&relative);
+        let mut visited = 0usize;
+        sanitize_private_directory(
+            &directory,
+            &display,
+            self.access,
+            Some(retained_file),
+            maximum_entries,
+            &mut visited,
+        )
+    }
+
     pub(crate) fn publish_new(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
         self.publish_new_with_hook(relative, bytes, || {})
     }
@@ -1704,6 +1725,85 @@ impl FolderbaseState {
 
     fn display_path(&self, relative: &Path) -> PathBuf {
         self.display_root.join(STATE_COMPONENT).join(relative)
+    }
+}
+
+fn sanitize_private_directory(
+    directory: &Dir,
+    display: &Path,
+    access: StateAccess,
+    retained_file: Option<&OsStr>,
+    maximum_entries: usize,
+    visited: &mut usize,
+) -> Result<()> {
+    let names = directory
+        .read_dir(".")
+        .map_err(|source| FolderbaseError::io(display, source))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|source| FolderbaseError::io(display, source))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut changed = false;
+    for name in names {
+        if *visited >= maximum_entries {
+            return Err(FolderbaseError::InvalidRecord {
+                path: display.to_path_buf(),
+                message: "private namespace exceeds its bounded entry limit".to_owned(),
+            });
+        }
+        *visited += 1;
+        let child_display = display.join(&name);
+        let metadata = directory
+            .symlink_metadata(&name)
+            .map_err(|source| FolderbaseError::io(&child_display, source))?;
+        if retained_file == Some(name.as_os_str())
+            && metadata.is_file()
+            && !metadata.file_type().is_symlink()
+        {
+            continue;
+        }
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let child = open_directory_nofollow(directory, &name, &child_display, access)
+                .map_err(|source| FolderbaseError::io(&child_display, source))?;
+            sanitize_private_directory(
+                &child,
+                &child_display,
+                access,
+                None,
+                maximum_entries,
+                visited,
+            )?;
+            directory
+                .remove_dir(&name)
+                .map_err(|source| FolderbaseError::io(&child_display, source))?;
+        } else {
+            remove_private_leaf(directory, &name, &child_display)?;
+        }
+        changed = true;
+    }
+    if changed {
+        sync_directory(directory, display)?;
+    }
+    Ok(())
+}
+
+fn remove_private_leaf(parent: &Dir, name: &OsStr, display: &Path) -> Result<()> {
+    match parent.remove_file(name) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            parent
+                .remove_dir(name)
+                .map_err(|source| FolderbaseError::io(display, source))
+        }
+        Err(source) => Err(FolderbaseError::io(display, source)),
     }
 }
 

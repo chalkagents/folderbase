@@ -754,6 +754,13 @@ impl FolderbaseQueryEngine {
                 })?;
         }
         state
+            .sanitize_private_single_file_namespace(
+                Path::new(INDEX_ROOT),
+                Path::new("index.json").as_os_str(),
+                MAX_INDEX_RECORDS,
+            )
+            .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
+        state
             .replace_with_before_publish(Path::new(INDEX_RECORD), &encoded, before_publish)
             .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
         let verified = read_index(&self.root, &observation);
