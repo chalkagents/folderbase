@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -57,14 +58,25 @@ test("Vercel Git deployments are enabled only for main", () => {
     readFileSync(join(docsRoot, "package.json"), "utf8"),
   );
 
-  assert.deepEqual(config.git?.deploymentEnabled, {
-    "*": false,
-    main: true,
-  });
+  assert.equal(config.git, undefined);
+  assert.equal(config.ignoreCommand, "node scripts/ignore-non-main-deploy.mjs");
   assert.equal(config.installCommand, "npm ci");
   assert.equal(packageManifest.engines?.node, "24.x");
   assert.match(packageManifest.packageManager ?? "", /^npm@\d+\.\d+\.\d+$/u);
   assert.match(packageManifest.devDependencies?.["@types/node"] ?? "", /^24\./u);
+
+  const ignoreScript = join(docsRoot, "scripts", "ignore-non-main-deploy.mjs");
+  const runIgnore = (gitRef) =>
+    spawnSync(process.execPath, [ignoreScript], {
+      env: {
+        ...process.env,
+        ...(gitRef === undefined ? {} : { VERCEL_GIT_COMMIT_REF: gitRef }),
+      },
+    });
+
+  assert.equal(runIgnore("codex/preview").status, 0, "preview should be ignored");
+  assert.equal(runIgnore("main").status, 1, "main should build");
+  assert.equal(runIgnore(undefined).status, 1, "manual deploy should build");
 });
 
 test("published docs describe the released native 0.5 contract", () => {
@@ -89,6 +101,24 @@ test("published docs describe the released native 0.5 contract", () => {
   assert.match(content, /--expected-plan-digest/);
   assert.match(index, /init \. --expected-plan-digest DIGEST_FROM_DRY_RUN --json/);
   assert.doesNotMatch(allDocs, /--help-json/);
+});
+
+test("install docs cover every verified 0.5 distribution channel", () => {
+  const install = read("apps/docs/content/docs/getting-started/install.mdx");
+  const release = read("apps/docs/content/docs/releases/0.5.mdx");
+
+  for (const page of [install, release]) {
+    assert.match(page, /npx --yes @folderbase\/cli@0\.5\.0 --version/u);
+    assert.match(
+      page,
+      /cargo install folderbase-cli --version 0\.5\.0 --locked/u,
+    );
+    assert.match(page, /brew install chalkagents\/tap\/folderbase/u);
+    assert.match(
+      page,
+      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.5\.0/u,
+    );
+  }
 });
 
 test("released templates, local versions, and public conformance have runnable guides", () => {
