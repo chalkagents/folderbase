@@ -25,3 +25,22 @@ JSON v1, and the immutable Core 0.5 release closure are unchanged.
 
 Read [Query a Folderbase](/docs/guides/querying) and the
 [query/index wire reference](/docs/reference/query-index).
+
+## Stable optional template-expansion capability
+
+Builds that advertise `folderbase.template-expansion@0.1.0` provide:
+
+- read-only planning for one exact data-only Template Protocol 0.2 package;
+- reviewed application bound to the exact physical folder instance and current plan;
+- no-clobber additions that preserve every existing user path;
+- idempotent replay and immutable template-application history;
+- explicit handoff to reorganization for lineage or structural changes;
+- bounded stdin, typed parser and operational errors, and safe output transport;
+- an eight-case implementation-neutral public conformance suite; and
+- policy-pinned native CLI conformance on macOS and Windows after merge.
+
+The capability does not make templates permanent schemas and does not stabilize
+the built-in catalog, “latest” selection, or `init --template` convenience.
+
+Read [Start from a template](/docs/guides/templates) and the
+[template expansion wire reference](/docs/reference/template-expansion).

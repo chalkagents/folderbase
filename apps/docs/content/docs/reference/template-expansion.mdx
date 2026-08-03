@@ -1,0 +1,84 @@
+---
+title: Template expansion capability
+description: Stable wire contract for additive, reviewed Template Protocol 0.2 application.
+---
+
+`folderbase.template-expansion@0.1.0` is a stable optional capability. It does
+not widen Compatibility Contract v1; discover it through:
+
+```bash
+folderbase protocol contract --json
+```
+
+## Commands
+
+```text
+folderbase template plan ROOT --stdin --json
+folderbase template apply ROOT --expected-plan-digest SHA256 --stdin --json
+```
+
+Both commands read exactly one bounded
+`folderbase-template-expansion-request-v1` document from stdin. The request
+contains one exact Template Protocol 0.2 package plus typed answers. Core does
+not resolve package names, query a catalog, execute template code, or select a
+newer version.
+
+## Results and exits
+
+| Exit | Stream | Meaning |
+| --- | --- | --- |
+| `0` | stdout | A valid plan or successful/idempotent apply result. |
+| `1` | stdout | Review is required; the request cannot be expressed as safe additive expansion. |
+| `2` | stderr | Invalid invocation, request, root, transport, or operational failure. |
+
+The closed document formats are:
+
+- `folderbase-template-expansion-plan-v1`;
+- `folderbase-template-expansion-apply-result-v1`;
+- `folderbase-template-expansion-attention-v1`; and
+- `folderbase-template-expansion-error-v1`.
+
+Parser failures, including missing and unknown arguments, use the typed error
+document with code `invalid_template_request`. If the host has already made an
+output stream unusable, the CLI exits `2` and attempts a non-panicking
+best-effort diagnostic; typed delivery cannot be guaranteed to a closed stream.
+
+## Safety and approval binding
+
+Planning is read-only. Applying retains the exact physical root, acquires the
+shared Folderbase transaction lease, re-plans, and compares the current digest
+with `--expected-plan-digest` before any template write. The digest binds:
+
+- the exact folder instance and Folderbase identity;
+- the exact template ID, version, semantic package digest, and answers;
+- proposed additions, preserved paths, blocked paths, and current targets; and
+- the comparison lineage used for additive expansion.
+
+Artifacts use only `create_if_missing`. Existing files and directories are
+preserved. A new collision fails rather than overwrites. Replaying an already
+applied package is a no-op without duplicate history. Downgrades, lineage
+changes, and structural changes return `reorganization_required` instead of
+performing an opaque rewrite.
+
+## Bounds and portable paths
+
+Request input is capped at 4 MiB before JSON decoding. Template artifacts and
+paths are validated against the closed capability schema and Core's portable
+NFC Unicode 17 / full case-fold Unicode 9 path policy. Unsafe aliases, path
+escapes, nested root violations, and oversized content fail closed.
+
+## Independent conformance
+
+```bash
+node protocol/conformance/capabilities/template-expansion-0.1/run.mjs \
+  --implementation /absolute/path/to/folderbase
+```
+
+The suite is process-only and implementation-neutral. It runs eight black-box
+cases and independently bounds every candidate command to 30 seconds and 8 MiB
+of combined output by default. Timeout or overflow terminates the candidate's
+descendant process tree.
+
+The canonical schema and capability manifest live under
+`protocol/schemas/capabilities/template-expansion/0.1/` and
+`protocol/capabilities/template-expansion/0.1.0/` in the public repository.

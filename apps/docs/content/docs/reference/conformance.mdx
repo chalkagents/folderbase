@@ -44,7 +44,7 @@ node protocol/conformance/cli-json-v1/run.mjs \
 - exit meanings `0`, `1`, and `2`;
 - black-box filesystem behavior for stable initialization, upgrade, validation, protocol checks, and workspace operations.
 
-Passing one suite proves compatibility only with its named contract and protocol profiles. Query, templates, Change Sets, and other future capabilities require their own advertised capability and conformance closure before third parties can claim them.
+Passing one suite proves compatibility only with its named contract and protocol profiles. Query/index, template expansion, Change Sets, and other capabilities require their own advertised profile and conformance closure before third parties can claim them.
 
 ## Run advertised capability suites
 
@@ -67,3 +67,17 @@ node protocol/conformance/capabilities/query-index-0.1/run.mjs \
 Folderbase CLI JSON v1. Passing the base suite does not imply query support,
 and advertising query support commits the implementation to the complete
 query/index suite.
+
+Run only the stable template-expansion profile:
+
+```bash
+node protocol/conformance/capabilities/template-expansion-0.1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+`folderbase.template-expansion@0.1.0` has eight implementation-neutral
+black-box cases. They prove typed parser errors, bounded stdin, read-only
+planning, exact-root approval binding, no-clobber application, idempotent
+replay, portable path handling, and handoff to reorganization. Candidate
+commands are independently bounded and their descendant process trees are
+terminated on timeout or output overflow.
