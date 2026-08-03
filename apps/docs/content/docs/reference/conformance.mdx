@@ -75,9 +75,10 @@ node protocol/conformance/capabilities/template-expansion-0.1/run.mjs \
   --implementation /absolute/path/to/your-folderbase
 ```
 
-`folderbase.template-expansion@0.1.0` has eight implementation-neutral
+`folderbase.template-expansion@0.1.0` has nine implementation-neutral
 black-box cases. They prove typed parser errors, bounded stdin, read-only
-planning, exact-root approval binding, no-clobber application, idempotent
-replay, portable path handling, and handoff to reorganization. Candidate
+planning, 10 GiB metadata-first collision handling, exact-root approval
+binding, no-clobber application, idempotent replay, portable path handling,
+and handoff to reorganization. Candidate
 commands are independently bounded and their descendant process trees are
 terminated on timeout or output overflow.

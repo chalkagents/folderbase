@@ -35,6 +35,10 @@ use the runner's closed, validated timeout and output environment controls for
 faster hostile-candidate proofs; those controls do not change capability
 semantics.
 
+Template expansion visits only declared artifact targets. A pre-existing text
+target larger than 1 MiB is classified from metadata as blocked rather than
+opened and hashed; unrelated large or opaque files are never visited.
+
 Parser failures for the `template` command use
 `folderbase-template-expansion-error-v1` on stderr with exit code `2`, including
 missing or unknown arguments. Successful and attention documents are written

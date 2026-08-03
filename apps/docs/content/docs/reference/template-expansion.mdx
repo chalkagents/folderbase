@@ -67,6 +67,12 @@ paths are validated against the closed capability schema and Core's portable
 NFC Unicode 17 / full case-fold Unicode 9 path policy. Unsafe aliases, path
 escapes, nested root violations, and oversized content fail closed.
 
+Existing template targets larger than 1 MiB are classified from metadata and
+returned as `blocked`; Core does not open their contents merely to compute an
+approval or history digest. Other large or opaque files that are not declared
+as template targets are never visited by template expansion. Resolve or
+reorganize a large target explicitly before applying that template package.
+
 ## Independent conformance
 
 ```bash
@@ -74,7 +80,7 @@ node protocol/conformance/capabilities/template-expansion-0.1/run.mjs \
   --implementation /absolute/path/to/folderbase
 ```
 
-The suite is process-only and implementation-neutral. It runs eight black-box
+The suite is process-only and implementation-neutral. It runs nine black-box
 cases and independently bounds every candidate command to 30 seconds and 8 MiB
 of combined output by default. Timeout or overflow terminates the candidate's
 descendant process tree.

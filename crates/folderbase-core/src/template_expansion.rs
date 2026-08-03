@@ -40,6 +40,7 @@ const APPLICATION_SCHEMA: &str =
 const MAX_TEMPLATE_HISTORY_RECORDS: usize = 4096;
 const MAX_TEMPLATE_APPLICATION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TEMPLATE_PATH_ENTRY_WORK: usize = 100_000;
+const MAX_TEMPLATE_PRESERVED_HASH_BYTES: u64 = 1024 * 1024;
 
 pub fn plan_template_expansion(
     root: impl AsRef<Path>,
@@ -250,6 +251,13 @@ fn plan_template_expansion_in_state(
                     continue;
                 }
                 let mut file = file.into_std();
+                let metadata = file
+                    .metadata()
+                    .map_err(|source| FolderbaseError::io(root.join(&artifact.target), source))?;
+                if metadata.len() > MAX_TEMPLATE_PRESERVED_HASH_BYTES {
+                    blocked_paths.push(artifact.target.clone());
+                    continue;
+                }
                 let sha256 = sha256_reader(&mut file)
                     .map_err(|source| FolderbaseError::io(root.join(&artifact.target), source))?;
                 let identity = RetainedPhysicalIdentity::from_file(file)

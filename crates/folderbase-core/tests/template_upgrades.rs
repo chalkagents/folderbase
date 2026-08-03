@@ -468,6 +468,58 @@ fn additive_upgrade_preserves_conflicting_user_file_byte_for_byte() {
 }
 
 #[test]
+fn additive_upgrade_blocks_a_large_existing_template_target_without_reading_its_bytes() {
+    let registry = tempfile::tempdir().expect("registry");
+    let folderbase = tempfile::tempdir().expect("folderbase");
+    let origin = write_package(
+        registry.path(),
+        "v1",
+        "1.0.0",
+        "project",
+        base_artifacts(),
+        None,
+    );
+    let target = write_package(
+        registry.path(),
+        "v2",
+        "1.1.0",
+        "project",
+        additive_artifacts(),
+        Some("1.0.0"),
+    );
+    initialize_from_template(folderbase.path(), &origin);
+    fs::create_dir(folderbase.path().join("References")).expect("user References");
+    let large_user_bytes = vec![b'x'; 1024 * 1024 + 1];
+    fs::write(
+        folderbase.path().join("References/README.md"),
+        &large_user_bytes,
+    )
+    .expect("large user file");
+
+    let plan = plan_template_expansion(folderbase.path(), &target, &BTreeMap::new())
+        .expect("metadata-first plan around large user file");
+    assert!(
+        plan.blocked_paths()
+            .contains(&PathBuf::from("References/README.md"))
+    );
+    assert!(matches!(
+        apply_template_expansion(&plan),
+        Err(FolderbaseError::TemplateExpansionBlocked)
+    ));
+    assert!(
+        template_application_history(folderbase.path())
+            .expect("no false application history")
+            .is_empty()
+    );
+    assert_eq!(
+        fs::metadata(folderbase.path().join("References/README.md"))
+            .expect("large user file metadata")
+            .len(),
+        large_user_bytes.len() as u64
+    );
+}
+
+#[test]
 fn expansion_rejects_existing_case_folded_path_aliases() {
     let registry = tempfile::tempdir().expect("registry");
     let folderbase = tempfile::tempdir().expect("folderbase");

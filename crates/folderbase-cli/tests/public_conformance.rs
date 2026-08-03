@@ -49,7 +49,7 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains(
             "\"capability\": \"folderbase.template-expansion@0.1.0\"",
         ))
-        .stdout(predicate::str::contains("\"passed\": 8"))
+        .stdout(predicate::str::contains("\"passed\": 9"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")

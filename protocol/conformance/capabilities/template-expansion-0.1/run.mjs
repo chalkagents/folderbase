@@ -10,6 +10,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -223,6 +224,30 @@ async function main() {
       assert.equal(output.disposition, "ready");
       assert.deepEqual(output.preserved_paths, ["Existing.md"]);
       assert.deepEqual(output.additions.map(({ path }) => path), ["Notes", "Notes/README.md"]);
+    });
+
+    await check("large-existing-template-target-is-metadata-first-and-blocked", () => {
+      const root = createRoot(owner, "large-target");
+      const target = join(root, "Existing.md");
+      const tenGiB = 10 * 1024 * 1024 * 1024;
+      truncateSync(target, tenGiB);
+
+      const output = success(
+        implementation,
+        ["template", "plan", root, "--stdin", "--json"],
+        `${JSON.stringify(request)}\n`,
+        "plan",
+      );
+      assert.equal(output.disposition, "blocked");
+      assert.deepEqual(output.blocked_paths, ["Existing.md"]);
+      assert.equal(lstatSync(target, { bigint: true }).size, BigInt(tenGiB));
+      attention(
+        implementation,
+        ["template", "apply", root, "--expected-plan-digest", output.plan_digest.digest, "--stdin", "--json"],
+        `${JSON.stringify(request)}\n`,
+        "template_expansion_blocked",
+      );
+      assert.equal(lstatSync(target, { bigint: true }).size, BigInt(tenGiB));
     });
 
     await check("apply-replans-approved-digest-and-never-clobbers", () => {
