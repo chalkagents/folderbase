@@ -61,22 +61,27 @@ fn live_query_projects_the_capture_plan_without_opening_ordinary_file_bytes() {
         result
             .entries()
             .iter()
-            .map(|entry| (
-                entry.path(),
-                entry.kind(),
-                entry.bytes(),
-                entry.source(),
-            ))
+            .map(|entry| (entry.path(), entry.kind(), entry.bytes(), entry.source(),))
             .collect::<Vec<_>>(),
         vec![
-            ("clients", QueryEntryKind::Directory, None, QuerySource::CapturePlan),
+            (
+                "clients",
+                QueryEntryKind::Directory,
+                None,
+                QuerySource::CapturePlan
+            ),
             (
                 "clients/acme",
                 QueryEntryKind::NestedFolderbase,
                 None,
                 QuerySource::CapturePlan,
             ),
-            ("data", QueryEntryKind::Directory, None, QuerySource::CapturePlan),
+            (
+                "data",
+                QueryEntryKind::Directory,
+                None,
+                QuerySource::CapturePlan
+            ),
             (
                 "data/table.csv",
                 QueryEntryKind::RegularFile,
