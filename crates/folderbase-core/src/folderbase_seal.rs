@@ -7792,6 +7792,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn stale_store_refuses_a_replacement_physical_root_with_copied_state() {
         let root = folderbase();
