@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use folderbase_core::{
-    FolderbaseQueryEngine, QueryEntryKind, QueryError, QueryExecution, QueryIndexState,
-    QueryLifecycle, QueryRequest, QuerySource,
+    FolderbaseQueryEngine, FolderbaseVersionStore, QueryEntryKind, QueryError, QueryExecution,
+    QueryIndexState, QueryLifecycle, QueryRequest, QuerySource,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -290,6 +290,68 @@ fn live_page(limit: usize, cursor: Option<&str>) -> QueryRequest {
             "cursor": cursor
         }
     }))
+}
+
+fn sealed_cursor_fixture() -> (TempDir, FolderbaseQueryEngine, String, String) {
+    let root = folderbase();
+    for name in ["a.md", "b.md"] {
+        fs::write(root.path().join(name), format!("{name}\n")).expect("query row");
+    }
+    let store = FolderbaseVersionStore::open(root.path()).expect("version store");
+    let sealed = store
+        .seal_capture(store.plan_capture().expect("capture plan"))
+        .expect("sealed identity source");
+    let version_id = sealed.version_id().to_owned();
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    let cursor = engine
+        .run(&live_page(1, None))
+        .expect("first page")
+        .page()
+        .next_cursor()
+        .expect("continuation cursor")
+        .to_owned();
+    (root, engine, cursor, version_id)
+}
+
+#[test]
+fn live_cursors_bind_protocol_metadata_local_head_bytes_and_identity_projection() {
+    let (root, engine, cursor, _) = sealed_cursor_fixture();
+    let manifest = root.path().join(".folderbase/manifest.json");
+    let replacement = root.path().join(".folderbase/manifest.replacement");
+    fs::write(&replacement, fs::read(&manifest).expect("manifest bytes"))
+        .expect("replacement manifest");
+    fs::rename(replacement, manifest).expect("change manifest metadata only");
+    assert!(matches!(
+        engine.run(&live_page(1, Some(&cursor))),
+        Err(QueryError::QuerySnapshotChanged)
+    ));
+
+    let (root, engine, cursor, _) = sealed_cursor_fixture();
+    let head = root.path().join(".folderbase/local/head.json");
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&fs::read(&head).expect("Local Head bytes"))
+            .expect("Local Head JSON");
+    fs::write(
+        &head,
+        serde_json::to_vec_pretty(&decoded).expect("alternate exact encoding"),
+    )
+    .expect("rewrite equivalent Local Head");
+    assert!(matches!(
+        engine.run(&live_page(1, Some(&cursor))),
+        Err(QueryError::QuerySnapshotChanged)
+    ));
+
+    let (root, engine, cursor, version_id) = sealed_cursor_fixture();
+    fs::remove_file(
+        root.path()
+            .join(".folderbase/versions/folderbase")
+            .join(format!("{version_id}.json")),
+    )
+    .expect("remove resolved identity source");
+    assert!(matches!(
+        engine.run(&live_page(1, Some(&cursor))),
+        Err(QueryError::QuerySnapshotChanged)
+    ));
 }
 
 #[test]
