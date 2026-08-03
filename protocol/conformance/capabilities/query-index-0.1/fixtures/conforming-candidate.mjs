@@ -5,7 +5,9 @@ import {
   lstat,
   mkdir,
   readFile,
+  readdir,
   readlink,
+  realpath,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -15,33 +17,19 @@ import {
   normalizeQueryRequest,
   pathMatchesPrefix,
   queryRequestSha256,
+  validatePortablePath,
 } from "../reference-request-digest.mjs";
 
 const FOLDERBASE_ID = "folderbase_018f43c2-9a1b-7def-8123-456789abcdef";
 const INDEX_PATH = ".folderbase/local/query-index-v1";
-const LIVE_PATHS = [
-  ".folderbaseignore",
-  "AGENTS.md",
-  "data",
-  "data/app.sqlite",
-  "data/table.csv",
-  "database.md",
-  "documents",
-  "documents/Brief.pdf",
-  "links",
-  "links/brief-link",
-  "media",
-  "media/archive.mov",
-  "media/clip.mp4",
-  "notes",
-  "notes/Brief.md",
-  "repo",
-  "repo/.git",
-  "repo/.git/HEAD",
-  "repo/README.md",
-  "vendors",
-  "vendors/nested",
-];
+const MAX_INVENTORY_ENTRIES = 16_384;
+
+class QueryCapabilityError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 
 function portableCompare(left, right) {
   return Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8"));
@@ -61,64 +49,204 @@ async function exists(path) {
   }
 }
 
-async function liveObservation(root) {
-  const entries = [];
-  const generationParts = [];
-  for (const path of LIVE_PATHS) {
-    const metadata = await lstat(join(root, path));
-    let kind;
-    let bytes = null;
-    const item = {
-      path,
-      kind: "directory",
-      lifecycle: "live",
-      bytes,
-      object_id: null,
-      object_version_id: null,
-      folderbase_version_id: null,
-      source: "capture_plan",
-    };
-    if (path === "vendors/nested") {
-      kind = "nested_folderbase";
-      item.boundary_reason = "nested-folderbase-boundary";
-    } else if (metadata.isSymbolicLink()) {
-      kind = "symlink";
-      item.symlink_target = await readlink(join(root, path));
-    } else if (metadata.isDirectory()) {
-      kind = "directory";
-    } else {
-      kind = "regular_file";
-      bytes = metadata.size;
-      item.bytes = bytes;
-      item.executable = (metadata.mode & 0o111) !== 0;
-    }
-    item.kind = kind;
-    entries.push(item);
-    generationParts.push([path, kind, bytes, Math.trunc(metadata.mtimeMs)]);
+function metadataFingerprint(metadata) {
+  const mode = metadata.mode;
+  return {
+    bytes: metadata.size.toString(),
+    modified_unix_nanos: metadata.mtimeNs?.toString() ?? null,
+    readonly: (mode & 0o200n) === 0n,
+    executable: (mode & 0o111n) !== 0n,
+    device: metadata.dev?.toString() ?? null,
+    inode: metadata.ino?.toString() ?? null,
+    physical_identity: metadata.dev === undefined || metadata.ino === undefined
+      ? null
+      : `unix:${metadata.dev.toString(16).padStart(16, "0")}:${metadata.ino.toString(16).padStart(16, "0")}`,
+  };
+}
+
+function ignoredByRules(path, rules) {
+  return rules.some((rule) => path === rule || path.startsWith(`${rule}/`));
+}
+
+async function exactRegularFile(path) {
+  try {
+    const metadata = await lstat(path);
+    return metadata.isFile() && !metadata.isSymbolicLink();
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
   }
-  const manifest = await lstat(join(root, ".folderbase/manifest.json"));
-  generationParts.push([".folderbase/manifest.json", manifest.size, Math.trunc(manifest.mtimeMs)]);
+}
+
+async function rootInstanceIdentity(root, folderbaseId) {
+  const exactRoot = await realpath(root);
+  return hash(JSON.stringify({
+    realpath: exactRoot,
+    folderbase_id: folderbaseId,
+    fingerprint: metadataFingerprint(await lstat(exactRoot, { bigint: true })),
+  }));
+}
+
+async function liveObservation(root) {
+  const exactRoot = await realpath(root);
+  const rootMetadata = await lstat(exactRoot, { bigint: true });
+  const manifestPath = join(exactRoot, ".folderbase/manifest.json");
+  const manifestBytes = await readFile(manifestPath);
+  const manifest = JSON.parse(manifestBytes);
+  const folderbaseId = manifest.folderbase?.id;
+  if (folderbaseId !== FOLDERBASE_ID) throw new Error("fixture Folderbase identity changed");
+  const manifestMetadata = await lstat(manifestPath, { bigint: true });
+  const ignorePath = join(exactRoot, ".folderbaseignore");
+  const ignoreBytes = await readFile(ignorePath);
+  const ignoreRules = ignoreBytes
+    .toString("utf8")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => line.endsWith("/") ? line.slice(0, -1) : line);
+  const effectiveIgnoreDigest = hash(JSON.stringify({
+    manifest: manifest.policies?.capture_ignore ?? null,
+    folderbaseignore_sha256: hash(ignoreBytes),
+    rules: ignoreRules,
+  }));
+  const entries = [];
+  const exclusions = [];
+  const observed = [];
+  async function visit(relativeDirectory) {
+    const children = await readdir(join(exactRoot, relativeDirectory), { withFileTypes: true });
+    children.sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
+    for (const child of children) {
+      const path = relativeDirectory ? `${relativeDirectory}/${child.name}` : child.name;
+      if (!relativeDirectory && child.name === ".folderbase") continue;
+      validatePortablePath(path);
+      if (path !== ".folderbaseignore" && ignoredByRules(path, ignoreRules)) {
+        if (!exclusions.some((entry) => entry.path === ignoreRules.find((rule) => path === rule || path.startsWith(`${rule}/`)))) {
+          const rule = ignoreRules.find((candidate) => path === candidate || path.startsWith(`${candidate}/`));
+          exclusions.push({ path: rule, reason: "capture-ignore-policy" });
+        }
+        continue;
+      }
+      const absolute = join(exactRoot, path);
+      const metadata = await lstat(absolute, { bigint: true });
+      const fingerprint = metadataFingerprint(metadata);
+      const item = {
+        path,
+        kind: "directory",
+        lifecycle: "live",
+        bytes: null,
+        object_id: null,
+        object_version_id: null,
+        folderbase_version_id: null,
+        source: "capture_plan",
+      };
+      let symlinkTarget = null;
+      if (metadata.isSymbolicLink()) {
+        item.kind = "symlink";
+        symlinkTarget = await readlink(absolute);
+        item.symlink_target = symlinkTarget;
+      } else if (metadata.isDirectory()) {
+        if (await exactRegularFile(join(absolute, ".folderbase/manifest.json"))) {
+          item.kind = "nested_folderbase";
+          item.boundary_reason = "nested-folderbase-boundary";
+          exclusions.push({
+            path,
+            kind: "nested_folderbase",
+            reason: "nested-folderbase-boundary",
+          });
+        }
+      } else if (metadata.isFile()) {
+        item.kind = "regular_file";
+        item.bytes = Number(metadata.size);
+        item.executable = fingerprint.executable;
+      } else {
+        exclusions.push({ path, reason: "unsupported-v1", kind: "other_special" });
+        continue;
+      }
+      entries.push(item);
+      observed.push({ path, kind: item.kind, fingerprint, symlink_target: symlinkTarget });
+      if (metadata.isDirectory() && item.kind !== "nested_folderbase") await visit(path);
+      if (entries.length + exclusions.length > MAX_INVENTORY_ENTRIES) {
+        throw new Error("query inventory limit exceeded");
+      }
+    }
+  }
+  await visit("");
+  const localHeadPath = join(exactRoot, ".folderbase/local/head.json");
+  const localHead = await exists(localHeadPath)
+    ? {
+        bytes_sha256: hash(await readFile(localHeadPath)),
+        fingerprint: metadataFingerprint(await lstat(localHeadPath, { bigint: true })),
+      }
+    : null;
+  const rootIdentity = hash(JSON.stringify({
+    realpath: exactRoot,
+    folderbase_id: folderbaseId,
+    fingerprint: metadataFingerprint(rootMetadata),
+  }));
+  const generation = hash(JSON.stringify({
+    root_instance: rootIdentity,
+    folderbase_id: folderbaseId,
+    root_manifest_sha256: hash(manifestBytes),
+    root_manifest_fingerprint: metadataFingerprint(manifestMetadata),
+    effective_ignore_sha256: effectiveIgnoreDigest,
+    local_head: localHead,
+    entries: observed.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path))),
+    exclusions: exclusions.sort(portableCompare),
+  }));
   return {
     entries: entries.sort(portableCompare),
-    exclusions: [
-      { path: "ignored", reason: "capture-ignore-policy" },
-      {
-        path: "vendors/nested",
-        kind: "nested_folderbase",
-        reason: "nested-folderbase-boundary",
-      },
-    ],
-    generation: hash(JSON.stringify(generationParts)),
+    exclusions: exclusions.sort(portableCompare),
+    generation,
+    rootIdentity,
     scopeSource: "capture_plan",
   };
 }
 
 async function historicalObservation(root, versionId) {
   const path = join(root, ".folderbase/versions/folderbase", `${versionId}.json`);
-  const bytes = await readFile(path);
-  const version = JSON.parse(bytes);
-  if (version.version_id !== versionId || version.folderbase_id !== FOLDERBASE_ID) {
-    throw new Error("query scope Version is invalid");
+  let bytes;
+  try {
+    bytes = await readFile(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new QueryCapabilityError(
+        "query_scope_version_missing",
+        "the exact historical Folderbase Version is missing",
+      );
+    }
+    throw error;
+  }
+  let version;
+  try {
+    version = JSON.parse(bytes);
+    if (
+      version.format !== "folderbase-version-v1" ||
+      version.protocol_version !== "0.5" ||
+      version.version_id !== versionId ||
+      version.folderbase_id !== FOLDERBASE_ID ||
+      version.path_policy?.format !== "folderbase-portable-path-v1" ||
+      !Array.isArray(version.bindings) ||
+      !Array.isArray(version.tombstones) ||
+      !Array.isArray(version.exclusions)
+    ) throw new Error("closed Folderbase Version fields are invalid");
+    const allPaths = [
+      ...version.bindings.map((entry) => entry.path),
+      ...version.tombstones.map((entry) => entry.path),
+      ...version.exclusions.map((entry) => entry.path),
+    ];
+    for (const portablePath of allPaths) validatePortablePath(portablePath);
+    for (const collection of [version.bindings, version.tombstones, version.exclusions]) {
+      for (let index = 1; index < collection.length; index += 1) {
+        if (Buffer.compare(Buffer.from(collection[index - 1].path), Buffer.from(collection[index].path)) >= 0) {
+          throw new Error("Folderbase Version paths are not strictly sorted");
+        }
+      }
+    }
+  } catch (error) {
+    throw new QueryCapabilityError(
+      "query_scope_version_invalid",
+      `the exact historical Folderbase Version is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const entries = version.bindings.map((binding) => ({
     path: binding.path,
@@ -163,6 +291,7 @@ async function historicalObservation(root, versionId) {
     entries: entries.sort(portableCompare),
     exclusions: version.exclusions,
     generation: hash(`${resolve(root)}\0${versionId}\0${hash(bytes)}`),
+    rootIdentity: await rootInstanceIdentity(root, version.folderbase_id),
     scopeSource: "folderbase_version",
   };
 }
@@ -189,13 +318,9 @@ function applies(entry, filters) {
   return true;
 }
 
-function rootBinding(root) {
-  return hash(resolve(root));
-}
-
-function encodeCursor(root, requestSha256, generation, lastPath) {
+function encodeCursor(rootIdentity, requestSha256, generation, lastPath) {
   const value = Buffer.from(JSON.stringify({
-    root: rootBinding(root),
+    root: rootIdentity,
     request_sha256: requestSha256,
     generation,
     last_path: lastPath,
@@ -259,7 +384,7 @@ async function query(command, root) {
   let lastPath = null;
   if (request.page.cursor) {
     const cursor = decodeCursor(request.page.cursor);
-    if (cursor.root !== rootBinding(root) || cursor.request_sha256 !== requestSha256) {
+    if (cursor.root !== observed.rootIdentity || cursor.request_sha256 !== requestSha256) {
       writeError("invalid_query_cursor", "cursor does not bind this root and request");
       return;
     }
@@ -308,7 +433,7 @@ async function query(command, root) {
       returned: pageEntries.length,
       has_more: hasMore,
       next_cursor: hasMore
-        ? encodeCursor(root, requestSha256, observed.generation, pageEntries.at(-1).path)
+        ? encodeCursor(observed.rootIdentity, requestSha256, observed.generation, pageEntries.at(-1).path)
         : null,
     },
   });
@@ -363,6 +488,9 @@ try {
   }
 } catch (error) {
   if (process.exitCode === undefined) {
-    writeError("invalid_query_request", error instanceof Error ? error.message : String(error));
+    writeError(
+      error instanceof QueryCapabilityError ? error.code : "invalid_query_request",
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }

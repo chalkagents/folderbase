@@ -107,6 +107,9 @@ jobs:
       - name: Test release publication policy
         run: node --test protocol/conformance/cli-json-v1/schema.test.mjs protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-required-results.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
 
+      - name: Test optional capability contracts
+        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs
+
       - name: Verify packaged legal notices
         run: |
           cmp LICENSE packages/npm-cli/LICENSE

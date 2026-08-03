@@ -388,6 +388,11 @@ require_workflow_job_exact_line \
   "The npm lane must remain change-aware."
 require_workflow_job_exact_line \
   "$workflow" \
+  "npm-cli" \
+  "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs" \
+  "The optional capability contract suite must remain policy-pinned in CI."
+require_workflow_job_exact_line \
+  "$workflow" \
   "rust" \
   "    if: needs.plan.outputs.rust == 'true'" \
   "The Linux Core lane must remain change-aware."

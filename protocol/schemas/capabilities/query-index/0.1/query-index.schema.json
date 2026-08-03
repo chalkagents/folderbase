@@ -37,7 +37,8 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\u0000)(?!.*(?:^|/)\\.folderbase(?:/|$)).+(?<!/)$"
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*[\\u0000-\\u001f<>:\"|?*])(?!.*(?:^|/)\\.[fF][oO][lL][dD][eE][rR][bB][aA][sS][eE](?:/|$))(?!.*[. ](?:/|$)).+(?<!/)$",
+      "x-folderbase-semantic-policy": "folderbase-portable-path-v1: 4096 UTF-8 bytes total, 255 UTF-8 bytes per component, depth 128, Windows reserved stems, and NFC/full-case-fold collision rejection"
     },
     "queryCursor": {
       "type": "string",
@@ -183,7 +184,31 @@
         "source": { "enum": ["capture_plan", "folderbase_version"] },
         "boundary_reason": { "const": "nested-folderbase-boundary" }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": { "kind": { "const": "nested_folderbase" } }
+          },
+          "then": {
+            "required": ["boundary_reason"],
+            "properties": {
+              "lifecycle": { "const": "live" },
+              "bytes": { "const": null },
+              "object_id": { "const": null },
+              "object_version_id": { "const": null }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["executable"] },
+                { "required": ["symlink_target"] }
+              ]
+            }
+          },
+          "else": { "not": { "required": ["boundary_reason"] } }
+        }
+      ]
     },
     "queryExclusion": {
       "type": "object",

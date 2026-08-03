@@ -63,6 +63,17 @@ values inside one family combine with OR. A prefix `data` matches `data` and
 filters are deferred until their authoritative Object-record projection is
 separately accepted; extensions must not infer them from filenames or prose.
 
+Every request path uses the complete `folderbase-portable-path-v1` policy: no
+absolute or drive-prefixed path, backslash, empty/dot/traversal component,
+control or Windows-forbidden character, trailing dot or space, case-folded
+`.folderbase` component, Windows-reserved stem, component beyond 255 UTF-8
+bytes, path beyond 4096 UTF-8 bytes, or depth beyond 128. The Unicode 17 NFC and
+Unicode 9 full-default-case-fold collision keys from the Folderbase Version
+contract apply. Exact duplicates inside a filter family are deduplicated; two
+distinct spellings that collide by NFC or full case fold make the request
+invalid. Path and prefix families are validated independently because their
+intersection is meaningful.
+
 Rows use ascending raw UTF-8 portable-path byte order. Because Folderbase
 Version portability already rejects exact, NFC, and case-fold collisions, this
 is stable without normalizing the displayed spelling. Exclusions use the same
@@ -74,6 +85,18 @@ set values, normalizes absent byte bounds to `null`, and omits the cursor. Its
 domain-separated SHA-256 is `folderbase-query-request-v1\0` followed by the
 canonical compact JSON bytes. Public vectors fix this digest across languages.
 
+Those JSON bytes have one closed serialization: object members occur in the
+schema-defined normalized order (`format`, `scope`, `filters`, `page`, with the
+documented order inside each), arrays retain their normalized order, integers
+use unsigned base-10 without leading zeroes, and no insignificant whitespace is
+present. Strings use JSON double quotes; quote, reverse solidus, and U+0000–001F
+use the standard shortest JSON escapes (`\b`, `\f`, `\n`, `\r`, `\t`, or
+lowercase `\u00xx`), solidus is not escaped, and all other Unicode scalar values,
+including U+2028/U+2029, are their exact UTF-8 bytes. Public vectors cover input
+member reordering, duplicate-set removal, Unicode byte order, every escape, and
+the maximum bounded integer. There are no implementation-selected map keys in a
+normalized request.
+
 ### Snapshot-safe cursors
 
 Cursors are opaque values. Their implementation-private payload binds the exact
@@ -82,14 +105,24 @@ and final portable-path sort key. It may additionally authenticate that
 binding. Callers may persist and round-trip a cursor but cannot inspect it for
 authority or ordering.
 
-The live observation generation binds root instance, manifest and effective
-ignore policy, optional Local Head, and the complete capture-plan metadata
-observation. The historical generation binds the exact root, Version ID, and
-verified Version digest. If a live workspace changes after a page, continuation
-returns the typed, retryable attention `query_snapshot_changed`; it never mixes
-rows from two generations. The caller restarts without a cursor. An immutable
-historical Version cannot legitimately change; missing or invalid bytes are an
-operational error.
+The live observation generation binds the attested physical root instance and
+Folderbase ID; exact root-manifest bytes and metadata; effective ordered ignore
+policy digest; optional verified Local Head bytes and metadata; every Capture
+Plan entry's kind, bytes, modified time, readonly/executable bits, device/inode
+or platform physical identity, and symlink target; plus sorted ignored and
+excluded paths. Index-private state is not part of that observation. If any
+bound fact changes after a page, continuation returns the typed, retryable
+attention `query_snapshot_changed`; it never mixes rows from two generations.
+Replaying a cursor against another root or normalized request is instead an
+`invalid_query_cursor` operational error.
+
+The historical generation binds the exact attested root, requested Version ID,
+and canonical digest of one bounded, semantically verified Folderbase Version.
+A missing Version exits 2 as `query_scope_version_missing`; malformed, identity-
+mismatched, schema-invalid, semantically invalid, or otherwise unverifiable
+Version bytes exit 2 as `query_scope_version_invalid`. Both use empty stdout and
+one typed error document on stderr. An immutable historical Version cannot
+legitimately change.
 
 ### Disposable index
 
@@ -107,6 +140,11 @@ excluded from capture. Deleting them changes performance only. A rebuild is a
 derived-state transaction, not Folderbase history and not permission or share
 authority.
 
+Conformance protects ordinary files, ignored descendants, descendants behind a
+nested Folderbase, portable protocol records, and pre-existing sibling
+namespaces under `.folderbase/local/**` across query, explain, status, and
+rebuild. Only the exact query-index namespace may differ after rebuild.
+
 ### Process surface
 
 The capability freezes these machine-readable invocations:
@@ -121,6 +159,13 @@ Successful commands exit 0 with one JSON document on stdout and empty stderr.
 Invocation and operational failures exit 2 with empty stdout and one typed
 capability error on stderr. These are optional-capability JSON documents, not
 new definitions or commands in Folderbase CLI JSON v1.
+
+The public runner resolves one regular candidate executable without a shell,
+places every fixture beneath one cleanup-owned temporary parent, and applies a
+hard per-command wall-clock limit, SIGKILL, and per-stream stdout/stderr byte
+bound. Its adversarial fixtures trap SIGTERM or produce unbounded output and
+prove the child PID no longer exists afterward. The sparse 10 GiB fixture is
+also required to consume at most 16 MiB of allocated blocks.
 
 Query never grants access, evaluates share policy, or crosses the authority of
 the root opened by the caller. It never mutates ordinary files or portable

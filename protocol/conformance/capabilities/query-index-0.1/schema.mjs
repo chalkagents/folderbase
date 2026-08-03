@@ -29,10 +29,27 @@ function matchesType(value, type) {
 
 function validate(value, inputSchema, root, path) {
   const schema = dereference(inputSchema, root);
+  if (schema.allOf) {
+    for (const branch of schema.allOf) validate(value, branch, root, path);
+  }
   if (schema.oneOf) {
     const branches = schema.oneOf.filter((branch) => accepts(value, branch, root, path));
     assert.equal(branches.length, 1, `${path} must match exactly one branch`);
     return;
+  }
+  if (schema.anyOf) {
+    assert.ok(
+      schema.anyOf.some((branch) => accepts(value, branch, root, path)),
+      `${path} must match at least one branch`,
+    );
+  }
+  if (schema.not) {
+    assert.ok(!accepts(value, schema.not, root, path), `${path} matches a forbidden branch`);
+  }
+  if (schema.if) {
+    if (accepts(value, schema.if, root, path)) {
+      if (schema.then) validate(value, schema.then, root, path);
+    } else if (schema.else) validate(value, schema.else, root, path);
   }
   if (Object.hasOwn(schema, "const")) {
     assert.ok(isDeepStrictEqual(value, schema.const), `${path} must equal its constant`);
