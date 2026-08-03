@@ -1752,6 +1752,22 @@ fn sanitize_private_directory_queued(
     access: StateAccess,
     retained_file: &OsStr,
 ) -> Result<()> {
+    sanitize_private_directory_queued_with_root_entry_visibility(
+        directory,
+        display,
+        access,
+        retained_file,
+        |_, _| true,
+    )
+}
+
+fn sanitize_private_directory_queued_with_root_entry_visibility(
+    directory: Dir,
+    display: PathBuf,
+    access: StateAccess,
+    retained_file: &OsStr,
+    mut root_entry_is_visible: impl FnMut(usize, &OsStr) -> bool,
+) -> Result<()> {
     let queue_name = OsString::from(format!(".sanitize-{}.tmp", Uuid::now_v7()));
     let queue_display = display.join(&queue_name);
     directory
@@ -1768,6 +1784,9 @@ fn sanitize_private_directory_queued(
     {
         let entry = entry.map_err(|source| FolderbaseError::io(&display, source))?;
         let name = entry.file_name();
+        if !root_entry_is_visible(0, &name) {
+            continue;
+        }
         if name == queue_name {
             continue;
         }
@@ -2697,6 +2716,46 @@ mod tests {
     const RESTORE_SOURCE: &str = ".folderbase/source";
     const RESTORE_STAGE: &str = ".folderbase/transactions/restore-stage";
     const RESTORE_DESTINATION: &str = "project/restored.bin";
+
+    #[test]
+    fn private_namespace_sanitizer_rescans_after_a_root_entry_is_skipped() {
+        let fixture = tempdir().expect("fixture");
+        let index_root = fixture.path().join(".folderbase/local/query-index-v1");
+        fs::create_dir_all(&index_root).expect("private namespace");
+        fs::write(index_root.join("index.json"), b"retained\n").expect("retained record");
+        fs::write(index_root.join("skipped-junk"), b"junk\n").expect("crash junk");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+        let directory = state
+            .open_dir(Path::new("local/query-index-v1"))
+            .expect("private directory capability");
+        let mut skipped = false;
+
+        sanitize_private_directory_queued_with_root_entry_visibility(
+            directory,
+            index_root.clone(),
+            StateAccess::Mutable,
+            OsStr::new("index.json"),
+            |pass, name| {
+                if pass == 0 && name == OsStr::new("skipped-junk") {
+                    skipped = true;
+                    false
+                } else {
+                    true
+                }
+            },
+        )
+        .expect("sanitize private namespace");
+
+        assert!(
+            skipped,
+            "the seam must omit original junk on the first pass"
+        );
+        let names = fs::read_dir(&index_root)
+            .expect("sanitized namespace")
+            .map(|entry| entry.expect("namespace entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [OsString::from("index.json")]);
+    }
 
     fn prepared_workspace_restore(
         expected: &[u8],
