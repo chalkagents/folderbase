@@ -643,6 +643,26 @@ pub enum FolderbaseCaptureError {
     },
 }
 
+impl FolderbaseCaptureError {
+    pub(crate) fn proves_query_observation_changed(&self) -> bool {
+        matches!(
+            self,
+            Self::RequiredMarker(_)
+                | Self::UnsafePortablePath(_)
+                | Self::PortablePathCollision { .. }
+                | Self::UnsafeSymlinkTarget(_)
+                | Self::IgnorePolicyTooLarge { .. }
+                | Self::IgnorePolicyNotUtf8
+                | Self::InvalidIgnorePolicy(_)
+                | Self::LocalHeadTooLarge { .. }
+                | Self::UnsafeLocalHead
+                | Self::InvalidLocalHead(_)
+                | Self::PlanningStateChanged
+                | Self::InventoryLimitExceeded { .. }
+        )
+    }
+}
+
 /// Read-only handle for planning Folderbase Version capture.
 pub struct FolderbaseVersionStore {
     pub(crate) root_attestation: FolderbaseRootAttestation,
@@ -667,6 +687,17 @@ impl fmt::Debug for FolderbaseVersionStore {
 impl FolderbaseVersionStore {
     /// Open one exact, existing Folderbase Root without writing any state.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, FolderbaseCaptureError> {
+        Self::open_with_local_head_validation(root, true)
+    }
+
+    pub(crate) fn open_for_query(root: impl AsRef<Path>) -> Result<Self, FolderbaseCaptureError> {
+        Self::open_with_local_head_validation(root, false)
+    }
+
+    fn open_with_local_head_validation(
+        root: impl AsRef<Path>,
+        validate_local_head: bool,
+    ) -> Result<Self, FolderbaseCaptureError> {
         let requested_root = root.as_ref();
         let (requested_attestation, _, requested_profile) =
             attest_folderbase_root_with_profile(requested_root)?;
@@ -697,11 +728,13 @@ impl FolderbaseVersionStore {
                 Path::new(".folderbaseignore"),
             )?;
         }
-        read_local_head(
-            &root_attestation,
-            &root_instance_authority,
-            &root_capability,
-        )?;
+        if validate_local_head {
+            read_local_head(
+                &root_attestation,
+                &root_instance_authority,
+                &root_capability,
+            )?;
+        }
         verify_root_capability(&root_capability, &canonical_root)?;
         let root_physical_identity = directory_identity(&root_capability, &canonical_root)?;
         let restore_state = FolderbaseState::open_existing_read_only(&canonical_root)?;

@@ -555,7 +555,7 @@ pub enum QueryError {
 impl FolderbaseQueryEngine {
     /// Open one exact Folderbase Root without writing state.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, QueryError> {
-        let store = FolderbaseVersionStore::open(root)?;
+        let store = FolderbaseVersionStore::open_for_query(root)?;
         let state = FolderbaseState::open_existing(&store.root_attestation.root)
             .map_err(|_| QueryError::RootAuthorityChanged)?;
         state
@@ -583,6 +583,43 @@ impl FolderbaseQueryEngine {
             return Err(QueryError::RootAuthorityChanged);
         }
         self.ensure_root_authority()
+    }
+
+    fn prepare_continuation(
+        &self,
+        request: &QueryRequest,
+        normalized: &NormalizedRequest<'_>,
+    ) -> Result<(String, Option<QueryCursorPayload>), QueryError> {
+        let request_sha256 = request_sha256(normalized)?;
+        let cursor = request
+            .page
+            .cursor
+            .as_deref()
+            .map(decode_cursor)
+            .transpose()?;
+        if cursor.as_ref().is_some_and(|cursor| {
+            cursor.root_instance_sha256 != self.opening_root_instance_sha256
+                || cursor.request_sha256 != request_sha256
+        }) {
+            return Err(QueryError::InvalidQueryCursor);
+        }
+        Ok((request_sha256, cursor))
+    }
+
+    fn observe_live_query_for_continuation<G>(
+        &self,
+        after_live_observation: impl FnOnce() -> G,
+        has_cursor: bool,
+    ) -> Result<(QueryObservation, QueryExecution), QueryError> {
+        match self.observe_live_query_with_after_observation(after_live_observation) {
+            Ok(observation) => Ok(observation),
+            Err(QueryError::Capture(error))
+                if has_cursor && error.proves_query_observation_changed() =>
+            {
+                Err(QueryError::QuerySnapshotChanged)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn observe_live_query_with_after_observation<G>(
@@ -636,9 +673,10 @@ impl FolderbaseQueryEngine {
     ) -> Result<QueryResult, QueryError> {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
+        let (request_sha256, cursor) = self.prepare_continuation(request, &normalized)?;
         let (mut observation, execution) = match &request.scope {
             QueryScope::Live => {
-                self.observe_live_query_with_after_observation(after_live_observation)?
+                self.observe_live_query_for_continuation(after_live_observation, cursor.is_some())?
             }
             QueryScope::Historical {
                 folderbase_version_id,
@@ -653,14 +691,7 @@ impl FolderbaseQueryEngine {
         self.ensure_observation_authority(&observation)?;
         let exclusions_truncated = observation.exclusions.len() > MAX_RETURNED_EXCLUSIONS;
         observation.exclusions.truncate(MAX_RETURNED_EXCLUSIONS);
-        let request_sha256 = request_sha256(&normalized)?;
-        let after_row_key = if let Some(cursor) = request.page.cursor.as_deref() {
-            let cursor = decode_cursor(cursor)?;
-            if cursor.root_instance_sha256 != observation.root_instance_sha256
-                || cursor.request_sha256 != request_sha256
-            {
-                return Err(QueryError::InvalidQueryCursor);
-            }
+        let after_row_key = if let Some(cursor) = cursor {
             if cursor.observation_generation != observation.generation {
                 return Err(QueryError::QuerySnapshotChanged);
             }
@@ -720,10 +751,11 @@ impl FolderbaseQueryEngine {
     ) -> Result<QueryExplain, QueryError> {
         self.ensure_root_authority()?;
         let normalized = normalize_request(request)?;
+        let (request_sha256, cursor) = self.prepare_continuation(request, &normalized)?;
         let live = matches!(&request.scope, QueryScope::Live);
         let (mut observation, index_strategy) = match &request.scope {
             QueryScope::Live => {
-                self.observe_live_query_with_after_observation(after_live_observation)?
+                self.observe_live_query_for_continuation(after_live_observation, cursor.is_some())?
             }
             QueryScope::Historical {
                 folderbase_version_id,
@@ -733,17 +765,10 @@ impl FolderbaseQueryEngine {
             ),
         };
         self.ensure_observation_authority(&observation)?;
-        let request_sha256 = request_sha256(&normalized)?;
-        if let Some(cursor) = request.page.cursor.as_deref() {
-            let cursor = decode_cursor(cursor)?;
-            if cursor.root_instance_sha256 != observation.root_instance_sha256
-                || cursor.request_sha256 != request_sha256
-            {
-                return Err(QueryError::InvalidQueryCursor);
-            }
-            if cursor.observation_generation != observation.generation {
-                return Err(QueryError::QuerySnapshotChanged);
-            }
+        if let Some(cursor) = cursor
+            && cursor.observation_generation != observation.generation
+        {
+            return Err(QueryError::QuerySnapshotChanged);
         }
         let matched = observation
             .entries
@@ -2160,11 +2185,76 @@ mod tests {
             b"{\"format\":\"changed-and-invalid-local-head\"}\n",
         )
         .expect("changed Local Head");
+        drop(engine);
+        let engine = FolderbaseQueryEngine::open(root.path())
+            .expect("query engine defers Local Head parsing until the request is known");
 
         assert!(matches!(
             engine.run(&request),
             Err(QueryError::QuerySnapshotChanged)
         ));
+        assert!(matches!(
+            engine.explain(&request),
+            Err(QueryError::QuerySnapshotChanged)
+        ));
+    }
+
+    #[test]
+    fn cursor_validation_precedes_live_state_parsing_for_run_and_explain() {
+        fn assert_invalid_cursor(engine: &FolderbaseQueryEngine, request: &QueryRequest) {
+            assert!(matches!(
+                engine.run(request),
+                Err(QueryError::InvalidQueryCursor)
+            ));
+            assert!(matches!(
+                engine.explain(request),
+                Err(QueryError::InvalidQueryCursor)
+            ));
+        }
+
+        let owner = tempdir().expect("root owner");
+        let first_root = owner.path().join("first");
+        let second_root = owner.path().join("second");
+        initialize_root(&first_root, "alpha.md");
+        fs::write(first_root.join("beta.md"), b"beta\n").expect("second ordinary file");
+        initialize_root(&second_root, "other.md");
+
+        let first_engine = FolderbaseQueryEngine::open(&first_root).expect("first query engine");
+        let first_page = first_engine
+            .run(&QueryRequest::live(1))
+            .expect("first page");
+        let valid_cursor = first_page
+            .page()
+            .next_cursor()
+            .expect("first page cursor")
+            .to_owned();
+        drop(first_engine);
+
+        for root in [&first_root, &second_root] {
+            fs::create_dir_all(root.join(".folderbase/local")).expect("local state");
+            fs::write(
+                root.join(".folderbase/local/head.json"),
+                b"{\"format\":\"changed-and-invalid-local-head\"}\n",
+            )
+            .expect("changed Local Head");
+        }
+
+        let first_engine = FolderbaseQueryEngine::open(&first_root)
+            .expect("first query engine defers Local Head parsing");
+        let second_engine = FolderbaseQueryEngine::open(&second_root)
+            .expect("second query engine defers Local Head parsing");
+
+        let mut malformed = QueryRequest::live(1);
+        malformed.page.cursor = Some("not-a-query-cursor".to_owned());
+        assert_invalid_cursor(&first_engine, &malformed);
+
+        let mut cross_request = QueryRequest::live(2);
+        cross_request.page.cursor = Some(valid_cursor.clone());
+        assert_invalid_cursor(&first_engine, &cross_request);
+
+        let mut cross_root = QueryRequest::live(1);
+        cross_root.page.cursor = Some(valid_cursor);
+        assert_invalid_cursor(&second_engine, &cross_root);
     }
 
     #[test]
