@@ -282,20 +282,18 @@ impl FolderbaseState {
         &self,
         relative: &Path,
         retained_file: &OsStr,
-        maximum_entries: usize,
+        maximum_depth: usize,
     ) -> Result<()> {
         let relative = state_relative(relative)?;
         self.require_mutable(&relative)?;
         let directory = self.open_dir(&relative)?;
         let display = self.display_path(&relative);
-        let mut visited = 0usize;
-        sanitize_private_directory(
-            &directory,
-            &display,
+        sanitize_private_directory_iterative(
+            directory,
+            display,
             self.access,
-            Some(retained_file),
-            maximum_entries,
-            &mut visited,
+            retained_file,
+            maximum_depth,
         )
     }
 
@@ -1728,65 +1726,117 @@ impl FolderbaseState {
     }
 }
 
-fn sanitize_private_directory(
-    directory: &Dir,
-    display: &Path,
+struct PrivateSanitizeFrame {
+    directory: Dir,
+    display: PathBuf,
+    name_in_parent: Option<OsString>,
+    changed: bool,
+}
+
+fn sanitize_private_directory_iterative(
+    directory: Dir,
+    display: PathBuf,
     access: StateAccess,
-    retained_file: Option<&OsStr>,
-    maximum_entries: usize,
-    visited: &mut usize,
+    retained_file: &OsStr,
+    maximum_depth: usize,
 ) -> Result<()> {
-    let names = directory
-        .read_dir(".")
-        .map_err(|source| FolderbaseError::io(display, source))?
-        .map(|entry| {
-            entry
-                .map(|entry| entry.file_name())
-                .map_err(|source| FolderbaseError::io(display, source))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut changed = false;
-    for name in names {
-        if *visited >= maximum_entries {
-            return Err(FolderbaseError::InvalidRecord {
-                path: display.to_path_buf(),
-                message: "private namespace exceeds its bounded entry limit".to_owned(),
-            });
-        }
-        *visited += 1;
-        let child_display = display.join(&name);
-        let metadata = directory
-            .symlink_metadata(&name)
-            .map_err(|source| FolderbaseError::io(&child_display, source))?;
-        if retained_file == Some(name.as_os_str())
-            && metadata.is_file()
-            && !metadata.file_type().is_symlink()
+    if maximum_depth == 0 {
+        return Err(FolderbaseError::InvalidRecord {
+            path: display,
+            message: "private namespace cleanup depth must be positive".to_owned(),
+        });
+    }
+    let mut stack = vec![PrivateSanitizeFrame {
+        directory,
+        display,
+        name_in_parent: None,
+        changed: false,
+    }];
+    loop {
+        let frame = stack
+            .last()
+            .expect("private sanitizer retains a root frame");
+        let mut child = None;
+        for entry in frame
+            .directory
+            .read_dir(".")
+            .map_err(|source| FolderbaseError::io(&frame.display, source))?
         {
+            let entry = entry.map_err(|source| FolderbaseError::io(&frame.display, source))?;
+            let name = entry.file_name();
+            let child_display = frame.display.join(&name);
+            let metadata = frame
+                .directory
+                .symlink_metadata(&name)
+                .map_err(|source| FolderbaseError::io(&child_display, source))?;
+            if stack.len() == 1
+                && retained_file == name.as_os_str()
+                && metadata.is_file()
+                && !metadata.file_type().is_symlink()
+            {
+                continue;
+            }
+            child = Some((name, child_display, metadata));
+            break;
+        }
+
+        let Some((name, child_display, metadata)) = child else {
+            if stack.len() == 1 {
+                let root = stack.pop().expect("private sanitizer root frame");
+                if root.changed {
+                    sync_directory(&root.directory, &root.display)?;
+                }
+                return Ok(());
+            }
+            let completed = stack.pop().expect("completed private child frame");
+            if completed.changed {
+                sync_directory(&completed.directory, &completed.display)?;
+            }
+            let parent = stack.last_mut().expect("private sanitizer parent frame");
+            let child_name = completed
+                .name_in_parent
+                .expect("nested private frame has a parent name");
+            parent
+                .directory
+                .remove_dir(&child_name)
+                .map_err(|source| FolderbaseError::io(&completed.display, source))?;
+            parent.changed = true;
             continue;
-        }
+        };
+
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            let child = open_directory_nofollow(directory, &name, &child_display, access)
-                .map_err(|source| FolderbaseError::io(&child_display, source))?;
-            sanitize_private_directory(
-                &child,
-                &child_display,
-                access,
-                None,
-                maximum_entries,
-                visited,
-            )?;
-            directory
-                .remove_dir(&name)
-                .map_err(|source| FolderbaseError::io(&child_display, source))?;
+            if stack.len() >= maximum_depth {
+                let frame = stack.last().expect("private sanitizer depth frame");
+                if frame.changed {
+                    sync_directory(&frame.directory, &frame.display)?;
+                }
+                for ancestor in stack.iter().rev().skip(1) {
+                    if ancestor.changed {
+                        sync_directory(&ancestor.directory, &ancestor.display)?;
+                    }
+                }
+                let path = child_display;
+                return Err(FolderbaseError::InvalidRecord {
+                    path,
+                    message: "private namespace exceeds its bounded nesting depth".to_owned(),
+                });
+            }
+            let parent = stack.last().expect("private sanitizer parent frame");
+            let directory =
+                open_directory_nofollow(&parent.directory, &name, &child_display, access)
+                    .map_err(|source| FolderbaseError::io(&child_display, source))?;
+            stack.push(PrivateSanitizeFrame {
+                directory,
+                display: child_display,
+                name_in_parent: Some(name),
+                changed: false,
+            });
         } else {
-            remove_private_leaf(directory, &name, &child_display)?;
+            let frame = stack.last_mut().expect("private sanitizer leaf frame");
+            remove_private_leaf(&frame.directory, &name, &child_display)?;
+            frame.changed = true;
         }
-        changed = true;
     }
-    if changed {
-        sync_directory(directory, display)?;
-    }
-    Ok(())
 }
 
 fn remove_private_leaf(parent: &Dir, name: &OsStr, display: &Path) -> Result<()> {

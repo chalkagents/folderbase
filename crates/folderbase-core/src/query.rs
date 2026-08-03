@@ -31,6 +31,7 @@ const MAX_PAGE_LIMIT: usize = 1_000;
 const MAX_RETURNED_EXCLUSIONS: usize = 1_000;
 const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INDEX_RECORDS: usize = 16_384;
+const MAX_INDEX_CLEANUP_DEPTH: usize = 256;
 const INDEX_ROOT: &str = ".folderbase/local/query-index-v1";
 const INDEX_RECORD: &str = ".folderbase/local/query-index-v1/index.json";
 const INDEX_FORMAT: &str = "folderbase-query-private-index-v1";
@@ -862,7 +863,7 @@ impl FolderbaseQueryEngine {
                 .sanitize_private_single_file_namespace(
                     Path::new(INDEX_ROOT),
                     Path::new("index.json").as_os_str(),
-                    MAX_INDEX_RECORDS,
+                    MAX_INDEX_CLEANUP_DEPTH,
                 )
                 .map_err(|error| QueryError::IndexRebuildFailed(error.to_string()))?;
             self.state
