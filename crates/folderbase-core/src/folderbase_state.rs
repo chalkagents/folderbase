@@ -2670,6 +2670,72 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn exact_private_leaf_removal_unlinks_a_directory_link_without_following_it() {
+        let fixture = tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+        fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
+        let outside = tempdir().expect("outside target");
+        fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+        let link = fixture.path().join(".folderbase/local/query-index-v1");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("directory link");
+        let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+        state
+            .remove_private_leaf_durable(Path::new(".folderbase/local/query-index-v1"))
+            .expect("unlink exact private leaf");
+
+        assert!(!link.exists());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).expect("outside sentinel remains"),
+            b"outside\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_private_leaf_removal_unlinks_windows_directory_links_without_following_them() {
+        use std::{os::windows::fs::symlink_dir, process::Command};
+
+        for junction in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            fs::create_dir(fixture.path().join(".folderbase")).expect("state");
+            fs::create_dir_all(fixture.path().join(".folderbase/local")).expect("private parent");
+            let outside = tempdir().expect("outside target");
+            fs::write(outside.path().join("sentinel"), b"outside\n").expect("outside sentinel");
+            let link = fixture.path().join(".folderbase/local/query-index-v1");
+            if junction {
+                let output = Command::new("cmd.exe")
+                    .args(["/D", "/C", "mklink", "/J"])
+                    .arg(&link)
+                    .arg(outside.path())
+                    .output()
+                    .expect("create directory junction");
+                assert!(
+                    output.status.success(),
+                    "mklink /J failed: stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            } else {
+                symlink_dir(outside.path(), &link)
+                    .expect("GitHub Windows runner can create directory symlinks");
+            }
+            let state = FolderbaseState::open_existing(fixture.path()).expect("state capability");
+
+            state
+                .remove_private_leaf_durable(Path::new(".folderbase/local/query-index-v1"))
+                .expect("unlink exact private leaf");
+
+            assert!(!link.exists());
+            assert_eq!(
+                fs::read(outside.path().join("sentinel")).expect("outside sentinel remains"),
+                b"outside\n"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn executable_restore_stage_fidelity_is_independent_of_process_umask() {
         const CHILD_MARKER: &str = "FOLDERBASE_RESTRICTIVE_UMASK_CHILD";
         const TEST_NAME: &str = "folderbase_state::tests::executable_restore_stage_fidelity_is_independent_of_process_umask";
