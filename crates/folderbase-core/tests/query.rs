@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, path::Path, time::Instant};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use folderbase_core::{
     FolderbaseQueryEngine, FolderbaseVersionStore, QueryEntryKind, QueryError, QueryExecution,
@@ -29,6 +34,50 @@ const MANIFEST: &[u8] = br#"{
   }
 }
 "#;
+
+const PACKAGED_QUERY_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/query-index-0.1"
+);
+
+fn packaged_query_fixture(name: &str) -> PathBuf {
+    Path::new(PACKAGED_QUERY_FIXTURES).join(name)
+}
+
+#[test]
+fn packaged_query_fixtures_match_public_capability_sources_when_present() {
+    let public = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../protocol/conformance/capabilities/query-index-0.1/fixtures");
+    if !public.is_dir() {
+        return;
+    }
+
+    for (packaged_name, public_name) in [
+        ("historical-version.json", "historical-version.json"),
+        (
+            "canonical-request.json",
+            "requests/valid/canonical-request.json",
+        ),
+        (
+            "canonical-request.sha256",
+            "requests/valid/canonical-request.sha256",
+        ),
+        (
+            "canonical-unicode-request.json",
+            "requests/valid/canonical-unicode-request.json",
+        ),
+        (
+            "canonical-unicode-request.sha256",
+            "requests/valid/canonical-unicode-request.sha256",
+        ),
+    ] {
+        assert_eq!(
+            fs::read(packaged_query_fixture(packaged_name)).expect("packaged query fixture"),
+            fs::read(public.join(public_name)).expect("public query fixture"),
+            "packaged query fixture drifted from {public_name}"
+        );
+    }
+}
 
 fn folderbase() -> TempDir {
     let root = tempdir().expect("temporary Folderbase");
@@ -193,10 +242,7 @@ fn historical_query_projects_one_verified_version_with_exact_identity() {
     let versions = root.path().join(".folderbase/versions/folderbase");
     fs::create_dir_all(&versions).expect("Folderbase Version directory");
     fs::copy(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
-        ),
+        packaged_query_fixture("historical-version.json"),
         versions.join(format!("{VERSION_ID}.json")),
     )
     .expect("historical fixture");
@@ -319,11 +365,8 @@ fn historical_scope_classifies_missing_ancestors_without_weakening_invalid_recor
     .expect("fixture Folderbase identity");
     let versions = invalid_root.path().join(".folderbase/versions/folderbase");
     fs::create_dir_all(&versions).expect("Version namespace");
-    let fixture = fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
-    ))
-    .expect("historical fixture");
+    let fixture =
+        fs::read(packaged_query_fixture("historical-version.json")).expect("historical fixture");
     fs::write(versions.join(format!("{REQUESTED}.json")), &fixture)
         .expect("identity-mismatched Version");
     let invalid_engine =
@@ -374,10 +417,7 @@ fn historical_recreation_rows_page_by_a_total_row_key() {
     .expect("matching historical Folderbase identity");
     let versions = root.path().join(".folderbase/versions/folderbase");
     fs::create_dir_all(&versions).expect("Folderbase Version directory");
-    let fixture = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
-    );
+    let fixture = packaged_query_fixture("historical-version.json");
     fs::copy(fixture, versions.join(format!("{VERSION_ID}.json")))
         .expect("historical recreation fixture");
     let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
@@ -635,15 +675,12 @@ fn opaque_cursors_are_snapshot_safe_and_bound_to_root_request_and_sort_key() {
 fn normalized_request_digest_matches_the_independent_fixed_vectors() {
     let root = folderbase();
     let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
-    let fixtures = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/requests/valid"
-    );
     for stem in ["canonical-request", "canonical-unicode-request"] {
-        let encoded = fs::read(format!("{fixtures}/{stem}.json")).expect("request vector");
+        let encoded =
+            fs::read(packaged_query_fixture(&format!("{stem}.json"))).expect("request vector");
         let request = serde_json::from_slice(&encoded).expect("typed request vector");
-        let expected =
-            fs::read_to_string(format!("{fixtures}/{stem}.sha256")).expect("digest vector");
+        let expected = fs::read_to_string(packaged_query_fixture(&format!("{stem}.sha256")))
+            .expect("digest vector");
         assert_eq!(
             engine
                 .run(&request)
