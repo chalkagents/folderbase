@@ -34,7 +34,10 @@ import {
 
 import { assertQuerySchema } from "./schema.mjs";
 import { queryRequestSha256 } from "./reference-request-digest.mjs";
-import { assertSparseFixture } from "./sparse-fixture.mjs";
+import {
+  assertSparseFixture,
+  markSparseFileForLogicalSizing,
+} from "./sparse-fixture.mjs";
 
 const FORMAT = "folderbase-capability-suite-report-v1";
 const CAPABILITY = "folderbase.query-index@0.1.0";
@@ -402,6 +405,7 @@ async function createFixtureRoot(owner, name, { folderbaseignore = true } = {}) 
   }
   const sparsePath = join(root, "media/archive.mov");
   await writeFile(sparsePath, "");
+  markSparseFileForLogicalSizing(sparsePath, process.platform, spawnSync);
   await truncate(sparsePath, LARGE_BYTES);
   const sparse = await stat(sparsePath, { bigint: true });
   assertSparseFixture(sparse, LARGE_BYTES);

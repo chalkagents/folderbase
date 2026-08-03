@@ -32,12 +32,16 @@ import {
   queryRequestSha256,
   validatePortablePath,
 } from "./reference-request-digest.mjs";
-import { assertSparseFixture } from "./sparse-fixture.mjs";
+import {
+  assertSparseFixture,
+  markSparseFileForLogicalSizing,
+} from "./sparse-fixture.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(directory, "../../../..");
 const fixtureDirectory = join(directory, "fixtures");
 const requestDirectory = join(fixtureDirectory, "requests");
+const COMPLETE_RUNNER_TIMEOUT_MS = 120_000;
 const schema = JSON.parse(
   await readFile(
     resolve(directory, "../../../schemas/capabilities/query-index/0.1/query-index.schema.json"),
@@ -58,7 +62,7 @@ function run(candidate, environment = {}) {
       env: { ...process.env, ...environment },
       killSignal: "SIGKILL",
       maxBuffer: 16 * 1024 * 1024,
-      timeout: 30_000,
+      timeout: COMPLETE_RUNNER_TIMEOUT_MS,
     },
   );
 }
@@ -262,6 +266,33 @@ test("sparse fixture allocation uses POSIX blocks but only logical size on Windo
     () => assertSparseFixture({ size: BigInt(bytes - 1), blocks: 0n }, bytes, "win32"),
     /Expected values to be strictly equal/u,
   );
+});
+
+test("Windows marks the large fixture sparse before assigning its logical length", () => {
+  const calls = [];
+  markSparseFileForLogicalSizing("C:\\fixture\\archive.mov", "win32", (...args) => {
+    calls.push(args);
+    return { status: 0, stderr: "" };
+  });
+  assert.deepEqual(calls, [[
+    "fsutil",
+    ["sparse", "setflag", "C:\\fixture\\archive.mov"],
+    { encoding: "utf8", windowsHide: true },
+  ]]);
+  assert.throws(
+    () => markSparseFileForLogicalSizing("C:\\fixture\\archive.mov", "win32", () => ({
+      status: 1,
+      stderr: "access denied",
+    })),
+    /access denied/u,
+  );
+
+  let nonWindowsCalls = 0;
+  markSparseFileForLogicalSizing("/fixture/archive.mov", "linux", () => {
+    nonWindowsCalls += 1;
+    return { status: 0 };
+  });
+  assert.equal(nonWindowsCalls, 0);
 });
 
 test("public Gitignore corpus freezes ordered edge semantics", async () => {
