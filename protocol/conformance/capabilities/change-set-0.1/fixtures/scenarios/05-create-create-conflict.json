@@ -1,0 +1,15 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "create-create-conflict",
+  "covers": ["create-create", "namespace-conflict"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/new.md", "content": "agent version\n" }
+  ],
+  "concurrent_source_changes": [
+    { "operation": "write_utf8", "path": "shared/new.md", "content": "source version\n" }
+  ],
+  "expected": {
+    "outcome": "conflict",
+    "conflict_code": "create_create"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "nested-boundary",
+  "covers": ["nested-folderbase-boundary", "no-authority-inheritance"],
+  "initial": [
+    { "operation": "nested_folderbase", "path": "shared/nested" }
+  ],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/nested/escape.md", "content": "must not cross boundary\n" }
+  ],
+  "concurrent_source_changes": [],
+  "expected": {
+    "outcome": "conflict",
+    "conflict_code": "nested_boundary"
+  }
+}

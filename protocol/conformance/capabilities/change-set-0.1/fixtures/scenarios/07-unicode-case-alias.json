@@ -1,0 +1,15 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "unicode-case-alias",
+  "covers": ["unicode-nfc", "unicode-case-fold", "path-alias"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/straße.md", "content": "agent alias\n" }
+  ],
+  "concurrent_source_changes": [
+    { "operation": "write_utf8", "path": "shared/strasse.md", "content": "source alias\n" }
+  ],
+  "expected": {
+    "outcome": "conflict",
+    "conflict_code": "path_alias"
+  }
+}

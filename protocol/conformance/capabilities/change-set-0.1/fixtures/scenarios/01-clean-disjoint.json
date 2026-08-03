@@ -1,0 +1,20 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "clean-disjoint",
+  "covers": ["clean", "disjoint", "scope-privacy"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/notes.md", "content": "agent edit\n" }
+  ],
+  "concurrent_source_changes": [
+    { "operation": "write_utf8", "path": "shared/source-only.md", "content": "disjoint in-scope work\n" },
+    { "operation": "write_utf8", "path": "private/sibling.txt", "content": "private concurrent work\n" }
+  ],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "utf8", "path": "shared/notes.md", "content": "agent edit\n" },
+      { "kind": "utf8", "path": "shared/source-only.md", "content": "disjoint in-scope work\n" },
+      { "kind": "utf8", "path": "private/sibling.txt", "content": "private concurrent work\n" }
+    ]
+  }
+}

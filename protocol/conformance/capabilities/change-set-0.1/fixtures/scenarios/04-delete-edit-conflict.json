@@ -1,0 +1,15 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "delete-edit-conflict",
+  "covers": ["delete-edit", "opaque-conflict"],
+  "checkout_changes": [
+    { "operation": "delete", "path": "shared/notes.md" }
+  ],
+  "concurrent_source_changes": [
+    { "operation": "write_utf8", "path": "shared/notes.md", "content": "source edit\n" }
+  ],
+  "expected": {
+    "outcome": "conflict",
+    "conflict_code": "delete_edit"
+  }
+}

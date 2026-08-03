@@ -1,0 +1,487 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/capabilities/change-set/0.1/change-set.schema.json",
+  "title": "Folderbase Change Set capability 0.1",
+  "description": "Closed bounded records for scoped checkout projection, immutable Change Sets, three-way assessment, and atomic apply.",
+  "oneOf": [
+    { "$ref": "#/$defs/checkoutRequest" },
+    { "$ref": "#/$defs/checkoutReceipt" },
+    { "$ref": "#/$defs/checkoutResult" },
+    { "$ref": "#/$defs/stagingIndex" },
+    { "$ref": "#/$defs/changeSetEnvelope" },
+    { "$ref": "#/$defs/changeSetAssessment" },
+    { "$ref": "#/$defs/changeSetApplyResult" },
+    { "$ref": "#/$defs/changeSetAttention" },
+    { "$ref": "#/$defs/changeSetError" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "projectionId": {
+      "type": "string",
+      "pattern": "^projection_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "folderScopeId": {
+      "type": "string",
+      "pattern": "^folderscope_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "checkoutId": {
+      "type": "string",
+      "pattern": "^checkout_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "changeSetId": {
+      "type": "string",
+      "pattern": "^changeset_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "stagingId": {
+      "type": "string",
+      "pattern": "^staging_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "objectVersionId": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?![\\s\\S]*\\\\)(?![\\s\\S]*(?:^|/)\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*[\\u0000-\\u001f<>:\"|?*])(?![\\s\\S]*(?:^|/)\\.[fF][oO][lL][dD][eE][rR][bB][aA][sS][eE](?:/|$))(?![\\s\\S]*[. ](?:/|$))[\\s\\S]+(?<!/)$",
+      "x-folderbase-semantic-policy": "folderbase-portable-path-v1: 4096 UTF-8 bytes total, 255 UTF-8 bytes per component, depth 128, Windows reserved stems, and NFC/full-case-fold collision rejection"
+    },
+    "authorizedPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path_prefix"],
+      "properties": {
+        "path_prefix": {
+          "oneOf": [
+            { "$ref": "#/$defs/portablePath" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "authorizedPaths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/authorizedPath" },
+      "x-folderbase-semantic-policy": "raw UTF-8 sorted; no exact, NFC, full-case-fold, redundant, or recursive-prefix overlap"
+    },
+    "checkoutRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "folderbase_id",
+        "projection_id",
+        "folder_scope_id",
+        "scope_revision_sha256",
+        "permission",
+        "authorized_paths"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-checkout-request-v1" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "projection_id": { "$ref": "#/$defs/projectionId" },
+        "folder_scope_id": { "$ref": "#/$defs/folderScopeId" },
+        "scope_revision_sha256": { "$ref": "#/$defs/sha256" },
+        "permission": { "const": "can_work" },
+        "authorized_paths": { "$ref": "#/$defs/authorizedPaths" }
+      }
+    },
+    "projectedRegularFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "object_id",
+        "kind",
+        "object_version_id",
+        "content_sha256",
+        "bytes",
+        "executable"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "kind": { "const": "regular_file" },
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+        "executable": { "type": "boolean" }
+      }
+    },
+    "projectedDirectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "object_id", "kind"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "kind": { "const": "directory" }
+      }
+    },
+    "projectedSymlink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "object_id", "kind", "object_version_id", "target", "target_safety"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "kind": { "const": "symlink" },
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "target": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "target_safety": { "const": "relative-within-projection" }
+      }
+    },
+    "projectedEntry": {
+      "oneOf": [
+        { "$ref": "#/$defs/projectedDirectory" },
+        { "$ref": "#/$defs/projectedRegularFile" },
+        { "$ref": "#/$defs/projectedSymlink" }
+      ]
+    },
+    "projectionExclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "reason": {
+          "enum": ["nested-folderbase-boundary", "unsupported-v1", "capture-ignore-policy"]
+        }
+      }
+    },
+    "checkoutReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "checkout_id",
+        "folderbase_id",
+        "projection_id",
+        "folder_scope_id",
+        "scope_revision_sha256",
+        "permission",
+        "authorized_paths",
+        "projection_base_sha256",
+        "entries",
+        "exclusions"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-checkout-projection-v1" },
+        "checkout_id": { "$ref": "#/$defs/checkoutId" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "projection_id": { "$ref": "#/$defs/projectionId" },
+        "folder_scope_id": { "$ref": "#/$defs/folderScopeId" },
+        "scope_revision_sha256": { "$ref": "#/$defs/sha256" },
+        "permission": { "const": "can_work" },
+        "authorized_paths": { "$ref": "#/$defs/authorizedPaths" },
+        "projection_base_sha256": { "$ref": "#/$defs/sha256" },
+        "entries": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": { "$ref": "#/$defs/projectedEntry" }
+        },
+        "exclusions": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": { "$ref": "#/$defs/projectionExclusion" }
+        }
+      }
+    },
+    "checkoutResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "checkout_id", "projection_id", "projection_base_sha256", "entry_count", "exclusion_count"],
+      "properties": {
+        "format": { "const": "folderbase-checkout-result-v1" },
+        "checkout_id": { "$ref": "#/$defs/checkoutId" },
+        "projection_id": { "$ref": "#/$defs/projectionId" },
+        "projection_base_sha256": { "$ref": "#/$defs/sha256" },
+        "entry_count": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "exclusion_count": { "type": "integer", "minimum": 0, "maximum": 16384 }
+      }
+    },
+    "baseContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "const": "projection_base" }
+      }
+    },
+    "stagedContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "staging_id", "chunk_manifest_sha256"],
+      "properties": {
+        "source": { "const": "staged" },
+        "staging_id": { "$ref": "#/$defs/stagingId" },
+        "chunk_manifest_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "stagingObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["staging_id", "chunk_manifest_sha256"],
+      "properties": {
+        "staging_id": { "$ref": "#/$defs/stagingId" },
+        "chunk_manifest_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "stagingIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "objects"],
+      "properties": {
+        "format": { "const": "folderbase-change-set-staging-v1" },
+        "objects": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": { "$ref": "#/$defs/stagingObject" }
+        }
+      },
+      "x-folderbase-semantic-policy": "objects sorted by staging_id; exact closed manifests/<sha256>.json and chunks/<sha256> no-follow tree"
+    },
+    "deltaRegularFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "object_version_id", "content_sha256", "bytes", "executable", "content"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "kind": { "const": "regular_file" },
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+        "executable": { "type": "boolean" },
+        "content": {
+          "oneOf": [
+            { "$ref": "#/$defs/baseContent" },
+            { "$ref": "#/$defs/stagedContent" }
+          ]
+        }
+      }
+    },
+    "deltaDirectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "kind": { "const": "directory" }
+      }
+    },
+    "deltaSymlink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "object_version_id", "target", "target_safety"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "kind": { "const": "symlink" },
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "target": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "target_safety": { "const": "relative-within-projection" }
+      }
+    },
+    "deltaState": {
+      "oneOf": [
+        { "$ref": "#/$defs/deltaDirectory" },
+        { "$ref": "#/$defs/deltaRegularFile" },
+        { "$ref": "#/$defs/deltaSymlink" }
+      ]
+    },
+    "nullableDeltaState": {
+      "oneOf": [
+        { "$ref": "#/$defs/deltaState" },
+        { "type": "null" }
+      ]
+    },
+    "objectDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "before", "after"],
+      "properties": {
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "before": { "$ref": "#/$defs/nullableDeltaState" },
+        "after": { "$ref": "#/$defs/nullableDeltaState" }
+      },
+      "not": {
+        "properties": {
+          "before": { "type": "null" },
+          "after": { "type": "null" }
+        },
+        "required": ["before", "after"]
+      },
+      "x-folderbase-semantic-policy": "before and after differ; create uses staged after bytes; unchanged regular bytes retain projection_base; one object and one collision-free final path per delta set"
+    },
+    "changeSetPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "change_set_id",
+        "checkout_id",
+        "folderbase_id",
+        "projection_id",
+        "folder_scope_id",
+        "scope_revision_sha256",
+        "permission",
+        "authorized_paths",
+        "projection_base_sha256",
+        "created_at",
+        "deltas"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-change-set-payload-v1" },
+        "change_set_id": { "$ref": "#/$defs/changeSetId" },
+        "checkout_id": { "$ref": "#/$defs/checkoutId" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "projection_id": { "$ref": "#/$defs/projectionId" },
+        "folder_scope_id": { "$ref": "#/$defs/folderScopeId" },
+        "scope_revision_sha256": { "$ref": "#/$defs/sha256" },
+        "permission": { "const": "can_work" },
+        "authorized_paths": { "$ref": "#/$defs/authorizedPaths" },
+        "projection_base_sha256": { "$ref": "#/$defs/sha256" },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "deltas": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16384,
+          "items": { "$ref": "#/$defs/objectDelta" }
+        }
+      }
+    },
+    "changeSetEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "change_set_sha256", "payload"],
+      "properties": {
+        "format": { "const": "folderbase-change-set-v1" },
+        "change_set_sha256": { "$ref": "#/$defs/sha256" },
+        "payload": { "$ref": "#/$defs/changeSetPayload" }
+      }
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "path", "object_id"],
+      "properties": {
+        "code": {
+          "enum": [
+            "delete_edit",
+            "edit_delete",
+            "edit_edit",
+            "move_edit",
+            "move_move",
+            "create_create",
+            "path_occupied",
+            "path_alias",
+            "nested_boundary",
+            "authorization_changed"
+          ]
+        },
+        "path": { "$ref": "#/$defs/portablePath" },
+        "other_path": { "$ref": "#/$defs/portablePath" },
+        "object_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/objectId" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "changeSetAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "change_set_sha256", "status", "conflicts", "current_projection_sha256"],
+      "properties": {
+        "format": { "const": "folderbase-change-set-assessment-v1" },
+        "change_set_sha256": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "clean" },
+        "conflicts": { "type": "array", "maxItems": 0 },
+        "current_projection_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "changeSetApplyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "change_set_sha256", "status", "projection_result_sha256"],
+      "properties": {
+        "format": { "const": "folderbase-change-set-apply-result-v1" },
+        "change_set_sha256": { "$ref": "#/$defs/sha256" },
+        "status": { "enum": ["applied", "already_applied"] },
+        "projection_result_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "changeSetAttention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "change_set_sha256", "attention"],
+      "properties": {
+        "format": { "const": "folderbase-change-set-attention-v1" },
+        "change_set_sha256": { "$ref": "#/$defs/sha256" },
+        "attention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "retryable", "conflicts"],
+          "properties": {
+            "code": {
+              "enum": ["change_set_conflicted", "change_set_stale_base", "change_set_authorization_changed"]
+            },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "retryable": { "type": "boolean" },
+            "conflicts": {
+              "type": "array",
+              "maxItems": 16384,
+              "items": { "$ref": "#/$defs/conflict" }
+            }
+          }
+        }
+      }
+    },
+    "changeSetError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-change-set-error-v1" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_change_set_input",
+                "invalid_checkout_request",
+                "invalid_projection_receipt",
+                "invalid_staging",
+                "change_set_id_reused",
+                "change_set_root_mismatch",
+                "change_set_operational_error"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          }
+        }
+      }
+    }
+  }
+}
