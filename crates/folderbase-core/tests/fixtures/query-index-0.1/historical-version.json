@@ -1,0 +1,105 @@
+{
+  "format": "folderbase-version-v1",
+  "protocol_version": "0.5",
+  "folderbase_id": "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+  "version_id": "fbversion_019f0000-0000-7000-8000-000000000001",
+  "parents": [],
+  "created_at": "2026-08-03T00:00:00Z",
+  "path_policy": {
+    "format": "folderbase-portable-path-v1",
+    "normalization": "NFC",
+    "normalization_unicode_version": "17.0.0",
+    "case_folding": "full-default",
+    "case_folding_unicode_version": "9.0.0"
+  },
+  "root_manifest": {
+    "path": ".folderbase/manifest.json",
+    "object_version_id": "version_019f0000-0000-7000-8000-000000000002",
+    "content_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "bytes": 624
+  },
+  "bindings": [
+    {
+      "path": "data/table.csv",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000020",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_019f0000-0000-7000-8000-000000000021",
+      "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 12,
+      "executable": false
+    },
+    {
+      "path": "documents/Brief.pdf",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000030",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_019f0000-0000-7000-8000-000000000031",
+      "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 15,
+      "executable": false
+    },
+    {
+      "path": "links/brief-link",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000040",
+      "lifecycle": "live",
+      "kind": "symlink",
+      "object_version_id": "version_019f0000-0000-7000-8000-000000000041",
+      "target": "../notes/Brief.md",
+      "target_safety": "relative-within-folderbase"
+    },
+    {
+      "path": "media/clip.mp4",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000050",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_019f0000-0000-7000-8000-000000000051",
+      "content_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bytes": 12,
+      "executable": false
+    },
+    {
+      "path": "notes/Brief.md",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000060",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_019f0000-0000-7000-8000-000000000061",
+      "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "bytes": 16,
+      "executable": false
+    },
+    {
+      "path": "repo/.git/HEAD",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000070",
+      "lifecycle": "live",
+      "kind": "regular_file",
+      "object_version_id": "version_019f0000-0000-7000-8000-000000000071",
+      "content_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "bytes": 21,
+      "executable": false
+    }
+  ],
+  "tombstones": [
+    {
+      "path": "archive/approved-proposal.docx",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000010",
+      "lifecycle": "deleted",
+      "deleted_kind": "regular_file",
+      "last_object_version_id": "version_019f0000-0000-7000-8000-000000000011"
+    },
+    {
+      "path": "data/table.csv",
+      "object_id": "obj_019f0000-0000-7000-8000-000000000080",
+      "lifecycle": "deleted",
+      "deleted_kind": "regular_file",
+      "last_object_version_id": "version_019f0000-0000-7000-8000-000000000081"
+    }
+  ],
+  "exclusions": [
+    {
+      "path": "vendors/nested",
+      "kind": "nested_folderbase",
+      "reason": "nested-folderbase-boundary"
+    }
+  ]
+}
