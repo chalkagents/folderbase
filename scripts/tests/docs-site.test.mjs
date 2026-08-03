@@ -181,6 +181,8 @@ test("the query capability has runnable guide, wire reference, and honest releas
   const guide = read("apps/docs/content/docs/guides/querying.mdx");
   const reference = read("apps/docs/content/docs/reference/query-index.mdx");
   const release = read("apps/docs/content/docs/releases/next.mdx");
+  const cli = read("apps/docs/content/docs/reference/cli.mdx");
+  const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
 
   assert(guidesMeta.pages.includes("querying"));
   assert(referenceMeta.pages.includes("query-index"));
@@ -199,4 +201,6 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert.match(reference, /Exit `1`/u);
   assert.match(reference, /Exit `2`/u);
   assert.match(release, /not part of the immutable Core 0\.5 release/u);
+  assert.match(cli, /\| `query` \| Experimental optional capability \|/u);
+  assert.match(conformance, /experimental query\/index profile/u);
 });
