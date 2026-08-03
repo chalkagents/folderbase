@@ -807,6 +807,34 @@ fn rebuild_sanitizes_the_complete_private_index_namespace_without_following_link
     }
 }
 
+#[test]
+fn one_rebuild_sanitizes_an_unbounded_width_and_deep_private_index_namespace() {
+    let root = folderbase();
+    fs::write(root.path().join("a.md"), b"a\n").expect("query row");
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+    engine.rebuild_index().expect("initial index");
+    let index_root = root.path().join(".folderbase/local/query-index-v1");
+
+    for index in 0..16_385 {
+        fs::File::create(index_root.join(format!("junk-{index:05}"))).expect("wide crash artifact");
+    }
+    let mut nested = index_root.join("deep");
+    for _ in 0..192 {
+        fs::create_dir(&nested).expect("deep crash directory");
+        nested.push("d");
+    }
+    fs::write(nested.with_file_name("orphan.tmp"), b"partial\n").expect("deep crash artifact");
+
+    engine
+        .rebuild_index()
+        .expect("one rebuild removes every crash artifact");
+    let names = fs::read_dir(&index_root)
+        .expect("rebuilt namespace")
+        .map(|entry| entry.expect("namespace entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, [std::ffi::OsString::from("index.json")]);
+}
+
 #[cfg(unix)]
 #[test]
 fn index_symlink_is_never_followed_and_explicit_rebuild_recovers_it() {
