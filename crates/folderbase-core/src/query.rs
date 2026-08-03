@@ -1277,21 +1277,24 @@ fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
             boundary_reason: None,
         })
         .collect::<Vec<_>>();
-    entries.extend(plan.exclusions().iter().filter_map(|exclusion| {
-        (exclusion.kind() == CaptureExclusionKind::NestedFolderbase).then(|| QueryEntry {
-            path: exclusion.path().to_owned(),
-            kind: QueryEntryKind::NestedFolderbase,
-            lifecycle: QueryLifecycle::Live,
-            bytes: None,
-            executable: None,
-            symlink_target: None,
-            object_id: None,
-            object_version_id: None,
-            folderbase_version_id: None,
-            source: QuerySource::CapturePlan,
-            boundary_reason: Some("nested-folderbase-boundary".to_owned()),
-        })
-    }));
+    entries.extend(
+        plan.exclusions()
+            .iter()
+            .filter(|exclusion| exclusion.kind() == CaptureExclusionKind::NestedFolderbase)
+            .map(|exclusion| QueryEntry {
+                path: exclusion.path().to_owned(),
+                kind: QueryEntryKind::NestedFolderbase,
+                lifecycle: QueryLifecycle::Live,
+                bytes: None,
+                executable: None,
+                symlink_target: None,
+                object_id: None,
+                object_version_id: None,
+                folderbase_version_id: None,
+                source: QuerySource::CapturePlan,
+                boundary_reason: Some("nested-folderbase-boundary".to_owned()),
+            }),
+    );
     entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
     entries
 }
@@ -1340,6 +1343,16 @@ fn request_sha256(request: &NormalizedRequest<'_>) -> Result<String, QueryError>
 
 fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError> {
     #[derive(Serialize)]
+    struct ObservationEntry<'a> {
+        path: &'a str,
+        kind: CaptureEntryKind,
+        bytes: Option<u64>,
+        executable: Option<bool>,
+        symlink_target: Option<&'a str>,
+        metadata: &'a crate::folderbase_capture::CaptureMetadataFingerprint,
+    }
+
+    #[derive(Serialize)]
     struct Observation<'a> {
         root_instance_sha256: &'a str,
         folderbase_id: &'a str,
@@ -1347,14 +1360,7 @@ fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError>
         root_manifest_bytes: u64,
         ignore_policy_sha256: &'a str,
         local_head: Option<(&'a str, &'a str, &'a str)>,
-        entries: Vec<(
-            &'a str,
-            CaptureEntryKind,
-            Option<u64>,
-            Option<bool>,
-            Option<&'a str>,
-            &'a crate::folderbase_capture::CaptureMetadataFingerprint,
-        )>,
+        entries: Vec<ObservationEntry<'a>>,
         exclusions: Vec<(&'a str, CaptureExclusionKind, CaptureExclusionReason)>,
         ignored_paths: Vec<&'a str>,
     }
@@ -1375,15 +1381,13 @@ fn live_observation_generation(plan: &CapturePlan) -> Result<String, QueryError>
         entries: plan
             .entries()
             .iter()
-            .map(|entry| {
-                (
-                    entry.path(),
-                    entry.kind(),
-                    entry.bytes(),
-                    entry.executable(),
-                    entry.symlink_target(),
-                    entry.observed(),
-                )
+            .map(|entry| ObservationEntry {
+                path: entry.path(),
+                kind: entry.kind(),
+                bytes: entry.bytes(),
+                executable: entry.executable(),
+                symlink_target: entry.symlink_target(),
+                metadata: entry.observed(),
             })
             .collect(),
         exclusions: plan
