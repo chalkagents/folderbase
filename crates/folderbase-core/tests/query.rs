@@ -220,6 +220,67 @@ fn historical_query_projects_one_verified_version_with_exact_identity() {
 }
 
 #[test]
+fn historical_recreation_rows_page_by_a_total_row_key() {
+    const VERSION_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000001";
+    let root = folderbase();
+    fs::write(
+        root.path().join(".folderbase/manifest.json"),
+        String::from_utf8_lossy(MANIFEST).replace(
+            "folderbase_019f9b75-4f42-7f65-a012-2bfecdd8c473",
+            "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+        ),
+    )
+    .expect("matching historical Folderbase identity");
+    let versions = root.path().join(".folderbase/versions/folderbase");
+    fs::create_dir_all(&versions).expect("Folderbase Version directory");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/conformance/capabilities/query-index-0.1/fixtures/historical-version.json"
+    );
+    let mut version: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture).expect("historical fixture"))
+            .expect("historical fixture JSON");
+    version["tombstones"]
+        .as_array_mut()
+        .expect("tombstone array")
+        .push(serde_json::json!({
+            "path": "data/table.csv",
+            "object_id": "obj_019f0000-0000-7000-8000-000000000080",
+            "lifecycle": "deleted",
+            "deleted_kind": "regular_file",
+            "last_object_version_id": "version_019f0000-0000-7000-8000-000000000081"
+        }));
+    fs::write(
+        versions.join(format!("{VERSION_ID}.json")),
+        serde_json::to_vec(&version).expect("recreation Version"),
+    )
+    .expect("historical recreation fixture");
+    let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
+
+    let make_request = |cursor: Option<&str>| {
+        request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "historical", "folderbase_version_id": VERSION_ID},
+            "filters": {"paths": ["data/table.csv"]},
+            "page": {"limit": 1, "cursor": cursor}
+        }))
+    };
+    let first = engine
+        .run(&make_request(None))
+        .expect("first recreation row");
+    let cursor = first.page().next_cursor().expect("same-path continuation");
+    let second = engine
+        .run(&make_request(Some(cursor)))
+        .expect("second recreation row");
+
+    assert_eq!(first.entries()[0].path(), "data/table.csv");
+    assert_eq!(second.entries()[0].path(), "data/table.csv");
+    assert_eq!(first.entries()[0].lifecycle(), QueryLifecycle::Live);
+    assert_eq!(second.entries()[0].lifecycle(), QueryLifecycle::Deleted);
+    assert!(!second.page().has_more());
+}
+
+#[test]
 fn filters_intersect_families_and_or_values_with_component_aware_prefixes() {
     let root = folderbase();
     fs::create_dir(root.path().join("data")).expect("data");
