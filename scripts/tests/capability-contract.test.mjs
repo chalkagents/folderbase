@@ -86,6 +86,11 @@ test("the public capability registry is exact, deterministic, and embedded uncha
   );
   assert.deepEqual(profiles, [
     {
+      name: "folderbase.query-index",
+      version: "0.1.0",
+      stability: "stable",
+    },
+    {
       name: "folderbase.version-cli-json",
       version: "0.1.0",
       stability: "experimental",

@@ -244,7 +244,11 @@ test("cross-platform gates run after merge or during full confidence runs", () =
   assert.match(platforms, /node-version: 24/);
   assert.match(
     platforms,
-    /node --test protocol\/conformance\/capabilities\/query-index-0\.1\/suite\.test\.mjs/,
+    /cargo build --package folderbase-cli --locked/,
+  );
+  assert.match(
+    platforms,
+    /node protocol\/conformance\/capabilities\/query-index-0\.1\/run\.mjs --implementation \.\/target\/debug\/folderbase/,
   );
 });
 

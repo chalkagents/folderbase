@@ -38,8 +38,8 @@ fn capability_runner_executes_every_known_profile_advertised_by_the_reference_cl
         .stdout(predicate::str::contains(
             "\"format\": \"folderbase-capability-conformance-report-v1\"",
         ))
-        .stdout(predicate::str::contains("\"selected\": 1"))
-        .stdout(predicate::str::contains("\"passed\": 1"))
+        .stdout(predicate::str::contains("\"selected\": 2"))
+        .stdout(predicate::str::contains("\"passed\": 2"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")
