@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
 use folderbase_core::{
     FolderbaseQueryEngine, FolderbaseVersionStore, QueryEntryKind, QueryError, QueryExecution,
@@ -855,16 +855,24 @@ fn one_rebuild_sanitizes_an_unbounded_width_and_deep_private_index_namespace() {
     for index in 0..16_385 {
         fs::File::create(index_root.join(format!("junk-{index:05}"))).expect("wide crash artifact");
     }
-    let mut nested = index_root.join("deep");
-    for _ in 0..192 {
-        fs::create_dir(&nested).expect("deep crash directory");
-        nested.push("d");
+    for depth in [256, 257] {
+        let mut nested = index_root.join(format!("deep-{depth}"));
+        for _ in 0..depth {
+            fs::create_dir(&nested).expect("deep crash directory");
+            nested.push("d");
+        }
+        fs::write(nested.with_file_name("orphan.tmp"), b"partial\n").expect("deep crash artifact");
     }
-    fs::write(nested.with_file_name("orphan.tmp"), b"partial\n").expect("deep crash artifact");
 
+    let started = Instant::now();
     engine
         .rebuild_index()
         .expect("one rebuild removes every crash artifact");
+    assert!(
+        started.elapsed().as_secs() < 30,
+        "wide cleanup must remain linear-time: {:?}",
+        started.elapsed()
+    );
     let names = fs::read_dir(&index_root)
         .expect("rebuilt namespace")
         .map(|entry| entry.expect("namespace entry").file_name())
