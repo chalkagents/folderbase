@@ -205,6 +205,18 @@ async function main() {
   }
 
   try {
+    await check("template-parser-errors-use-the-typed-capability-envelope", () => {
+      for (const arguments_ of [
+        ["template", "plan", "--stdin", "--json"],
+        ["template", "plan", createRoot(owner, "missing-stdin"), "--json"],
+        ["template", "plan", createRoot(owner, "missing-json"), "--stdin"],
+        ["template", "plan", createRoot(owner, "unknown-flag"), "--stdin", "--json", "--unknown-option"],
+        ["template", "unknown", createRoot(owner, "unknown-command"), "--stdin", "--json"],
+      ]) {
+        operationalError(implementation, arguments_, "", "invalid_template_request");
+      }
+    });
+
     await check("plan-is-bounded-read-only-and-preserves-existing-paths", () => {
       const root = createRoot(owner, "plan");
       const output = plan(implementation, root, request);

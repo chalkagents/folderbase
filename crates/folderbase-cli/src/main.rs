@@ -538,6 +538,9 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Err(error) if error.exit_code() != 0 && argv_selects_template_capability() => {
+            return write_template_invocation_error(error.to_string());
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             return match error.print() {
@@ -606,6 +609,42 @@ fn argv_selects_query_capability() -> bool {
             .as_deref(),
         Some("query" | "index")
     )
+}
+
+fn argv_selects_template_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("template")
+    )
+}
+
+fn write_template_invocation_error(message: String) -> ExitCode {
+    let envelope = serde_json::json!({
+        "format": "folderbase-template-expansion-error-v1",
+        "error": {
+            "code": "invalid_template_request",
+            "message": message,
+        }
+    });
+    let mut encoded = match serde_json::to_vec_pretty(&envelope) {
+        Ok(encoded) => encoded,
+        Err(source) => {
+            write_stderr_best_effort(format_args!(
+                "error: failed to serialize template invocation error: {source}"
+            ));
+            return ExitCode::from(EXIT_OPERATIONAL_ERROR);
+        }
+    };
+    encoded.push(b'\n');
+
+    let stderr = std::io::stderr();
+    if let Err(error) = write_transport_stream(&mut stderr.lock(), &encoded, "stderr") {
+        write_stderr_best_effort(format_args!("error: {error}"));
+    }
+    ExitCode::from(EXIT_OPERATIONAL_ERROR)
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
@@ -1287,9 +1326,10 @@ fn run_protocol_check(artifact: ProtocolArtifactArg, json: bool) -> Result<u8, C
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<(), CliError> {
-    let encoded = serde_json::to_string_pretty(value).map_err(CliError::OutputSerialization)?;
-    println!("{encoded}");
-    Ok(())
+    let mut encoded = serde_json::to_vec_pretty(value).map_err(CliError::OutputSerialization)?;
+    encoded.push(b'\n');
+    let stdout = std::io::stdout();
+    write_transport_stream(&mut stdout.lock(), &encoded, "stdout")
 }
 
 fn parse_template_expansion_request_stdin() -> Result<TemplateExpansionRequest, CliError> {

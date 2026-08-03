@@ -35,5 +35,15 @@ use the runner's closed, validated timeout and output environment controls for
 faster hostile-candidate proofs; those controls do not change capability
 semantics.
 
+Parser failures for the `template` command use
+`folderbase-template-expansion-error-v1` on stderr with exit code `2`, including
+missing or unknown arguments. Successful and attention documents are written
+to stdout; operational errors are written to stderr.
+
+The process contract has one physical delivery carve-out: when a host output
+stream is unavailable, the CLI still exits `2` and attempts a non-panicking
+best-effort diagnostic, but cannot guarantee delivery of typed JSON to that
+unusable stream.
+
 Implementations must not advertise this capability until that suite passes in
 full.
