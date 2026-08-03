@@ -220,6 +220,44 @@ fn historical_query_projects_one_verified_version_with_exact_identity() {
 }
 
 #[test]
+fn historical_scope_classifies_missing_ancestors_without_weakening_invalid_records() {
+    const REQUESTED: &str = "fbversion_019f0000-0000-7000-8000-000000000099";
+    let historical = |version_id: &str| {
+        request(serde_json::json!({
+            "format": "folderbase-query-request-v1",
+            "scope": {"kind": "historical", "folderbase_version_id": version_id},
+            "page": {"limit": 10}
+        }))
+    };
+
+    let missing_root = folderbase();
+    let missing_engine =
+        FolderbaseQueryEngine::open(missing_root.path()).expect("missing query engine");
+    assert!(matches!(
+        missing_engine.run(&historical(REQUESTED)),
+        Err(QueryError::ScopeVersionMissing { .. })
+    ));
+
+    let unsafe_root = folderbase();
+    fs::write(
+        unsafe_root.path().join(".folderbase/versions"),
+        b"not a directory\n",
+    )
+    .expect("unsafe Version ancestor");
+    let unsafe_engine =
+        FolderbaseQueryEngine::open(unsafe_root.path()).expect("unsafe query engine");
+    assert!(matches!(
+        unsafe_engine.run(&historical(REQUESTED)),
+        Err(QueryError::ScopeVersionInvalid { .. })
+    ));
+
+    let malformed = missing_engine
+        .run(&historical("not-a-version-id"))
+        .expect_err("malformed Version ID");
+    assert!(matches!(malformed, QueryError::InvalidQueryRequest(_)));
+}
+
+#[test]
 fn historical_recreation_rows_page_by_a_total_row_key() {
     const VERSION_ID: &str = "fbversion_019f0000-0000-7000-8000-000000000001";
     let root = folderbase();
