@@ -36,7 +36,8 @@ const INDEX_RECORD: &str = ".folderbase/local/query-index-v1/index.json";
 const INDEX_FORMAT: &str = "folderbase-query-private-index-v1";
 #[cfg(test)]
 thread_local! {
-    static LIVE_ROW_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LIVE_RESULT_ROW_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LIVE_RESULT_EXCLUSION_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A root-bound handle for read-only query and explicit disposable-index work.
@@ -1610,6 +1611,8 @@ fn query_version_exclusion_kind(kind: ExclusionKind) -> QueryExclusionKind {
 }
 
 fn live_capture_entry(entry: &CapturePlanEntry) -> QueryEntry {
+    #[cfg(test)]
+    LIVE_RESULT_ROW_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     QueryEntry {
         path: entry.path().to_owned(),
         kind: match entry.kind() {
@@ -1630,6 +1633,8 @@ fn live_capture_entry(entry: &CapturePlanEntry) -> QueryEntry {
 }
 
 fn live_boundary_entry(exclusion: &CapturePlanExclusion) -> QueryEntry {
+    #[cfg(test)]
+    LIVE_RESULT_ROW_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     QueryEntry {
         path: exclusion.path().to_owned(),
         kind: QueryEntryKind::NestedFolderbase,
@@ -1665,6 +1670,8 @@ fn attach_live_identity(state: &LiveObservationState, entry: &mut QueryEntry) {
 }
 
 fn live_ignored_exclusion(ignored: &CaptureIgnoredPath) -> QueryExclusion {
+    #[cfg(test)]
+    LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     QueryExclusion {
         path: ignored.path().to_owned(),
         reason: "capture-ignore-policy".to_owned(),
@@ -1673,6 +1680,8 @@ fn live_ignored_exclusion(ignored: &CaptureIgnoredPath) -> QueryExclusion {
 }
 
 fn live_plan_exclusion(exclusion: &CapturePlanExclusion) -> QueryExclusion {
+    #[cfg(test)]
+    LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     QueryExclusion {
         path: exclusion.path().to_owned(),
         reason: match exclusion.reason() {
@@ -1740,8 +1749,6 @@ fn live_projection_sha256(state: &LiveObservationState) -> String {
 }
 
 fn project_live_entries(plan: &CapturePlan) -> Vec<QueryEntry> {
-    #[cfg(test)]
-    LIVE_ROW_PROJECTIONS.with(|count| count.set(count.get() + 1));
     let mut entries = plan
         .entries()
         .iter()
@@ -1870,8 +1877,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FolderbaseQueryEngine, INDEX_RECORD, LIVE_ROW_PROJECTIONS, PrivateIndexRecord, QueryError,
-        QueryExecution, QueryIndexState, QueryRequest, private_index_content_sha256,
+        FolderbaseQueryEngine, INDEX_RECORD, LIVE_RESULT_EXCLUSION_MATERIALIZATIONS,
+        LIVE_RESULT_ROW_MATERIALIZATIONS, PrivateIndexRecord, QueryError, QueryExecution,
+        QueryIndexState, QueryRequest, private_index_content_sha256,
         private_index_projection_sha256,
     };
 
@@ -1931,15 +1939,22 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_index_skips_duplicate_live_row_projection() {
+    fn fresh_index_validation_materializes_no_expected_result_rows() {
         let root = tempdir().expect("temporary Folderbase");
         fs::create_dir(root.path().join(".folderbase")).expect("state");
         fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
         fs::write(root.path().join("ordinary.md"), b"ordinary\n").expect("ordinary file");
+        fs::create_dir_all(root.path().join("nested/.folderbase")).expect("nested state");
+        fs::write(
+            root.path().join("nested/.folderbase/manifest.json"),
+            b"opaque nested manifest\n",
+        )
+        .expect("nested manifest");
         let engine = FolderbaseQueryEngine::open(root.path()).expect("query engine");
         engine.rebuild_index().expect("fresh index");
 
-        LIVE_ROW_PROJECTIONS.with(|count| count.set(0));
+        LIVE_RESULT_ROW_MATERIALIZATIONS.with(|count| count.set(0));
+        LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| count.set(0));
         let indexed = engine.run(&QueryRequest::live(10)).expect("indexed query");
         assert_eq!(indexed.execution(), QueryExecution::PrivateIndex);
         assert_eq!(
@@ -1953,12 +1968,14 @@ mod tests {
                 .index_strategy(),
             QueryExecution::PrivateIndex
         );
-        LIVE_ROW_PROJECTIONS.with(|count| assert_eq!(count.get(), 0));
+        LIVE_RESULT_ROW_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+        LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
 
         fs::write(root.path().join("second.md"), b"second\n").expect("stale index");
         let scanned = engine.run(&QueryRequest::live(10)).expect("fallback query");
         assert_eq!(scanned.execution(), QueryExecution::BoundedScan);
-        LIVE_ROW_PROJECTIONS.with(|count| assert_eq!(count.get(), 1));
+        LIVE_RESULT_ROW_MATERIALIZATIONS.with(|count| assert!(count.get() > 0));
+        LIVE_RESULT_EXCLUSION_MATERIALIZATIONS.with(|count| assert!(count.get() > 0));
     }
 
     #[test]
