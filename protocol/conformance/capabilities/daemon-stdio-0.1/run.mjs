@@ -23,6 +23,8 @@ const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_SESSION_OUTPUT_BYTES = 32 * 1024 * 1024;
 const RESPONSE_TIMEOUT_MS = 15_000;
 const PROCESS_TIMEOUT_MS = 30_000;
+const directory = dirname(fileURLToPath(import.meta.url));
+const commandSupervisor = resolve(directory, "../query-index-0.1/command-supervisor.mjs");
 const liveRequest = {
   format: "folderbase-query-request-v1",
   scope: { kind: "live" },
@@ -46,16 +48,34 @@ function commandFor(implementation, arguments_) {
 
 function execute(implementation, arguments_, input = "") {
   const invocation = commandFor(implementation, arguments_);
-  const result = spawnSync(invocation.command, invocation.args, {
+  const supervised = spawnSync(process.execPath, [commandSupervisor], {
     encoding: "utf8",
-    input,
+    input: JSON.stringify({
+      command: invocation.command,
+      args: invocation.args,
+      input: Buffer.from(input).toString("base64"),
+      timeoutMs: PROCESS_TIMEOUT_MS,
+      maxBytes: MAX_LINE_BYTES,
+      environment: {},
+    }),
     shell: false,
     windowsHide: true,
-    maxBuffer: MAX_LINE_BYTES,
-    timeout: PROCESS_TIMEOUT_MS,
+    maxBuffer: MAX_LINE_BYTES + 1024 * 1024,
+    timeout: PROCESS_TIMEOUT_MS + 10_000,
     killSignal: "SIGKILL",
   });
-  if (result.error) throw result.error;
+  if (supervised.error) throw supervised.error;
+  if (supervised.status !== 0) {
+    throw new Error(supervised.stderr || "candidate process supervisor failed");
+  }
+  const result = JSON.parse(supervised.stdout);
+  if (result.bound === "timeout") {
+    throw new Error(`candidate command ${arguments_.join(" ")} timed out`);
+  }
+  if (result.bound === "output") {
+    throw new Error(`candidate command ${arguments_.join(" ")} exceeded output bound`);
+  }
+  if (result.error) throw Object.assign(new Error(result.error.message), { code: result.error.code });
   return result;
 }
 
@@ -452,6 +472,12 @@ const cases = [
     run: (implementation) => withSession(implementation, async ({ session }) => {
       session.child.stdin.write("{}\n");
       let response = await session.next(
+        (message) => message.kind === "response" && message.request_id === null,
+      );
+      assert.equal(response.status, "error");
+      assert.equal(response.document.error.code, "invalid_daemon_request");
+      session.child.stdin.write(Buffer.from([0xff, 0x0a]));
+      response = await session.next(
         (message) => message.kind === "response" && message.request_id === null,
       );
       assert.equal(response.status, "error");

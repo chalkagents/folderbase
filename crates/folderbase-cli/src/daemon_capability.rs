@@ -6,7 +6,7 @@
 use std::{
     io::{BufRead, Write},
     path::{Component, Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, SyncSender},
     thread,
 };
 
@@ -26,6 +26,7 @@ const MESSAGE_FORMAT: &str = "folderbase-daemon-message-v1";
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MESSAGE_SCALARS: usize = 4_096;
+const INPUT_QUEUE_CAPACITY: usize = 8;
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_OPERATIONAL_ERROR: u8 = 2;
 
@@ -104,7 +105,7 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
         Err(error) => return write_terminal_error("daemon_root_invalid", error.to_string()),
     };
     let epoch = format!("daemon_{}", Uuid::now_v7());
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
     let mut watcher = match start_watcher(&root, sender.clone()) {
         Ok(watcher) => watcher,
         Err(error) => return write_terminal_error("daemon_watcher_unavailable", error.to_string()),
@@ -130,9 +131,11 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
     }
 
     let code = session_loop(&root, &pinned, &epoch, &receiver, &mut output);
+    // Release the bounded receiver first so a watcher callback or stdin reader
+    // blocked on backpressure cannot delay watcher teardown.
+    drop(receiver);
     drop(watcher.unwatch(&root));
     drop(watcher);
-    drop(receiver);
     // The reader may still be blocked in a platform stdin call after an
     // explicit shutdown or terminal root change. Dropping its handle lets the
     // process exit immediately; EOF still causes the reader to return on its
@@ -141,7 +144,7 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
     code
 }
 
-fn start_watcher(root: &Path, sender: Sender<Input>) -> notify::Result<RecommendedWatcher> {
+fn start_watcher(root: &Path, sender: SyncSender<Input>) -> notify::Result<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = sender.send(Input::Fs(event));
     })?;
@@ -149,7 +152,7 @@ fn start_watcher(root: &Path, sender: Sender<Input>) -> notify::Result<Recommend
     Ok(watcher)
 }
 
-fn start_input_thread(sender: Sender<Input>) -> thread::JoinHandle<()> {
+fn start_input_thread(sender: SyncSender<Input>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
