@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 
 import { changeSetSha256 } from "./reference-change-set-digest.mjs";
 import { assertChangeSetSchema } from "./schema.mjs";
+import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  MAXIMUM_COMMAND_TIMEOUT_MS,
+} from "./limits.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(directory, "../../../..");
@@ -18,6 +22,12 @@ const schema = JSON.parse(
     "utf8",
   ),
 );
+
+test("large-object conformance has a bounded cross-platform command budget", () => {
+  assert.equal(DEFAULT_COMMAND_TIMEOUT_MS, 90_000);
+  assert.equal(MAXIMUM_COMMAND_TIMEOUT_MS, 300_000);
+  assert.ok(DEFAULT_COMMAND_TIMEOUT_MS <= MAXIMUM_COMMAND_TIMEOUT_MS);
+});
 
 test("stable capability package is advertised identically", async () => {
   const packageEntry = JSON.parse(
