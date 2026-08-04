@@ -1,4 +1,4 @@
 {
   "title": "Guides",
-  "pages": ["agents", "querying", "templates", "versioning", "migrate"]
+  "pages": ["agents", "querying", "templates", "change-sets", "versioning", "migrate"]
 }
