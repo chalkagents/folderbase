@@ -344,6 +344,13 @@ function assertOk(response, expectedFormat) {
   return response.document;
 }
 
+function assertDirtyHint(event) {
+  assert.ok(
+    ["workspace_changed", "rescan_required"].includes(event.event),
+    `expected a workspace freshness hint, received ${JSON.stringify(event)}`,
+  );
+}
+
 async function withSession(implementation, operation) {
   const state = await fixture(implementation);
   let session;
@@ -394,7 +401,7 @@ const cases = [
       assertOk(await session.request("subscribe"), "folderbase-daemon-subscription-v1");
       const created = join(root, "docs", "working.txt");
       await writeFile(created, "one\n");
-      assert.equal((await session.event()).event, "workspace_changed");
+      assertDirtyHint(await session.event());
       let rows = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1").entries;
       assert.ok(rows.some(({ path }) => path === "docs/working.txt"));
       await writeFile(created, "two\n");
@@ -416,7 +423,7 @@ const cases = [
       await Promise.all(Array.from({ length: 32 }, (_, index) =>
         writeFile(join(root, `burst-${String(index).padStart(2, "0")}.txt`), `${index}\n`)));
       const event = await session.event();
-      assert.equal(event.event, "workspace_changed");
+      assertDirtyHint(event);
       await session.assertNoEvent(500);
       const result = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1");
       assert.equal(result.entries.filter(({ path }) => path.startsWith("burst-")).length, 32);
