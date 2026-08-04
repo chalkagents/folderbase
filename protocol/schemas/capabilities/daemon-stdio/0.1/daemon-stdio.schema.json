@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/capabilities/daemon-stdio/0.1/daemon-stdio.schema.json",
+  "title": "Folderbase daemon stdio capability 0.1",
+  "description": "Bounded JSON Lines documents for folderbase.daemon-stdio@0.1.0. Operation documents are additionally validated by the query/index capability selected by operation.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/message" },
+    { "$ref": "#/$defs/terminalError" }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "epoch": {
+      "type": "string",
+      "pattern": "^daemon_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "operation": {
+      "enum": [
+        "query",
+        "explain",
+        "index_status",
+        "refresh",
+        "subscribe",
+        "unsubscribe",
+        "shutdown"
+      ]
+    },
+    "request": {
+      "type": "object",
+      "required": ["format", "request_id", "operation"],
+      "properties": {
+        "format": { "const": "folderbase-daemon-request-v1" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "operation": { "$ref": "#/$defs/operation" },
+        "document": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": { "enum": ["query", "explain"] }
+            },
+            "required": ["operation"]
+          },
+          "then": { "required": ["document"] },
+          "else": { "not": { "required": ["document"] } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "ready": {
+      "type": "object",
+      "required": [
+        "format",
+        "kind",
+        "capability",
+        "epoch",
+        "folderbase_id",
+        "root_instance_sha256",
+        "root"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-daemon-message-v1" },
+        "kind": { "const": "ready" },
+        "capability": { "const": "folderbase.daemon-stdio@0.1.0" },
+        "epoch": { "$ref": "#/$defs/epoch" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "root_instance_sha256": { "$ref": "#/$defs/sha256" },
+        "root": { "type": "string", "maxLength": 4096 }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": ["format", "kind", "request_id", "operation", "status", "document"],
+      "properties": {
+        "format": { "const": "folderbase-daemon-message-v1" },
+        "kind": { "const": "response" },
+        "request_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/requestId" },
+            { "type": "null" }
+          ]
+        },
+        "operation": {
+          "oneOf": [
+            { "$ref": "#/$defs/operation" },
+            { "type": "null" }
+          ]
+        },
+        "status": { "enum": ["ok", "attention", "error"] },
+        "document": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["format", "kind", "event", "epoch", "sequence"],
+      "properties": {
+        "format": { "const": "folderbase-daemon-message-v1" },
+        "kind": { "const": "event" },
+        "event": { "enum": ["workspace_changed", "rescan_required"] },
+        "epoch": { "$ref": "#/$defs/epoch" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      },
+      "additionalProperties": false
+    },
+    "message": {
+      "oneOf": [
+        { "$ref": "#/$defs/ready" },
+        { "$ref": "#/$defs/response" },
+        { "$ref": "#/$defs/event" }
+      ]
+    },
+    "terminalError": {
+      "type": "object",
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-daemon-terminal-error-v1" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_daemon_invocation",
+                "daemon_root_invalid",
+                "daemon_watcher_unavailable",
+                "daemon_output_failed"
+              ]
+            },
+            "message": { "type": "string", "maxLength": 4096 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
