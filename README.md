@@ -67,7 +67,7 @@ Install the same native CLI persistently with Homebrew or Cargo:
 ```sh
 brew install chalkagents/tap/folderbase
 # or, with Rust 1.96+
-cargo install folderbase-cli --version 0.6.0 --locked
+cargo install folderbase-cli --version 0.6.1 --locked
 ```
 
 Prebuilt macOS and Linux binaries and their closed `SHA256SUMS` record are

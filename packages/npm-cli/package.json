@@ -1,6 +1,6 @@
 {
   "name": "@folderbase/cli",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Install and run the native Folderbase CLI for agent-ready local-first folders.",
   "license": "Apache-2.0",
   "type": "module",

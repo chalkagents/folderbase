@@ -1,6 +1,6 @@
 ---
 title: Install Folderbase
-description: Install Folderbase Core 0.6 through npx, Homebrew, crates.io, or a verified native binary.
+description: Install Folderbase Core 0.6.1 through npx, Homebrew, crates.io, or a verified native binary.
 ---
 
 Folderbase Core is an Apache-2.0 Rust engine distributed as a native `folderbase` executable. Choose the installation path that fits your environment.
@@ -10,7 +10,7 @@ Folderbase Core is an Apache-2.0 Rust engine distributed as a native `folderbase
 The quickest path for macOS and Linux is the verified npm launcher:
 
 ```bash
-npx --yes @folderbase/cli@0.6.0 --version
+npx --yes @folderbase/cli@0.6.1 --version
 ```
 
 The launcher downloads the exact native executable for the package version, verifies it against the release `SHA256SUMS`, caches it by version, and forwards arguments directly. It does not install Folderbase into the folder you operate on.
@@ -31,20 +31,20 @@ brew install chalkagents/tap/folderbase
 folderbase --version
 ```
 
-The formula installs the matching verified binary from the immutable Core 0.6 release.
+The formula installs the matching verified binary from the immutable Core 0.6.1 release.
 
 ## Install from crates.io
 
 If you already have Rust 1.96 or newer, install the published CLI crate:
 
 ```bash
-cargo install folderbase-cli --version 0.6.0 --locked
+cargo install folderbase-cli --version 0.6.1 --locked
 folderbase --version
 ```
 
 ## Download a native binary
 
-Download the matching artifact from the [Core 0.6 GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.6.0), verify it with the published `SHA256SUMS`, mark it executable, and place it on your `PATH`.
+Download the matching artifact from the [Core 0.6.1 GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.6.1), verify it with the published `SHA256SUMS`, mark it executable, and place it on your `PATH`.
 
 ## Build from source
 

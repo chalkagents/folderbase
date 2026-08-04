@@ -1,23 +1,29 @@
 ---
-title: Folderbase Core 0.6
+title: Folderbase Core 0.6.1
 description: Query, templates, Change Sets, daemon sessions, and public process adapters on the stable database core.
 ---
 
-Folderbase Core 0.6 completes the portable local database vertical: ordinary
+Folderbase Core 0.6.1 completes the portable local database vertical: ordinary
 folders can be queried, expanded with guidance, checked out to agents, merged
 through Change Sets, and kept fresh through one root-pinned daemon. Every file
 type remains an ordinary file and Core remains the sole database authority.
 
+> **Release note:** 0.6.1 is the first complete public 0.6 release. The
+> crates-only 0.6.0 publication was superseded before npm, GitHub binaries, or
+> Homebrew were released because its embedded source revision did not match
+> the immutable tag. Do not pin 0.6.0; no portable record or runtime behavior
+> changed in 0.6.1.
+
 ## Install
 
 ```bash
-npx --yes @folderbase/cli@0.6.0 --version
-cargo install folderbase-cli --version 0.6.0 --locked
+npx --yes @folderbase/cli@0.6.1 --version
+cargo install folderbase-cli --version 0.6.1 --locked
 brew install chalkagents/tap/folderbase
 ```
 
 Native macOS and Linux executables plus `SHA256SUMS` are on the immutable
-[GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.6.0).
+[GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.6.1).
 The same Core is published as `folderbase-core` and `folderbase-cli` on
 crates.io, `@folderbase/cli` on npm, and `chalkagents/tap/folderbase` on
 Homebrew.
@@ -104,7 +110,7 @@ Read [Use Folderbase from TypeScript](/docs/guides/typescript-sdk) and the
 
 ## Compatibility
 
-Core 0.6 retains Compatibility Contract v1, CLI JSON v1, native root-manifest
+Core 0.6.1 retains Compatibility Contract v1, CLI JSON v1, native root-manifest
 profile `0.5.0`, Folderbase Version profiles `0.4` and `0.5`, stable IDs,
 explicit upgrade behavior, and exit meanings `0`, `1`, and `2`. The release
 adds advertised capability profiles; it does not silently rewrite portable
