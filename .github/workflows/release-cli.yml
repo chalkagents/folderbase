@@ -1,4 +1,4 @@
-name: Release native CLI and npm launcher
+name: Release Folderbase Core distributions
 
 on:
   push:
@@ -66,7 +66,7 @@ jobs:
             cargo metadata --manifest-path native-source/Cargo.toml --format-version 1 --no-deps |
               jq -r '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace package versions differ") end'
           )"
-          npm_version="$(jq -r '.version' packages/npm-cli/package.json)"
+          npm_version="$(jq -r '.version' native-source/packages/npm-cli/package.json)"
           canonical_tag="v${package_version}"
           test "$RELEASE_TAG" = "$canonical_tag"
           test "$release_version" = "$package_version"
@@ -132,7 +132,7 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 45
     environment: npm
     permissions:
       contents: write
@@ -141,6 +141,9 @@ jobs:
     steps:
       - name: Check out distribution sources
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Install Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -148,6 +151,11 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.96.0
 
       - name: Verify the canonical package tag
         shell: bash
@@ -164,8 +172,13 @@ jobs:
           classification="$(
             node scripts/npm-publication-policy.mjs classify "$package_version"
           )"
+          sdk_version="$(node -p "require('./packages/sdk/package.json').version")"
+          sdk_classification="$(
+            node scripts/npm-publication-policy.mjs classify "$sdk_version"
+          )"
           echo "github_prerelease=$(printf '%s' "$classification" | jq -r '.githubPrerelease')" >> "$GITHUB_OUTPUT"
           echo "npm_dist_tag=$(printf '%s' "$classification" | jq -r '.channel')" >> "$GITHUB_OUTPUT"
+          echo "sdk_npm_dist_tag=$(printf '%s' "$sdk_classification" | jq -r '.channel')" >> "$GITHUB_OUTPUT"
 
       - name: Download native CLIs
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -191,12 +204,17 @@ jobs:
             cd dist
             sha256sum "${expected[@]}" > SHA256SUMS
           )
+          chmod +x dist/folderbase-*
 
       - name: Test the npm distribution package
         run: |
           npm test --prefix packages/npm-cli
           node scripts/test-npm-cli-package.mjs
-          node --test protocol/conformance/cli-json-v1/schema.test.mjs protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-scripts.test.mjs
+          npm ci --prefix packages/sdk
+          npm test --prefix packages/sdk
+          node scripts/test-sdk-package.mjs \
+            --implementation "dist/folderbase-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
+          node --test protocol/conformance/cli-json-v1/schema.test.mjs protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/release-registry-closure.test.mjs scripts/tests/release-scripts.test.mjs
 
       - name: Require repository immutable releases
         env:
@@ -213,6 +231,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NPM_DIST_TAG: ${{ steps.release-metadata.outputs.npm_dist_tag }}
         run: scripts/release/decide-publication-state.sh
+
+      - name: Check immutable SDK publication state
+        id: sdk-publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NPM_DIST_TAG: ${{ steps.release-metadata.outputs.sdk_npm_dist_tag }}
+          NPM_PACKAGE_DIRECTORY: packages/sdk
+          TRACK_GITHUB_LATEST: "false"
+        run: scripts/release/decide-publication-state.sh
+
+      - name: Publish crates.io packages in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: scripts/release/publish-crates.sh
 
       - name: Publish GitHub release artifacts
         env:
@@ -234,3 +266,107 @@ jobs:
           CLEANUP_TAG: ${{ steps.npm-publication.outputs.cleanup_tag }}
         working-directory: packages/npm-cli
         run: npm dist-tag rm @folderbase/cli "$CLEANUP_TAG"
+
+      - name: Publish the public TypeScript SDK
+        if: (github.event_name == 'push' || inputs.publish_npm) && steps.sdk-publication.outputs.skip_publish != 'true'
+        env:
+          PUBLISH_TAG: ${{ steps.sdk-publication.outputs.publish_tag }}
+        working-directory: packages/sdk
+        run: npm publish --access public --tag "$PUBLISH_TAG"
+
+      - name: Remove the temporary SDK npm backfill tag
+        if: (github.event_name == 'push' || inputs.publish_npm) && steps.sdk-publication.outputs.cleanup_tag != ''
+        env:
+          CLEANUP_TAG: ${{ steps.sdk-publication.outputs.cleanup_tag }}
+        working-directory: packages/sdk
+        run: npm dist-tag rm @folderbase/sdk "$CLEANUP_TAG"
+
+      - name: Publish the Homebrew formula from sealed checksums
+        env:
+          GH_TOKEN: ${{ secrets.FOLDERBASE_HOMEBREW_TAP_TOKEN || github.token }}
+        run: scripts/release/publish-homebrew-formula.sh
+
+  verify-public:
+    name: Verify public multi-channel release
+    needs: publish
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the exact released Core tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.96.0
+
+      - name: Wait for exact public registry versions
+        shell: bash
+        run: |
+          core_version="${RELEASE_TAG#v}"
+          sdk_version="$(node -p "require('./packages/sdk/package.json').version")"
+          for attempt in $(seq 1 120); do
+            if [[ "$(npm view @folderbase/cli@"$core_version" version 2>/dev/null || true)" == "$core_version" ]] &&
+              [[ "$(npm view @folderbase/sdk@"$sdk_version" version 2>/dev/null || true)" == "$sdk_version" ]] &&
+              curl -fsSL -A 'folderbase-release-workflow/1.0' \
+                "https://crates.io/api/v1/crates/folderbase-core/${core_version}" >/dev/null &&
+              curl -fsSL -A 'folderbase-release-workflow/1.0' \
+                "https://crates.io/api/v1/crates/folderbase-cli/${core_version}" >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Verify npm CLI and SDK from a clean consumer
+        shell: bash
+        run: |
+          core_version="${RELEASE_TAG#v}"
+          sdk_version="$(node -p "require('./packages/sdk/package.json').version")"
+          consumer="$(mktemp -d)"
+          trap 'rm -rf "$consumer"' EXIT
+          npm install \
+            --prefix "$consumer" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            "@folderbase/cli@${core_version}" \
+            "@folderbase/sdk@${sdk_version}"
+          PATH="$consumer/node_modules/.bin:$PATH" \
+            folderbase --version | grep -Fx "folderbase ${core_version}"
+          PATH="$consumer/node_modules/.bin:$PATH" \
+            SDK_PATH="$consumer/node_modules/@folderbase/sdk/src/index.js" \
+            node --input-type=module -e \
+              'const { FolderbaseClient } = await import(`file://${process.env.SDK_PATH}`); const result = await new FolderbaseClient().contract(); if (result.kind !== "success") process.exit(1);'
+
+      - name: Verify crates.io installation
+        shell: bash
+        run: |
+          core_version="${RELEASE_TAG#v}"
+          install_root="$(mktemp -d)"
+          trap 'rm -rf "$install_root"' EXIT
+          cargo install folderbase-cli \
+            --version "$core_version" \
+            --locked \
+            --root "$install_root"
+          test "$("$install_root/bin/folderbase" --version)" = "folderbase $core_version"
+
+      - name: Verify Homebrew installation
+        shell: bash
+        run: |
+          brew update
+          brew uninstall folderbase >/dev/null 2>&1 || true
+          brew install chalkagents/tap/folderbase
+          test "$(folderbase --version)" = "folderbase ${RELEASE_TAG#v}"
+          folderbase protocol contract --json | jq -e '.contract_version == "1.0.0"'

@@ -148,7 +148,7 @@ case "$*" in
   "pack --dry-run --json")
     printf '%s\n' '[{"integrity":"sha512-local"}]'
     ;;
-  "view @folderbase/cli@0.5.0 version dist.integrity --json")
+  "view @folderbase/cli@0.6.0 version dist.integrity --json")
     printf '%s\n' 'npm error code E404' >&2
     exit 1
     ;;
@@ -168,6 +168,67 @@ esac
         GITHUB_OUTPUT: output,
         GITHUB_REPOSITORY: "chalkagents/folderbase",
         NPM_DIST_TAG: "latest",
+        PATH: `${bin}:${process.env.PATH}`,
+      },
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(
+      await readFile(output, "utf8"),
+      `skip_publish=false
+publish_tag=latest
+cleanup_tag=
+advance_channel=true
+advance_github_latest=true
+`,
+    );
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("registry-state entrypoint supports SDK publication without GitHub Latest authority", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-release-script-"));
+  try {
+    const bin = join(temporaryRoot, "bin");
+    const output = join(temporaryRoot, "github-output");
+    await mkdir(bin);
+    await writeExecutable(
+      join(bin, "gh"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 64
+`,
+    );
+    await writeExecutable(
+      join(bin, "npm"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "pack --dry-run --json")
+    printf '%s\n' '[{"integrity":"sha512-sdk"}]'
+    ;;
+  "view @folderbase/sdk@0.1.0 version dist.integrity --json")
+    printf '%s\n' 'npm error code E404' >&2
+    exit 1
+    ;;
+  "view @folderbase/sdk dist-tags --json")
+    printf '%s\n' '{}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+`,
+    );
+
+    const result = await runScript(decisionScript, {
+      env: {
+        GH_TOKEN: "workflow-token",
+        GITHUB_OUTPUT: output,
+        GITHUB_REPOSITORY: "chalkagents/folderbase",
+        NPM_DIST_TAG: "latest",
+        NPM_PACKAGE_DIRECTORY: "packages/sdk",
+        TRACK_GITHUB_LATEST: "false",
         PATH: `${bin}:${process.env.PATH}`,
       },
     });

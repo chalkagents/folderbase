@@ -1,0 +1,111 @@
+---
+title: Folderbase Core 0.6
+description: Query, templates, Change Sets, daemon sessions, and public process adapters on the stable database core.
+---
+
+Folderbase Core 0.6 completes the portable local database vertical: ordinary
+folders can be queried, expanded with guidance, checked out to agents, merged
+through Change Sets, and kept fresh through one root-pinned daemon. Every file
+type remains an ordinary file and Core remains the sole database authority.
+
+## Install
+
+```bash
+npx --yes @folderbase/cli@0.6.0 --version
+cargo install folderbase-cli --version 0.6.0 --locked
+brew install chalkagents/tap/folderbase
+```
+
+Native macOS and Linux executables plus `SHA256SUMS` are on the immutable
+[GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.6.0).
+The same Core is published as `folderbase-core` and `folderbase-cli` on
+crates.io, `@folderbase/cli` on npm, and `chalkagents/tap/folderbase` on
+Homebrew.
+
+## Experimental query and index capability
+
+Builds advertise `folderbase.query-index@0.1.0` and provide:
+
+- bounded metadata-first live queries over every ordinary file type;
+- exact historical Folderbase Version queries with live and deleted lifecycle;
+- deterministic filters, ordering, pagination, and snapshot-bound cursors;
+- query explanations naming source, exclusions, ordering, and content access;
+- explicit status and rebuild commands for one disposable private index;
+- closed JSON success, attention, and error documents; and
+- a 28-case implementation-neutral public conformance suite.
+
+Read [Query a Folderbase](/docs/guides/querying) and the
+[query/index wire reference](/docs/reference/query-index).
+
+## Stable template-expansion capability
+
+Builds advertise `folderbase.template-expansion@0.1.0` and provide:
+
+- read-only planning for one exact data-only Template Protocol 0.2 package;
+- reviewed application bound to the exact physical folder and current plan;
+- no-clobber additions that preserve every existing user path;
+- idempotent replay and immutable template-application history;
+- explicit handoff to reorganization for lineage or structural changes; and
+- a nine-case public conformance suite with 10 GiB metadata-first collision proof.
+
+Templates remain guidance rather than permanent schemas. Read
+[Start from a template](/docs/guides/templates) and the
+[template expansion wire reference](/docs/reference/template-expansion).
+
+## Stable Change Set capability
+
+Builds advertise `folderbase.change-set@0.1.0` and provide:
+
+- least-authority ordinary-folder checkouts for a complete root or path prefixes;
+- immutable before/after Object deltas and provider-neutral staged bytes;
+- read-only three-way assessment with typed conflicts and retryable attention;
+- atomic scoped apply with one-parent proposal or two-parent merge history;
+- stable Object identity across rename and move-plus-edit;
+- safe handling for repositories, documents, databases, media, and unknown files;
+- durable restart recovery and digest-keyed idempotent replay; and
+- a ten-scenario implementation-neutral conformance suite.
+
+This is the portable local work loop used by future share links and Cloud
+Agents. Hosted share-link grants, transport, review UI, and Cloud Agents remain separate
+App and Cloud work. Read
+[Work through scoped Change Sets](/docs/guides/change-sets) and the
+[Change Set wire reference](/docs/reference/change-sets).
+
+## Experimental daemon stdio capability
+
+Builds advertise `folderbase.daemon-stdio@0.1.0` and provide:
+
+- one explicit, physically root-pinned long-lived session;
+- JSON Lines request/response framing for exact query/index delegation;
+- coalesced workspace-change and rescan-required hints;
+- no second scanner, mutation engine, network listener, or authoritative state;
+- bounded malformed and oversized-frame recovery;
+- EOF, shutdown, forced-termination, and restart safety; and
+- a ten-case implementation-neutral conformance suite.
+
+Read [Keep an active Folderbase session fresh](/docs/guides/daemon-sessions)
+and the [daemon stdio reference](/docs/reference/daemon-stdio).
+
+## Public process adapters
+
+`@folderbase/sdk@0.1.0` is a zero-runtime-dependency ESM adapter for Node.js and
+TypeScript. It supervises CLI JSON and daemon stdio with typed exits, bounded
+I/O, deadlines, cancellation, capability helpers, and complete JSON-value
+preservation.
+
+The package contains no bundled Core and no private `.folderbase` reader. Its
+release gate installs the packed archive outside the repository, runs a
+mixed-file journey against the real executable, and reruns the public base and
+capability suites through the adapter. Swift and other native clients use the
+same process seam rather than private Rust internals.
+
+Read [Use Folderbase from TypeScript](/docs/guides/typescript-sdk) and the
+[process adapter contract](/docs/reference/process-adapters).
+
+## Compatibility
+
+Core 0.6 retains Compatibility Contract v1, CLI JSON v1, native root-manifest
+profile `0.5.0`, Folderbase Version profiles `0.4` and `0.5`, stable IDs,
+explicit upgrade behavior, and exit meanings `0`, `1`, and `2`. The release
+adds advertised capability profiles; it does not silently rewrite portable
+records.

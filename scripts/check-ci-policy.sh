@@ -543,9 +543,13 @@ fi
 immutable_script="scripts/release/require-immutable-releases.sh"
 decision_script="scripts/release/decide-publication-state.sh"
 publication_script="scripts/release/publish-github-release.sh"
+crates_script="scripts/release/publish-crates.sh"
+homebrew_script="scripts/release/publish-homebrew-formula.sh"
 require_release_script "$immutable_script"
 require_release_script "$decision_script"
 require_release_script "$publication_script"
+require_release_script "$crates_script"
+require_release_script "$homebrew_script"
 
 require_release_step_exact_run \
   "Require repository immutable releases" \
@@ -559,14 +563,46 @@ require_release_step_exact_run \
   "Publish GitHub release artifacts" \
   "$publication_script" \
   "GitHub publication must have exactly one run key naming its dedicated entrypoint."
+require_release_step_exact_run \
+  "Check immutable SDK publication state" \
+  "$decision_script" \
+  "The SDK registry-state decision must use the shared immutable npm policy entrypoint."
+require_release_step_exact_run \
+  "Publish crates.io packages in dependency order" \
+  "$crates_script" \
+  "crates.io publication must use its dependency-ordered idempotent entrypoint."
+require_release_step_exact_run \
+  "Publish the Homebrew formula from sealed checksums" \
+  "$homebrew_script" \
+  "Homebrew publication must derive its formula through the sealed-checksum entrypoint."
 require_release_step_before \
   "Require repository immutable releases" \
   "Check immutable npm publication state" \
   "The immutable-release preflight must precede the registry-state decision."
 require_release_step_before \
   "Check immutable npm publication state" \
+  "Check immutable SDK publication state" \
+  "The CLI registry-state decision must precede the SDK decision."
+require_release_step_before \
+  "Check immutable SDK publication state" \
+  "Publish crates.io packages in dependency order" \
+  "All npm immutability decisions must precede registry writes."
+require_release_step_before \
+  "Publish crates.io packages in dependency order" \
   "Publish GitHub release artifacts" \
-  "The registry-state decision must precede GitHub publication."
+  "folderbase-core and folderbase-cli crates must publish before GitHub and npm channels."
+require_release_step_before \
+  "Publish GitHub release artifacts" \
+  "Publish the public npm launcher" \
+  "Immutable GitHub assets must exist before the npm launcher points at them."
+require_release_step_before \
+  "Publish the public npm launcher" \
+  "Publish the public TypeScript SDK" \
+  "The Core launcher must publish before the optional TypeScript adapter."
+require_release_step_before \
+  "Publish the public TypeScript SDK" \
+  "Publish the Homebrew formula from sealed checksums" \
+  "Homebrew publication must be the final channel write from sealed GitHub assets."
 
 require_release_fragment_minimum_count \
   'ref: refs/tags/${{ env.RELEASE_TAG }}' \
@@ -615,6 +651,14 @@ require_release_step_exact_line \
   "Publish GitHub release artifacts" \
   '          GITHUB_LATEST: ${{ steps.npm-publication.outputs.advance_github_latest }}' \
   "GitHub Latest must consume its independent registry-state decision."
+require_release_step_exact_line \
+  "Publish crates.io packages in dependency order" \
+  '          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}' \
+  "crates.io publication must use only the dedicated registry token."
+require_release_step_exact_line \
+  "Publish the Homebrew formula from sealed checksums" \
+  '          GH_TOKEN: ${{ secrets.FOLDERBASE_HOMEBREW_TAP_TOKEN || github.token }}' \
+  "Homebrew publication must prefer narrow tap authority and retain read-only rerun fallback."
 
 require_release_job_exact_line \
   "publish" \
@@ -641,6 +685,21 @@ require_release_step_exact_run \
   "Remove the temporary npm backfill tag" \
   'npm dist-tag rm @folderbase/cli "$CLEANUP_TAG"' \
   "Older npm backfills must exactly remove their temporary non-channel tag."
+require_release_step_exact_run \
+  "Publish the public TypeScript SDK" \
+  'npm publish --access public --tag "$PUBLISH_TAG"' \
+  "SDK publication must use exactly the policy-selected non-regressing tag."
+require_release_step_exact_run \
+  "Remove the temporary SDK npm backfill tag" \
+  'npm dist-tag rm @folderbase/sdk "$CLEANUP_TAG"' \
+  "Older SDK backfills must exactly remove their temporary non-channel tag."
+
+require_release_fragment \
+  'node scripts/test-sdk-package.mjs' \
+  "The release must prove the packed SDK against an exact native artifact."
+require_release_fragment \
+  'name: Verify public multi-channel release' \
+  "The release must verify public registries after every channel write."
 
 require_script_fragment \
   "$immutable_script" \
@@ -695,24 +754,52 @@ require_script_fragment \
   "$publication_script" \
   "--json isImmutable --jq '.isImmutable'" \
   "The publication entrypoint must prove the final release is immutable."
+require_script_fragment \
+  "$crates_script" \
+  'for crate_name in folderbase-core folderbase-cli' \
+  "Crates must publish in dependency order."
+require_script_fragment \
+  "$crates_script" \
+  'node scripts/release/crate-publication-policy.mjs' \
+  "Crate reruns must use the tested immutable-checksum policy."
+require_script_fragment \
+  "$homebrew_script" \
+  'node scripts/release/render-homebrew-formula.mjs' \
+  "The Homebrew formula must be rendered from sealed checksums."
+require_script_fragment \
+  "$homebrew_script" \
+  'repos/chalkagents/homebrew-tap/contents/${tap_path}' \
+  "Homebrew publication authority must remain scoped to the tap formula path."
 
 # The text checks above retain focused diagnostics. This exact-byte seal is the
 # fail-closed boundary: YAML aliases, quoted duplicate keys, conditionals, shell
 # escapes, or policy-script changes cannot silently alter release authority.
 require_sealed_release_control \
   "$release_workflow" \
-  "ae981a245e544527880673b8dceb5854e512dd46e2e4fd61ca8b827c483de91b"
+  "9ea78156dcc405a3355c591344c77e8f79354fedc00a59ad028db03ce41e5cb7"
 require_sealed_release_control \
   "$immutable_script" \
   "1898cdb0efcb49cbf346d7057cac0dc34e838305ec8b14a7bd42082e20ffe627"
 require_sealed_release_control \
   "$decision_script" \
-  "2210a59d942bbd49132c3ddb639379ecb8498e1e45177b81af5cb712d3080e9c"
+  "4295254103027da945f9aa2dad36a9d5bd438720f1fd0b77f43657f84c46641b"
 require_sealed_release_control \
   "$publication_script" \
   "5a9e8cc98c5b250a36180be1beb29b2657cd77f7bbbe2980040e5a9ac9fd63bb"
 require_sealed_release_control \
   "scripts/npm-publication-policy.mjs" \
   "7d3682901f38b1fba7afe066ed479cd41bb4279de0ad56872c9d7f13ca8cd643"
+require_sealed_release_control \
+  "$crates_script" \
+  "90736b71ca8ca5fdb67b87ced925532cefd45f6dfcbcf664eb0a8db442816d50"
+require_sealed_release_control \
+  "$homebrew_script" \
+  "dc4714e3ec712ea0ccfdbc23670588d0b3da5560bc5f9b58d84df90f877ea3b8"
+require_sealed_release_control \
+  "scripts/release/crate-publication-policy.mjs" \
+  "009925ada5709900031afb51d0ea66fbeadae8a8de27944eba71ffbc639f413d"
+require_sealed_release_control \
+  "scripts/release/render-homebrew-formula.mjs" \
+  "a7b33e7d9c2309ab39dfb5d5e3b8bcd2faacf6f222bf381c22b7da8e33d94b8d"
 
 echo "CI and release workflow policy is valid."

@@ -35,6 +35,9 @@ tar -xzf "$cli_archive" -C "$extraction_root"
 
 core_source="$extraction_root/$(basename "$core_archive" .crate)"
 cli_source="$extraction_root/$(basename "$cli_archive" .crate)"
+cli_package_name=$(basename "$cli_source")
+cli_package_version=${cli_package_name#folderbase-cli-}
+test "$cli_package_version" != "$cli_package_name"
 
 test -f "$core_source/src/folderbase_version.rs"
 for package in folderbase-core folderbase-cli
@@ -93,7 +96,7 @@ cargo install \
   --config "patch.crates-io.folderbase-core.path='$core_source'"
 
 folderbase="$extraction_root/install/bin/folderbase"
-test "$("$folderbase" --version)" = "folderbase 0.5.0"
+test "$("$folderbase" --version)" = "folderbase $cli_package_version"
 node "$repository_root/protocol/conformance/capabilities/run.mjs" \
   --implementation "$folderbase"
 node "$repository_root/scripts/test-sdk-package.mjs" \

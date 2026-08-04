@@ -79,7 +79,7 @@ test("Vercel Git deployments are enabled only for main", () => {
   assert.equal(runIgnore(undefined).status, 1, "manual deploy should build");
 });
 
-test("published docs describe the released native 0.5 contract", () => {
+test("published docs describe the released native 0.6 contract", () => {
   const content = readFileSync(
     join(docsRoot, "content", "docs", "getting-started", "quickstart.mdx"),
     "utf8",
@@ -103,20 +103,20 @@ test("published docs describe the released native 0.5 contract", () => {
   assert.doesNotMatch(allDocs, /--help-json/);
 });
 
-test("install docs cover every verified 0.5 distribution channel", () => {
+test("install docs cover every verified 0.6 distribution channel", () => {
   const install = read("apps/docs/content/docs/getting-started/install.mdx");
-  const release = read("apps/docs/content/docs/releases/0.5.mdx");
+  const release = read("apps/docs/content/docs/releases/0.6.mdx");
 
   for (const page of [install, release]) {
-    assert.match(page, /npx --yes @folderbase\/cli@0\.5\.0 --version/u);
+    assert.match(page, /npx --yes @folderbase\/cli@0\.6\.0 --version/u);
     assert.match(
       page,
-      /cargo install folderbase-cli --version 0\.5\.0 --locked/u,
+      /cargo install folderbase-cli --version 0\.6\.0 --locked/u,
     );
     assert.match(page, /brew install chalkagents\/tap\/folderbase/u);
     assert.match(
       page,
-      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.5\.0/u,
+      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.6\.0/u,
     );
   }
 });
@@ -190,13 +190,14 @@ test("the query capability has runnable guide, wire reference, and honest releas
   );
   const guide = read("apps/docs/content/docs/guides/querying.mdx");
   const reference = read("apps/docs/content/docs/reference/query-index.mdx");
-  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const release = read("apps/docs/content/docs/releases/0.6.mdx");
   const cli = read("apps/docs/content/docs/reference/cli.mdx");
   const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
 
   assert(guidesMeta.pages.includes("querying"));
   assert(referenceMeta.pages.includes("query-index"));
   assert(releasesMeta.pages.includes("next"));
+  assert(releasesMeta.pages.includes("0.6"));
 
   for (const page of [guide, reference, release]) {
     assert.match(page, /folderbase\.query-index@0\.1\.0/u);
@@ -217,7 +218,7 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert.match(reference, /host output-stream failure/u);
   assert.match(reference, /Exit `1`/u);
   assert.match(reference, /Exit `2`/u);
-  assert.match(release, /not part of the immutable Core 0\.5 release/u);
+  assert.match(release, /Core 0\.6 retains Compatibility Contract v1/u);
   assert.match(cli, /\| `query` \| Experimental optional capability \|/u);
   assert.match(conformance, /experimental query\/index profile/u);
 });
@@ -227,7 +228,7 @@ test("the stable Change Set capability has a runnable guide, wire reference, and
   const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
   const guide = read("apps/docs/content/docs/guides/change-sets.mdx");
   const reference = read("apps/docs/content/docs/reference/change-sets.mdx");
-  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const release = read("apps/docs/content/docs/releases/0.6.mdx");
   const cli = read("apps/docs/content/docs/reference/cli.mdx");
   const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
 
@@ -253,7 +254,7 @@ test("the daemon capability has a runnable guide, wire reference, and honest aut
   const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
   const guide = read("apps/docs/content/docs/guides/daemon-sessions.mdx");
   const reference = read("apps/docs/content/docs/reference/daemon-stdio.mdx");
-  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const release = read("apps/docs/content/docs/releases/0.6.mdx");
   const cli = read("apps/docs/content/docs/reference/cli.mdx");
   const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
 
@@ -276,7 +277,7 @@ test("the public TypeScript and native process adapter seam is fully documented"
   const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
   const guide = read("apps/docs/content/docs/guides/typescript-sdk.mdx");
   const reference = read("apps/docs/content/docs/reference/process-adapters.mdx");
-  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const release = read("apps/docs/content/docs/releases/0.6.mdx");
   const index = read("apps/docs/content/docs/index.mdx");
 
   assert(guidesMeta.pages.includes("typescript-sdk"));

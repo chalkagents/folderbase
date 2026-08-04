@@ -502,7 +502,7 @@ test("the registry decision must remain before GitHub publication", async () => 
     await writeFile(fixture, unsafe);
     const result = await runPolicy(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /decision must precede/);
+    assert.match(result.stderr, /(decision must precede|crates must publish)/);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
