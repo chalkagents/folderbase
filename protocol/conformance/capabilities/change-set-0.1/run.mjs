@@ -97,7 +97,9 @@ function execute(implementation, arguments_, input = "", environment = {}) {
     throw new Error(supervised.stderr || "candidate process supervisor failed");
   }
   const result = JSON.parse(supervised.stdout);
-  if (result.bound === "timeout") throw new Error(`candidate command timed out after ${timeoutMs} ms`);
+  if (result.bound === "timeout") {
+    throw new Error(`candidate command ${arguments_.join(" ")} timed out after ${timeoutMs} ms`);
+  }
   if (result.bound === "output") throw new Error(`candidate command exceeded ${maxBytes} bytes`);
   if (result.error) throw Object.assign(new Error(result.error.message), { code: result.error.code });
   return result;
@@ -467,8 +469,64 @@ async function assertScenarioResults(root, assertions = []) {
   }
 }
 
+async function readFolderbaseVersion(root, versionId) {
+  assert.match(versionId, /^fbversion_[0-9a-f-]+$/u);
+  return JSON.parse(
+    await readFile(join(root, ".folderbase", "versions", "folderbase", `${versionId}.json`), "utf8"),
+  );
+}
+
+async function immutableVersionSnapshot(root) {
+  return (await readdir(join(root, ".folderbase", "versions", "folderbase")))
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+}
+
+async function assertChangeSetHistory(root, scenario, envelope) {
+  const head = JSON.parse(await readFile(join(root, ".folderbase", "local", "head.json"), "utf8"));
+  const version = await readFolderbaseVersion(root, head.version_id);
+  assert.equal(version.version_id, head.version_id);
+  assert.equal(version.folderbase_id, envelope.payload.folderbase_id);
+
+  if (scenario.name === "clean-disjoint") {
+    assert.equal(version.parents.length, 2, "disjoint work produces a real two-parent merge");
+    const current = await readFolderbaseVersion(root, version.parents[0]);
+    const proposal = await readFolderbaseVersion(root, version.parents[1]);
+    assert.ok(current.bindings.some(({ path }) => path === "shared/source-only.md"));
+    assert.ok(!proposal.bindings.some(({ path }) => path === "shared/source-only.md"));
+    assert.equal(proposal.parents.length, 1, "proposal is pinned to one projection base");
+  } else {
+    assert.equal(version.parents.length, 1, "non-divergent apply publishes the proposal Version");
+  }
+
+  for (const delta of envelope.payload.deltas) {
+    if (delta.after === null) {
+      assert.ok(!version.bindings.some(({ object_id }) => object_id === delta.object_id));
+      assert.ok(version.tombstones.some(({ object_id }) => object_id === delta.object_id));
+      continue;
+    }
+    const binding = version.bindings.find(({ path }) => path === delta.after.path);
+    assert.ok(binding, `history contains ${delta.after.path}`);
+    assert.equal(binding.object_id, delta.object_id, "history retains Change Set Object identity");
+    if (delta.after.kind !== "directory") {
+      assert.equal(
+        binding.object_version_id,
+        delta.after.object_version_id,
+        "history retains the exact Change Set Object Version",
+      );
+    }
+  }
+}
+
 async function readScenarios() {
-  const names = (await readdir(scenarioDirectory)).filter((name) => name.endsWith(".json")).sort();
+  const selected = process.env.FOLDERBASE_CHANGE_SET_CONFORMANCE_SCENARIO;
+  const names = (await readdir(scenarioDirectory))
+    .filter((name) => name.endsWith(".json"))
+    .filter((name) => selected === undefined || name === selected)
+    .sort();
+  if (selected !== undefined && names.length !== 1) {
+    throw new Error(`unknown Change Set conformance scenario ${selected}`);
+  }
   return Promise.all(names.map(async (name) => JSON.parse(await readFile(join(scenarioDirectory, name), "utf8"))));
 }
 
@@ -574,14 +632,18 @@ async function runScenario(implementation, scenario, index) {
     assertNoScopedLeak(assessed, "assessment");
     assert.deepEqual(await treeSnapshot(root, includeOutOfScope), outOfScopeBefore);
 
-    if (scenario.crash_once_after_prepare) {
+    let historyHeadSnapshot;
+    for (const crashPoint of scenario.crash_sequence ?? []) {
       const crashed = execute(
         implementation,
         ["change-set", "apply", root, staging, "--stdin", "--json"],
         input,
-        { FOLDERBASE_CHANGE_SET_CONFORMANCE_CRASH_AFTER: "prepared-journal" },
+        { FOLDERBASE_CHANGE_SET_CONFORMANCE_CRASH_AFTER: crashPoint },
       );
-      assert.notEqual(crashed.status, 0, "conformance crash hook terminates after durable preparation");
+      assert.notEqual(crashed.status, 0, `conformance crash hook terminates at ${crashPoint}`);
+      if (crashPoint === "history-head") {
+        historyHeadSnapshot = await immutableVersionSnapshot(root);
+      }
     }
 
     const applied = successJson(
@@ -595,6 +657,15 @@ async function runScenario(implementation, scenario, index) {
     assertNoScopedLeak(applied, "apply result");
     assert.deepEqual(await treeSnapshot(root, includeOutOfScope), outOfScopeBefore);
     await assertScenarioResults(root, scenario.expected.assertions);
+    await assertChangeSetHistory(root, scenario, envelope);
+    const versionsBeforeReplay = await immutableVersionSnapshot(root);
+    if (historyHeadSnapshot !== undefined) {
+      assert.deepEqual(
+        versionsBeforeReplay,
+        historyHeadSnapshot,
+        "restart after publishing history Head installs no additional immutable Versions",
+      );
+    }
 
     const replayed = successJson(
       implementation,
@@ -605,6 +676,11 @@ async function runScenario(implementation, scenario, index) {
     assert.equal(replayed.status, "already_applied");
     assert.equal(replayed.projection_result_sha256, applied.projection_result_sha256);
     assert.deepEqual(await treeSnapshot(root, includeOutOfScope), outOfScopeBefore);
+    assert.deepEqual(
+      await immutableVersionSnapshot(root),
+      versionsBeforeReplay,
+      "idempotent replay installs no additional immutable Versions",
+    );
   } finally {
     await rm(owner, { force: true, recursive: true });
   }

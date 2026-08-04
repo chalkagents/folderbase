@@ -228,7 +228,7 @@ Apply accepts only the exact assessed Change Set digest. Under the Folderbase
 transaction lease it repeats root attestation, authorization, projection-base,
 staging, and three-way checks. It then journals one all-or-nothing transaction.
 No ordinary source path changes before the complete replacement state and
-rollback evidence are durable.
+forward-recovery evidence are durable.
 
 When the source still equals the projection's trusted source Version, Core
 creates one proposal Folderbase Version whose single parent is that source
@@ -247,18 +247,21 @@ authorized path closure and never enters another Folderbase boundary.
 
 ### Crash, restart, and replay
 
-The canonical Change Set digest is the idempotency key. The durable apply
-journal binds root identity, scope revision, projection base, Change Set digest,
-staging manifests, expected current Version, rollback state, proposal Version,
-and optional merge Version. Every mutating entry point recovers an existing
-journal before starting new work.
+The canonical Change Set digest is the idempotency key. A compact durable apply
+journal binds the Change Set ID, Change Set digest, projection, and publication
+phase. Digest-named prepared files contain every replacement byte before the
+journal becomes visible. Recovery accepts only the exact validated envelope,
+the matching immutable ID binding, and workspace paths that still equal a
+recognized before, intermediate, or after state. Every mutating entry point
+recovers an existing journal before starting new work.
 
 After process or machine loss, the next apply converges to either the exact
 pre-apply state or one completely published result. Replaying the same Change
 Set returns the original scoped result and creates no additional Folderbase
 Version. Reusing a Change Set ID with different bytes or digest is an
 operational error. Completed replay does not require staging bytes that were
-already verified and durably consumed; incomplete replay does.
+already verified and durably consumed. Once durable prepared work exists,
+incomplete restart recovery does not require the original staging directory.
 
 ### Process surface and exit meanings
 
@@ -291,11 +294,19 @@ aliases, nested boundaries, crash/restart, and idempotent replay. The suite
 snapshots every out-of-scope entry with no-follow bounded observations and fails
 if a candidate emits or changes sibling state.
 
-Crash convergence has one conformance-only seam so the black-box check is
-deterministic on fast and slow hosts. When apply receives the exact environment
-pair `FOLDERBASE_CHANGE_SET_CONFORMANCE_CRASH_AFTER=prepared-journal`, a
-conformance build terminates nonzero immediately after the complete prepared
-journal is durable and before its first visible ordinary-path mutation.
+Crash convergence has four conformance-only seam values so the black-box check
+is deterministic on fast and slow hosts. With
+`FOLDERBASE_CHANGE_SET_CONFORMANCE_CRASH_AFTER=prepared-journal`, a conforming
+build terminates nonzero after the complete prepared journal is durable and
+before its first visible ordinary-path mutation. With the value
+`first-mutation`, it terminates nonzero immediately after its first visible
+ordinary-path mutation. With `in-place-write`, it terminates after durably
+marking a moved Object for recovery, preserving its filesystem identity,
+truncating the moved regular file, and writing at most one byte. The next
+invocation must finish the same result. With `history-head`, it terminates after
+the deterministic proposal or merge Version and its Local Head are durable but
+before the completion receipt. The next invocation must reuse that exact
+immutable Version and install no additional history record.
 Production builds may omit the hook unless they are presented for conformance;
 the variable grants no additional operation and is not an advertised product
 interface.

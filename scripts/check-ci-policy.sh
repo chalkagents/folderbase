@@ -398,6 +398,11 @@ require_workflow_job_exact_line \
   "The template capability contract suite must remain policy-pinned in CI."
 require_workflow_job_exact_line \
   "$workflow" \
+  "npm-cli" \
+  "        run: node --test protocol/conformance/capabilities/change-set-0.1/suite.test.mjs" \
+  "The Change Set capability contract suite must remain policy-pinned in CI."
+require_workflow_job_exact_line \
+  "$workflow" \
   "rust" \
   "    if: needs.plan.outputs.rust == 'true'" \
   "The Linux Core lane must remain change-aware."
@@ -420,17 +425,12 @@ require_workflow_job_exact_line \
   "$workflow" \
   "core-platforms" \
   "        run: cargo build --package folderbase-cli --locked" \
-  "Native post-merge runners must build the actual query CLI candidate."
+  "Native post-merge runners must build the actual capability candidate."
 require_workflow_job_exact_line \
   "$workflow" \
   "core-platforms" \
-  "        run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase\${{ runner.os == 'Windows' && '.exe' || '' }}" \
-  "Native post-merge runners must conform the actual optional query CLI candidate."
-require_workflow_job_exact_line \
-  "$workflow" \
-  "core-platforms" \
-  "        run: node protocol/conformance/capabilities/template-expansion-0.1/run.mjs --implementation ./target/debug/folderbase\${{ runner.os == 'Windows' && '.exe' || '' }}" \
-  "Native post-merge runners must conform the actual optional template CLI candidate."
+  "        run: node protocol/conformance/capabilities/run.mjs --implementation ./target/debug/folderbase\${{ runner.os == 'Windows' && '.exe' || '' }}" \
+  "Native post-merge runners must conform every advertised capability in one supervised run."
 require_workflow_job_exact_line \
   "$workflow" \
   "required" \

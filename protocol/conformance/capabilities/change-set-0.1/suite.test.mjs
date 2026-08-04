@@ -19,7 +19,7 @@ const schema = JSON.parse(
   ),
 );
 
-test("capability package is stable but remains unadvertised", async () => {
+test("stable capability package is advertised identically", async () => {
   const packageEntry = JSON.parse(
     await readFile(
       resolve(directory, "../../../capabilities/change-set/0.1.0/capability.json"),
@@ -37,7 +37,11 @@ test("capability package is stable but remains unadvertised", async () => {
     "crates/folderbase-cli/assets/capability-registry-v1.json",
   ]) {
     const value = JSON.parse(await readFile(join(repositoryRoot, registry), "utf8"));
-    assert.ok(!value.capabilities.some(({ name }) => name === "folderbase.change-set"), registry);
+    assert.deepEqual(
+      value.capabilities.find(({ name }) => name === "folderbase.change-set"),
+      packageEntry,
+      registry,
+    );
   }
 });
 
@@ -166,6 +170,9 @@ test("fixture inventory covers every accepted Change Set risk before runtime exi
     "nested-folderbase-boundary",
     "missing-projection-base",
     "crash-after-prepare",
+    "crash-mid-publication",
+    "crash-mid-in-place-write",
+    "crash-after-history-head",
     "restart-recovery",
     "idempotent-replay",
   ]) assert.ok(covered.has(required), required);

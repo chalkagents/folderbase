@@ -94,7 +94,7 @@ test("template capability contract tests are policy-pinned in CI", async () => {
   }
 });
 
-test("native post-merge query capability proof is policy-pinned", async () => {
+test("native post-merge advertised capability proof is policy-pinned", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {
     const fixture = join(temporaryRoot, "ci.yml");
@@ -103,32 +103,12 @@ test("native post-merge query capability proof is policy-pinned", async () => {
     const end = source.indexOf("\n  required:", start);
     const block = source.slice(start, end);
     const critical =
-      "        run: node protocol/conformance/capabilities/query-index-0.1/run.mjs --implementation ./target/debug/folderbase${{ runner.os == 'Windows' && '.exe' || '' }}";
+      "        run: node protocol/conformance/capabilities/run.mjs --implementation ./target/debug/folderbase${{ runner.os == 'Windows' && '.exe' || '' }}";
     assert(block.includes(critical));
     await writeFile(fixture, `${source.slice(0, start)}${block.replace(critical, "        run: true")}${source.slice(end)}`);
     const result = await runPolicy(releaseWorkflow, fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /native post-merge|optional query/u);
-  } finally {
-    await rm(temporaryRoot, { recursive: true, force: true });
-  }
-});
-
-test("native post-merge template capability proof is policy-pinned", async () => {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
-  try {
-    const fixture = join(temporaryRoot, "ci.yml");
-    const source = await readFile(ciWorkflow, "utf8");
-    const start = source.indexOf("  core-platforms:");
-    const end = source.indexOf("\n  required:", start);
-    const block = source.slice(start, end);
-    const critical =
-      "        run: node protocol/conformance/capabilities/template-expansion-0.1/run.mjs --implementation ./target/debug/folderbase${{ runner.os == 'Windows' && '.exe' || '' }}";
-    assert(block.includes(critical));
-    await writeFile(fixture, `${source.slice(0, start)}${block.replace(critical, "        run: true")}${source.slice(end)}`);
-    const result = await runPolicy(releaseWorkflow, fixture);
-    assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /native post-merge|optional template/u);
+    assert.match(result.stderr, /native post-merge|every advertised capability/u);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
