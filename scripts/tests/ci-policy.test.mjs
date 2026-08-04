@@ -94,6 +94,23 @@ test("template capability contract tests are policy-pinned in CI", async () => {
   }
 });
 
+test("daemon stdio capability contract tests are policy-pinned in CI", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
+  try {
+    const fixture = join(temporaryRoot, "ci.yml");
+    const source = await readFile(ciWorkflow, "utf8");
+    const critical =
+      "        run: node --test protocol/conformance/capabilities/daemon-stdio-0.1/suite.test.mjs";
+    assert(source.includes(critical));
+    await writeFile(fixture, source.replace(critical, "        run: true"));
+    const result = await runPolicy(releaseWorkflow, fixture);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /daemon stdio capability contract/u);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("native post-merge advertised capability proof is policy-pinned", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-ci-policy-"));
   try {

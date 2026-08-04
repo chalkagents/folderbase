@@ -1,0 +1,100 @@
+---
+title: Keep an active Folderbase session fresh
+description: Spawn one root-pinned Core child process for authoritative queries and bounded filesystem-change hints.
+---
+
+The experimental optional `folderbase.daemon-stdio@0.1.0` capability gives an
+App or agent harness one long-lived local Core session. It watches one explicit
+Folderbase root, delegates every query to the same Core query engine as the
+one-shot CLI, and emits coalesced hints when the ordinary folder may have
+changed.
+
+It is not a background network service. Your process starts it, communicates
+over newline-delimited JSON on stdin/stdout, and owns its lifetime.
+
+## Discover support
+
+```bash
+folderbase protocol contract --json
+```
+
+Continue only when `capabilities` contains
+`folderbase.daemon-stdio@0.1.0`. The capability also depends on the advertised
+`folderbase.query-index@0.1.0` operation documents.
+
+## Start one explicit root
+
+```bash
+folderbase daemon serve /path/to/folderbase --stdio-jsonl
+```
+
+The first stdout line is a `ready` message. It binds the session to the exact
+Folderbase ID and physical Root Instance. The command opens no port, discovers
+no neighboring workspace, and cannot switch roots later.
+
+```json
+{"format":"folderbase-daemon-message-v1","kind":"ready","capability":"folderbase.daemon-stdio@0.1.0","epoch":"daemon_019f0000-0000-7000-8000-000000000001","folderbase_id":"folderbase_019f0000-0000-7000-8000-000000000001","root_instance_sha256":"1111111111111111111111111111111111111111111111111111111111111111","root":"/path/to/folderbase"}
+```
+
+## Query through the session
+
+Write one request per line. `query` and `explain` carry the same closed request
+document as their one-shot commands:
+
+```json
+{"format":"folderbase-daemon-request-v1","request_id":"files-1","operation":"query","document":{"format":"folderbase-query-request-v1","scope":{"kind":"live"},"page":{"limit":1000}}}
+```
+
+The matching response repeats `request_id`. Its inner `document` is the exact
+query-capability result the one-shot command would return for the same root and
+request.
+
+```json
+{"format":"folderbase-daemon-message-v1","kind":"response","request_id":"files-1","operation":"query","status":"ok","document":{"format":"folderbase-query-result-v1"}}
+```
+
+The abbreviated result above illustrates framing only. Real query results
+include the complete closed query document.
+
+## Subscribe to change hints
+
+Send `subscribe`, then continue reading interleaved response and event lines:
+
+```json
+{"format":"folderbase-daemon-request-v1","request_id":"watch-1","operation":"subscribe"}
+```
+
+A burst of creates, edits, moves, or deletes produces at most one outstanding
+`workspace_changed` hint until an authoritative operation acknowledges the
+observed dirty state:
+
+```json
+{"format":"folderbase-daemon-message-v1","kind":"event","event":"workspace_changed","epoch":"daemon_019f0000-0000-7000-8000-000000000001","sequence":1}
+```
+
+Treat the event as “ask Core again,” never as a file patch. Operating-system
+events can be duplicated, reordered, coalesced, or lost. A query, explanation,
+index status, or explicit refresh is the authoritative observation.
+
+## Refresh disposable acceleration
+
+`refresh` runs the same explicit private-index rebuild as
+`folderbase index rebuild ROOT --json`:
+
+```json
+{"format":"folderbase-daemon-request-v1","request_id":"refresh-1","operation":"refresh"}
+```
+
+Missing, stale, corrupt, or deleted index bytes never make query truth
+unavailable. Core falls back to its bounded authoritative observation. The
+daemon ignores watcher events produced only by its own private index namespace.
+
+## Stop and restart
+
+Send `shutdown` for an acknowledged clean exit, close stdin, or terminate the
+child process. The daemon owns no portable or authoritative state, so restart
+requires no recovery file. A new session gets a new epoch, re-attests the root,
+and immediately sees edits made while it was down.
+
+Use the [daemon stdio reference](/docs/reference/daemon-stdio) for the complete
+operations, bounds, failures, and public conformance suite.

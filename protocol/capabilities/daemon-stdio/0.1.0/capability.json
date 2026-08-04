@@ -1,0 +1,6 @@
+{
+  "name": "folderbase.daemon-stdio",
+  "version": "0.1.0",
+  "stability": "experimental",
+  "conformance_runner": "protocol/conformance/capabilities/daemon-stdio-0.1/run.mjs"
+}

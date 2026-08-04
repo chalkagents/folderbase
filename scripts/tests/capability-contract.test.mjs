@@ -21,6 +21,10 @@ const changeSetCapabilityUrl = new URL(
   "../../protocol/capabilities/change-set/0.1.0/capability.json",
   import.meta.url,
 );
+const daemonCapabilityUrl = new URL(
+  "../../protocol/capabilities/daemon-stdio/0.1.0/capability.json",
+  import.meta.url,
+);
 const queryCapabilityUrl = new URL(
   "../../protocol/capabilities/query-index/0.1.0/capability.json",
   import.meta.url,
@@ -76,10 +80,11 @@ test("optional capabilities do not expand Compatibility Contract v1's minimum", 
 });
 
 test("the public capability registry is exact, deterministic, and embedded unchanged", async () => {
-  const [registry, embeddedRegistry, changeSetCapability, queryCapability, templateCapability, schema] = await Promise.all([
+  const [registry, embeddedRegistry, changeSetCapability, daemonCapability, queryCapability, templateCapability, schema] = await Promise.all([
     load(registryUrl),
     load(embeddedRegistryUrl),
     load(changeSetCapabilityUrl),
+    load(daemonCapabilityUrl),
     load(queryCapabilityUrl),
     load(templateCapabilityUrl),
     load(registrySchemaUrl),
@@ -106,6 +111,11 @@ test("the public capability registry is exact, deterministic, and embedded uncha
       stability: "stable",
     },
     {
+      name: "folderbase.daemon-stdio",
+      version: "0.1.0",
+      stability: "experimental",
+    },
+    {
       name: "folderbase.query-index",
       version: "0.1.0",
       stability: "experimental",
@@ -128,6 +138,10 @@ test("the public capability registry is exact, deterministic, and embedded uncha
   assert.deepEqual(
     registry.capabilities.find(({ name }) => name === "folderbase.change-set"),
     changeSetCapability,
+  );
+  assert.deepEqual(
+    registry.capabilities.find(({ name }) => name === "folderbase.daemon-stdio"),
+    daemonCapability,
   );
   assert.deepEqual(
     registry.capabilities.find(({ name }) => name === "folderbase.query-index"),
