@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     FolderbaseError, FolderbaseRootAttestation,
+    change_set::{DeltaState, ObjectDelta},
     folderbase_capture::{
         CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureLinkCommitment,
         CaptureLocalHead, CaptureMetadataFingerprint, CapturePlan, CapturePlanEntry,
@@ -884,6 +885,495 @@ impl FolderbaseVersionStore {
             created: true,
         })
     }
+}
+
+impl FolderbaseVersionStore {
+    /// Replace an intermediate capture Head with the real proposal/merge
+    /// history proved by one scoped Change Set.
+    ///
+    /// The intermediate capture installs all verified Object Version records.
+    /// This method then constructs a proposal from the trusted projection base
+    /// and, when concurrent disjoint work existed, a two-parent merge whose
+    /// content is the already-verified final capture.
+    pub(crate) fn finalize_change_set_history(
+        &self,
+        base_version_id: &str,
+        final_capture_version_id: &str,
+        created_at: &str,
+        change_set_sha256: &str,
+        deltas: &[ObjectDelta],
+    ) -> Result<SealedCapture, FolderbaseCaptureError> {
+        let local = LocalVersionStore::open_read_only(&self.root_attestation.root)?;
+        let state = FolderbaseState::open_existing(&self.root_attestation.root)?;
+        let _lock = local.acquire_transaction_lock_in(&state)?;
+        ensure_no_active_capture(&state)?;
+        ensure_no_active_restore(&state)?;
+
+        // Assessment already verified the base and seal_capture already
+        // verified the final capture, including every referenced byte. Under
+        // the same append-only store and transaction lease, history assembly
+        // needs only re-decode those immutable envelopes; rehashing a 10 GiB
+        // unchanged movie once per derived parent would add no authority.
+        let base = read_folderbase_version_envelope(&state, base_version_id)?;
+        let final_capture = read_folderbase_version_envelope(&state, final_capture_version_id)?;
+        let live_head =
+            read_head_record(&state)?.ok_or(FolderbaseCaptureError::MissingLocalHead)?;
+
+        let current_version_id = deterministic_change_set_version_id(change_set_sha256, "current");
+        let proposal_version_id =
+            deterministic_change_set_version_id(change_set_sha256, "proposal");
+        let merge_version_id = deterministic_change_set_version_id(change_set_sha256, "merge");
+        if [proposal_version_id.as_str(), merge_version_id.as_str()]
+            .contains(&live_head.version_id.as_str())
+        {
+            let installed = read_folderbase_version_envelope(&state, &live_head.version_id)?;
+            let installed_sha256 = installed.canonical_digest()?;
+            if installed_sha256 != live_head.version_sha256 {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                    "installed Change Set history differs from Local Head".to_owned(),
+                ));
+            }
+            return Ok(SealedCapture {
+                version_id: live_head.version_id,
+                version_sha256: installed_sha256,
+                created: false,
+            });
+        }
+        if live_head.version_id != final_capture.version_id()
+            || live_head.version_sha256 != final_capture.canonical_digest()?
+        {
+            return Err(FolderbaseCaptureError::LocalHeadChanged);
+        }
+
+        let current = build_change_set_current(
+            &base,
+            &final_capture,
+            &current_version_id,
+            final_capture.created_at(),
+            deltas,
+        )?;
+        if let Some(current) = &current {
+            let current_sha256 = current.canonical_digest()?;
+            install_folderbase_version(&state, current, &current_sha256)?;
+            let installed = read_folderbase_version_envelope(&state, current.version_id())?;
+            if installed.canonical_digest()? != current_sha256 {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                    "installed pre-apply Change Set Version changed".to_owned(),
+                ));
+            }
+        }
+
+        install_change_set_object_versions(&local, &state, &final_capture, created_at, deltas)?;
+
+        let proposal = build_change_set_proposal(
+            &base,
+            &final_capture,
+            &proposal_version_id,
+            created_at,
+            deltas,
+        )?;
+        let proposal_sha256 = proposal.canonical_digest()?;
+        install_folderbase_version(&state, &proposal, &proposal_sha256)?;
+        let installed = read_folderbase_version_envelope(&state, proposal.version_id())?;
+        if installed.canonical_digest()? != proposal_sha256 {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "installed Change Set proposal Version changed".to_owned(),
+            ));
+        }
+
+        let target = match current.as_ref() {
+            None => proposal,
+            Some(current) => build_change_set_merge(
+                current,
+                &proposal,
+                &final_capture,
+                &merge_version_id,
+                final_capture.created_at(),
+                deltas,
+            )?,
+        };
+        let target_sha256 = target.canonical_digest()?;
+        install_folderbase_version(&state, &target, &target_sha256)?;
+        let installed = read_folderbase_version_envelope(&state, target.version_id())?;
+        if installed.canonical_digest()? != target_sha256 {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "installed Change Set merge Version changed".to_owned(),
+            ));
+        }
+
+        let target_head = LocalHeadRecord {
+            format: "folderbase-local-head-v2".to_owned(),
+            folderbase_id: self.root_attestation.folderbase_id.clone(),
+            root_instance_sha256: self.root_attestation.root_instance_sha256.clone(),
+            version_id: target.version_id().to_owned(),
+            version_sha256: target_sha256.clone(),
+            authority: LocalHeadAuthority::VersionDerivedV1 {
+                sha256: version_derived_local_head_sha256(
+                    &self.root_attestation.folderbase_id,
+                    &self.root_attestation.root_instance_sha256,
+                    target.version_id(),
+                    &target_sha256,
+                )?,
+            },
+        };
+        state.replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&target_head)?)?;
+        if read_head_record(&state)?.as_ref() != Some(&target_head) {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "Change Set history Head replacement did not verify".to_owned(),
+            ));
+        }
+        Ok(SealedCapture {
+            version_id: target.version_id().to_owned(),
+            version_sha256: target_sha256,
+            created: true,
+        })
+    }
+}
+
+fn install_change_set_object_versions(
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    final_capture: &FolderbaseVersion,
+    created_at: &str,
+    deltas: &[ObjectDelta],
+) -> Result<(), FolderbaseCaptureError> {
+    for delta in deltas {
+        let Some(after) = &delta.after else {
+            continue;
+        };
+        let (desired_version_id, content) = match after {
+            DeltaState::Directory(_) => continue,
+            DeltaState::RegularFile(value) => (
+                value.object_version_id.as_str(),
+                ContentDigest {
+                    algorithm: "sha256".to_owned(),
+                    digest: value.content_sha256.clone(),
+                    bytes: value.bytes,
+                },
+            ),
+            DeltaState::Symlink(value) => (
+                value.object_version_id.as_str(),
+                content_digest(value.target.as_bytes()),
+            ),
+        };
+        let final_binding = final_capture.lookup_binding(after.path()).ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "final capture omitted Change Set path {}",
+                after.path()
+            ))
+        })?;
+        if final_binding.object_id() != delta.object_id {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "final capture changed Change Set Object identity at {}",
+                after.path()
+            )));
+        }
+        if final_binding.object_version_id() == Some(desired_version_id) {
+            continue;
+        }
+        let object_id = ObjectId::parse(delta.object_id.clone())?;
+        let version_id = VersionId::parse(desired_version_id.to_owned())?;
+        let record = LocalVersionRecord {
+            id: version_id.clone(),
+            object_id: object_id.clone(),
+            content: content.clone(),
+            captured_at: created_at.to_owned(),
+            extensions: BTreeMap::new(),
+        };
+        local.install_or_verify_version_record_in(state, &record)?;
+        let mut projection = local
+            .read_capture_object_projection_in(state, &object_id)?
+            .ok_or_else(|| {
+                FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                    "final capture omitted Object projection {}",
+                    delta.object_id
+                ))
+            })?;
+        if !projection.versions.contains(&version_id) {
+            projection.versions.push(version_id.clone());
+        }
+        projection.current_version = version_id.clone();
+        projection.path = after.path().to_owned();
+        local.write_capture_object_projection_in(state, &projection)?;
+        local.verify_capture_object_version_in(state, &object_id, &version_id, &content)?;
+    }
+    Ok(())
+}
+
+fn read_folderbase_version_envelope(
+    state: &FolderbaseState,
+    version_id: &str,
+) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
+    validate_capture_version_id(version_id)?;
+    let relative = folderbase_version_relative_path(version_id);
+    let encoded = state
+        .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)?
+        .ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "Folderbase Version envelope is missing: {version_id}"
+            ))
+        })?;
+    let version = FolderbaseVersion::decode_bounded(encoded.as_slice())?;
+    if version.version_id() != version_id {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "Folderbase Version envelope ID differs from its append-only path".to_owned(),
+        ));
+    }
+    Ok(version)
+}
+
+fn build_change_set_current(
+    base: &FolderbaseVersion,
+    final_capture: &FolderbaseVersion,
+    version_id: &str,
+    created_at: &str,
+    deltas: &[ObjectDelta],
+) -> Result<Option<FolderbaseVersion>, FolderbaseCaptureError> {
+    let mut bindings = final_capture
+        .bindings()
+        .iter()
+        .cloned()
+        .map(|binding| (binding.object_id().to_owned(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let base_bindings = base
+        .bindings()
+        .iter()
+        .map(|binding| (binding.object_id(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let mut tombstones = final_capture
+        .tombstones()
+        .iter()
+        .cloned()
+        .map(|tombstone| (tombstone.path().to_owned(), tombstone))
+        .collect::<BTreeMap<_, _>>();
+    for delta in deltas {
+        if delta.after.is_some() && bindings.remove(&delta.object_id).is_none() {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "final capture omitted Change Set Object {}",
+                delta.object_id
+            )));
+        }
+        if let Some(before) = &delta.before {
+            let binding = base_bindings.get(delta.object_id.as_str()).ok_or_else(|| {
+                FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                    "projection base omitted Change Set Object {}",
+                    delta.object_id
+                ))
+            })?;
+            bindings.insert(delta.object_id.clone(), (*binding).clone());
+            tombstones.remove(before.path());
+        }
+    }
+    let mut bindings = bindings.into_values().collect::<Vec<_>>();
+    bindings.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
+    let tombstones = tombstones.into_values().collect::<Vec<_>>();
+    if bindings == base.bindings()
+        && tombstones == base.tombstones()
+        && final_capture.exclusions() == base.exclusions()
+        && final_capture.root_manifest() == base.root_manifest()
+    {
+        return Ok(None);
+    }
+    let entries = FolderbaseVersionEntries::from_verified_producer(
+        bindings,
+        tombstones,
+        final_capture.exclusions().to_vec(),
+    );
+    Ok(Some(FolderbaseVersion::from_verified_parts(
+        FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+            final_capture.protocol_version(),
+            final_capture.folderbase_id(),
+            version_id.to_owned(),
+            vec![base.version_id().to_owned()],
+            created_at,
+            final_capture.root_manifest().clone(),
+            entries,
+        ),
+    )?))
+}
+
+fn build_change_set_proposal(
+    base: &FolderbaseVersion,
+    final_capture: &FolderbaseVersion,
+    version_id: &str,
+    created_at: &str,
+    deltas: &[ObjectDelta],
+) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
+    let mut bindings = base
+        .bindings()
+        .iter()
+        .cloned()
+        .map(|binding| (binding.object_id().to_owned(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let mut tombstones = base
+        .tombstones()
+        .iter()
+        .cloned()
+        .map(|tombstone| (tombstone.path().to_owned(), tombstone))
+        .collect::<BTreeMap<_, _>>();
+    for delta in deltas {
+        if delta.before.is_some() && bindings.remove(&delta.object_id).is_none() {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "Change Set proposal base omitted Object {}",
+                delta.object_id
+            )));
+        }
+        match &delta.after {
+            Some(after) => {
+                let final_binding =
+                    final_capture.lookup_binding(after.path()).ok_or_else(|| {
+                        FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                            "final capture omitted Change Set path {}",
+                            after.path()
+                        ))
+                    })?;
+                if final_binding.object_id() != delta.object_id {
+                    return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                        "final capture changed Change Set Object identity at {}",
+                        after.path()
+                    )));
+                }
+                tombstones.retain(|_, tombstone| tombstone.object_id() != delta.object_id);
+                let binding = match after {
+                    DeltaState::Directory(value) => PathBinding::directory_from_verified_producer(
+                        value.path.clone(),
+                        delta.object_id.clone(),
+                    ),
+                    DeltaState::RegularFile(value) => {
+                        PathBinding::regular_file_from_verified_producer(
+                            value.path.clone(),
+                            delta.object_id.clone(),
+                            value.object_version_id.clone(),
+                            value.content_sha256.clone(),
+                            value.bytes,
+                            value.executable,
+                        )
+                    }
+                    DeltaState::Symlink(value) => PathBinding::symlink_from_verified_producer(
+                        value.path.clone(),
+                        delta.object_id.clone(),
+                        value.object_version_id.clone(),
+                        value.target.clone(),
+                    ),
+                };
+                bindings.insert(delta.object_id.clone(), binding);
+            }
+            None => {
+                let before = delta.before.as_ref().expect("validated delete delta");
+                let (deleted_kind, last_object_version_id) = match before {
+                    DeltaState::Directory(_) => (DeletedKind::Directory, None),
+                    DeltaState::RegularFile(value) => (
+                        DeletedKind::RegularFile,
+                        Some(value.object_version_id.clone()),
+                    ),
+                    DeltaState::Symlink(value) => {
+                        (DeletedKind::Symlink, Some(value.object_version_id.clone()))
+                    }
+                };
+                tombstones.insert(
+                    before.path().to_owned(),
+                    Tombstone::from_verified_producer(
+                        before.path(),
+                        delta.object_id.clone(),
+                        deleted_kind,
+                        last_object_version_id,
+                    ),
+                );
+            }
+        }
+    }
+    let mut bindings = bindings.into_values().collect::<Vec<_>>();
+    bindings.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
+    let entries = FolderbaseVersionEntries::from_verified_producer(
+        bindings,
+        tombstones.into_values().collect(),
+        base.exclusions().to_vec(),
+    );
+    Ok(FolderbaseVersion::from_verified_parts(
+        FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+            base.protocol_version(),
+            base.folderbase_id(),
+            version_id.to_owned(),
+            vec![base.version_id().to_owned()],
+            created_at,
+            base.root_manifest().clone(),
+            entries,
+        ),
+    )?)
+}
+
+fn build_change_set_merge(
+    current: &FolderbaseVersion,
+    proposal: &FolderbaseVersion,
+    final_capture: &FolderbaseVersion,
+    version_id: &str,
+    created_at: &str,
+    deltas: &[ObjectDelta],
+) -> Result<FolderbaseVersion, FolderbaseCaptureError> {
+    let mut bindings = final_capture
+        .bindings()
+        .iter()
+        .cloned()
+        .map(|binding| (binding.object_id().to_owned(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let proposal_bindings = proposal
+        .bindings()
+        .iter()
+        .map(|binding| (binding.object_id(), binding))
+        .collect::<BTreeMap<_, _>>();
+    for delta in deltas {
+        match &delta.after {
+            Some(_) => {
+                let binding = proposal_bindings
+                    .get(delta.object_id.as_str())
+                    .ok_or_else(|| {
+                        FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                            "proposal omitted Change Set Object {}",
+                            delta.object_id
+                        ))
+                    })?;
+                bindings.insert(delta.object_id.clone(), (*binding).clone());
+            }
+            None => {
+                bindings.remove(&delta.object_id);
+            }
+        }
+    }
+    let mut bindings = bindings.into_values().collect::<Vec<_>>();
+    bindings.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
+    let entries = FolderbaseVersionEntries::from_verified_producer(
+        bindings,
+        final_capture.tombstones().to_vec(),
+        final_capture.exclusions().to_vec(),
+    );
+    Ok(FolderbaseVersion::from_verified_parts(
+        FolderbaseVersionParts::portable_v1_for_protocol_from_verified_producer(
+            final_capture.protocol_version(),
+            final_capture.folderbase_id(),
+            version_id.to_owned(),
+            vec![
+                current.version_id().to_owned(),
+                proposal.version_id().to_owned(),
+            ],
+            created_at,
+            final_capture.root_manifest().clone(),
+            entries,
+        ),
+    )?)
+}
+
+fn deterministic_change_set_version_id(change_set_sha256: &str, role: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"folderbase-change-set-history-v1\0");
+    hasher.update(change_set_sha256.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(role.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!("fbversion_{}", Uuid::from_bytes(bytes))
 }
 
 fn build_restore_transaction(
@@ -2575,18 +3065,11 @@ fn assign_capture_transaction(
     plan_sha256: &str,
     prior: Option<&FolderbaseVersion>,
 ) -> Result<CaptureTransaction, FolderbaseCaptureError> {
-    let prior_bindings = prior
-        .map(|version| {
-            version
-                .bindings()
-                .iter()
-                .map(|binding| (binding.path(), binding))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let identity_state = FolderbaseState::open_existing_read_only(plan.root())?;
     let mut assignments = Vec::with_capacity(plan.entries().len());
     for entry in plan.entries() {
-        let prior_binding = prior_bindings.get(entry.path()).copied();
+        let prior_binding =
+            prior_binding_for_capture_entry(prior, &identity_state, plan.root(), entry)?;
         let reused_object =
             prior_binding.is_some_and(|binding| binding.kind() == path_binding_kind(entry.kind()));
         let object_id = prior_binding
@@ -2646,6 +3129,15 @@ fn ensure_prior_bindings_observable(
         if live_paths.contains(binding.path()) {
             continue;
         }
+        let state = FolderbaseState::open_existing_read_only(plan.root())?;
+        let moved_with_stable_identity = plan.entries().iter().any(|entry| {
+            entry.kind() == capture_entry_kind(binding.kind())
+                && identity_allows_reuse(&state, plan.root(), binding.object_id(), entry)
+                    .unwrap_or(false)
+        });
+        if moved_with_stable_identity {
+            continue;
+        }
         let hidden_by_ignore = plan
             .ignored_paths()
             .iter()
@@ -2678,10 +3170,6 @@ fn project_target_tombstones(
     let Some(prior) = prior else {
         return Vec::new();
     };
-    let assignments = assignments
-        .iter()
-        .map(|assignment| (assignment.path.as_str(), assignment))
-        .collect::<BTreeMap<_, _>>();
     let mut by_path = prior
         .tombstones()
         .iter()
@@ -2689,7 +3177,7 @@ fn project_target_tombstones(
         .map(|tombstone| (tombstone.path().to_owned(), tombstone))
         .collect::<BTreeMap<_, _>>();
     for binding in prior.bindings() {
-        let continued = assignments.get(binding.path()).is_some_and(|assignment| {
+        let continued = assignments.iter().any(|assignment| {
             assignment.reused_object && assignment.object_id == binding.object_id()
         });
         if continued {
@@ -2722,6 +3210,45 @@ fn path_binding_kind(kind: CaptureEntryKind) -> PathBindingKind {
         CaptureEntryKind::RegularFile => PathBindingKind::RegularFile,
         CaptureEntryKind::Symlink => PathBindingKind::Symlink,
     }
+}
+
+fn capture_entry_kind(kind: PathBindingKind) -> CaptureEntryKind {
+    match kind {
+        PathBindingKind::Directory => CaptureEntryKind::Directory,
+        PathBindingKind::RegularFile => CaptureEntryKind::RegularFile,
+        PathBindingKind::Symlink => CaptureEntryKind::Symlink,
+    }
+}
+
+fn prior_binding_for_capture_entry<'a>(
+    prior: Option<&'a FolderbaseVersion>,
+    state: &FolderbaseState,
+    root: &Path,
+    entry: &CapturePlanEntry,
+) -> Result<Option<&'a PathBinding>, FolderbaseCaptureError> {
+    let Some(prior) = prior else {
+        return Ok(None);
+    };
+    if let Some(binding) = prior.lookup_binding(entry.path())
+        && binding.kind() == path_binding_kind(entry.kind())
+    {
+        return Ok(Some(binding));
+    }
+    let mut matched = None;
+    for binding in prior.bindings() {
+        if binding.kind() != path_binding_kind(entry.kind())
+            || !identity_allows_reuse(state, root, binding.object_id(), entry)?
+        {
+            continue;
+        }
+        if matched.is_some() {
+            return Err(FolderbaseCaptureError::InvalidPriorLocalHead(
+                "more than one prior Object identity matches a moved entry".to_owned(),
+            ));
+        }
+        matched = Some(binding);
+    }
+    Ok(matched)
 }
 
 fn identity_allows_reuse(
@@ -3028,15 +3555,6 @@ fn build_and_install_capture(
     prior: Option<&FolderbaseVersion>,
     checkpoint: &mut impl FnMut(&CaptureCheckpoint),
 ) -> Result<BuiltCapture, FolderbaseCaptureError> {
-    let prior_bindings = prior
-        .map(|version| {
-            version
-                .bindings()
-                .iter()
-                .map(|binding| (binding.path(), binding))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
     let root_content = capture_root_manifest(store, plan, local, state, || {
         checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
             ".folderbase/manifest.json".to_owned(),
@@ -3097,7 +3615,12 @@ fn build_and_install_capture(
                     Some(local),
                     checkpoint,
                 )?;
-                let prior_binding = prior_bindings.get(entry.path()).copied();
+                let prior_binding = prior.and_then(|version| {
+                    version
+                        .bindings()
+                        .iter()
+                        .find(|binding| binding.object_id() == assignment.object_id)
+                });
                 let object_version_id = if prior_binding.is_some_and(|binding| {
                     binding.object_id() == assignment.object_id
                         && binding.content_sha256() == Some(content.digest.as_str())
@@ -3156,7 +3679,12 @@ fn build_and_install_capture(
                 verify_symlink_entry(&store.root_attestation.root, entry)?;
                 let target = entry.symlink_target().expect("planned symlink");
                 let content = local.install_content_bytes_in(state, target.as_bytes())?;
-                let prior_binding = prior_bindings.get(entry.path()).copied();
+                let prior_binding = prior.and_then(|version| {
+                    version
+                        .bindings()
+                        .iter()
+                        .find(|binding| binding.object_id() == assignment.object_id)
+                });
                 let object_version_id = if prior_binding.is_some_and(|binding| {
                     binding.object_id() == assignment.object_id
                         && binding.symlink_target() == Some(target)
@@ -3817,7 +4345,14 @@ fn validate_transaction_against_plan(
                 "journal assignment does not exactly match the approved CapturePlan".to_owned(),
             ));
         }
-        let prior_binding = prior_bindings.get(entry.path()).copied();
+        let prior_binding = prior
+            .and_then(|version| {
+                version
+                    .bindings()
+                    .iter()
+                    .find(|binding| binding.object_id() == assignment.object_id)
+            })
+            .or_else(|| prior_bindings.get(entry.path()).copied());
         match prior_binding {
             Some(binding)
                 if assignment.reused_object

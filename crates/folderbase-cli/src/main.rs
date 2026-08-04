@@ -29,6 +29,7 @@ use folderbase_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod change_set_capability;
 mod query_capability;
 
 const EXIT_SUCCESS: u8 = 0;
@@ -215,6 +216,50 @@ enum Command {
     Protocol {
         #[command(subcommand)]
         command: ProtocolCommand,
+    },
+
+    /// Materialize scoped ordinary-folder checkouts and publish immutable Change Sets.
+    ChangeSet {
+        #[command(subcommand)]
+        command: ChangeSetCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ChangeSetCommand {
+    /// Materialize one least-authority ordinary-folder projection.
+    Checkout {
+        root: PathBuf,
+        destination: PathBuf,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Propose one immutable Change Set and provider-neutral staging tree.
+    Propose {
+        checkout: PathBuf,
+        staging: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Assess one immutable Change Set without mutating source state.
+    Assess {
+        root: PathBuf,
+        staging: PathBuf,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Atomically publish one clean immutable Change Set.
+    Apply {
+        root: PathBuf,
+        staging: PathBuf,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long, required = true)]
+        json: bool,
     },
 }
 
@@ -541,6 +586,16 @@ fn main() -> ExitCode {
         Err(error) if error.exit_code() != 0 && argv_selects_template_capability() => {
             return write_template_invocation_error(error.to_string());
         }
+        Err(error) if error.exit_code() != 0 && argv_selects_change_set_capability() => {
+            let transport = change_set_capability::invalid_invocation(error.to_string());
+            return match write_change_set_transport(transport) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    write_stderr_best_effort(format_args!("error: {error}"));
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             return match error.print() {
@@ -618,6 +673,16 @@ fn argv_selects_template_capability() -> bool {
             .and_then(|argument| argument.into_string().ok())
             .as_deref(),
         Some("template")
+    )
+}
+
+fn argv_selects_change_set_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("change-set")
     )
 }
 
@@ -1232,7 +1297,48 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 json,
             } => run_protocol_check(artifact, json),
         },
+        Command::ChangeSet { command } => {
+            let operation = match command {
+                ChangeSetCommand::Checkout {
+                    root,
+                    destination,
+                    stdin: _,
+                    json: _,
+                } => change_set_capability::ChangeSetOperation::Checkout { root, destination },
+                ChangeSetCommand::Propose {
+                    checkout,
+                    staging,
+                    json: _,
+                } => change_set_capability::ChangeSetOperation::Propose { checkout, staging },
+                ChangeSetCommand::Assess {
+                    root,
+                    staging,
+                    stdin: _,
+                    json: _,
+                } => change_set_capability::ChangeSetOperation::Assess { root, staging },
+                ChangeSetCommand::Apply {
+                    root,
+                    staging,
+                    stdin: _,
+                    json: _,
+                } => change_set_capability::ChangeSetOperation::Apply { root, staging },
+            };
+            write_change_set_transport(change_set_capability::execute(
+                operation,
+                std::io::stdin().lock(),
+            ))
+        }
     }
+}
+
+fn write_change_set_transport(
+    transport: change_set_capability::ChangeSetTransport,
+) -> Result<u8, CliError> {
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    write_transport_stream(&mut stdout.lock(), &transport.stdout, "stdout")?;
+    write_transport_stream(&mut stderr.lock(), &transport.stderr, "stderr")?;
+    Ok(transport.exit_code)
 }
 
 fn write_query_transport(transport: query_capability::QueryTransport) -> Result<u8, CliError> {
@@ -1536,6 +1642,7 @@ fn command_emits_json_errors(command: &Command) -> bool {
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } | ProtocolCommand::Check { json, .. } => *json,
         },
+        Command::ChangeSet { .. } => false,
     }
 }
 
