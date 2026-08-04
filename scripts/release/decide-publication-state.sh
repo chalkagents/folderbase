@@ -2,12 +2,21 @@
 set -euo pipefail
 
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
-: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${NPM_DIST_TAG:?NPM_DIST_TAG is required}"
 
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/../.." && pwd)"
-cd "$repository_root/packages/npm-cli"
+package_directory="${NPM_PACKAGE_DIRECTORY:-packages/npm-cli}"
+track_github_latest="${TRACK_GITHUB_LATEST:-true}"
+case "$package_directory" in
+  packages/npm-cli|packages/sdk) ;;
+  *) printf 'Unsupported npm package directory: %s\n' "$package_directory" >&2; exit 1 ;;
+esac
+case "$track_github_latest" in
+  true|false) ;;
+  *) printf 'TRACK_GITHUB_LATEST must be true or false.\n' >&2; exit 1 ;;
+esac
+cd "$repository_root/$package_directory"
 
 package_name="$(node -p "require('./package.json').name")"
 package_version="$(node -p "require('./package.json').version")"
@@ -23,17 +32,20 @@ github_error="$(mktemp)"
 trap 'rm -f "$view_error" "$github_error"' EXIT
 
 github_latest_version=""
-if github_latest_tag="$(
-  gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>"$github_error"
-)"; then
-  if [[ "$github_latest_tag" != v* ]]; then
-    echo "GitHub Latest tag is not canonical: $github_latest_tag" >&2
+if [[ "$track_github_latest" == true ]]; then
+  : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required when tracking GitHub Latest}"
+  if github_latest_tag="$(
+    gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>"$github_error"
+  )"; then
+    if [[ "$github_latest_tag" != v* ]]; then
+      echo "GitHub Latest tag is not canonical: $github_latest_tag" >&2
+      exit 1
+    fi
+    github_latest_version="${github_latest_tag#v}"
+  elif ! grep -Eq 'HTTP 404|Not Found' "$github_error"; then
+    cat "$github_error" >&2
     exit 1
   fi
-  github_latest_version="${github_latest_tag#v}"
-elif ! grep -Eq 'HTTP 404|Not Found' "$github_error"; then
-  cat "$github_error" >&2
-  exit 1
 fi
 
 if published_metadata="$(

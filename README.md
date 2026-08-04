@@ -13,6 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-d7ff3f" alt="Apache-2.0 license"></a>
   <a href="https://github.com/chalkagents/folderbase/releases/latest"><img src="https://img.shields.io/github/v/release/chalkagents/folderbase?color=d7ff3f" alt="Latest GitHub release"></a>
   <a href="https://www.npmjs.com/package/@folderbase/cli"><img src="https://img.shields.io/npm/v/@folderbase/cli?color=d7ff3f&amp;label=npm" alt="npm package version"></a>
+  <a href="https://www.npmjs.com/package/@folderbase/sdk"><img src="https://img.shields.io/npm/v/@folderbase/sdk?color=d7ff3f&amp;label=sdk" alt="TypeScript SDK version"></a>
   <a href="https://crates.io/crates/folderbase-cli"><img src="https://img.shields.io/crates/v/folderbase-cli?color=d7ff3f" alt="crates.io package version"></a>
   <img src="https://img.shields.io/badge/rust-1.96%2B-17120e?logo=rust&amp;logoColor=f5efe4" alt="Rust 1.96 or newer">
   <a href="https://github.com/chalkagents/folderbase/actions/workflows/ci.yml"><img src="https://github.com/chalkagents/folderbase/actions/workflows/ci.yml/badge.svg" alt="Continuous integration status"></a>
@@ -66,7 +67,7 @@ Install the same native CLI persistently with Homebrew or Cargo:
 ```sh
 brew install chalkagents/tap/folderbase
 # or, with Rust 1.96+
-cargo install folderbase-cli --version 0.5.0 --locked
+cargo install folderbase-cli --version 0.6.0 --locked
 ```
 
 Prebuilt macOS and Linux binaries and their closed `SHA256SUMS` record are
@@ -85,6 +86,23 @@ folderbase inspect . --json
 folderbase workspace list . --json
 folderbase validate . --json
 ```
+
+Node.js and TypeScript consumers can use the same executable seam without
+reimplementing Core process supervision:
+
+```sh
+npm install @folderbase/sdk @folderbase/cli
+```
+
+```js
+import { FolderbaseClient } from "@folderbase/sdk";
+
+const folderbase = new FolderbaseClient();
+const contract = await folderbase.contract();
+```
+
+The SDK is removable, has no runtime dependencies, bundles no native binary,
+and never interprets engine-owned `.folderbase/` records.
 
 Compatibility Contract v1 freezes portable record meanings, Version IDs,
 manifest behavior, explicit upgrade behavior, CLI JSON envelopes and exit
@@ -127,6 +145,9 @@ node protocol/conformance/capabilities/run.mjs \
   Folderbase Version validation/digests/controlled encoding, read-only
   metadata capture planning, and sync primitives
 - `folderbase`: reference command-line interface
+- `@folderbase/sdk`: typed Node.js process adapter for CLI JSON and daemon stdio
+- metadata-first query/index, additive template expansion, scoped Change Sets,
+  and root-pinned daemon capability profiles
 - versioned JSON Schemas and conformance fixtures
 - built-in person, organization, customer, engagement, project, temporary, and
   custom templates
