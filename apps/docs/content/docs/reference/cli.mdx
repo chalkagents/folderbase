@@ -28,6 +28,7 @@ folderbase protocol contract --json
 | `query` | Experimental optional capability | Run or explain a bounded metadata query. Requires `folderbase.query-index@0.1.0`. |
 | `index` | Experimental optional capability | Inspect or explicitly rebuild the disposable private query index. Requires `folderbase.query-index@0.1.0`. |
 | `template` | Stable optional capability | Preview or apply one exact additive Template 0.2 package. Requires `folderbase.template-expansion@0.1.0`. |
+| `change-set` | Stable optional capability | Materialize scoped ordinary folders, propose immutable work, assess conflicts, and apply or replay it. Requires `folderbase.change-set@0.1.0`. |
 | `migrate` | Experimental JSON | Analyze and stage reviewed restructuring. |
 | `transform` | Experimental JSON | Run the durable multi-process transform workflow. |
 | `version` | Experimental JSON | Capture, inspect, and restore immutable local file versions. |
@@ -41,3 +42,5 @@ Query and index commands use their own closed wire contract; see the
 [query/index reference](/docs/reference/query-index).
 Template plan/apply uses a separate stable optional contract; see the
 [template expansion reference](/docs/reference/template-expansion).
+Scoped checkout and apply use another stable optional contract; see the
+[Change Set reference](/docs/reference/change-sets).

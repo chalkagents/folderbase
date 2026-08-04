@@ -1,0 +1,18 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "move-and-edit",
+  "covers": ["move", "edit", "one-before-after-delta", "crash-mid-in-place-write"],
+  "checkout_changes": [
+    { "operation": "rename", "from": "shared/notes.md", "to": "shared/final.md" },
+    { "operation": "write_utf8", "path": "shared/final.md", "content": "moved and edited\n" }
+  ],
+  "concurrent_source_changes": [],
+  "crash_sequence": ["in-place-write"],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "absent", "path": "shared/notes.md" },
+      { "kind": "utf8", "path": "shared/final.md", "content": "moved and edited\n" }
+    ]
+  }
+}

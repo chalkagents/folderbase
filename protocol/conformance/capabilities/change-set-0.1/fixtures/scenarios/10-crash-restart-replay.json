@@ -1,0 +1,16 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "crash-restart-replay",
+  "covers": ["crash-after-prepare", "crash-mid-publication", "crash-after-history-head", "restart-recovery", "idempotent-replay"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/notes.md", "content": "survives restart\n" }
+  ],
+  "concurrent_source_changes": [],
+  "crash_sequence": ["prepared-journal", "first-mutation", "history-head"],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "utf8", "path": "shared/notes.md", "content": "survives restart\n" }
+    ]
+  }
+}

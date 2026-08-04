@@ -37,6 +37,11 @@ fn protocol_contract_discovers_the_stable_machine_interface() {
         descriptor["capabilities"],
         serde_json::json!([
             {
+                "name": "folderbase.change-set",
+                "version": "0.1.0",
+                "stability": "stable"
+            },
+            {
                 "name": "folderbase.query-index",
                 "version": "0.1.0",
                 "stability": "experimental"

@@ -12,7 +12,8 @@ independent of the Folderbase application and hosted services.
 - `schemas/0.1/workspace.schema.json` validates
   `.folderbase-workspace.json`.
 - `schemas/0.1/migration.schema.json` validates migration `plan.json` files.
-- `schemas/0.1/change-set.schema.json` validates proposed checkout change sets.
+- `schemas/0.1/change-set.schema.json` is the unchanged legacy Change Set
+  prototype; it is not the optional Change Set capability.
 - `schemas/0.2/folderbase.schema.json` adds optional, non-locking template
   provenance while preserving unknown manifest fields.
 - `schemas/0.2/template.schema.json` validates transparent Template Protocol
@@ -29,6 +30,8 @@ independent of the Folderbase application and hosted services.
   manifest, including the closed embedded capture-ignore policy.
 - `schemas/0.5/folderbase-version.schema.json` validates the protocol 0.5
   profile of the same closed, provider-neutral Version v1 envelope.
+- `schemas/capabilities/change-set/0.1/change-set.schema.json` defines the
+  unadvertised scoped checkout and immutable Change Set 0.1 capability.
 - `conformance/` contains valid and invalid compatibility fixtures.
 - `compatibility/v1/contract.json` is the machine-readable stable Core
   compatibility inventory.
@@ -51,6 +54,9 @@ independent of the Folderbase application and hosted services.
   fixes markerless and optional-root-file Version states, strict root-manifest
   capture policy, invalid delta cases, canonical Version digests, and exact
   root-manifest byte digests.
+- `conformance/capabilities/change-set-0.1/` is the independently runnable RED
+  suite for scoped projections, opaque staged bytes, three-way assessment,
+  atomic apply, crash recovery, and replay.
 - `templates/0.2/project/template.json` is the built-in data-only
   Project package.
 - `templates/project/` is the additive starting point for a new Project
@@ -101,9 +107,10 @@ is rejected. Root `FOLDERBASE.md` is fully ordinary when present.
 force-captured as a visible binding when present.
 
 The full-state artifact is an independent restore contract, not a scoped share
-projection, authorization record, hosted-presence receipt, or chunk transfer plan.
-A separate future projection artifact must contain only the paths authorized for
-one Folder Scope.
+projection, authorization record, hosted-presence receipt, or chunk transfer
+plan. The separately versioned Change Set capability defines a projection
+artifact containing only the paths authorized for one Folder Scope; that
+artifact never reinterprets the full-state Version.
 
 The required root-file bindings are profile-specific. Protocol 0.4 requires
 `FOLDERBASE.md` and `.folderbaseignore` as live regular-file bindings. Protocol

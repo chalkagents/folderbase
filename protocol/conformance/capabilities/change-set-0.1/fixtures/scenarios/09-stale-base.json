@@ -1,0 +1,14 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "stale-base",
+  "covers": ["missing-projection-base", "retryable-attention"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/notes.md", "content": "cannot assess without base\n" }
+  ],
+  "concurrent_source_changes": [],
+  "before_assess": "replace_projection_id_with_unknown",
+  "expected": {
+    "outcome": "attention",
+    "attention_code": "change_set_stale_base"
+  }
+}

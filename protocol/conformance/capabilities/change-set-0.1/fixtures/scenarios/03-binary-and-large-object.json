@@ -1,0 +1,30 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "binary-and-large-object",
+  "covers": ["opaque-binary", "large-object", "chunk-manifest-staging"],
+  "initial": [
+    { "operation": "write_base64", "path": "shared/data.sqlite", "content_base64": "U1FMaXRlIGZvcm1hdCAzAAEC/w==" },
+    {
+      "operation": "sparse",
+      "path": "shared/movie.mov",
+      "bytes": 67108865,
+      "patches": [
+        { "offset": 0, "content_base64": "Rk9MREVSQkFTRQ==" },
+        { "offset": 67108861, "content_base64": "VEFJTA==" }
+      ]
+    }
+  ],
+  "checkout_changes": [
+    { "operation": "write_base64", "path": "shared/data.sqlite", "content_base64": "U1FMaXRlIGZvcm1hdCAzAAIDBA==" },
+    { "operation": "rename", "from": "shared/movie.mov", "to": "shared/movie-final.mov" }
+  ],
+  "concurrent_source_changes": [],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "sha256", "path": "shared/data.sqlite", "sha256": "2a5e5e5152e28ac5fd1a46bf14656c79c2682382ea66940f40455a5c22b142bb" },
+      { "kind": "absent", "path": "shared/movie.mov" },
+      { "kind": "bytes", "path": "shared/movie-final.mov", "bytes": 67108865 }
+    ]
+  }
+}

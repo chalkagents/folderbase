@@ -1,0 +1,110 @@
+---
+title: Change Set capability 0.1
+description: Stable scoped checkout, proposal, assessment, apply, replay, and conformance contracts.
+---
+
+`folderbase.change-set@0.1.0` is an advertised stable optional capability. It
+does not expand Compatibility Contract v1 or Folderbase CLI JSON v1.
+Integrations must discover it with `folderbase protocol contract --json`.
+
+## Process interface
+
+| Command | Input | Exit 0 document |
+| --- | --- | --- |
+| `folderbase change-set checkout ROOT DESTINATION --stdin --json` | `folderbase-checkout-request-v1` on stdin | `folderbase-checkout-result-v1` |
+| `folderbase change-set propose CHECKOUT STAGING --json` | closed checkout receipt and ordinary checkout tree | `folderbase-change-set-v1` |
+| `folderbase change-set assess ROOT STAGING --stdin --json` | `folderbase-change-set-v1` on stdin | `folderbase-change-set-assessment-v1` |
+| `folderbase change-set apply ROOT STAGING --stdin --json` | `folderbase-change-set-v1` on stdin | `folderbase-change-set-apply-result-v1` |
+
+Arguments are explicit paths. The process never discovers authority from its
+current working directory. Checkout destinations and propose staging
+directories must be new and absent.
+
+The canonical closed Draft 2020-12 schema is
+[`change-set.schema.json`](https://github.com/chalkagents/folderbase/blob/main/protocol/schemas/capabilities/change-set/0.1/change-set.schema.json).
+The normative architecture is [ADR-0012](https://github.com/chalkagents/folderbase/blob/main/docs/adr/0012-materialize-scoped-projections-and-merge-immutable-change-sets.md).
+
+## Authority and privacy
+
+A request names one Folderbase, projection, Folder Scope, exact scope revision,
+Can Work permission, and one or more byte-sorted authorized path prefixes. A
+single `null` prefix means the complete ordinary root. Prefixes cannot overlap,
+name `.folderbase`, collide by Unicode normalization or case folding, or cross
+a nested Folderbase boundary.
+
+The checkout receipt contains only projected entries and explicit exclusions.
+Trusted projection-to-Version authority stays under the source `.folderbase`.
+Portable results expose scoped digests, never global source or merge Version
+IDs.
+
+## Records and content
+
+One Change Set envelope contains a canonical payload digest and byte-sorted
+logical Object deltas. Each delta has a stable `object_id` and zero or one
+`before` and `after` state:
+
+- directories carry path and kind;
+- regular files carry Object Version ID, SHA-256, logical bytes, executable
+  bit, and projection-base or staged content reference; and
+- symlinks carry Object Version ID and a safe relative target.
+
+Changed regular files use canonical `folderbase-chunk-manifest-v1` manifests
+and verified content-addressed chunks. File extensions and MIME types have no
+protocol authority. Repositories, documents, databases, media, and unknown
+formats therefore receive the same byte-safe contract.
+
+The envelope is limited to 16,384 deltas and 8 MiB of encoded JSON. Projection
+records are limited to 64 MiB. Regular-file logical length is bounded by the
+Core Object limit.
+
+## Three-way behavior
+
+Assessment compares the immutable projection base, proposed states, and live
+source scope by stable Object and portable path identity. Clean disjoint work
+is mergeable. Overlap returns typed conflicts, including delete/edit,
+create/create, path alias, kind change, and namespace obstruction.
+
+Apply revalidates the same inputs. Without concurrent source work it records a
+one-parent proposal Version. With clean disjoint work it records the proposal
+and a real two-parent merge Version. Opaque content is never auto-merged.
+
+## Restart and replay
+
+Before ordinary paths change, Core durably stores all replacement bytes and a
+digest-bound active journal. Publication accepts only recognized before,
+intermediate, or after states. Recovery can finish after a crash before the
+first mutation, after a mutation, or during a moved regular-file rewrite while
+preserving logical Object identity.
+
+The canonical Change Set digest is the idempotency key. A completed replay
+returns the original scoped digest with `status: "already_applied"`. The
+original staging directory is not required after prepared work becomes
+durable.
+
+## Output and exits
+
+- Exit `0`: one bounded success JSON document on stdout; stderr is empty.
+- Exit `1`: one `folderbase-change-set-attention-v1` on stdout for a valid
+  conflict or retryable attention; stderr is empty.
+- Exit `2`: stdout is empty and stderr contains one
+  `folderbase-change-set-error-v1` for syntax, malformed input, missing or
+  unverifiable state, unsafe paths, or operational failure.
+
+Messages are explanatory and must not be parsed. Codes and schemas are the
+machine interface.
+
+## Independent conformance
+
+Any Rust, Go, TypeScript, or other implementation can run the dependency-free
+black-box suite:
+
+```bash
+node protocol/conformance/capabilities/change-set-0.1/run.mjs \
+  --implementation /absolute/path/to/folderbase
+```
+
+The ten scenarios cover clean disjoint merge history, move-plus-edit, opaque
+binary and large objects, delete/edit and create/create conflicts, stable
+rename identity, Unicode and case aliases, nested boundaries, stale bases,
+four crash points, restart, and idempotent replay. A conforming report exits
+`0` with `passed: 10` and `failed: 0`.

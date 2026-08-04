@@ -5,6 +5,7 @@
 //! layout, preservation rules, and validation stay behind this interface.
 
 pub mod availability;
+mod change_set;
 pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
@@ -41,6 +42,15 @@ mod traversal_policy;
 mod validation;
 mod workspace;
 
+pub use change_set::{
+    AuthorizedPath, ChangeSetApplyOutcome, ChangeSetApplyResult, ChangeSetAssessment,
+    ChangeSetAssessmentOutcome, ChangeSetAttention, ChangeSetAttentionDetail, ChangeSetConflict,
+    ChangeSetEnvelope, ChangeSetError, ChangeSetPayload, CheckoutReceipt, CheckoutRequest,
+    CheckoutResult, ContentReference, DeltaDirectory, DeltaRegularFile, DeltaState, DeltaSymlink,
+    MAX_CHANGE_SET_BYTES, ObjectDelta, ProjectedEntry, ProjectionExclusion, StagedContent,
+    StagingIndex, StagingObject, apply_change_set, assess_change_set,
+    checkout_change_set_projection, propose_change_set,
+};
 pub use error::{FolderbaseError, InitializationInventoryLimitKind, Result};
 pub use folderbase_capture::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureIgnoredPath,

@@ -221,3 +221,29 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert.match(cli, /\| `query` \| Experimental optional capability \|/u);
   assert.match(conformance, /experimental query\/index profile/u);
 });
+
+test("the stable Change Set capability has a runnable guide, wire reference, and release boundary", () => {
+  const guidesMeta = JSON.parse(read("apps/docs/content/docs/guides/meta.json"));
+  const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
+  const guide = read("apps/docs/content/docs/guides/change-sets.mdx");
+  const reference = read("apps/docs/content/docs/reference/change-sets.mdx");
+  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const cli = read("apps/docs/content/docs/reference/cli.mdx");
+  const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
+
+  assert(guidesMeta.pages.includes("change-sets"));
+  assert(referenceMeta.pages.includes("change-sets"));
+  for (const page of [guide, reference, release, cli, conformance]) {
+    assert.match(page, /folderbase\.change-set@0\.1\.0/u);
+  }
+  assert.match(guide, /change-set checkout/u);
+  assert.match(guide, /change-set propose/u);
+  assert.match(guide, /change-set assess/u);
+  assert.match(guide, /change-set apply/u);
+  assert.match(guide, /PDFs, CSVs, SQLite files, videos/u);
+  assert.match(reference, /folderbase-change-set-attention-v1/u);
+  assert.match(reference, /passed: 10/u);
+  assert.match(conformance, /capabilities\/change-set-0\.1\/run\.mjs/u);
+  assert.match(release, /Hosted share-link/u);
+  assert.match(release, /Cloud Agents remain separate/u);
+});

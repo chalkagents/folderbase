@@ -3,6 +3,12 @@
   "format": "folderbase-capability-registry-v1",
   "capabilities": [
     {
+      "name": "folderbase.change-set",
+      "version": "0.1.0",
+      "stability": "stable",
+      "conformance_runner": "protocol/conformance/capabilities/change-set-0.1/run.mjs"
+    },
+    {
       "name": "folderbase.query-index",
       "version": "0.1.0",
       "stability": "experimental",

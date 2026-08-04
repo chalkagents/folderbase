@@ -1,0 +1,112 @@
+---
+title: Work through scoped Change Sets
+description: Give an agent an ordinary least-authority folder, then review and merge its work without exposing sibling files.
+---
+
+The stable optional `folderbase.change-set@0.1.0` capability turns a permitted
+part of a Folderbase into a normal working directory. An agent can use its
+usual filesystem tools there, then return one immutable Change Set for
+three-way assessment and atomic application.
+
+This is the local Core workflow. Folder Scope grants, share links, review UI,
+and transport between machines belong to Folderbase Cloud and the App; they do
+not change the portable checkout or Change Set records.
+
+## Discover support
+
+```bash
+folderbase protocol contract --json
+```
+
+Continue only when the returned `capabilities` array includes
+`folderbase.change-set@0.1.0` with `stability: "stable"`.
+
+## 1. Materialize a scoped checkout
+
+An authorization layer supplies a closed checkout request. This example grants
+Can Work access only to `clients/project-2`:
+
+```json
+{
+  "format": "folderbase-checkout-request-v1",
+  "folderbase_id": "folderbase_019f0000-0000-7000-8000-000000000001",
+  "projection_id": "projection_019f0000-0000-7000-8000-000000000001",
+  "folder_scope_id": "folderscope_019f0000-0000-7000-8000-000000000001",
+  "scope_revision_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "permission": "can_work",
+  "authorized_paths": [{ "path_prefix": "clients/project-2" }]
+}
+```
+
+```bash
+folderbase change-set checkout /path/to/source /tmp/project-2-work \
+  --stdin --json < checkout-request.json
+```
+
+The destination must not already exist. It contains ordinary directories,
+files, and safe relative symlinks plus a closed
+`.folderbase/checkout.json` receipt. It is deliberately not another Folderbase
+root and contains no source manifest, sibling history, hidden grant, or
+credential.
+
+Give `/tmp/project-2-work` directly to Codex, Claude, a local script, or a
+remote VM. Markdown, source repositories, PDFs, CSVs, SQLite files, videos, and
+other regular files remain opaque ordinary bytes. Folderbase does not pretend
+to text-merge formats it cannot understand.
+
+## 2. Propose immutable work
+
+After the agent finishes, create provider-neutral staging bytes and one
+canonical Change Set:
+
+```bash
+folderbase change-set propose /tmp/project-2-work /tmp/project-2-stage \
+  --json > project-2-change-set.json
+```
+
+The proposal describes each logical Object with an optional `before` state and
+optional `after` state. A rename or move-plus-edit remains one Object delta,
+not a delete/create guess when the match is unambiguous. Changed regular-file
+bytes are chunked and verified in the staging directory; large files use the
+same bounded provider-neutral manifest model.
+
+## 3. Assess without writing
+
+```bash
+folderbase change-set assess /path/to/source /tmp/project-2-stage \
+  --stdin --json < project-2-change-set.json
+```
+
+Assessment is read-only. Clean disjoint source work can merge. An overlapping
+edit, delete/edit, create/create collision, changed scope revision, missing
+projection base, unsafe path alias, or nested Folderbase boundary returns a
+typed attention instead of guessing.
+
+## 4. Apply and replay safely
+
+```bash
+folderbase change-set apply /path/to/source /tmp/project-2-stage \
+  --stdin --json < project-2-change-set.json
+```
+
+Apply repeats validation under the Core transaction lease, publishes only
+authorized paths, records real proposal history, and creates a two-parent
+Folderbase Version when clean concurrent source work exists. Publication is
+restart-safe before, during, and after visible filesystem mutations.
+
+The Change Set digest is the idempotency key. Replaying the same bytes returns
+`status: "already_applied"` and creates no additional Version. Reusing a
+Change Set ID for different bytes fails.
+
+## What Core guarantees
+
+- scoped checkouts do not reveal sibling content or global Version IDs;
+- assessment never mutates the source folder;
+- apply never crosses the authorized path closure or a nested Folderbase;
+- Object identity survives renames and move-plus-edit;
+- opaque binary changes conflict safely rather than receiving a fake merge;
+- crash recovery converges from durable prepared work; and
+- every implementation can prove the same behavior with the public suite.
+
+See the [Change Set wire reference](/docs/reference/change-sets) for records,
+exit meanings, bounds, and independent conformance.

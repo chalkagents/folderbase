@@ -1,0 +1,19 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "rename",
+  "covers": ["rename", "stable-object-identity"],
+  "initial": [
+    { "operation": "write_utf8", "path": "shared/draft.txt", "content": "same opaque bytes\n" }
+  ],
+  "checkout_changes": [
+    { "operation": "rename", "from": "shared/draft.txt", "to": "shared/approved.txt" }
+  ],
+  "concurrent_source_changes": [],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "absent", "path": "shared/draft.txt" },
+      { "kind": "utf8", "path": "shared/approved.txt", "content": "same opaque bytes\n" }
+    ]
+  }
+}

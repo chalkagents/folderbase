@@ -82,3 +82,16 @@ binding, no-clobber application, idempotent replay, portable path handling,
 and handoff to reorganization. Candidate
 commands are independently bounded and their descendant process trees are
 terminated on timeout or output overflow.
+
+Run only the stable Change Set profile:
+
+```bash
+node protocol/conformance/capabilities/change-set-0.1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+`folderbase.change-set@0.1.0` has ten implementation-neutral black-box
+scenarios. They prove least-authority projection privacy, immutable proposals,
+three-way conflict detection, real one- and two-parent history, stable Object
+identity, binary and large-file staging, nested-boundary confinement, three
+crash recovery points, and idempotent replay.
