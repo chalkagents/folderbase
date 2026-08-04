@@ -1,0 +1,38 @@
+{
+  "name": "@folderbase/sdk",
+  "version": "0.1.0",
+  "description": "Typed process adapters for Folderbase Core CLI JSON and daemon sessions.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chalkagents/folderbase.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://folderbase.ai",
+  "bugs": {
+    "url": "https://github.com/chalkagents/folderbase/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}
