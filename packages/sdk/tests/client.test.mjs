@@ -41,6 +41,9 @@ test("success and attention preserve complete additive JSON documents", async ()
   assert.equal(attention.kind, "attention");
   assert.equal(attention.exitCode, 1);
   assert.deepEqual(attention.document.unknown_vendor, { retained: true });
+
+  const history = await client().run(["array"]);
+  assert.deepEqual(history.document, [{ action: "version.captured" }]);
 });
 
 test("operational errors retain the typed stderr document", async () => {

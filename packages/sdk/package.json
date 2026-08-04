@@ -32,7 +32,11 @@
     "access": "public",
     "provenance": true
   },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  },
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs && npm run typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

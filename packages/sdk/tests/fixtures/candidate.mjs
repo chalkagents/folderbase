@@ -21,6 +21,8 @@ if (mode === "attention") {
     unknown_vendor: { retained: true },
   });
   process.exitCode = 1;
+} else if (mode === "array") {
+  writeJson(process.stdout, [{ action: "version.captured" }]);
 } else if (mode === "operational-error") {
   writeJson(process.stderr, {
     format: "fixture-error-v1",

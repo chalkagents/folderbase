@@ -1,4 +1,4 @@
 {
   "title": "Guides",
-  "pages": ["agents", "querying", "daemon-sessions", "templates", "change-sets", "versioning", "migrate"]
+  "pages": ["agents", "typescript-sdk", "querying", "daemon-sessions", "templates", "change-sets", "versioning", "migrate"]
 }

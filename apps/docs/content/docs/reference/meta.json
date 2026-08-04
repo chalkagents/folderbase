@@ -1,4 +1,4 @@
 {
   "title": "Reference",
-  "pages": ["cli", "query-index", "daemon-stdio", "template-expansion", "change-sets", "compatibility-v1", "cli-json-v1", "conformance", "protocol"]
+  "pages": ["cli", "process-adapters", "query-index", "daemon-stdio", "template-expansion", "change-sets", "compatibility-v1", "cli-json-v1", "conformance", "protocol"]
 }

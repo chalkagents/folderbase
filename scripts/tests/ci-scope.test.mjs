@@ -74,6 +74,29 @@ test("npm launcher changes stay in the fast npm lane", () => {
   );
 });
 
+test("SDK changes run the npm and clean installation lanes", () => {
+  assert.deepEqual(
+    classifyChanges(["packages/sdk/src/index.js"]),
+    {
+      docs: false,
+      install: true,
+      npm: true,
+      platform: false,
+      rust: false,
+    },
+  );
+  assert.deepEqual(
+    classifyChanges(["scripts/test-sdk-package.mjs"]),
+    {
+      docs: false,
+      install: true,
+      npm: true,
+      platform: false,
+      rust: false,
+    },
+  );
+});
+
 test("npm publication policy changes stay in the fast npm lane", () => {
   assert.deepEqual(classifyChanges(["scripts/npm-publication-policy.mjs"]), {
     docs: false,
@@ -208,6 +231,16 @@ test("the npm policy lane executes scoped result verification tests", () => {
   const npm = workflowJob(source, "npm-cli");
 
   assert.match(npm, /scripts\/tests\/ci-required-results\.test\.mjs/);
+  assert.match(npm, /npm ci --prefix packages\/sdk/);
+  assert.match(npm, /npm test --prefix packages\/sdk/);
+});
+
+test("the fresh installation lane supplies the supported Node runtime", () => {
+  const source = readFileSync(ciWorkflow, "utf8");
+  const install = workflowJob(source, "package-install");
+
+  assert.match(install, /node-version: "24"/);
+  assert.match(install, /scripts\/test-package-install\.sh/);
 });
 
 test("the extracted CLI prefetches dependencies before its offline proof", () => {

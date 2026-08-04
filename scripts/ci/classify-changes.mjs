@@ -14,6 +14,7 @@ const normativeAdrPath = /^docs\/adr\/000(?:3|4|5|6|8|9)-/;
 const docsSitePath = /^apps\/docs\//;
 const docsSiteControlPath = /^scripts\/tests\/docs-site\.test\.mjs$/;
 const npmLauncherPath = /^packages\/npm-cli\//;
+const sdkPackagePath = /^(?:packages\/sdk\/|scripts\/test-sdk-package\.mjs$)/;
 const workspaceManifestPath = /^Cargo\.(?:lock|toml)$/;
 const ciControlPath = /^(?:\.github\/workflows\/ci\.yml|scripts\/check-ci-policy\.sh|scripts\/ci\/|scripts\/tests\/ci-(?:policy|required-results|scope)\.test\.mjs)/;
 const nativeInstallPath = /^(?:crates\/folderbase-cli\/|crates\/folderbase-core\/(?:Cargo\.toml$|assets\/)|scripts\/(?:test-extracted-package[^/]*|test-package-install)\.sh$)/;
@@ -37,6 +38,7 @@ function isKnownPath(path) {
     docsSitePath.test(path) ||
     docsSiteControlPath.test(path) ||
     npmLauncherPath.test(path) ||
+    sdkPackagePath.test(path) ||
     nativeInstallPath.test(path) ||
     npmOnlyPath.test(path) ||
     coreImplementationPath.test(path);
@@ -49,11 +51,12 @@ export function classifyChanges(paths, { full = false } = {}) {
   const npm = requiresFullConfidence || paths.some(
     (path) =>
       npmLauncherPath.test(path) ||
+      sdkPackagePath.test(path) ||
       npmOnlyPath.test(path),
   );
   const install = requiresFullConfidence || paths.some(
     (path) =>
-      nativeInstallPath.test(path),
+      nativeInstallPath.test(path) || sdkPackagePath.test(path),
   );
   const requiresCoreVerification = requiresFullConfidence || paths.some(
     (path) =>

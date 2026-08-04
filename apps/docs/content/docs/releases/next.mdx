@@ -42,6 +42,22 @@ Builds that advertise `folderbase.daemon-stdio@0.1.0` provide:
 Read [Keep an active Folderbase session fresh](/docs/guides/daemon-sessions)
 and the [daemon stdio reference](/docs/reference/daemon-stdio).
 
+## Public process adapters
+
+The next release adds `@folderbase/sdk@0.1.0`, a zero-runtime-dependency ESM
+adapter for Node.js and TypeScript consumers. It supervises the public CLI JSON
+and daemon stdio contracts with typed exits, bounded I/O, deadlines,
+cancellation, capability helpers, and complete JSON-value preservation.
+
+The package contains no bundled Core and no private `.folderbase` reader. Its
+clean-consumer gate installs the packed archive outside the repository, runs a
+mixed-file journey against the real executable, and reruns the public
+compatibility and advertised capability suites through the adapter.
+
+Swift and other native clients use the same process seam rather than private
+Rust internals. Read [Use Folderbase from TypeScript](/docs/guides/typescript-sdk)
+and the [process adapter contract](/docs/reference/process-adapters).
+
 ## Stable optional template-expansion capability
 
 Builds that advertise `folderbase.template-expansion@0.1.0` provide:

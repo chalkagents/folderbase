@@ -50,7 +50,8 @@ dependencies and a Node.js baseline matching `@folderbase/cli`. It provides:
 - caller-supplied executable, argument prefix, environment, timeout, and abort
   controls for local binaries, `npx`, containers, and test harnesses.
 
-The adapter preserves each parsed public document as a complete JSON object.
+The adapter preserves each parsed public document as a complete JSON value,
+including array-valued history results.
 Known discriminants receive useful TypeScript types, while unknown additive
 fields remain present at runtime and do not make compatible consumers fail.
 Experimental closed capability envelopes may still reject malformed outer
