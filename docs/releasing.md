@@ -30,7 +30,7 @@ writes continue to use the short-lived workflow token.
 ## Start or resume a release
 
 ```sh
-git tag -s vVERSION -m "Folderbase Core vVERSION"
+git tag -a vVERSION -m "Folderbase Core vVERSION"
 git push origin vVERSION
 ```
 

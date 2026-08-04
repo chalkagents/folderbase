@@ -26,7 +26,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-folderbase-core = { version = "0.6.0", path = "../folderbase-core" }
+folderbase-core = { version = "0.6.1", path = "../folderbase-core" }
 notify.workspace = true
 uuid.workspace = true
 

@@ -68,8 +68,8 @@ fn cargo_and_executable_surface_is_folderbase_only() {
             .as_array()
             .expect("workspace packages")
             .iter()
-            .all(|package| package["version"] == "0.6.0"),
-        "every published workspace package must carry the Core 0.6 distribution identity"
+            .all(|package| package["version"] == "0.6.1"),
+        "every published workspace package must carry the Core 0.6.1 distribution identity"
     );
 
     let core = metadata["packages"]
@@ -112,7 +112,7 @@ fn cargo_and_executable_surface_is_folderbase_only() {
         .arg("--version")
         .assert()
         .success()
-        .stdout("folderbase 0.6.0\n");
+        .stdout("folderbase 0.6.1\n");
 }
 
 #[test]
