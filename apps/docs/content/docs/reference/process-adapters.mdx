@@ -1,0 +1,96 @@
+---
+title: Process adapter contract
+description: The public boundary for TypeScript, Swift, native apps, scripts, and remote agent VMs.
+---
+
+The released `folderbase` executable is the universal integration surface.
+`@folderbase/sdk` removes Node.js process boilerplate; it is not a second Core
+implementation and owns no Folderbase records.
+
+## One-shot contract
+
+An adapter launches an explicit executable without a shell and supplies exact
+arguments, bounded stdin, bounded stdout, bounded stderr, and a deadline.
+
+| Process result | Adapter meaning |
+| --- | --- |
+| Exit `0`, empty stderr, one JSON value on stdout | Success |
+| Exit `1`, empty stderr, one JSON value on stdout | Attention; the operation was understood but needs review or retry |
+| Exit `2`, empty stdout, one JSON object on stderr | Typed operational error |
+| Any other exit, signal, noise, malformed JSON, overflow, or timeout | Adapter failure |
+
+One-shot stdout may contain any valid JSON value, including arrays returned by
+history commands. SDK results preserve the complete value and all unknown
+additive object fields. Operational-error documents and daemon frames remain
+JSON objects.
+
+The SDK defaults to 8 MiB input and output bounds and a 30-second timeout. A
+caller may raise each byte bound to 64 MiB and the timeout to ten minutes. The
+limits bound control documents, not the size of ordinary files staged or
+managed by Core.
+
+## Daemon contract
+
+`startDaemon(root)` launches:
+
+```text
+folderbase daemon serve /absolute/root --stdio-jsonl
+```
+
+The adapter requires one bounded `folderbase-daemon-message-v1` JSON object per
+line, validates the closed outer envelope, serializes requests, matches each
+response to its operation and request ID, and exposes change events as
+freshness hints. It does not interpret a hint as a patch.
+
+EOF, malformed frames, output overflow, request timeout, cancellation, process
+loss, and physical-root replacement make the session terminal. A caller starts
+a new session and asks Core for authoritative state again.
+
+## Authority boundary
+
+Adapters must not read or write `.folderbase` engine records, reproduce Core
+digests, maintain another index, or apply filesystem changes inferred from
+private state. They may:
+
+- discover `protocol contract --json`;
+- invoke documented CLI JSON commands;
+- exchange a capability's documented stdin and result documents;
+- supervise a documented daemon stdio session; and
+- retain complete public JSON values for the caller.
+
+This keeps the App, agent harnesses, local scripts, and remote VMs on one
+compatibility path.
+
+## Swift and native apps
+
+Swift and native apps use the same process boundary:
+
+1. Resolve a pinned, verified `folderbase` executable.
+2. Launch it directly with `Process` or the platform equivalent; never build a
+   shell command string.
+3. Bound stdin, stdout, stderr, time, and cancellation.
+4. Call `protocol contract --json` and select only advertised capabilities.
+5. Treat exits `0`, `1`, and `2` exactly as defined above.
+6. Decode a one-shot response as one JSON value and daemon output as bounded
+   JSON Lines objects.
+7. Treat daemon events as reasons to query again.
+8. Leave all `.folderbase` interpretation and mutation to Core.
+
+A native binding may make these steps ergonomic, but it must remain removable:
+every operation must still work through the documented executable.
+
+## Independent proof
+
+The repository packs the SDK, installs it into a fresh external consumer, and
+runs a mixed-file init/query/template/Change Set/daemon journey against an
+exact Core binary. It then runs the public CLI JSON and advertised capability
+suites through that installed adapter:
+
+```bash
+node scripts/test-sdk-package.mjs \
+  --implementation /absolute/path/to/folderbase
+```
+
+Independent Core implementations remain conformant through the executable
+runners described in [Run public conformance](/docs/reference/conformance);
+they do not need this SDK.

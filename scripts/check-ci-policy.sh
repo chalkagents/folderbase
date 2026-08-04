@@ -389,6 +389,16 @@ require_workflow_job_exact_line \
 require_workflow_job_exact_line \
   "$workflow" \
   "npm-cli" \
+  "        run: npm ci --prefix packages/sdk" \
+  "The npm lane must install the locked TypeScript SDK development dependencies."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "npm-cli" \
+  "        run: npm test --prefix packages/sdk" \
+  "The npm lane must verify the TypeScript SDK runtime and declaration contracts."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "npm-cli" \
   "        run: node --test protocol/conformance/capabilities/query-index-0.1/suite.test.mjs" \
   "The optional capability contract suite must remain policy-pinned in CI."
 require_workflow_job_exact_line \
@@ -416,6 +426,11 @@ require_workflow_job_exact_line \
   "package-install" \
   "    if: needs.plan.outputs.install == 'true'" \
   "Fresh installation proof must remain change-aware."
+require_workflow_job_exact_line \
+  "$workflow" \
+  "package-install" \
+  "          node-version: \"24\"" \
+  "Fresh installation proof must use the supported Node runtime for the SDK."
 require_workflow_job_exact_line \
   "$workflow" \
   "package-install" \

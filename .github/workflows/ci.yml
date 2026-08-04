@@ -104,6 +104,12 @@ jobs:
       - name: Test the packed npm command
         run: node scripts/test-npm-cli-package.mjs
 
+      - name: Install the TypeScript SDK development dependencies
+        run: npm ci --prefix packages/sdk
+
+      - name: Test the TypeScript SDK adapter contract
+        run: npm test --prefix packages/sdk
+
       - name: Test release publication policy
         run: node --test protocol/conformance/cli-json-v1/schema.test.mjs protocol/conformance/capabilities/run.test.mjs scripts/tests/capability-contract.test.mjs scripts/tests/compatibility-contract.test.mjs scripts/tests/npm-publication-policy.test.mjs scripts/tests/ci-policy.test.mjs scripts/tests/ci-required-results.test.mjs scripts/tests/ci-scope.test.mjs scripts/tests/release-scripts.test.mjs
 
@@ -123,6 +129,8 @@ jobs:
         run: |
           cmp LICENSE packages/npm-cli/LICENSE
           cmp NOTICE packages/npm-cli/NOTICE
+          cmp LICENSE packages/sdk/LICENSE
+          cmp NOTICE packages/sdk/NOTICE
 
   rust:
     name: Linux Core gate
@@ -199,6 +207,12 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: 1.96.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
 
       - name: Verify packages and installed CLI
         run: scripts/test-package-install.sh

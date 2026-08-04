@@ -1,0 +1,109 @@
+---
+title: Use Folderbase from TypeScript
+description: Supervise the public Core process contract from Node.js without reimplementing the database.
+---
+
+`@folderbase/sdk` is a zero-runtime-dependency adapter for the public Folderbase
+Core executable. It gives Node.js apps and agent harnesses typed process
+supervision while Core remains the only filesystem and database authority.
+
+## Install the adapter and executable
+
+```bash
+npm install @folderbase/sdk @folderbase/cli
+```
+
+`@folderbase/sdk` does not bundle Core. The default executable name is
+`folderbase`, so it works with the npm launcher, Homebrew, Cargo, a GitHub
+binary, or any independently conforming implementation on `PATH`.
+
+Use an explicit binary when reproducibility matters:
+
+```js
+import { FolderbaseClient } from "@folderbase/sdk";
+
+const folderbase = new FolderbaseClient({
+  executable: "/opt/folderbase/bin/folderbase",
+  timeoutMs: 30_000,
+});
+
+const contract = await folderbase.contract();
+if (contract.kind !== "success") throw new Error("Core needs attention");
+console.log(contract.document.capabilities);
+```
+
+## Turn an ordinary folder into a Folderbase
+
+```js
+const root = "/absolute/path/to/project";
+
+const preview = await folderbase.init(root, { dryRun: true });
+if (preview.kind !== "success") throw new Error("Initialization needs attention");
+
+const initialized = await folderbase.init(root, {
+  expectedPlanDigest: preview.document.plan_digest.digest,
+});
+```
+
+The same folder can contain repositories, Markdown, PDFs, CSVs, SQLite databases, videos,
+design assets, and unknown regular-file formats. The SDK
+does not convert or upload them. It delegates to Core, which inventories
+metadata first and preserves the ordinary bytes.
+
+## Query live metadata
+
+```js
+const result = await folderbase.query(root, {
+  format: "folderbase-query-request-v1",
+  scope: { kind: "live" },
+  page: { limit: 100 },
+});
+
+if (result.kind === "success") {
+  for (const entry of result.document.entries) {
+    console.log(entry.path, entry.kind, entry.bytes);
+  }
+}
+```
+
+Exit `1` resolves as `kind: "attention"`; it is not thrown away as an
+exception. Exit `2`, malformed output, timeouts, cancellation, and output
+overflow use distinct exported error classes.
+
+## Keep one active root fresh
+
+Use the daemon only after capability discovery advertises
+`folderbase.daemon-stdio@0.1.0`:
+
+```js
+const session = await folderbase.startDaemon(root);
+
+session.on("event", async (hint) => {
+  // Hints never contain authoritative file patches. Query Core again.
+  console.log(hint.event);
+});
+
+await session.request("subscribe");
+const response = await session.request("query", {
+  format: "folderbase-query-request-v1",
+  scope: { kind: "live" },
+  page: { limit: 100 },
+});
+
+await session.shutdown();
+```
+
+Daemon 0.1 is serial. Cancelling an active request ends the session instead of
+claiming cooperative mid-request cancellation that Core does not advertise.
+
+## Use the universal surface from remote VMs
+
+A Codex-, Claude-, or Cursor-style VM can install a pinned Core binary plus
+`@folderbase/sdk`, materialize an authorized ordinary folder, and use the same
+CLI JSON and Change Set contracts as a local app. Cloud authentication,
+share-link grants, and file transport remain separate from the database Core.
+
+Read the [process adapter contract](/docs/reference/process-adapters),
+[query/index reference](/docs/reference/query-index), and
+[Change Set guide](/docs/guides/change-sets) before building a long-lived
+integration.

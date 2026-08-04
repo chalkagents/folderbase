@@ -270,3 +270,28 @@ test("the daemon capability has a runnable guide, wire reference, and honest aut
   assert.match(conformance, /capabilities\/daemon-stdio-0\.1\/run\.mjs/u);
   assert.match(release, /no second scanner, mutation engine, network listener/u);
 });
+
+test("the public TypeScript and native process adapter seam is fully documented", () => {
+  const guidesMeta = JSON.parse(read("apps/docs/content/docs/guides/meta.json"));
+  const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
+  const guide = read("apps/docs/content/docs/guides/typescript-sdk.mdx");
+  const reference = read("apps/docs/content/docs/reference/process-adapters.mdx");
+  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const index = read("apps/docs/content/docs/index.mdx");
+
+  assert(guidesMeta.pages.includes("typescript-sdk"));
+  assert(referenceMeta.pages.includes("process-adapters"));
+  for (const page of [guide, reference, release, index]) {
+    assert.match(page, /@folderbase\/sdk/u);
+  }
+  assert.match(guide, /FolderbaseClient/u);
+  assert.match(guide, /startDaemon/u);
+  assert.match(guide, /PDFs, CSVs, SQLite databases, videos/u);
+  assert.match(reference, /Exit `0`/u);
+  assert.match(reference, /Exit `1`/u);
+  assert.match(reference, /Exit `2`/u);
+  assert.match(reference, /any valid JSON value/u);
+  assert.match(reference, /Swift and native apps/u);
+  assert.match(reference, /must not read or write `.folderbase/u);
+  assert.match(reference, /test-sdk-package\.mjs/u);
+});
