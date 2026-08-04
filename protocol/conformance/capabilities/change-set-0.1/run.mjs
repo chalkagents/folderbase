@@ -24,11 +24,14 @@ import { fileURLToPath } from "node:url";
 
 import { changeSetSha256 } from "./reference-change-set-digest.mjs";
 import { assertChangeSetSchema } from "./schema.mjs";
+import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  MAXIMUM_COMMAND_TIMEOUT_MS,
+} from "./limits.mjs";
 
 const REPORT_FORMAT = "folderbase-capability-suite-report-v1";
 const CAPABILITY = "folderbase.change-set@0.1.0";
 const PRIVATE_MARKER = "FOLDERBASE-CONFORMANCE-PRIVATE-SIBLING-MUST-NEVER-LEAK";
-const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 const directory = dirname(fileURLToPath(import.meta.url));
 const scenarioDirectory = join(directory, "fixtures", "scenarios");
@@ -52,9 +55,9 @@ function boundedEnvironmentInteger(name, fallback, minimum, maximum) {
 
 const timeoutMs = boundedEnvironmentInteger(
   "FOLDERBASE_CHANGE_SET_CONFORMANCE_COMMAND_TIMEOUT_MS",
-  DEFAULT_TIMEOUT_MS,
+  DEFAULT_COMMAND_TIMEOUT_MS,
   100,
-  300_000,
+  MAXIMUM_COMMAND_TIMEOUT_MS,
 );
 const maxBytes = boundedEnvironmentInteger(
   "FOLDERBASE_CHANGE_SET_CONFORMANCE_COMMAND_MAX_BYTES",
