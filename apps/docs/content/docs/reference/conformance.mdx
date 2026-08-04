@@ -68,6 +68,19 @@ Folderbase CLI JSON v1. Passing the base suite does not imply query support,
 and advertising query support commits the implementation to the complete
 query/index suite.
 
+Run only the experimental daemon stdio profile:
+
+```bash
+node protocol/conformance/capabilities/daemon-stdio-0.1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+`folderbase.daemon-stdio@0.1.0` has ten implementation-neutral black-box
+cases. They prove root-pinned startup, exact one-shot query delegation,
+create/edit/move/delete convergence, bounded event coalescing, missing and
+corrupt index fallback, nested-root isolation, physical-root replacement,
+bad-frame recovery, subscription loss, EOF, shutdown, and restart.
+
 Run only the stable template-expansion profile:
 
 ```bash

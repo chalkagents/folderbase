@@ -26,6 +26,22 @@ JSON v1, and the immutable Core 0.5 release closure are unchanged.
 Read [Query a Folderbase](/docs/guides/querying) and the
 [query/index wire reference](/docs/reference/query-index).
 
+## Experimental optional daemon stdio capability
+
+Builds that advertise `folderbase.daemon-stdio@0.1.0` provide:
+
+- one explicit, physically root-pinned long-lived session;
+- JSON Lines request/response framing for exact query/index delegation;
+- coalesced workspace-change and rescan-required hints;
+- no second scanner, mutation engine, network listener, or authoritative state;
+- bounded malformed and oversized-frame recovery;
+- EOF, shutdown, forced-termination, and restart safety;
+- cross-platform watcher adapters with platform-neutral semantics; and
+- a ten-case implementation-neutral conformance suite.
+
+Read [Keep an active Folderbase session fresh](/docs/guides/daemon-sessions)
+and the [daemon stdio reference](/docs/reference/daemon-stdio).
+
 ## Stable optional template-expansion capability
 
 Builds that advertise `folderbase.template-expansion@0.1.0` provide:

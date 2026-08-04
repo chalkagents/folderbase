@@ -247,3 +247,26 @@ test("the stable Change Set capability has a runnable guide, wire reference, and
   assert.match(release, /Hosted share-link/u);
   assert.match(release, /Cloud Agents remain separate/u);
 });
+
+test("the daemon capability has a runnable guide, wire reference, and honest authority model", () => {
+  const guidesMeta = JSON.parse(read("apps/docs/content/docs/guides/meta.json"));
+  const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
+  const guide = read("apps/docs/content/docs/guides/daemon-sessions.mdx");
+  const reference = read("apps/docs/content/docs/reference/daemon-stdio.mdx");
+  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const cli = read("apps/docs/content/docs/reference/cli.mdx");
+  const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
+
+  assert(guidesMeta.pages.includes("daemon-sessions"));
+  assert(referenceMeta.pages.includes("daemon-stdio"));
+  for (const page of [guide, reference, release, cli, conformance]) {
+    assert.match(page, /folderbase\.daemon-stdio@0\.1\.0/u);
+  }
+  assert.match(guide, /daemon serve \/path\/to\/folderbase --stdio-jsonl/u);
+  assert.match(guide, /ask Core again/u);
+  assert.match(reference, /physical Root Instance/u);
+  assert.match(reference, /At most one hint is outstanding/u);
+  assert.match(reference, /passed: 10/u);
+  assert.match(conformance, /capabilities\/daemon-stdio-0\.1\/run\.mjs/u);
+  assert.match(release, /no second scanner, mutation engine, network listener/u);
+});

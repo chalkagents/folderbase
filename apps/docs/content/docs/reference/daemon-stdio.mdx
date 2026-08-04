@@ -1,0 +1,95 @@
+---
+title: Daemon stdio capability 0.1
+description: Experimental root-pinned JSON Lines query sessions, change hints, restart behavior, and conformance.
+---
+
+`folderbase.daemon-stdio@0.1.0` is a separately advertised experimental
+capability. It does not expand Compatibility Contract v1, Folderbase CLI JSON
+v1, or the immutable protocol 0.5 closure.
+
+## Process interface
+
+```bash
+folderbase daemon serve ROOT --stdio-jsonl
+```
+
+The parent owns the process. Stdin is a sequence of
+`folderbase-daemon-request-v1` lines. Stdout is a sequence of
+`folderbase-daemon-message-v1` lines. Startup failure writes one
+`folderbase-daemon-terminal-error-v1` document to stderr and exits `2`.
+
+The canonical closed Draft 2020-12 outer schema is
+[`daemon-stdio.schema.json`](https://github.com/chalkagents/folderbase/blob/main/protocol/schemas/capabilities/daemon-stdio/0.1/daemon-stdio.schema.json).
+The normative architecture is [ADR-0013](https://github.com/chalkagents/folderbase/blob/main/docs/adr/0013-run-root-pinned-query-sessions-over-stdio-json-lines.md).
+
+## Operations
+
+| Operation | Request document | Success inner document |
+| --- | --- | --- |
+| `query` | required `folderbase-query-request-v1` | exact `folderbase-query-result-v1` |
+| `explain` | required `folderbase-query-request-v1` | exact `folderbase-query-explain-v1` |
+| `index_status` | absent | exact `folderbase-query-index-status-v1` |
+| `refresh` | absent | exact `folderbase-query-index-rebuild-result-v1` |
+| `subscribe` | absent | `folderbase-daemon-subscription-v1` with `subscribed: true` |
+| `unsubscribe` | absent | `folderbase-daemon-subscription-v1` with `subscribed: false` |
+| `shutdown` | absent | `folderbase-daemon-shutdown-v1` |
+
+Only one request executes at a time in 0.1. Responses repeat the caller's
+portable 1–128 byte request ID. Query/index inner documents keep their original
+success, attention, and error meanings; the outer response status is `ok`,
+`attention`, or `error`.
+
+## Authority and root replacement
+
+Startup attests the explicit path and pins its physical Root Instance plus
+Folderbase ID. Every operation re-attests before use. Replacing the directory,
+crossing an alias, or changing the Folderbase identity returns
+`query_root_changed` and terminates the session. The daemon never changes roots
+or inherits authority from a parent Folderbase.
+
+Nested Folderbases remain one opaque `nested_folderbase` query row. Their
+descendants and private state never appear in the parent session.
+
+## Event meaning
+
+`workspace_changed` and `rescan_required` are bounded freshness hints. They
+carry only the daemon epoch and a monotonic sequence. They contain no paths,
+bytes, semantic inference, credentials, provider locations, or mutation
+authority.
+
+At most one hint is outstanding. Duplicate, reordered, and burst filesystem
+events coalesce. Watcher failure or suspected event loss becomes
+`rescan_required`; the next Core operation still obtains authoritative state.
+Subscriptions and sequences are not replayed after disconnect or restart.
+
+## Bounds and lifecycle
+
+- request line: at most 4 MiB, drained through newline when oversized;
+- output line: at most 8 MiB;
+- error message: at most 4,096 Unicode scalar values;
+- root: one explicit path for the entire process; and
+- cancellation: terminate the child process; 0.1 does not claim cooperative
+  mid-operation cancellation.
+
+EOF and `shutdown` exit successfully. Forced termination loses only disposable
+session state. The daemon writes no portable record and stores no authoritative
+checkpoint.
+
+The current Rust adapter uses a stable cross-platform filesystem notification
+library. That implementation choice and the platform watcher backend are not
+part of the portable interface.
+
+## Independent conformance
+
+Run the dependency-free ten-case suite against any implementation:
+
+```bash
+node protocol/conformance/capabilities/daemon-stdio-0.1/run.mjs \
+  --implementation /absolute/path/to/folderbase
+```
+
+It proves one-shot equivalence, create/edit/move/delete convergence, burst
+coalescing, missing and corrupt index fallback, nested-root isolation, physical
+root replacement, bounded bad-frame recovery, subscribe/unsubscribe behavior,
+EOF, shutdown, termination, edits while down, and restart. Passing exits `0`
+with `passed: 10` and `failed: 0`.
