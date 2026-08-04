@@ -6,7 +6,11 @@
 use std::{
     io::{BufRead, Write},
     path::{Component, Path, PathBuf},
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
     thread,
 };
 
@@ -26,6 +30,8 @@ const MESSAGE_FORMAT: &str = "folderbase-daemon-message-v1";
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MESSAGE_SCALARS: usize = 4_096;
+const MAX_DISPLAY_ROOT_SCALARS: usize = 4_096;
+const MAX_SAFE_JSON_SEQUENCE: u64 = 9_007_199_254_740_991;
 const INPUT_QUEUE_CAPACITY: usize = 8;
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_OPERATIONAL_ERROR: u8 = 2;
@@ -104,9 +110,17 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
         Ok(attestation) => attestation,
         Err(error) => return write_terminal_error("daemon_root_invalid", error.to_string()),
     };
+    let display_root = pinned.root.to_string_lossy().into_owned();
+    if display_root.chars().count() > MAX_DISPLAY_ROOT_SCALARS {
+        return write_terminal_error(
+            "daemon_root_invalid",
+            "daemon display root exceeds 4096 Unicode scalar values".to_owned(),
+        );
+    }
     let epoch = format!("daemon_{}", Uuid::now_v7());
     let (sender, receiver) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
-    let mut watcher = match start_watcher(&root, sender.clone()) {
+    let rescan_required = Arc::new(AtomicBool::new(false));
+    let mut watcher = match start_watcher(&root, sender.clone(), Arc::clone(&rescan_required)) {
         Ok(watcher) => watcher,
         Err(error) => return write_terminal_error("daemon_watcher_unavailable", error.to_string()),
     };
@@ -122,7 +136,7 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
             epoch: &epoch,
             folderbase_id: &pinned.folderbase_id,
             root_instance_sha256: &pinned.root_instance_sha256,
-            root: pinned.root.to_string_lossy().into_owned(),
+            root: display_root,
         },
     )
     .is_err()
@@ -130,9 +144,16 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
         return EXIT_OPERATIONAL_ERROR;
     }
 
-    let code = session_loop(&root, &pinned, &epoch, &receiver, &mut output);
-    // Release the bounded receiver first so a watcher callback or stdin reader
-    // blocked on backpressure cannot delay watcher teardown.
+    let code = session_loop(
+        &root,
+        &pinned,
+        &epoch,
+        &receiver,
+        &rescan_required,
+        &mut output,
+    );
+    // Release the bounded receiver first so an stdin reader blocked on
+    // backpressure cannot delay watcher teardown.
     drop(receiver);
     drop(watcher.unwatch(&root));
     drop(watcher);
@@ -144,12 +165,29 @@ pub(crate) fn serve(root: PathBuf) -> u8 {
     code
 }
 
-fn start_watcher(root: &Path, sender: SyncSender<Input>) -> notify::Result<RecommendedWatcher> {
+fn start_watcher(
+    root: &Path,
+    sender: SyncSender<Input>,
+    rescan_required: Arc<AtomicBool>,
+) -> notify::Result<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |event| {
-        let _ = sender.send(Input::Fs(event));
+        enqueue_fs_hint(&sender, &rescan_required, event);
     })?;
     watcher.watch(root, RecursiveMode::Recursive)?;
     Ok(watcher)
+}
+
+fn enqueue_fs_hint(
+    sender: &SyncSender<Input>,
+    rescan_required: &AtomicBool,
+    event: Result<Event, notify::Error>,
+) {
+    if matches!(
+        sender.try_send(Input::Fs(event)),
+        Err(TrySendError::Full(_))
+    ) {
+        rescan_required.store(true, Ordering::Release);
+    }
 }
 
 fn start_input_thread(sender: SyncSender<Input>) -> thread::JoinHandle<()> {
@@ -181,12 +219,26 @@ fn session_loop(
     pinned: &FolderbaseRootAttestation,
     epoch: &str,
     receiver: &Receiver<Input>,
+    rescan_required: &AtomicBool,
     output: &mut impl Write,
 ) -> u8 {
     let mut subscribed = false;
     let mut dirty = false;
     let mut sequence = 0_u64;
     while let Ok(input) = receiver.recv() {
+        if rescan_required.swap(false, Ordering::AcqRel) {
+            dirty = match emit_hint_if_needed(
+                output,
+                epoch,
+                &mut sequence,
+                subscribed,
+                dirty,
+                "rescan_required",
+            ) {
+                Ok(dirty) => dirty,
+                Err(_) => return EXIT_OPERATIONAL_ERROR,
+            };
+        }
         match input {
             Input::Eof => return EXIT_SUCCESS,
             Input::ReadError(message) => {
@@ -241,6 +293,8 @@ fn session_loop(
                             | Operation::Explain
                             | Operation::IndexStatus
                             | Operation::Refresh
+                            | Operation::Subscribe
+                            | Operation::Unsubscribe
                     )
                 {
                     dirty = false;
@@ -294,19 +348,23 @@ fn emit_hint_if_needed(
     if dirty {
         return Ok(true);
     }
-    if subscribed {
-        *sequence = sequence.saturating_add(1);
-        write_message(
-            output,
-            &EventMessage {
-                format: MESSAGE_FORMAT,
-                kind: "event",
-                event,
-                epoch,
-                sequence: *sequence,
-            },
-        )?;
+    if !subscribed {
+        return Ok(false);
     }
+    *sequence = sequence
+        .checked_add(1)
+        .filter(|next| *next <= MAX_SAFE_JSON_SEQUENCE)
+        .ok_or_else(|| std::io::Error::other("daemon event sequence exhausted"))?;
+    write_message(
+        output,
+        &EventMessage {
+            format: MESSAGE_FORMAT,
+            kind: "event",
+            event,
+            epoch,
+            sequence: *sequence,
+        },
+    )?;
     Ok(true)
 }
 
@@ -454,6 +512,13 @@ fn decode_request(bytes: &[u8]) -> Result<Request, String> {
             "this operation does not accept document".to_owned()
         });
     }
+    if request
+        .document
+        .as_ref()
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err("document must be a JSON object".to_owned());
+    }
     Ok(request)
 }
 
@@ -566,9 +631,17 @@ fn bounded_message(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, Cursor};
+    use std::{
+        io::{BufReader, Cursor},
+        sync::{Arc, atomic::AtomicBool, mpsc},
+    };
 
-    use super::{Frame, MAX_REQUEST_BYTES, read_frame, valid_request_id};
+    use notify::{Event, EventKind};
+
+    use super::{
+        Frame, Input, MAX_REQUEST_BYTES, decode_request, enqueue_fs_hint, read_frame,
+        valid_request_id,
+    };
 
     #[test]
     fn request_ids_use_one_small_portable_alphabet() {
@@ -591,5 +664,26 @@ mod tests {
             read_frame(&mut reader).unwrap(),
             Some(Frame::Bytes(bytes)) if bytes == b"{}"
         ));
+    }
+
+    #[test]
+    fn watcher_queue_overflow_requires_an_authoritative_rescan() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        sender.send(Input::Eof).unwrap();
+        let rescan_required = Arc::new(AtomicBool::new(false));
+
+        enqueue_fs_hint(&sender, &rescan_required, Ok(Event::new(EventKind::Any)));
+
+        assert!(rescan_required.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_schema_boundary_rejects_non_object_documents() {
+        let error = decode_request(
+            br#"{"format":"folderbase-daemon-request-v1","request_id":"one","operation":"query","document":[]}"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "document must be a JSON object");
     }
 }
