@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(directory, "../../../..");
 
-test("experimental daemon package is defined but not advertised before GREEN", async () => {
+test("experimental daemon package is advertised identically after GREEN", async () => {
   const packageEntry = JSON.parse(
     await readFile(
       resolve(directory, "../../../capabilities/daemon-stdio/0.1.0/capability.json"),
@@ -24,9 +24,19 @@ test("experimental daemon package is defined but not advertised before GREEN", a
   const registry = JSON.parse(
     await readFile(join(repositoryRoot, "protocol/capabilities/v1/registry.json"), "utf8"),
   );
-  assert.equal(
-    registry.capabilities.some(({ name }) => name === "folderbase.daemon-stdio"),
-    false,
+  assert.deepEqual(
+    registry.capabilities.find(({ name }) => name === "folderbase.daemon-stdio"),
+    packageEntry,
+  );
+  const embedded = JSON.parse(
+    await readFile(
+      join(repositoryRoot, "crates/folderbase-cli/assets/capability-registry-v1.json"),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(
+    embedded.capabilities.find(({ name }) => name === "folderbase.daemon-stdio"),
+    packageEntry,
   );
 });
 

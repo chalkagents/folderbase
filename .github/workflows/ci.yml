@@ -116,6 +116,9 @@ jobs:
       - name: Test Change Set capability contracts
         run: node --test protocol/conformance/capabilities/change-set-0.1/suite.test.mjs
 
+      - name: Test daemon stdio capability contracts
+        run: node --test protocol/conformance/capabilities/daemon-stdio-0.1/suite.test.mjs
+
       - name: Verify packaged legal notices
         run: |
           cmp LICENSE packages/npm-cli/LICENSE

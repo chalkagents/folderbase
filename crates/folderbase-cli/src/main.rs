@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod change_set_capability;
+mod daemon_capability;
 mod query_capability;
 
 const EXIT_SUCCESS: u8 = 0;
@@ -222,6 +223,22 @@ enum Command {
     ChangeSet {
         #[command(subcommand)]
         command: ChangeSetCommand,
+    },
+
+    /// Run one root-pinned long-lived Core session over stdio JSON Lines.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Serve one explicit Folderbase root until stdin closes or shutdown is requested.
+    Serve {
+        root: PathBuf,
+        #[arg(long, required = true)]
+        stdio_jsonl: bool,
     },
 }
 
@@ -596,6 +613,9 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Err(error) if error.exit_code() != 0 && argv_selects_daemon_capability() => {
+            return ExitCode::from(daemon_capability::invalid_invocation(error.to_string()));
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             return match error.print() {
@@ -683,6 +703,16 @@ fn argv_selects_change_set_capability() -> bool {
             .and_then(|argument| argument.into_string().ok())
             .as_deref(),
         Some("change-set")
+    )
+}
+
+fn argv_selects_daemon_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("daemon")
     )
 }
 
@@ -1328,6 +1358,12 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 std::io::stdin().lock(),
             ))
         }
+        Command::Daemon { command } => match command {
+            DaemonCommand::Serve {
+                root,
+                stdio_jsonl: _,
+            } => Ok(daemon_capability::serve(root)),
+        },
     }
 }
 
@@ -1643,6 +1679,7 @@ fn command_emits_json_errors(command: &Command) -> bool {
             ProtocolCommand::Contract { json } | ProtocolCommand::Check { json, .. } => *json,
         },
         Command::ChangeSet { .. } => false,
+        Command::Daemon { .. } => false,
     }
 }
 

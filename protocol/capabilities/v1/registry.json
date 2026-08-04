@@ -9,6 +9,12 @@
       "conformance_runner": "protocol/conformance/capabilities/change-set-0.1/run.mjs"
     },
     {
+      "name": "folderbase.daemon-stdio",
+      "version": "0.1.0",
+      "stability": "experimental",
+      "conformance_runner": "protocol/conformance/capabilities/daemon-stdio-0.1/run.mjs"
+    },
+    {
       "name": "folderbase.query-index",
       "version": "0.1.0",
       "stability": "experimental",

@@ -403,6 +403,11 @@ require_workflow_job_exact_line \
   "The Change Set capability contract suite must remain policy-pinned in CI."
 require_workflow_job_exact_line \
   "$workflow" \
+  "npm-cli" \
+  "        run: node --test protocol/conformance/capabilities/daemon-stdio-0.1/suite.test.mjs" \
+  "The daemon stdio capability contract suite must remain policy-pinned in CI."
+require_workflow_job_exact_line \
+  "$workflow" \
   "rust" \
   "    if: needs.plan.outputs.rust == 'true'" \
   "The Linux Core lane must remain change-aware."

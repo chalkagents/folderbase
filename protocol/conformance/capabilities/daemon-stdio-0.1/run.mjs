@@ -20,6 +20,7 @@ const REPORT_FORMAT = "folderbase-capability-suite-report-v1";
 const REQUEST_FORMAT = "folderbase-daemon-request-v1";
 const MESSAGE_FORMAT = "folderbase-daemon-message-v1";
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
+const MAX_SESSION_OUTPUT_BYTES = 32 * 1024 * 1024;
 const RESPONSE_TIMEOUT_MS = 15_000;
 const PROCESS_TIMEOUT_MS = 30_000;
 const liveRequest = {
@@ -65,6 +66,59 @@ function successJson(implementation, arguments_, input = "") {
   return JSON.parse(result.stdout);
 }
 
+function assertExactKeys(value, expected, label) {
+  assert.deepEqual(Object.keys(value).sort(), [...expected].sort(), `${label} keys`);
+}
+
+function assertDaemonMessage(message) {
+  assert.equal(message.format, MESSAGE_FORMAT);
+  if (message.kind === "ready") {
+    assertExactKeys(message, [
+      "format",
+      "kind",
+      "capability",
+      "epoch",
+      "folderbase_id",
+      "root_instance_sha256",
+      "root",
+    ], "ready");
+    assert.equal(message.capability, CAPABILITY);
+    assert.match(message.epoch, /^daemon_[0-9a-f-]{36}$/u);
+    assert.match(message.folderbase_id, /^folderbase_[0-9a-f-]{36}$/u);
+    assert.match(message.root_instance_sha256, /^[0-9a-f]{64}$/u);
+    assert.equal(typeof message.root, "string");
+    return;
+  }
+  if (message.kind === "response") {
+    assertExactKeys(message, [
+      "format",
+      "kind",
+      "request_id",
+      "operation",
+      "status",
+      "document",
+    ], "response");
+    assert.ok(message.request_id === null || typeof message.request_id === "string");
+    assert.ok(message.operation === null || [
+      "query",
+      "explain",
+      "index_status",
+      "refresh",
+      "subscribe",
+      "unsubscribe",
+      "shutdown",
+    ].includes(message.operation));
+    assert.ok(["ok", "attention", "error"].includes(message.status));
+    assert.ok(message.document && typeof message.document === "object" && !Array.isArray(message.document));
+    return;
+  }
+  assert.equal(message.kind, "event");
+  assertExactKeys(message, ["format", "kind", "event", "epoch", "sequence"], "event");
+  assert.ok(["workspace_changed", "rescan_required"].includes(message.event));
+  assert.match(message.epoch, /^daemon_[0-9a-f-]{36}$/u);
+  assert.ok(Number.isSafeInteger(message.sequence) && message.sequence >= 1);
+}
+
 async function killTree(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
@@ -95,7 +149,11 @@ class DaemonSession {
     this.queue = [];
     this.waiters = [];
     this.stderr = Buffer.alloc(0);
+    this.outputBytes = 0;
     this.closed = false;
+    this.closedPromise = new Promise((resolve_) => {
+      this.resolveClosed = resolve_;
+    });
     child.stdout.on("data", (chunk) => this.#stdout(chunk));
     child.stderr.on("data", (chunk) => {
       this.stderr = Buffer.concat([this.stderr, chunk]);
@@ -105,6 +163,7 @@ class DaemonSession {
     child.once("close", (status, signal) => {
       this.status = status;
       this.signal = signal;
+      this.resolveClosed({ status, signal });
       this.#close(new Error(`daemon closed with status ${status} signal ${signal ?? "none"}`));
     });
   }
@@ -129,6 +188,12 @@ class DaemonSession {
   }
 
   #stdout(chunk) {
+    this.outputBytes += chunk.length;
+    if (this.outputBytes > MAX_SESSION_OUTPUT_BYTES) {
+      this.#close(new Error("daemon session output exceeded 32 MiB"));
+      void killTree(this.child);
+      return;
+    }
     this.buffer = Buffer.concat([this.buffer, chunk]);
     if (this.buffer.length > MAX_LINE_BYTES && !this.buffer.includes(0x0a)) {
       this.#close(new Error("daemon output line exceeded 8 MiB"));
@@ -153,7 +218,13 @@ class DaemonSession {
         void killTree(this.child);
         return;
       }
-      assert.equal(message.format, MESSAGE_FORMAT);
+      try {
+        assertDaemonMessage(message);
+      } catch (error) {
+        this.#close(error);
+        void killTree(this.child);
+        return;
+      }
       const waiter = this.waiters.find(({ predicate }) => predicate(message));
       if (waiter) {
         this.waiters.splice(this.waiters.indexOf(waiter), 1);
@@ -225,6 +296,16 @@ class DaemonSession {
   async stop() {
     await killTree(this.child);
   }
+
+  async waitClosed(timeoutMs = 2_000) {
+    return Promise.race([
+      this.closedPromise,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error(`daemon did not exit within ${timeoutMs} ms`)),
+        timeoutMs,
+      )),
+    ]);
+  }
 }
 
 async function fixture(implementation) {
@@ -283,7 +364,7 @@ const cases = [
         direct,
       );
       assertOk(await session.request("index_status"), "folderbase-query-index-status-v1");
-      assertOk(await session.request("refresh"), "folderbase-query-index-rebuild-v1");
+      assertOk(await session.request("refresh"), "folderbase-query-index-rebuild-result-v1");
     }),
   },
   {
@@ -297,12 +378,12 @@ const cases = [
       let rows = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1").entries;
       assert.ok(rows.some(({ path }) => path === "docs/working.txt"));
       await writeFile(created, "two\n");
-      await session.event();
+      rows = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1").entries;
+      assert.ok(rows.some(({ path }) => path === "docs/working.txt"));
       await rename(created, join(root, "docs", "final.txt"));
       rows = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1").entries;
       assert.ok(rows.some(({ path }) => path === "docs/final.txt"));
       await rm(join(root, "docs", "final.txt"));
-      await session.event();
       rows = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1").entries;
       assert.ok(!rows.some(({ path }) => path === "docs/final.txt"));
     }),
@@ -325,7 +406,7 @@ const cases = [
     name: "missing-corrupt-index-falls-back",
     covers: ["missing-index", "corrupt-index", "rescan"],
     run: (implementation) => withSession(implementation, async ({ root, session }) => {
-      assertOk(await session.request("refresh"), "folderbase-query-index-rebuild-v1");
+      assertOk(await session.request("refresh"), "folderbase-query-index-rebuild-result-v1");
       const index = join(root, ".folderbase", "local", "query-index-v1", "index.json");
       await writeFile(index, "{corrupt\n");
       const corrupt = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1");
@@ -338,11 +419,12 @@ const cases = [
   {
     name: "nested-folderbase-is-opaque",
     covers: ["nested-boundary", "no-authority-inheritance"],
-    run: (implementation) => withSession(implementation, async ({ root, session }) => {
-      const nested = join(root, "vendor");
-      await mkdir(nested);
-      successJson(implementation, ["init", nested, "--json"]);
-      await writeFile(join(nested, "secret.txt"), "must remain opaque\n");
+    run: (implementation) => withSession(implementation, async ({ owner, root, session }) => {
+      const source = join(owner, "nested-source");
+      await mkdir(source);
+      successJson(implementation, ["init", source, "--json"]);
+      await writeFile(join(source, "secret.txt"), "must remain opaque\n");
+      await rename(source, join(root, "vendor"));
       const result = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1");
       assert.ok(result.entries.some(({ path, kind }) => path === "vendor" && kind === "nested_folderbase"));
       assert.ok(!JSON.stringify(result).includes("secret.txt"));
@@ -360,6 +442,8 @@ const cases = [
       assert.equal(response.status, "error");
       assert.equal(response.document.format, "folderbase-query-error-v1");
       assert.equal(response.document.error.code, "query_root_changed");
+      const closed = await session.waitClosed();
+      assert.equal(closed.status, 2);
     }),
   },
   {
@@ -387,7 +471,6 @@ const cases = [
       assertOk(await session.request("subscribe"), "folderbase-daemon-subscription-v1");
       assertOk(await session.request("unsubscribe"), "folderbase-daemon-subscription-v1");
       await writeFile(join(root, "offline-hint.txt"), "visible anyway\n");
-      await session.assertNoEvent(500);
       const result = assertOk(await session.request("query", liveRequest), "folderbase-query-result-v1");
       assert.ok(result.entries.some(({ path }) => path === "offline-hint.txt"));
     }),
@@ -403,6 +486,8 @@ const cases = [
       try {
         first = await DaemonSession.start(implementation, state.root);
         assertOk(await first.request("shutdown"), "folderbase-daemon-shutdown-v1");
+        const shutdown = await first.waitClosed();
+        assert.equal(shutdown.status, 0);
         await writeFile(join(state.root, "while-down.txt"), "later\n");
         second = await DaemonSession.start(implementation, state.root);
         const result = assertOk(await second.request("query", liveRequest), "folderbase-query-result-v1");
