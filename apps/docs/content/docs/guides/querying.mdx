@@ -1,13 +1,67 @@
 ---
 title: Query a Folderbase
-description: Run bounded metadata-first queries over live folders or exact historical Versions.
+description: Understand and use the unstable Beta metadata inventory capability for live folders and exact historical Versions.
 ---
 
-The experimental optional `folderbase.query-index@0.1.0` capability queries normal
-Folderbase contents without reading ordinary file bytes. It preserves all file
-types as metadata rows, treats nested Folderbases as opaque boundaries, and can
-select either the current filesystem observation or one exact historical
-Folderbase Version.
+> **Status: Unstable Beta.** `folderbase.query-index@0.1.0` is an optional
+> experimental capability, not part of Compatibility Contract v1 and not
+> required for Folderbase sync, Cloud storage, sharing, or ordinary agent
+> access. Discover it at runtime and pin the exact capability version before
+> integrating it.
+
+The name **Query** currently means a bounded, structured metadata inventory. It
+filters the files and historical records that Folderbase already knows about.
+It does not search inside files, execute SQL, traverse a knowledge graph, create
+embeddings, or ask a model to interpret content.
+
+## What Query does
+
+Query can select one current filesystem observation or one exact historical
+Folderbase Version, then filter its rows by:
+
+- exact path or component-aware path prefix;
+- filesystem kind: directory, regular file, symlink, or nested Folderbase;
+- logical byte range;
+- `live` or `deleted` lifecycle;
+- stable Knowledge Object ID; or
+- exact Object Version ID.
+
+Every ordinary format remains opaque. Markdown, repositories, PDFs, CSV files,
+SQLite databases, office documents, archives, videos, sparse 10 GiB files, and
+unknown formats are represented only by safe metadata. Query never opens,
+hashes, or searches their content.
+
+## Who it is for
+
+Query is primarily a machine integration surface for:
+
+- an App filtering a large Folderbase or displaying exact historical state;
+- an agent harness requesting a structured inventory before choosing files;
+- a remote workspace materializer inspecting identities and deleted records;
+- scripts and third-party applications that need deterministic paginated JSON;
+  and
+- independent Folderbase implementations proving the same metadata behavior.
+
+Humans normally use Query indirectly through an App. An agent working in an
+ordinary materialized folder should continue to use familiar tools such as
+`rg`, `grep`, `find`, Git, or a format-specific reader for content. Query adds
+Folderbase identity, history, boundary, and large-file metadata that those
+tools do not provide.
+
+## When not to use it
+
+Do not put Query in the critical path for:
+
+- observing and capturing local changes;
+- generating or transferring chunks;
+- publishing or fetching a Remote Head;
+- downloading and verifying Cloud bytes;
+- enforcing permissions or resolving a Live Folder share; or
+- listing a small ordinary workspace when `folderbase workspace list` is
+  sufficient.
+
+Cloud may use PostgreSQL internally, but that is unrelated to this local
+query/index capability.
 
 First confirm that the executable advertises the capability:
 

@@ -219,7 +219,12 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert.match(reference, /Exit `1`/u);
   assert.match(reference, /Exit `2`/u);
   assert.match(release, /Core 0\.6\.1 retains Compatibility Contract v1/u);
-  assert.match(cli, /\| `query` \| Experimental optional capability \|/u);
+  for (const page of [guide, reference, release, cli]) {
+    assert.match(page, /Unstable Beta/u);
+  }
+  assert.match(guide, /does not search inside files/u);
+  assert.match(guide, /required for Folderbase sync/u);
+  assert.match(cli, /\| `query` \| Unstable Beta optional capability \|/u);
   assert.match(conformance, /experimental query\/index profile/u);
 });
 

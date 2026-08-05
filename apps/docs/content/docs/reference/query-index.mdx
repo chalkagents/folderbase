@@ -1,6 +1,6 @@
 ---
 title: Query/index capability 0.1
-description: Stable commands, JSON documents, bounds, errors, and conformance for Folderbase metadata queries.
+description: Unstable Beta commands, JSON documents, bounds, errors, and conformance for Folderbase metadata inventory queries.
 ---
 
 `folderbase.query-index@0.1.0` is a separately advertised experimental capability. It
@@ -10,6 +10,15 @@ Folderbase CLI JSON v1. Integrations must discover it with:
 ```bash
 folderbase protocol contract --json
 ```
+
+> **Stability:** this is an Unstable Beta capability. The exact advertised
+> `0.1.0` process contract is conformance-tested, but future Folderbase releases
+> may replace it with a new capability version rather than extending
+> Compatibility Contract v1. Pin and test the exact version you consume.
+
+This capability performs metadata filtering only. It does not search file
+contents, execute SQL, query relationships, generate embeddings, or grant
+access. It is not a dependency of synchronization or Cloud durability.
 
 ## Process interface
 

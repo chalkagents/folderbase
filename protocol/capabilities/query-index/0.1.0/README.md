@@ -3,6 +3,12 @@
 This package is a separately advertised optional capability. It does not add a
 command to Compatibility Contract v1 or a definition to Folderbase CLI JSON v1.
 
+Product maturity: **Unstable Beta**. The machine-readable registry continues to
+use the protocol value `"stability": "experimental"`. Integrators must discover
+and pin this exact capability version. Query/index is a metadata-only inventory
+and filtering surface; it does not search file contents and is not required for
+sync, Cloud storage, sharing, or ordinary workspace access.
+
 The package entry in `capability.json` is deliberately the same closed shape
 accepted by the optional-capability registry introduced by ADR-0010. The
 post-0.5 reference CLI copies that exact entry into its registry only after

@@ -8,13 +8,13 @@ export function baseOptions(): BaseLayoutProps {
         <span className="fb-wordmark">
           <span className="fb-mark">FB</span>
           <span>{appName}</span>
-          <span className="fb-docs-label">DOCS</span>
+          <span className="fb-docs-label">BETA DOCS</span>
         </span>
       ),
     },
     githubUrl: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
     links: [
-      { text: 'v0.5', url: '/docs/releases/0.5' },
+      { text: 'v0.6.1', url: '/docs/releases/0.6.1' },
       { text: 'Folderbase.ai', url: 'https://folderbase.ai', external: true },
     ],
   };

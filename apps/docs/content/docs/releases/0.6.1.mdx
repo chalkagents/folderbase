@@ -1,12 +1,17 @@
 ---
 title: Folderbase Core 0.6.1
-description: Query, templates, Change Sets, daemon sessions, and public process adapters on the stable database core.
+description: Query, templates, Change Sets, daemon sessions, and public process adapters in the Folderbase Beta.
 ---
 
 Folderbase Core 0.6.1 completes the portable local database vertical: ordinary
 folders can be queried, expanded with guidance, checked out to agents, merged
 through Change Sets, and kept fresh through one root-pinned daemon. Every file
 type remains an ordinary file and Core remains the sole database authority.
+
+> **Product status: Beta.** Compatibility Contract v1 and capabilities marked
+> stable keep their named compatibility promises. Experimental capabilities,
+> especially Query/index 0.1, remain Unstable Beta and require discovery,
+> exact-version pinning, and conformance testing.
 
 > **Release note:** 0.6.1 is the first complete public 0.6 release. The
 > crates-only 0.6.0 publication was superseded before npm, GitHub binaries, or
@@ -28,7 +33,7 @@ The same Core is published as `folderbase-core` and `folderbase-cli` on
 crates.io, `@folderbase/cli` on npm, and `chalkagents/tap/folderbase` on
 Homebrew.
 
-## Experimental query and index capability
+## Unstable Beta query and index capability
 
 Builds advertise `folderbase.query-index@0.1.0` and provide:
 
@@ -39,6 +44,9 @@ Builds advertise `folderbase.query-index@0.1.0` and provide:
 - explicit status and rebuild commands for one disposable private index;
 - closed JSON success, attention, and error documents; and
 - a 28-case implementation-neutral public conformance suite.
+
+This is a structured metadata inventory, not file-content search, SQL, a graph
+query, or a sync/Cloud dependency.
 
 Read [Query a Folderbase](/docs/guides/querying) and the
 [query/index wire reference](/docs/reference/query-index).
