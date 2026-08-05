@@ -79,7 +79,9 @@ cargo install folderbase-cli --version 0.6.1 --locked
 Prebuilt macOS and Linux binaries and their closed `SHA256SUMS` record are
 available from [GitHub Releases](https://github.com/chalkagents/folderbase/releases/latest).
 Every channel runs the same released Core executable and Compatibility
-Contract.
+Contract. The exact tag, registry identities, checksums, and independent
+clean-install commands are recorded in the
+[v0.6.1 public distribution evidence](docs/verification/v0.6.1-public-distribution.md).
 
 ## Integrate an agent or application
 
