@@ -5,12 +5,17 @@ description: Install and operate the open folder database for AI agents.
 
 Folderbase turns an ordinary folder into a structured, versioned workspace that humans and agents can understand across sessions. Your files remain normal files. A small `.folderbase/` directory adds durable identity, protocol records, history, and policy.
 
+> **Beta status:** Folderbase is under active development. Compatibility
+> Contract v1 names the stable portable records and CLI behavior. Everything
+> else must be treated as Beta, and optional capabilities marked
+> **Experimental** are the most likely to change between releases.
+
 ## Start here
 
 <Cards>
   <Card title="Install Folderbase" href="/docs/getting-started/install" description="Choose npx, a native release binary, or Cargo." />
   <Card title="Five-minute quickstart" href="/docs/getting-started/quickstart" description="Inspect, preview, initialize, and validate a folder." />
-  <Card title="Query a Folderbase" href="/docs/guides/querying" description="Search live or historical metadata without reading ordinary file bytes." />
+  <Card title="Query metadata (Unstable Beta)" href="/docs/guides/querying" description="Filter live or historical file metadata without searching file contents." />
   <Card title="Keep an active session fresh" href="/docs/guides/daemon-sessions" description="Give an App or agent one root-pinned query session with bounded filesystem-change hints." />
   <Card title="Expand from a template" href="/docs/guides/templates" description="Preview and apply additive guidance without replacing existing work." />
   <Card title="Work through Change Sets" href="/docs/guides/change-sets" description="Give an agent a scoped ordinary folder and merge reviewable work safely." />

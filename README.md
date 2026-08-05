@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-d7ff3f" alt="Apache-2.0 license"></a>
+  <img src="https://img.shields.io/badge/status-Beta-17120e" alt="Folderbase Beta">
   <a href="https://github.com/chalkagents/folderbase/releases/latest"><img src="https://img.shields.io/github/v/release/chalkagents/folderbase?color=d7ff3f" alt="Latest GitHub release"></a>
   <a href="https://www.npmjs.com/package/@folderbase/cli"><img src="https://img.shields.io/npm/v/@folderbase/cli?color=d7ff3f&amp;label=npm" alt="npm package version"></a>
   <a href="https://www.npmjs.com/package/@folderbase/sdk"><img src="https://img.shields.io/npm/v/@folderbase/sdk?color=d7ff3f&amp;label=sdk" alt="TypeScript SDK version"></a>
@@ -23,6 +24,11 @@ Folderbase turns an ordinary folder into a structured, versioned workspace that
 humans and agents can understand and operate across sessions. Files remain
 normal files. A small `.folderbase/` directory adds the durable identity,
 protocol records, history, and policy needed to treat the folder as a database.
+
+> **Folderbase is in Beta.** The product, documentation, and optional
+> capabilities are still evolving. Compatibility Contract v1 remains the
+> deliberately stable integration boundary; features outside that named
+> contract must be discovered and pinned explicitly.
 
 Folderbase is the open database core beneath
 [Folderbase Cloud](https://folderbase.ai), in the same way that PostgreSQL is

@@ -12,7 +12,10 @@ folderbase --help
 folderbase protocol contract --json
 ```
 
-`protocol contract --json` advertises the stable machine contract. Human-readable `--help` can include additional experimental commands and must not be parsed as a compatibility surface.
+Folderbase is a Beta product. `protocol contract --json` advertises the named
+stable machine contract inside that Beta; human-readable `--help` can include
+additional experimental commands and must not be parsed as a compatibility
+surface.
 
 ## Primary command families
 
@@ -25,9 +28,9 @@ folderbase protocol contract --json
 | `validate` | Stable JSON v1 | Check protocol records and report diagnostics. |
 | `workspace` | Stable JSON v1 | List, read, and save bounded UTF-8 workspace files. |
 | `protocol` | Stable JSON v1 | Advertise the contract or check portable records. |
-| `query` | Experimental optional capability | Run or explain a bounded metadata query. Requires `folderbase.query-index@0.1.0`. |
-| `index` | Experimental optional capability | Inspect or explicitly rebuild the disposable private query index. Requires `folderbase.query-index@0.1.0`. |
-| `daemon` | Experimental optional capability | Serve one root-pinned query/index session over stdio JSON Lines. Requires `folderbase.daemon-stdio@0.1.0`. |
+| `query` | Unstable Beta optional capability | Filter a bounded metadata inventory; it does not search file contents. Requires `folderbase.query-index@0.1.0`. |
+| `index` | Unstable Beta optional capability | Inspect or explicitly rebuild the disposable private metadata index. Requires `folderbase.query-index@0.1.0`. |
+| `daemon` | Experimental Beta optional capability | Serve one root-pinned query/index session over stdio JSON Lines. Requires `folderbase.daemon-stdio@0.1.0`. |
 | `template` | Stable optional capability | Preview or apply one exact additive Template 0.2 package. Requires `folderbase.template-expansion@0.1.0`. |
 | `change-set` | Stable optional capability | Materialize scoped ordinary folders, propose immutable work, assess conflicts, and apply or replay it. Requires `folderbase.change-set@0.1.0`. |
 | `migrate` | Experimental JSON | Analyze and stage reviewed restructuring. |
@@ -41,6 +44,8 @@ Use `--json` on supported commands. Successful JSON output is written to stdout.
 See [CLI JSON v1](/docs/reference/cli-json-v1) for the compatibility rules.
 Query and index commands use their own closed wire contract; see the
 [query/index reference](/docs/reference/query-index).
+They are optional and are not required by sync, Cloud durability, sharing, or
+ordinary agent workspace access.
 Long-lived App and agent integrations should also read the
 [daemon stdio reference](/docs/reference/daemon-stdio).
 Template plan/apply uses a separate stable optional contract; see the
