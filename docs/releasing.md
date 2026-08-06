@@ -12,8 +12,8 @@ the dependency-ordered publication and clean public verification:
    versioned `@folderbase/sdk`, and the Homebrew formula; and
 5. require the workflow's clean macOS public-install job to pass.
 
-The prior stable baseline is documented in the
-[v0.6.1 public distribution evidence](verification/v0.6.1-public-distribution.md).
+The current stable Core distribution is documented in the
+[v0.7.1 public distribution evidence](verification/v0.7.1-public-distribution.md).
 Core 0.7.1 is the release closure for exact root reconstruction. Core 0.7.0 is
 a superseded crate-only publication: its byte-identical pre-squash source tree
 carried different embedded Cargo VCS metadata from the canonical tag.
