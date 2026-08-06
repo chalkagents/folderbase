@@ -10,7 +10,9 @@ repository_root=$(
   pwd
 )
 package_directory=${1:-"$repository_root/target/package"}
-extraction_root=$(mktemp -d)
+temporary_parent=${TMPDIR:-/tmp}
+mkdir -p "$temporary_parent"
+extraction_root=$(mktemp -d "$temporary_parent/folderbase-extracted-packages.XXXXXX")
 trap 'rm -R "$extraction_root"' EXIT
 
 resolve_archive() {
