@@ -1,6 +1,6 @@
 # Root reconstruction capability implementation plan
 
-Status: blocked on founder acceptance of ADR-0016's exact public contract
+Status: Ready; ADR-0016 accepted 2026-08-06
 
 ## Outcome
 
@@ -93,4 +93,3 @@ scripts/test-package-install.sh
 GitHub-hosted Actions are optional evidence while account quota is unavailable;
 the same path-scoped gates must pass locally and be recorded with exact commit
 and fixture hashes before merge.
-

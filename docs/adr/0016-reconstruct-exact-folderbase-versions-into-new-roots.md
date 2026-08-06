@@ -2,12 +2,17 @@
 
 ## Status
 
-Proposed
+Accepted
 
-Founder confirmation: pending for the exact public capability and process
-contract below. The product direction and no-clobber boundary were previously
-accepted in Folderbase Platform ADR-0026, but that decision did not freeze this
-public Core interface.
+Proposed: 2026-08-06
+
+Accepted: 2026-08-06
+
+Founder confirmation: accept the separate
+`folderbase.root-reconstruction@0.1.0` capability and the exact package,
+process, no-clobber, restart, completion-evidence, and retained-Tombstone
+closure contract below. Root reconstruction remains distinct from scoped
+Projection Checkout and single-Object-Version restore.
 
 ## Context
 
@@ -247,4 +252,3 @@ policy, File Provider, automatic reorganization, or Cloud Agent scheduling.
 - Directory-level no-replace publication and restart recovery add real
   implementation work, but prevent a partially restored tree from being
   mistaken for an agent-ready Folderbase.
-
