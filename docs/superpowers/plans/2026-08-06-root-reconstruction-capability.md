@@ -1,6 +1,6 @@
 # Root reconstruction capability implementation plan
 
-Status: R1–R4 merged; Core 0.7.0 release closure in progress; ADR-0016 accepted 2026-08-06
+Status: R1–R4 merged; Core 0.7.1 release closure in progress; ADR-0016 accepted 2026-08-06
 
 ## Outcome
 

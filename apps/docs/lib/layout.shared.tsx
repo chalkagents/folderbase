@@ -14,7 +14,7 @@ export function baseOptions(): BaseLayoutProps {
     },
     githubUrl: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
     links: [
-      { text: 'v0.7.0', url: '/docs/releases/0.7.0' },
+      { text: 'v0.7.1', url: '/docs/releases/0.7.1' },
       { text: 'Folderbase.ai', url: 'https://folderbase.ai', external: true },
     ],
   };

@@ -544,11 +544,13 @@ immutable_script="scripts/release/require-immutable-releases.sh"
 decision_script="scripts/release/decide-publication-state.sh"
 publication_script="scripts/release/publish-github-release.sh"
 crates_script="scripts/release/publish-crates.sh"
+canonical_tag_script="scripts/release/assert-canonical-tag.sh"
 homebrew_script="scripts/release/publish-homebrew-formula.sh"
 require_release_script "$immutable_script"
 require_release_script "$decision_script"
 require_release_script "$publication_script"
 require_release_script "$crates_script"
+require_release_script "$canonical_tag_script"
 require_release_script "$homebrew_script"
 
 require_release_step_exact_run \
@@ -791,7 +793,10 @@ require_sealed_release_control \
   "7d3682901f38b1fba7afe066ed479cd41bb4279de0ad56872c9d7f13ca8cd643"
 require_sealed_release_control \
   "$crates_script" \
-  "90736b71ca8ca5fdb67b87ced925532cefd45f6dfcbcf664eb0a8db442816d50"
+  "51b65d7a9ad21550fcd296cc79e49d181db5ffd6d08098d89987094a61a32c6a"
+require_sealed_release_control \
+  "$canonical_tag_script" \
+  "baf8b7d89a060468533d9f93e7663ac37ca8801ab203df5d763ed161fa09ae9c"
 require_sealed_release_control \
   "$homebrew_script" \
   "dc4714e3ec712ea0ccfdbc23670588d0b3da5560bc5f9b58d84df90f877ea3b8"

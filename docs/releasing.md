@@ -14,7 +14,14 @@ the dependency-ordered publication and clean public verification:
 
 The prior stable baseline is documented in the
 [v0.6.1 public distribution evidence](verification/v0.6.1-public-distribution.md).
-Core 0.7.0 is the next release closure for exact root reconstruction.
+Core 0.7.1 is the release closure for exact root reconstruction. Core 0.7.0 is
+a superseded crate-only publication: its byte-identical pre-squash source tree
+carried different embedded Cargo VCS metadata from the canonical tag.
+
+Never manually publish a crate from a branch commit, even when its tree matches
+the release tag. Cargo includes `.cargo_vcs_info.json` in the archive, so the
+commit identity changes the immutable registry checksum. Manual recovery must
+check out the exact canonical tag before packaging or publishing.
 
 The first npm publication requires the package owner to claim the package and
 configure this repository's `release-cli.yml` trusted publisher. Later npm

@@ -103,22 +103,31 @@ test("published docs describe the released native 0.6 contract", () => {
   assert.doesNotMatch(allDocs, /--help-json/);
 });
 
-test("install docs cover every verified 0.7 distribution channel", () => {
+test("install docs cover every verified 0.7.1 distribution channel", () => {
   const install = read("apps/docs/content/docs/getting-started/install.mdx");
-  const release = read("apps/docs/content/docs/releases/0.7.0.mdx");
+  const release = read("apps/docs/content/docs/releases/0.7.1.mdx");
 
   for (const page of [install, release]) {
-    assert.match(page, /npx --yes @folderbase\/cli@0\.7\.0 --version/u);
+    assert.match(page, /npx --yes @folderbase\/cli@0\.7\.1 --version/u);
     assert.match(
       page,
-      /cargo install folderbase-cli --version 0\.7\.0 --locked/u,
+      /cargo install folderbase-cli --version 0\.7\.1 --locked/u,
     );
     assert.match(page, /brew install chalkagents\/tap\/folderbase/u);
     assert.match(
       page,
-      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.7\.0/u,
+      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.7\.1/u,
     );
   }
+});
+
+test("the incomplete 0.7.0 publication is visibly superseded", () => {
+  const release = read("apps/docs/content/docs/releases/0.7.0.mdx");
+
+  assert.match(release, /Do not install or integrate Core 0\.7\.0/u);
+  assert.match(release, /\.cargo_vcs_info\.json/u);
+  assert.match(release, /Core 0\.7\.1 supersedes 0\.7\.0/u);
+  assert.doesNotMatch(release, /npx --yes @folderbase\/cli@0\.7\.0/u);
 });
 
 test("released templates, local versions, and public conformance have runnable guides", () => {
@@ -197,6 +206,7 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert(guidesMeta.pages.includes("querying"));
   assert(referenceMeta.pages.includes("query-index"));
   assert(releasesMeta.pages.includes("next"));
+  assert(releasesMeta.pages.includes("0.7.1"));
   assert(releasesMeta.pages.includes("0.7.0"));
   assert(releasesMeta.pages.includes("0.6.1"));
 

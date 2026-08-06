@@ -37,10 +37,16 @@ const publicationScript = join(
   "release",
   "publish-github-release.sh",
 );
+const canonicalTagScript = join(
+  repositoryRoot,
+  "scripts",
+  "release",
+  "assert-canonical-tag.sh",
+);
 
-function runScript(script, { cwd = repositoryRoot, env = {} } = {}) {
+function runScript(script, { args = [], cwd = repositoryRoot, env = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(script, {
+    const child = spawn(script, args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
@@ -59,6 +65,68 @@ function runScript(script, { cwd = repositoryRoot, env = {} } = {}) {
     );
   });
 }
+
+test("crate publication requires the exact clean canonical tag commit", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-canonical-tag-"));
+  try {
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "user.name", "Folderbase Test"],
+      ["config", "user.email", "folderbase@example.invalid"],
+    ]) {
+      const result = await runScript("git", { args, cwd: temporaryRoot });
+      assert.equal(result.code, 0, result.stderr);
+    }
+    await writeFile(join(temporaryRoot, "release.txt"), "canonical\n");
+    for (const args of [
+      ["add", "release.txt"],
+      ["commit", "--quiet", "-m", "release"],
+      ["tag", "-a", "v0.7.1", "-m", "Folderbase Core v0.7.1"],
+    ]) {
+      const result = await runScript("git", { args, cwd: temporaryRoot });
+      assert.equal(result.code, 0, result.stderr);
+    }
+
+    const canonical = await runScript(canonicalTagScript, {
+      args: ["0.7.1"],
+      cwd: temporaryRoot,
+      env: { RELEASE_TAG: "v0.7.1" },
+    });
+    assert.equal(canonical.code, 0, canonical.stderr);
+
+    await writeFile(join(temporaryRoot, "release.txt"), "dirty\n");
+    const dirty = await runScript(canonicalTagScript, {
+      args: ["0.7.1"],
+      cwd: temporaryRoot,
+      env: { RELEASE_TAG: "v0.7.1" },
+    });
+    assert.notEqual(dirty.code, 0);
+    assert.match(dirty.stderr, /working tree must be clean/u);
+
+    let result = await runScript("git", {
+      args: ["restore", "release.txt"],
+      cwd: temporaryRoot,
+    });
+    assert.equal(result.code, 0, result.stderr);
+    await writeFile(join(temporaryRoot, "later.txt"), "same product tree, later commit\n");
+    for (const args of [
+      ["add", "later.txt"],
+      ["commit", "--quiet", "-m", "post-tag"],
+    ]) {
+      result = await runScript("git", { args, cwd: temporaryRoot });
+      assert.equal(result.code, 0, result.stderr);
+    }
+    const postTag = await runScript(canonicalTagScript, {
+      args: ["0.7.1"],
+      cwd: temporaryRoot,
+      env: { RELEASE_TAG: "v0.7.1" },
+    });
+    assert.notEqual(postTag.code, 0);
+    assert.match(postTag.stderr, /HEAD must equal the canonical release tag/u);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
 
 async function writeExecutable(path, source) {
   await writeFile(path, source);
@@ -148,7 +216,7 @@ case "$*" in
   "pack --dry-run --json")
     printf '%s\n' '[{"integrity":"sha512-local"}]'
     ;;
-  "view @folderbase/cli@0.7.0 version dist.integrity --json")
+  "view @folderbase/cli@0.7.1 version dist.integrity --json")
     printf '%s\n' 'npm error code E404' >&2
     exit 1
     ;;

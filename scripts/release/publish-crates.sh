@@ -9,6 +9,7 @@ workspace_version="$(
   cargo metadata --format-version 1 --no-deps |
     jq -r '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace package versions differ") end'
 )"
+scripts/release/assert-canonical-tag.sh "$workspace_version"
 target_directory="${CARGO_TARGET_DIR:-$repository_root/target}"
 registry_user_agent="folderbase-release-workflow/1.0 (https://github.com/chalkagents/folderbase)"
 temporary_root="$(mktemp -d)"
