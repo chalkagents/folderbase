@@ -9,7 +9,9 @@ repository_root=$(
   CDPATH= cd -- "$script_directory/.." >/dev/null 2>&1
   pwd
 )
-temporary_root=$(mktemp -d)
+temporary_parent=${TMPDIR:-/tmp}
+mkdir -p "$temporary_parent"
+temporary_root=$(mktemp -d "$temporary_parent/folderbase-package-sensitivity.XXXXXX")
 trap 'rm -R "$temporary_root"' EXIT
 
 package_directory=${1:-"$temporary_root/package"}

@@ -29,6 +29,10 @@ const queryCapabilityUrl = new URL(
   "../../protocol/capabilities/query-index/0.1.0/capability.json",
   import.meta.url,
 );
+const rootReconstructionCapabilityUrl = new URL(
+  "../../protocol/capabilities/root-reconstruction/0.1.0/capability.json",
+  import.meta.url,
+);
 const templateCapabilityUrl = new URL(
   "../../protocol/capabilities/template-expansion/0.1.0/capability.json",
   import.meta.url,
@@ -79,18 +83,25 @@ test("optional capabilities do not expand Compatibility Contract v1's minimum", 
   assert.equal(registry.format, "folderbase-capability-registry-v1");
 });
 
-test("the public capability registry is exact, deterministic, and embedded unchanged", async () => {
-  const [registry, embeddedRegistry, changeSetCapability, daemonCapability, queryCapability, templateCapability, schema] = await Promise.all([
+test("the public and embedded capability registries are exact after advertised profiles turn GREEN", async () => {
+  const [registry, embeddedRegistry, changeSetCapability, daemonCapability, queryCapability, rootReconstructionCapability, templateCapability, schema] = await Promise.all([
     load(registryUrl),
     load(embeddedRegistryUrl),
     load(changeSetCapabilityUrl),
     load(daemonCapabilityUrl),
     load(queryCapabilityUrl),
+    load(rootReconstructionCapabilityUrl),
     load(templateCapabilityUrl),
     load(registrySchemaUrl),
   ]);
 
   assert.deepEqual(embeddedRegistry, registry);
+  assert.equal(
+    embeddedRegistry.capabilities.some(
+      ({ name }) => name === "folderbase.root-reconstruction",
+    ),
+    true,
+  );
   assert.equal(
     schema.$id,
     "https://folderbase.ai/protocol/capabilities/1/registry.schema.json",
@@ -121,6 +132,11 @@ test("the public capability registry is exact, deterministic, and embedded uncha
       stability: "experimental",
     },
     {
+      name: "folderbase.root-reconstruction",
+      version: "0.1.0",
+      stability: "stable",
+    },
+    {
       name: "folderbase.template-expansion",
       version: "0.1.0",
       stability: "stable",
@@ -146,6 +162,10 @@ test("the public capability registry is exact, deterministic, and embedded uncha
   assert.deepEqual(
     registry.capabilities.find(({ name }) => name === "folderbase.query-index"),
     queryCapability,
+  );
+  assert.deepEqual(
+    registry.capabilities.find(({ name }) => name === "folderbase.root-reconstruction"),
+    rootReconstructionCapability,
   );
   assert.deepEqual(
     registry.capabilities.find(({ name }) => name === "folderbase.template-expansion"),

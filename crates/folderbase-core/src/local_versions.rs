@@ -44,6 +44,7 @@ const HISTORY_TRANSFER_INTENTS_DIRECTORY: &str = ".folderbase/history-transfers/
 const HISTORY_TRANSFER_OUTGOING_DIRECTORY: &str = ".folderbase/history-transfers/outgoing";
 const HISTORY_TRANSFER_INCOMING_DIRECTORY: &str = ".folderbase/history-transfers/incoming";
 const HISTORY_TRANSFER_STAGING_DIRECTORY: &str = ".folderbase/history-transfers/staging";
+const VERSION_EXECUTABLE_FIELD: &str = "executable";
 
 /// A stable object identity that does not depend on the object's current path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -325,6 +326,8 @@ struct PendingRestore {
     version_id: VersionId,
     destination: String,
     content: ContentDigest,
+    #[serde(default)]
+    executable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,6 +386,35 @@ pub struct LocalVersionStore {
 }
 
 impl LocalVersionStore {
+    /// Construct the diagnostic half of a store whose filesystem authority is
+    /// supplied independently by `FolderbaseState`.
+    pub(crate) fn for_retained_root(display_root: &Path) -> Self {
+        Self {
+            root: display_root.to_path_buf(),
+        }
+    }
+
+    /// Prepare the ordinary local version-store directories through an
+    /// already-retained Folderbase state capability.
+    ///
+    /// Reconstruction uses this before its root is visible. Recovery remains
+    /// the responsibility of `ensure_store_layout` once a root is published.
+    pub(crate) fn prepare_store_layout_in(state: &FolderbaseState) -> Result<()> {
+        for relative in [
+            OBJECTS_DIRECTORY,
+            VERSION_RECORDS_DIRECTORY,
+            BLOBS_DIRECTORY,
+            ".folderbase/journal",
+            JOURNAL_QUARANTINE_DIRECTORY,
+            TRANSACTIONS_DIRECTORY,
+            LOCKS_DIRECTORY,
+            PATH_IDENTITIES_DIRECTORY,
+        ] {
+            state.ensure_private_dir(Path::new(relative))?;
+        }
+        Ok(())
+    }
+
     /// Open a store rooted at an existing directory.
     ///
     /// Storage directories are created lazily by the first accepted write.
@@ -961,6 +993,7 @@ impl LocalVersionStore {
         let version = self.read_version(version_id)?;
         let blob_path = self.blob_path(&version.content.digest);
         verify_file_content(&blob_path, &version.content)?;
+        let executable = version_executable(&version, &self.version_record_path(version_id))?;
 
         let (_, destination) = self.prepare_new_destination(&destination)?;
         let path_string = relative_path_to_string(&destination)?;
@@ -975,6 +1008,7 @@ impl LocalVersionStore {
                 version_id: version.id.clone(),
                 destination: path_string.clone(),
                 content: version.content.clone(),
+                executable,
             }),
             replacement: None,
             events: vec![ObjectJournalEvent {
@@ -1101,7 +1135,8 @@ impl LocalVersionStore {
                 "version ID does not match its filename",
             ));
         }
-        validate_content_digest(&record.content, path)
+        validate_content_digest(&record.content, path)?;
+        version_executable(record, path).map(drop)
     }
 
     pub(crate) fn validate_chunk_transfer_membership(
@@ -1549,12 +1584,19 @@ impl LocalVersionStore {
 
         match fs::symlink_metadata(&destination_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                verify_file_content(&destination_path, &restore.content)
+                verify_file_content(&destination_path, &restore.content)?;
+                set_and_verify_executable(&destination_path, restore.executable)
             }
             Ok(_) => Err(FolderbaseError::WouldOverwrite(destination_path)),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                copy_verified_new(&blob_path, &destination_path, &restore.content)?;
-                verify_file_content(&destination_path, &restore.content)
+                copy_verified_new_with_executable(
+                    &blob_path,
+                    &destination_path,
+                    &restore.content,
+                    restore.executable,
+                )?;
+                verify_file_content(&destination_path, &restore.content)?;
+                verify_executable(&destination_path, restore.executable)
             }
             Err(source) => Err(FolderbaseError::io(destination_path, source)),
         }
@@ -3262,6 +3304,28 @@ fn verify_file_content(path: &Path, expected: &ContentDigest) -> Result<()> {
     Ok(())
 }
 
+fn version_executable(record: &LocalVersionRecord, path: &Path) -> Result<bool> {
+    match record.extensions.get(VERSION_EXECUTABLE_FIELD) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(invalid_record(
+            path,
+            "Object Version executable fidelity is not a boolean",
+        )),
+        None => Ok(false),
+    }
+}
+
+fn copy_verified_new_with_executable(
+    source: &Path,
+    destination: &Path,
+    expected: &ContentDigest,
+    executable: bool,
+) -> Result<()> {
+    copy_verified_new_with_staged_file(source, destination, expected, |staged, staged_path| {
+        set_file_executable(staged, staged_path, executable)
+    })
+}
+
 fn hash_reader(mut reader: impl Read, path: &Path) -> Result<ContentDigest> {
     let mut hasher = Sha256::new();
     let mut bytes = 0_u64;
@@ -3286,6 +3350,15 @@ fn hash_reader(mut reader: impl Read, path: &Path) -> Result<ContentDigest> {
 }
 
 fn copy_verified_new(source: &Path, destination: &Path, expected: &ContentDigest) -> Result<()> {
+    copy_verified_new_with_staged_file(source, destination, expected, |_, _| Ok(()))
+}
+
+fn copy_verified_new_with_staged_file(
+    source: &Path,
+    destination: &Path,
+    expected: &ContentDigest,
+    prepare: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<()> {
     let parent = destination
         .parent()
         .ok_or_else(|| FolderbaseError::UnsafePath(destination.to_path_buf()))?;
@@ -3312,6 +3385,7 @@ fn copy_verified_new(source: &Path, destination: &Path, expected: &ContentDigest
                 .checked_add(read as u64)
                 .ok_or_else(|| invalid_record(source, "content length exceeds supported range"))?;
         }
+        prepare(&staged, &staged_path)?;
         staged
             .sync_all()
             .map_err(|source_error| FolderbaseError::io(&staged_path, source_error))?;
@@ -3346,6 +3420,54 @@ fn copy_verified_new(source: &Path, destination: &Path, expected: &ContentDigest
             }
         }
     }
+}
+
+fn set_and_verify_executable(path: &Path, executable: bool) -> Result<()> {
+    let file = open_existing_nofollow(path)?;
+    set_file_executable(&file, path, executable)?;
+    file.sync_all()
+        .map_err(|source| FolderbaseError::io(path, source))?;
+    verify_executable(path, executable)
+}
+
+#[cfg(unix)]
+fn set_file_executable(file: &File, path: &Path, executable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = if executable { 0o700 } else { 0o600 };
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|source| FolderbaseError::io(path, source))
+}
+
+#[cfg(not(unix))]
+fn set_file_executable(_file: &File, _path: &Path, _executable: bool) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_executable(path: &Path, executable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let file = open_existing_nofollow(path)?;
+    let observed = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(path, source))?
+        .permissions()
+        .mode()
+        & 0o111
+        != 0;
+    if observed != executable {
+        return Err(invalid_record(
+            path,
+            "restored executable fidelity does not match its Object Version",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_executable(_path: &Path, _executable: bool) -> Result<()> {
+    Ok(())
 }
 
 fn replace_verified(

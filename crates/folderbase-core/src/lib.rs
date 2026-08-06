@@ -31,6 +31,7 @@ mod protocol_upgrade;
 mod query;
 mod reorganization;
 mod root_attestation;
+pub mod root_reconstruction;
 mod sharing;
 mod sync;
 mod template;

@@ -68,6 +68,10 @@ const RESTORE_COMPLETION_FORMAT_V2: &str = "folderbase-restore-completion-v2";
 const FOLDERBASE_VERSIONS_DIRECTORY: &str = ".folderbase/versions/folderbase";
 const CAPTURE_IDENTITIES_DIRECTORY: &str = ".folderbase/local/capture-identities";
 const LOCAL_HEAD_PATH: &str = ".folderbase/local/head.json";
+const RECONSTRUCTED_TOMBSTONE_ASSOCIATIONS_DIRECTORY: &str =
+    ".folderbase/local/root-reconstruction/tombstone-associations";
+const RECONSTRUCTED_TOMBSTONE_ASSOCIATION_FORMAT_V1: &str =
+    "folderbase-reconstructed-tombstone-association-v1";
 const IO_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_CAPTURE_TRANSACTION_BYTES: u64 = MAX_ENCODED_VERSION_BYTES;
 
@@ -88,6 +92,45 @@ pub struct RestoredTombstone {
     version_id: String,
     version_sha256: String,
     created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReconstructedTombstoneAssociation {
+    pub(crate) format: String,
+    pub(crate) path: String,
+    pub(crate) object_id: String,
+    pub(crate) object_version_id: String,
+    pub(crate) content_sha256: String,
+    pub(crate) bytes: u64,
+    pub(crate) executable: bool,
+}
+
+pub(crate) struct ReconstructedHistoryClosure {
+    pub(crate) object_versions: Vec<LocalVersionRecord>,
+    pub(crate) object_projections: Vec<LocalObjectRecord>,
+    pub(crate) tombstone_associations: Vec<ReconstructedTombstoneAssociation>,
+}
+
+impl ReconstructedTombstoneAssociation {
+    pub(crate) fn for_tombstone(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        object_version_id: impl Into<String>,
+        content_sha256: impl Into<String>,
+        bytes: u64,
+        executable: bool,
+    ) -> Self {
+        Self {
+            format: RECONSTRUCTED_TOMBSTONE_ASSOCIATION_FORMAT_V1.to_owned(),
+            path: path.into(),
+            object_id: object_id.into(),
+            object_version_id: object_version_id.into(),
+            content_sha256: content_sha256.into(),
+            bytes,
+            executable,
+        }
+    }
 }
 
 impl RestoredTombstone {
@@ -1579,6 +1622,18 @@ fn find_restore_binding_with_limit(
     ensure_restore_ancestry_acyclic(&adjacency)?;
     if !candidates.is_empty() {
         return unique_restore_candidate(candidates, tombstone);
+    }
+    if let Some(association) =
+        read_reconstructed_tombstone_association(local, state, tombstone, expected_version)?
+    {
+        return Ok(PathBinding::regular_file_from_verified_producer(
+            tombstone.path(),
+            tombstone.object_id(),
+            expected_version,
+            association.content_sha256,
+            association.bytes,
+            association.executable,
+        ));
     }
     Err(FolderbaseCaptureError::InvalidRestoreAncestry(format!(
         "no verified live ancestor preserves exact fidelity for {}",
@@ -4216,6 +4271,193 @@ fn install_folderbase_version(
     Ok(())
 }
 
+/// Install one reconstructed history closure in the same order used by
+/// capture sealing: immutable Object Versions, immutable Folderbase Version,
+/// verified version-derived Local Head, then mutable Object projections.
+///
+/// The caller owns package-byte verification and the reconstruction journal;
+/// this helper owns the invariant that no Local Head can name incomplete
+/// history.
+pub(crate) fn install_reconstructed_history(
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    root_attestation: &FolderbaseRootAttestation,
+    version: &FolderbaseVersion,
+    expected_version_sha256: &str,
+    history: &ReconstructedHistoryClosure,
+) -> Result<(), FolderbaseCaptureError> {
+    prepare_reconstructed_history(state)?;
+    for record in &history.object_versions {
+        local.install_or_verify_version_record_in(state, record)?;
+        local.verify_capture_version_record_in(state, &record.id, &record.content)?;
+    }
+    for association in &history.tombstone_associations {
+        install_reconstructed_tombstone_association(state, association)?;
+    }
+
+    install_folderbase_version(state, version, expected_version_sha256)?;
+    verify_version_references(local, state, version)?;
+
+    let target_head = LocalHeadRecord {
+        format: "folderbase-local-head-v2".to_owned(),
+        folderbase_id: root_attestation.folderbase_id.clone(),
+        root_instance_sha256: root_attestation.root_instance_sha256.clone(),
+        version_id: version.version_id().to_owned(),
+        version_sha256: expected_version_sha256.to_owned(),
+        authority: LocalHeadAuthority::VersionDerivedV1 {
+            sha256: version_derived_local_head_sha256(
+                &root_attestation.folderbase_id,
+                &root_attestation.root_instance_sha256,
+                version.version_id(),
+                expected_version_sha256,
+            )?,
+        },
+    };
+    match read_head_record(state)? {
+        None => state.replace(Path::new(LOCAL_HEAD_PATH), &json_bytes(&target_head)?)?,
+        Some(existing) if existing == target_head => {}
+        Some(_) => {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                "reconstructed Local Head conflicts with retained staged history".to_owned(),
+            ));
+        }
+    }
+    if read_head_record(state)?.as_ref() != Some(&target_head) {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "reconstructed Local Head did not verify".to_owned(),
+        ));
+    }
+    verify_version_references(local, state, version)?;
+
+    for projection in &history.object_projections {
+        local.write_capture_object_projection_in(state, projection)?;
+    }
+    Ok(())
+}
+
+/// Prepare the one retained state layout required before reconstructed object
+/// bytes or history records can be installed. Ordering is significant because
+/// every intermediate directory is created and durably verified before its
+/// children.
+pub(crate) fn prepare_reconstructed_history(
+    state: &FolderbaseState,
+) -> Result<(), FolderbaseCaptureError> {
+    LocalVersionStore::prepare_store_layout_in(state)?;
+    for relative in [
+        ".folderbase/versions",
+        ".folderbase/versions/blobs",
+        FOLDERBASE_VERSIONS_DIRECTORY,
+        ".folderbase/local",
+        CAPTURE_TRANSACTIONS_DIRECTORY,
+        CAPTURE_IDENTITIES_DIRECTORY,
+        ".folderbase/local/root-reconstruction",
+        RECONSTRUCTED_TOMBSTONE_ASSOCIATIONS_DIRECTORY,
+    ] {
+        state.ensure_private_dir(Path::new(relative))?;
+    }
+    Ok(())
+}
+
+fn reconstructed_tombstone_association_relative_path(
+    path: &str,
+    object_id: &str,
+    version_id: &str,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-reconstructed-tombstone-association-path-v1\0");
+    digest.update(path.as_bytes());
+    digest.update(b"\0");
+    digest.update(object_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(version_id.as_bytes());
+    Path::new(RECONSTRUCTED_TOMBSTONE_ASSOCIATIONS_DIRECTORY)
+        .join(format!("{:x}.json", digest.finalize()))
+}
+
+fn install_reconstructed_tombstone_association(
+    state: &FolderbaseState,
+    association: &ReconstructedTombstoneAssociation,
+) -> Result<(), FolderbaseCaptureError> {
+    validate_capture_path(&association.path)?;
+    let object_id = ObjectId::parse(association.object_id.clone())?;
+    let version_id = VersionId::parse(association.object_version_id.clone())?;
+    if association.format != RECONSTRUCTED_TOMBSTONE_ASSOCIATION_FORMAT_V1
+        || !is_lowercase_sha256(&association.content_sha256)
+    {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+            "reconstructed Tombstone association is invalid".to_owned(),
+        ));
+    }
+    let relative = reconstructed_tombstone_association_relative_path(
+        &association.path,
+        object_id.as_str(),
+        version_id.as_str(),
+    );
+    let encoded = json_bytes(association)?;
+    match state.publish_new(&relative, &encoded) {
+        Ok(()) => {}
+        Err(FolderbaseError::WouldOverwrite(_)) => {
+            if state
+                .read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)?
+                .as_deref()
+                != Some(encoded.as_slice())
+            {
+                return Err(FolderbaseCaptureError::InvalidCaptureTransaction(
+                    "reconstructed Tombstone association conflicts with retained state".to_owned(),
+                ));
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn read_reconstructed_tombstone_association(
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    tombstone: &Tombstone,
+    expected_version: &str,
+) -> Result<Option<ReconstructedTombstoneAssociation>, FolderbaseCaptureError> {
+    let version_id = VersionId::parse(expected_version.to_owned())?;
+    let relative = reconstructed_tombstone_association_relative_path(
+        tombstone.path(),
+        tombstone.object_id(),
+        expected_version,
+    );
+    let Some(encoded) = state.read_bounded(&relative, MAX_ENCODED_VERSION_BYTES)? else {
+        return Ok(None);
+    };
+    let association: ReconstructedTombstoneAssociation =
+        serde_json::from_slice(&encoded).map_err(|source| {
+            FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                "reconstructed Tombstone association JSON is invalid: {source}"
+            ))
+        })?;
+    if json_bytes(&association)? != encoded
+        || association.format != RECONSTRUCTED_TOMBSTONE_ASSOCIATION_FORMAT_V1
+        || association.path != tombstone.path()
+        || association.object_id != tombstone.object_id()
+        || association.object_version_id != expected_version
+        || !is_lowercase_sha256(&association.content_sha256)
+    {
+        return Err(FolderbaseCaptureError::InvalidRestoreAncestry(
+            "reconstructed Tombstone association does not match the current Tombstone".to_owned(),
+        ));
+    }
+    let content = ContentDigest {
+        algorithm: "sha256".to_owned(),
+        digest: association.content_sha256.clone(),
+        bytes: association.bytes,
+    };
+    local.verify_capture_object_version_in(
+        state,
+        &ObjectId::parse(tombstone.object_id().to_owned())?,
+        &version_id,
+        &content,
+    )?;
+    Ok(Some(association))
+}
+
 fn folderbase_version_relative_path(version_id: &str) -> PathBuf {
     Path::new(FOLDERBASE_VERSIONS_DIRECTORY).join(format!("{version_id}.json"))
 }
@@ -6398,6 +6640,165 @@ mod tests {
             read_active_restore_transaction(&state)
                 .expect("active restore")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn reconstructed_tombstone_associations_are_path_scoped_for_shared_object_versions() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let sealed = store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let version = store.read_version(sealed.version_id()).expect("version");
+        let binding = version
+            .lookup_binding("active.bin")
+            .expect("active binding");
+        let object_id = binding.object_id();
+        let object_version_id = binding.object_version_id().expect("Object Version");
+        let content_sha256 = binding.content_sha256().expect("content digest");
+        let bytes = binding.bytes().expect("content bytes");
+        let local = LocalVersionStore::open_read_only(root.path()).expect("local");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        prepare_reconstructed_history(&state).expect("reconstruction state");
+
+        let first_path = "deleted/first.bin";
+        let second_path = "deleted/second.bin";
+        for association in [
+            ReconstructedTombstoneAssociation::for_tombstone(
+                first_path,
+                object_id,
+                object_version_id,
+                content_sha256,
+                bytes,
+                false,
+            ),
+            ReconstructedTombstoneAssociation::for_tombstone(
+                second_path,
+                object_id,
+                object_version_id,
+                content_sha256,
+                bytes,
+                true,
+            ),
+        ] {
+            install_reconstructed_tombstone_association(&state, &association)
+                .expect("path-scoped association");
+        }
+
+        let first = Tombstone::from_verified_producer(
+            first_path,
+            object_id,
+            DeletedKind::RegularFile,
+            Some(object_version_id.to_owned()),
+        );
+        let second = Tombstone::from_verified_producer(
+            second_path,
+            object_id,
+            DeletedKind::RegularFile,
+            Some(object_version_id.to_owned()),
+        );
+        assert!(
+            !read_reconstructed_tombstone_association(&local, &state, &first, object_version_id,)
+                .expect("first association")
+                .expect("first association exists")
+                .executable
+        );
+        assert!(
+            read_reconstructed_tombstone_association(&local, &state, &second, object_version_id,)
+                .expect("second association")
+                .expect("second association exists")
+                .executable
+        );
+        assert_ne!(
+            reconstructed_tombstone_association_relative_path(
+                first_path,
+                object_id,
+                object_version_id,
+            ),
+            reconstructed_tombstone_association_relative_path(
+                second_path,
+                object_id,
+                object_version_id,
+            ),
+        );
+    }
+
+    #[test]
+    fn reconstructed_tombstone_restore_rejects_path_substitution() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let sealed = store
+            .seal_capture(store.plan_capture().expect("genesis"))
+            .expect("genesis");
+        let version = store.read_version(sealed.version_id()).expect("version");
+        let binding = version
+            .lookup_binding("active.bin")
+            .expect("active binding");
+        let object_id = binding.object_id();
+        let object_version_id = binding.object_version_id().expect("Object Version");
+        let state = FolderbaseState::open_existing(root.path()).expect("state");
+        prepare_reconstructed_history(&state).expect("reconstruction state");
+        let expected_path = "deleted/expected.bin";
+        let tombstone = Tombstone::from_verified_producer(
+            expected_path,
+            object_id,
+            DeletedKind::RegularFile,
+            Some(object_version_id.to_owned()),
+        );
+        let current = FolderbaseVersion::from_verified_parts(
+            FolderbaseVersionParts::portable_v1_from_verified_producer(
+                version.folderbase_id(),
+                format!("fbversion_{}", Uuid::now_v7()),
+                Vec::new(),
+                version.created_at(),
+                version.root_manifest().clone(),
+                FolderbaseVersionEntries::from_verified_producer(
+                    version
+                        .bindings()
+                        .iter()
+                        .filter(|candidate| candidate.path() != "active.bin")
+                        .cloned()
+                        .collect(),
+                    vec![tombstone],
+                    version.exclusions().to_vec(),
+                ),
+            ),
+        )
+        .expect("reconstructed current Version");
+        install_test_version(root.path(), &current);
+        point_test_head(root.path(), &current);
+        let substituted = ReconstructedTombstoneAssociation::for_tombstone(
+            "deleted/substituted.bin",
+            object_id,
+            object_version_id,
+            binding.content_sha256().expect("content digest"),
+            binding.bytes().expect("content bytes"),
+            false,
+        );
+        state
+            .replace(
+                &reconstructed_tombstone_association_relative_path(
+                    expected_path,
+                    object_id,
+                    object_version_id,
+                ),
+                &json_bytes(&substituted).expect("association bytes"),
+            )
+            .expect("substitute association path");
+        fs::create_dir_all(root.path().join("deleted")).expect("restore destination parent");
+
+        let error = FolderbaseVersionStore::open(root.path())
+            .expect("reopen")
+            .restore_tombstone(expected_path)
+            .expect_err("path-substituted association must be refused");
+        assert!(
+            matches!(
+                &error,
+                FolderbaseCaptureError::InvalidRestoreAncestry(message)
+                    if message.contains("does not match the current Tombstone")
+            ),
+            "unexpected restore error: {error:?}"
         );
     }
 

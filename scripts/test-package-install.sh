@@ -10,10 +10,13 @@ repository_root=$(
   CDPATH= cd -- "$script_directory/.." >/dev/null 2>&1
   pwd
 )
-temporary_root=$(mktemp -d)
+temporary_parent=${FOLDERBASE_TEST_TEMP_ROOT:-${TMPDIR:-/tmp}}
+mkdir -p "$temporary_parent"
+temporary_root=$(mktemp -d "$temporary_parent/folderbase-package-install.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT
 
 export CARGO_TARGET_DIR="$temporary_root/target"
+export TMPDIR="$temporary_root"
 
 cd "$repository_root"
 
@@ -22,9 +25,9 @@ node scripts/verify-folderbase-version-distribution.mjs
 node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 node scripts/verify-folderbase-version-0.5-distribution.mjs
 
-cmp \
-  "protocol/capabilities/v1/registry.json" \
-  "crates/folderbase-cli/assets/capability-registry-v1.json"
+# Capability advertisement is verified semantically below so known profiles
+# may still spend time in the fail-closed RED state before a later release
+# copies them into the executable registry.
 
 for template in \
   person \

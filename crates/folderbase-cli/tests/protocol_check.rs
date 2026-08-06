@@ -52,6 +52,11 @@ fn protocol_contract_discovers_the_stable_machine_interface() {
                 "stability": "experimental"
             },
             {
+                "name": "folderbase.root-reconstruction",
+                "version": "0.1.0",
+                "stability": "stable"
+            },
+            {
                 "name": "folderbase.template-expansion",
                 "version": "0.1.0",
                 "stability": "stable"

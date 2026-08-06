@@ -14,6 +14,7 @@ categories = ["command-line-utilities", "filesystem"]
 exclude = [
   "tests/folderbase_full_eclipse.rs",
   "tests/public_conformance.rs",
+  "tests/root_reconstruction_public_conformance.rs",
   "tests/transform_fixture.rs",
 ]
 

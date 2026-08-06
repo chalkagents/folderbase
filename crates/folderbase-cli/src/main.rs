@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 mod change_set_capability;
 mod daemon_capability;
 mod query_capability;
+mod root_reconstruction_capability;
 
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_INVALID: u8 = 1;
@@ -223,6 +224,16 @@ enum Command {
     ChangeSet {
         #[command(subcommand)]
         command: ChangeSetCommand,
+    },
+
+    /// Reconstruct one exact Folderbase Version into one absent ordinary root.
+    Reconstruct {
+        source: PathBuf,
+        destination: PathBuf,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long, required = true)]
+        json: bool,
     },
 
     /// Run one root-pinned long-lived Core session over stdio JSON Lines.
@@ -616,6 +627,16 @@ fn main() -> ExitCode {
         Err(error) if error.exit_code() != 0 && argv_selects_daemon_capability() => {
             return ExitCode::from(daemon_capability::invalid_invocation(error.to_string()));
         }
+        Err(error) if error.exit_code() != 0 && argv_selects_root_reconstruction_capability() => {
+            let transport = root_reconstruction_capability::invalid_invocation(error.to_string());
+            return match write_root_reconstruction_transport(transport) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    write_stderr_best_effort(format_args!("error: {error}"));
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             return match error.print() {
@@ -713,6 +734,16 @@ fn argv_selects_daemon_capability() -> bool {
             .and_then(|argument| argument.into_string().ok())
             .as_deref(),
         Some("daemon")
+    )
+}
+
+fn argv_selects_root_reconstruction_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("reconstruct")
     )
 }
 
@@ -1364,7 +1395,39 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 stdio_jsonl: _,
             } => Ok(daemon_capability::serve(root)),
         },
+        Command::Reconstruct {
+            source,
+            destination,
+            stdin: _,
+            json: _,
+        } => write_root_reconstruction_transport(root_reconstruction_capability::execute(
+            source,
+            destination,
+            std::io::stdin().lock(),
+        )),
     }
+}
+
+fn write_root_reconstruction_transport(
+    transport: root_reconstruction_capability::RootReconstructionTransport,
+) -> Result<u8, CliError> {
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    write_root_reconstruction_transport_to(transport, &mut stdout.lock(), &mut stderr.lock())
+}
+
+fn write_root_reconstruction_transport_to(
+    transport: root_reconstruction_capability::RootReconstructionTransport,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<u8, CliError> {
+    if let Err(error) = write_transport_stream(stdout, &transport.stdout, "stdout") {
+        let fallback = root_reconstruction_capability::output_failed(error.to_string());
+        write_transport_stream(stderr, &fallback.stderr, "stderr")?;
+        return Ok(fallback.exit_code);
+    }
+    write_transport_stream(stderr, &transport.stderr, "stderr")?;
+    Ok(transport.exit_code)
 }
 
 fn write_change_set_transport(
@@ -1680,6 +1743,7 @@ fn command_emits_json_errors(command: &Command) -> bool {
         },
         Command::ChangeSet { .. } => false,
         Command::Daemon { .. } => false,
+        Command::Reconstruct { .. } => false,
     }
 }
 
@@ -2236,6 +2300,29 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn reconstruction_stdout_write_failure_becomes_typed_operational_error() {
+        let transport = root_reconstruction_capability::RootReconstructionTransport {
+            exit_code: EXIT_SUCCESS,
+            stdout: b"success document\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        let mut stdout = RejectsWrites;
+        let mut stderr = Vec::new();
+
+        let exit_code = write_root_reconstruction_transport_to(transport, &mut stdout, &mut stderr)
+            .expect("the typed fallback should be writable");
+        let document: serde_json::Value =
+            serde_json::from_slice(&stderr).expect("fallback is valid JSON");
+
+        assert_eq!(exit_code, EXIT_OPERATIONAL_ERROR);
+        assert_eq!(
+            document["format"],
+            "folderbase-root-reconstruction-error-v1"
+        );
+        assert_eq!(document["error"]["code"], "output_failed");
     }
 
     #[test]

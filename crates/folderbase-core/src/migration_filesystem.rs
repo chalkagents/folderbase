@@ -4225,6 +4225,242 @@ fn map_rename_noreplace_error(path: impl Into<PathBuf>, error: std::io::Error) -
     }
 }
 
+/// Publish one retained directory entry into an absent retained-parent slot.
+///
+/// This is the shared atomic no-clobber + parent-durability primitive used by
+/// migration and exact root reconstruction. Neither path is reopened through
+/// ambient namespace during the operation.
+pub(crate) fn publish_retained_directory_noreplace(
+    parent: &Dir,
+    staged_name: &OsStr,
+    destination_name: &OsStr,
+    parent_display: &Path,
+) -> Result<()> {
+    rename_noreplace(parent, staged_name, parent, destination_name).map_err(|source| {
+        map_rename_noreplace_error(parent_display.join(destination_name), source)
+    })?;
+    sync_directory(parent, parent_display)
+}
+
+pub(crate) fn sync_retained_directory(directory: &Dir, display: &Path) -> Result<()> {
+    sync_directory(directory, display)
+}
+
+/// Reject platforms where retained-handle atomic no-replace publication and
+/// directory durability cannot be established by this implementation.
+pub(crate) fn require_retained_directory_publication(parent: &Dir, display: &Path) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        require_retained_directory_publication_with_hook(parent, display, |_, _| {})
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = parent;
+        Err(FolderbaseError::UnsupportedMigrationFilesystem {
+            path: display.to_path_buf(),
+            reason: "atomic retained-handle no-replace rename and directory durability are unavailable on this platform".to_owned(),
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn require_retained_directory_publication_with_hook<F>(
+    parent: &Dir,
+    display: &Path,
+    before_no_replace_refusal: F,
+) -> Result<()>
+where
+    F: FnOnce(&OsStr, &OsStr),
+{
+    const SOURCE_BYTES: &[u8] = b"folderbase reconstruction preflight source\n";
+    const DESTINATION_BYTES: &[u8] = b"folderbase reconstruction preflight destination\n";
+
+    let nonce = Uuid::now_v7();
+    let source = OsString::from(format!(
+        ".folderbase-reconstruction-preflight-{nonce}.source"
+    ));
+    let destination = OsString::from(format!(
+        ".folderbase-reconstruction-preflight-{nonce}.destination"
+    ));
+    let create_regular =
+        |name: &OsStr, bytes: &[u8]| -> Result<crate::physical_identity::PhysicalIdentity> {
+            let path = display.join(name);
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            let mut file = parent
+                .open_with(name, &options)
+                .map_err(|source| FolderbaseError::io(&path, source))?;
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|source| FolderbaseError::io(&path, source))?;
+            let file = file
+                .try_clone()
+                .map_err(|source| FolderbaseError::io(&path, source))?
+                .into_std();
+            crate::physical_identity::PhysicalIdentity::from_file(&file)
+                .map_err(|source| FolderbaseError::io(path, source))
+        };
+    let read_regular = |name: &OsStr| -> Result<Vec<u8>> {
+        let path = display.join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = parent
+            .open_with(name, &options)
+            .map_err(|source| FolderbaseError::io(&path, source))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| FolderbaseError::io(&path, source))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+                path,
+                reason: "publication preflight probe is not a regular file".to_owned(),
+            });
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|source| FolderbaseError::io(path, source))?;
+        Ok(bytes)
+    };
+    let mut source_identity = None;
+    let mut destination_identity = None;
+    let probe = (|| -> Result<()> {
+        source_identity = Some(create_regular(&source, SOURCE_BYTES)?);
+        destination_identity = Some(create_regular(&destination, DESTINATION_BYTES)?);
+        sync_directory(parent, display)?;
+        before_no_replace_refusal(&source, &destination);
+
+        match rename_noreplace(parent, &source, parent, &destination) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(FolderbaseError::io(display.join(&destination), source));
+            }
+            Ok(()) => {
+                destination_identity = source_identity.take();
+                return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+                    path: display.join(&destination),
+                    reason: "no-replace rename overwrote an existing regular file".to_owned(),
+                });
+            }
+        }
+        if read_regular(&source)? != SOURCE_BYTES
+            || read_regular(&destination)? != DESTINATION_BYTES
+        {
+            return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+                path: display.to_path_buf(),
+                reason: "no-replace refusal did not preserve both regular files".to_owned(),
+            });
+        }
+
+        remove_owned_preflight_regular(
+            parent,
+            display,
+            &destination,
+            destination_identity.as_ref().expect("created destination"),
+        )?;
+        destination_identity = None;
+        sync_directory(parent, display)?;
+        rename_noreplace(parent, &source, parent, &destination)
+            .map_err(|source| FolderbaseError::io(display.join(&destination), source))?;
+        destination_identity = source_identity.take();
+        sync_directory(parent, display)?;
+        if read_regular(&destination)? != SOURCE_BYTES {
+            return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+                path: display.join(&destination),
+                reason: "no-replace rename did not preserve source bytes".to_owned(),
+            });
+        }
+        remove_owned_preflight_regular(
+            parent,
+            display,
+            &destination,
+            destination_identity.as_ref().expect("renamed source"),
+        )?;
+        destination_identity = None;
+        sync_directory(parent, display)?;
+        for name in [&source, &destination] {
+            match parent.symlink_metadata(name) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(FolderbaseError::io(display.join(name), source));
+                }
+                Ok(_) => {
+                    return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+                        path: display.join(name),
+                        reason: "publication preflight cleanup did not retire its probe".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = probe {
+        let cleanup_error = (|| -> Result<()> {
+            if let Some(identity) = source_identity.as_ref() {
+                remove_owned_preflight_regular(parent, display, &source, identity)?;
+            }
+            if let Some(identity) = destination_identity.as_ref() {
+                remove_owned_preflight_regular(parent, display, &destination, identity)?;
+            }
+            sync_directory(parent, display)
+        })()
+        .err();
+        let reason = match cleanup_error {
+            Some(cleanup_error) => format!(
+                "target filesystem failed atomic no-replace publication preflight: {error}; cleanup also failed: {cleanup_error}"
+            ),
+            None => {
+                format!("target filesystem failed atomic no-replace publication preflight: {error}")
+            }
+        };
+        return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+            path: display.to_path_buf(),
+            reason,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn remove_owned_preflight_regular(
+    parent: &Dir,
+    display: &Path,
+    name: &OsStr,
+    expected_identity: &crate::physical_identity::PhysicalIdentity,
+) -> Result<()> {
+    let path = display.join(name);
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = match parent.open_with(name, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(FolderbaseError::io(path, source)),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|source| FolderbaseError::io(&path, source))?;
+    let file = file
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(&path, source))?
+        .into_std();
+    let actual_identity = crate::physical_identity::PhysicalIdentity::from_file(&file)
+        .map_err(|source| FolderbaseError::io(&path, source))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || &actual_identity != expected_identity
+    {
+        return Err(FolderbaseError::UnsupportedMigrationFilesystem {
+            path,
+            reason: "publication preflight probe identity changed before cleanup".to_owned(),
+        });
+    }
+    parent
+        .remove_file(name)
+        .map_err(|source| FolderbaseError::io(path, source))
+}
+
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn rename_noreplace(
     source_parent: &Dir,
@@ -4585,6 +4821,127 @@ mod linux_directory_sync_tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o555);
+    }
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "android", target_vendor = "apple")
+))]
+mod retained_publication_preflight_tests {
+    use std::fs;
+
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::require_retained_directory_publication_with_hook;
+    use crate::FolderbaseError;
+
+    #[test]
+    fn preflight_exercises_regular_file_publication_and_leaves_no_artifacts() {
+        let root = tempfile::tempdir().expect("retained publication preflight fixture");
+        let parent = Dir::open_ambient_dir(root.path(), ambient_authority())
+            .expect("retained parent capability");
+        let mut observed_regular_files = false;
+
+        require_retained_directory_publication_with_hook(
+            &parent,
+            root.path(),
+            |source, destination| {
+                observed_regular_files = true;
+                let source = root.path().join(source);
+                let destination = root.path().join(destination);
+                let source_metadata = fs::symlink_metadata(&source).expect("source probe metadata");
+                let destination_metadata =
+                    fs::symlink_metadata(&destination).expect("destination probe metadata");
+                assert!(source_metadata.is_file());
+                assert!(!source_metadata.file_type().is_symlink());
+                assert!(destination_metadata.is_file());
+                assert!(!destination_metadata.file_type().is_symlink());
+                assert_eq!(
+                    fs::read(source).expect("source probe bytes"),
+                    b"folderbase reconstruction preflight source\n"
+                );
+                assert_eq!(
+                    fs::read(destination).expect("destination probe bytes"),
+                    b"folderbase reconstruction preflight destination\n"
+                );
+            },
+        )
+        .expect("regular-file publication preflight");
+
+        assert!(observed_regular_files);
+        assert_eq!(
+            fs::read_dir(root.path()).expect("preflight parent").count(),
+            0,
+            "successful preflight must durably retire every probe entry"
+        );
+    }
+
+    #[test]
+    fn failed_preflight_durably_retires_every_created_probe() {
+        let root = tempfile::tempdir().expect("failed publication preflight fixture");
+        let parent = Dir::open_ambient_dir(root.path(), ambient_authority())
+            .expect("retained parent capability");
+
+        let error = require_retained_directory_publication_with_hook(
+            &parent,
+            root.path(),
+            |_, destination| {
+                fs::remove_file(root.path().join(destination))
+                    .expect("force unexpected no-replace success");
+            },
+        )
+        .expect_err("missing refusal must fail the filesystem preflight");
+
+        assert!(matches!(
+            error,
+            FolderbaseError::UnsupportedMigrationFilesystem { path, reason }
+                if path == root.path()
+                    && reason.contains("overwrote an existing regular file")
+        ));
+        assert_eq!(
+            fs::read_dir(root.path()).expect("preflight parent").count(),
+            0,
+            "failed preflight must durably retire every probe before returning"
+        );
+    }
+
+    #[test]
+    fn failed_preflight_never_removes_a_replacement_probe_identity() {
+        let root = tempfile::tempdir().expect("failed publication preflight fixture");
+        let parent = Dir::open_ambient_dir(root.path(), ambient_authority())
+            .expect("retained parent capability");
+        let mut replacement = None;
+
+        let error = require_retained_directory_publication_with_hook(
+            &parent,
+            root.path(),
+            |_, destination| {
+                let path = root.path().join(destination);
+                fs::remove_file(&path).expect("remove owned destination probe");
+                fs::write(&path, b"foreign replacement\n").expect("replace destination probe");
+                replacement = Some(path);
+            },
+        )
+        .expect_err("replacement identity must fail the filesystem preflight");
+
+        let replacement = replacement.expect("replacement path");
+        assert!(matches!(
+            error,
+            FolderbaseError::UnsupportedMigrationFilesystem { path, reason }
+                if path == root.path()
+                    && reason.contains("cleanup also failed")
+                    && reason.contains("identity changed before cleanup")
+        ));
+        assert_eq!(
+            fs::read(&replacement).expect("foreign replacement survives"),
+            b"foreign replacement\n"
+        );
+        assert_eq!(
+            fs::read_dir(root.path()).expect("preflight parent").count(),
+            1,
+            "cleanup must leave only the replacement identity it does not own"
+        );
     }
 }
 

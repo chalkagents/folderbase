@@ -1,0 +1,62 @@
+{
+  "format": "folderbase-root-reconstruction-scenarios-v1",
+  "cases": [
+    {
+      "id": "01-reconstruct-mixed-tree",
+      "covers": [
+        "mixed-opaque-files",
+        "retained-tombstone-closure",
+        "retained-tombstone-executable-fidelity",
+        "move-with-tombstone-shared-reference"
+      ]
+    },
+    {
+      "id": "02-reject-wrong-package-index-pin",
+      "covers": ["exact-package-index-pin"]
+    },
+    {
+      "id": "03-reject-malformed-request",
+      "covers": ["malformed-request"]
+    },
+    {
+      "id": "04-reject-changed-version",
+      "covers": ["changed-version-bytes"]
+    },
+    {
+      "id": "05-reject-missing-retained-reference",
+      "covers": [
+        "missing-retained-reference",
+        "retained-tombstone-closure",
+        "retained-tombstone-fidelity-closure"
+      ]
+    },
+    {
+      "id": "06-reject-corrupt-chunk",
+      "covers": ["corrupt-chunk"]
+    },
+    {
+      "id": "07-reject-unsafe-package-node",
+      "covers": ["no-follow-package"]
+    },
+    {
+      "id": "08-preserve-existing-destination",
+      "covers": ["destination-no-clobber"]
+    },
+    {
+      "id": "09-restart-convergence-and-replay",
+      "covers": ["crash-before-publication", "crash-after-publication", "exact-replay"]
+    },
+    {
+      "id": "10-reject-unsupported-filesystem-before-staging",
+      "covers": ["unsupported-filesystem-preflight"]
+    },
+    {
+      "id": "11-reject-ambient-authority",
+      "covers": ["no-ambient-authority"]
+    },
+    {
+      "id": "12-reconstruct-legacy-version-0.4",
+      "covers": ["legacy-version-0.4", "legacy-root-manifest-protocol"]
+    }
+  ]
+}

@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/capabilities/root-reconstruction/0.1/root-reconstruction.schema.json",
+  "title": "Folderbase root-reconstruction capability 0.1",
+  "description": "Closed bounded package and process records for reconstructing one exact Folderbase Version into one absent ordinary root.",
+  "oneOf": [
+    { "$ref": "#/$defs/packageIndex" },
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/attention" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "folderbaseVersionId": {
+      "type": "string",
+      "pattern": "^fbversion_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^obj_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "objectVersionId": {
+      "type": "string",
+      "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\u0000)(?!.*(?:^|/)\\.folderbase(?:/|$)).+(?<!/)$"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^reconstruction_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "packageLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_index_bytes",
+        "max_version_bytes",
+        "max_manifest_bytes",
+        "max_references",
+        "max_distinct_manifests",
+        "max_distinct_chunks",
+        "max_chunks_per_manifest",
+        "max_object_bytes",
+        "max_total_object_bytes",
+        "max_visible_entries"
+      ],
+      "properties": {
+        "max_index_bytes": { "const": 8388608 },
+        "max_version_bytes": { "const": 67108864 },
+        "max_manifest_bytes": { "const": 67108864 },
+        "max_references": { "const": 16385 },
+        "max_distinct_manifests": { "const": 16385 },
+        "max_distinct_chunks": { "const": 1048576 },
+        "max_chunks_per_manifest": { "const": 262144 },
+        "max_object_bytes": { "const": 1099511627776 },
+        "max_total_object_bytes": { "const": 9007199254740991 },
+        "max_visible_entries": { "const": 16384 }
+      }
+    },
+    "referenceRoles": {
+      "description": "Canonical sorted unique roles for one unique Object Version reference. A live regular file retained by a Tombstone after an unchanged move carries both roles.",
+      "oneOf": [
+        { "const": ["root_manifest"] },
+        { "const": ["live_regular_file"] },
+        { "const": ["retained_tombstone"] },
+        { "const": ["live_regular_file", "retained_tombstone"] }
+      ]
+    },
+    "packageReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "object_version_id",
+        "roles",
+        "chunk_manifest_sha256"
+      ],
+      "properties": {
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "roles": { "$ref": "#/$defs/referenceRoles" },
+        "chunk_manifest_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "roles": { "const": ["root_manifest"] } },
+            "required": ["roles"]
+          },
+          "then": { "not": { "required": ["object_id"] } },
+          "else": { "required": ["object_id"] }
+        }
+      ]
+    },
+    "tombstoneFidelity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "object_id", "object_version_id", "executable"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "executable": { "type": "boolean" }
+      },
+      "description": "Package-index transport evidence for one regular-file Tombstone with a last Object Version. It is not a Folderbase Version claim."
+    },
+    "packageIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "folderbase_id",
+        "folderbase_version_id",
+        "canonical_version_sha256",
+        "encoded_version_sha256",
+        "limits",
+        "references",
+        "tombstone_fidelity"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-root-reconstruction-package-v1" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "folderbase_version_id": { "$ref": "#/$defs/folderbaseVersionId" },
+        "canonical_version_sha256": { "$ref": "#/$defs/sha256" },
+        "encoded_version_sha256": { "$ref": "#/$defs/sha256" },
+        "limits": { "$ref": "#/$defs/packageLimits" },
+        "references": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16385,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/packageReference" },
+          "description": "Strictly sorted and unique by exact UTF-8 object_version_id bytes. Semantic validation rejects duplicate Object Versions and noncanonical order."
+        },
+        "tombstone_fidelity": {
+          "type": "array",
+          "maxItems": 16384,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/tombstoneFidelity" },
+          "description": "Strictly sorted and unique by exact UTF-8 path bytes. Exact semantic closure requires one entry for every regular-file Tombstone with last_object_version_id and no entry for a directory, symlink, or Tombstone without a last Object Version."
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "operation_id", "package_index_sha256"],
+      "properties": {
+        "format": { "const": "folderbase-root-reconstruction-request-v1" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "package_index_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "rootAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "folderbase_id",
+        "protocol_version",
+        "manifest_sha256",
+        "root_instance_sha256"
+      ],
+      "properties": {
+        "root": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "protocol_version": {
+          "oneOf": [
+            { "const": "0.5.0" },
+            {
+              "type": "string",
+              "pattern": "^0\\.(?:1|2)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+            }
+          ]
+        },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "root_instance_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "operation_id",
+        "request_sha256",
+        "folderbase_id",
+        "folderbase_version_id",
+        "canonical_version_sha256",
+        "package_index_sha256",
+        "verified_object_count",
+        "version_authenticated_object_count",
+        "retained_tombstone_object_count",
+        "visible_entry_count",
+        "verified_opaque_bytes",
+        "root_attestation",
+        "replayed"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-root-reconstruction-result-v1" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "folderbase_version_id": { "$ref": "#/$defs/folderbaseVersionId" },
+        "canonical_version_sha256": { "$ref": "#/$defs/sha256" },
+        "package_index_sha256": { "$ref": "#/$defs/sha256" },
+        "verified_object_count": { "type": "integer", "minimum": 1, "maximum": 16385 },
+        "version_authenticated_object_count": { "type": "integer", "minimum": 1, "maximum": 16385 },
+        "retained_tombstone_object_count": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "visible_entry_count": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "verified_opaque_bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "root_attestation": { "$ref": "#/$defs/rootAttestation" },
+        "replayed": { "type": "boolean" }
+      }
+    },
+    "attentionDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "enum": ["destination_occupied", "reconstruction_in_progress"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "attention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "operation_id",
+        "request_sha256",
+        "package_index_sha256",
+        "attention"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-root-reconstruction-attention-v1" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "package_index_sha256": { "$ref": "#/$defs/sha256" },
+        "attention": { "$ref": "#/$defs/attentionDetail" }
+      }
+    },
+    "errorDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_invocation",
+            "invalid_request",
+            "invalid_package",
+            "package_index_mismatch",
+            "package_changed",
+            "invalid_folderbase_version",
+            "folderbase_mismatch",
+            "version_mismatch",
+            "reference_closure_invalid",
+            "manifest_invalid",
+            "chunk_invalid",
+            "object_verification_failed",
+            "unsafe_package",
+            "unsafe_destination",
+            "operation_id_conflict",
+            "unsupported_reconstruction_filesystem",
+            "reconstruction_failed",
+            "output_failed"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-root-reconstruction-error-v1" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "package_index_sha256": { "$ref": "#/$defs/sha256" },
+        "error": { "$ref": "#/$defs/errorDetail" }
+      }
+    }
+  }
+}

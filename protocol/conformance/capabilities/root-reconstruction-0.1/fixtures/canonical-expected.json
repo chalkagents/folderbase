@@ -1,0 +1,13 @@
+{
+  "folderbase_id": "folderbase_019f0000-0000-7000-8000-000000000001",
+  "folderbase_version_id": "fbversion_019f0000-0000-7000-8000-000000000001",
+  "canonical_version_sha256": "97bef7243bbc35bfc00990535cdbc15c2bd737d8397e561c5341f8066c9e1080",
+  "encoded_version_sha256": "ab92869d30414bbade72a8e4b10cd3c482ddcbdab45b9c9b3b5be42771778952",
+  "package_index_sha256": "e0c90ddaeac15541bda62abe72883de911eaf762afc9431158027b6c85271456",
+  "request_sha256": "b637c268035b144b99ea03607bffbaeeaf970919eb11d26f34c487ae933a7835",
+  "verified_object_count": 13,
+  "version_authenticated_object_count": 12,
+  "retained_tombstone_object_count": 2,
+  "visible_entry_count": 25,
+  "verified_opaque_bytes": 937
+}

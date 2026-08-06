@@ -33,6 +33,7 @@ surface.
 | `daemon` | Experimental Beta optional capability | Serve one root-pinned query/index session over stdio JSON Lines. Requires `folderbase.daemon-stdio@0.1.0`. |
 | `template` | Stable optional capability | Preview or apply one exact additive Template 0.2 package. Requires `folderbase.template-expansion@0.1.0`. |
 | `change-set` | Stable optional capability | Materialize scoped ordinary folders, propose immutable work, assess conflicts, and apply or replay it. Requires `folderbase.change-set@0.1.0`. |
+| `reconstruct` | Stable optional capability | Reconstruct one exact retained Folderbase Version into one absent ordinary root. Requires `folderbase.root-reconstruction@0.1.0`. |
 | `migrate` | Experimental JSON | Analyze and stage reviewed restructuring. |
 | `transform` | Experimental JSON | Run the durable multi-process transform workflow. |
 | `version` | Experimental JSON | Capture, inspect, and restore immutable local file versions. |
@@ -52,6 +53,8 @@ Template plan/apply uses a separate stable optional contract; see the
 [template expansion reference](/docs/reference/template-expansion).
 Scoped checkout and apply use another stable optional contract; see the
 [Change Set reference](/docs/reference/change-sets).
+Exact retained-Version reconstruction uses its own stable optional contract;
+see the [root reconstruction reference](/docs/reference/root-reconstruction).
 TypeScript, Swift, native apps, and remote agent VMs should use the
 [process adapter contract](/docs/reference/process-adapters) instead of reading
 engine-owned records.

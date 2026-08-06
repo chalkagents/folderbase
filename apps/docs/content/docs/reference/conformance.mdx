@@ -44,7 +44,7 @@ node protocol/conformance/cli-json-v1/run.mjs \
 - exit meanings `0`, `1`, and `2`;
 - black-box filesystem behavior for stable initialization, upgrade, validation, protocol checks, and workspace operations.
 
-Passing one suite proves compatibility only with its named contract and protocol profiles. Query/index, template expansion, Change Sets, and other capabilities require their own advertised profile and conformance closure before third parties can claim them.
+Passing one suite proves compatibility only with its named contract and protocol profiles. Query/index, template expansion, Change Sets, root reconstruction, and other capabilities require their own advertised profile and conformance closure before third parties can claim them.
 
 ## Run advertised capability suites
 
@@ -108,3 +108,20 @@ scenarios. They prove least-authority projection privacy, immutable proposals,
 three-way conflict detection, real one- and two-parent history, stable Object
 identity, binary and large-file staging, nested-boundary confinement, three
 crash recovery points, and idempotent replay.
+
+Run only the stable root-reconstruction profile:
+
+```bash
+node protocol/conformance/capabilities/root-reconstruction-0.1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+`folderbase.root-reconstruction@0.1.0` has twelve implementation-neutral
+black-box cases. They prove exact canonical and legacy Version reconstruction,
+closed package and reference fidelity, corrupt-input rejection, no-follow
+package handling, destination no-clobber, unsupported-filesystem preflight,
+restart and exact replay, and rejection of ambient authority. A passing report
+exits `0` with `passed: 12` and `failed: 0`.
+
+This stable capability remains optional. Passing its suite proves the named
+root-reconstruction contract; it does not widen Compatibility Contract v1.
