@@ -12,8 +12,9 @@ the dependency-ordered publication and clean public verification:
    versioned `@folderbase/sdk`, and the Homebrew formula; and
 5. require the workflow's clean macOS public-install job to pass.
 
-The current stable baseline is documented in the
+The prior stable baseline is documented in the
 [v0.6.1 public distribution evidence](verification/v0.6.1-public-distribution.md).
+Core 0.7.0 is the next release closure for exact root reconstruction.
 
 The first npm publication requires the package owner to claim the package and
 configure this repository's `release-cli.yml` trusted publisher. Later npm

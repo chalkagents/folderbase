@@ -148,7 +148,7 @@ case "$*" in
   "pack --dry-run --json")
     printf '%s\n' '[{"integrity":"sha512-local"}]'
     ;;
-  "view @folderbase/cli@0.6.1 version dist.integrity --json")
+  "view @folderbase/cli@0.7.0 version dist.integrity --json")
     printf '%s\n' 'npm error code E404' >&2
     exit 1
     ;;
@@ -207,7 +207,7 @@ case "$*" in
   "pack --dry-run --json")
     printf '%s\n' '[{"integrity":"sha512-sdk"}]'
     ;;
-  "view @folderbase/sdk@0.1.0 version dist.integrity --json")
+  "view @folderbase/sdk@0.2.0 version dist.integrity --json")
     printf '%s\n' 'npm error code E404' >&2
     exit 1
     ;;

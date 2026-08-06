@@ -1,0 +1,79 @@
+---
+title: Folderbase Core 0.7.0
+description: Exact whole-Version root reconstruction for ordinary agent workspaces.
+---
+
+Folderbase Core 0.7.0 adds one stable optional capability for reconstructing an
+exact retained Folderbase Version into an absent ordinary folder. Every file
+type remains an opaque ordinary file, and the installed root reopens through
+the same local Core interfaces used by normal work.
+
+Folderbase remains Beta. This release does not expand Compatibility Contract
+v1, deploy Folderbase Cloud, synchronize an existing non-empty root, or turn a
+Live Folder projection into a global Folderbase Version.
+
+## Install
+
+```bash
+npx --yes @folderbase/cli@0.7.0 --version
+cargo install folderbase-cli --version 0.7.0 --locked
+brew install chalkagents/tap/folderbase
+```
+
+Native macOS and Linux executables plus `SHA256SUMS` are on the immutable
+[GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.7.0).
+The same Core is published as `folderbase-core` and `folderbase-cli` on
+crates.io and as `@folderbase/cli` on npm. The typed reconstruction adapter is
+published in `@folderbase/sdk` 0.2.0.
+
+## Exact root reconstruction
+
+The advertised `folderbase.root-reconstruction@0.1.0` capability consumes one
+package pinned by its exact package-index SHA-256:
+
+```bash
+folderbase reconstruct \
+  /absolute/path/to/reconstruction-package \
+  /absolute/path/to/new-folderbase \
+  --stdin --json < request.json
+```
+
+Core validates the complete Version and exact reference closure, streams and
+verifies every object with bounded memory, preserves supported file kinds and
+executable fidelity, retains restorable Tombstone history, and publishes only
+to an absent destination. Source and destination authorities must be absolute
+and physically separate.
+
+Crash-safe replay covers preparation, verified staging, publication, and
+completion evidence. Corrupt chunks, unsafe package nodes, changed package
+pins, unsupported filesystems, and occupied destinations fail closed through
+typed JSON results.
+
+## Independent conformance
+
+The public black-box suite contains twelve cases for canonical and legacy
+Versions, mixed opaque files, retained deletion history, no-clobber behavior,
+restart convergence, and rejection of ambient authority:
+
+```bash
+node protocol/conformance/capabilities/root-reconstruction-0.1/run.mjs \
+  --implementation folderbase
+```
+
+An implementation may omit this optional capability and remain compatible.
+An implementation claiming support must advertise the exact profile through
+`folderbase protocol contract --json` and pass its suite.
+
+## TypeScript
+
+`FolderbaseClient.reconstruct()` supervises the exact CLI process without a
+shell, validates absolute authorities, derives the normative request digest,
+and correlates success, attention, and operational errors with the request.
+It never reads private `.folderbase` records or weakens Core verification.
+
+## Compatibility
+
+Core 0.7.0 retains Compatibility Contract v1, CLI JSON v1, native
+root-manifest profile `0.5.0`, Folderbase Version profiles `0.4` and `0.5`,
+stable IDs, extension preservation, explicit upgrade behavior, and exit
+meanings `0`, `1`, and `2`.

@@ -103,20 +103,20 @@ test("published docs describe the released native 0.6 contract", () => {
   assert.doesNotMatch(allDocs, /--help-json/);
 });
 
-test("install docs cover every verified 0.6 distribution channel", () => {
+test("install docs cover every verified 0.7 distribution channel", () => {
   const install = read("apps/docs/content/docs/getting-started/install.mdx");
-  const release = read("apps/docs/content/docs/releases/0.6.1.mdx");
+  const release = read("apps/docs/content/docs/releases/0.7.0.mdx");
 
   for (const page of [install, release]) {
-    assert.match(page, /npx --yes @folderbase\/cli@0\.6\.1 --version/u);
+    assert.match(page, /npx --yes @folderbase\/cli@0\.7\.0 --version/u);
     assert.match(
       page,
-      /cargo install folderbase-cli --version 0\.6\.1 --locked/u,
+      /cargo install folderbase-cli --version 0\.7\.0 --locked/u,
     );
     assert.match(page, /brew install chalkagents\/tap\/folderbase/u);
     assert.match(
       page,
-      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.6\.1/u,
+      /github\.com\/chalkagents\/folderbase\/releases\/tag\/v0\.7\.0/u,
     );
   }
 });
@@ -197,6 +197,7 @@ test("the query capability has runnable guide, wire reference, and honest releas
   assert(guidesMeta.pages.includes("querying"));
   assert(referenceMeta.pages.includes("query-index"));
   assert(releasesMeta.pages.includes("next"));
+  assert(releasesMeta.pages.includes("0.7.0"));
   assert(releasesMeta.pages.includes("0.6.1"));
 
   for (const page of [guide, reference, release]) {
