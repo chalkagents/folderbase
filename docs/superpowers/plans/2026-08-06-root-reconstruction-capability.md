@@ -32,7 +32,9 @@ Exit: the public runner is independently runnable and RED against v0.6.1.
 - Reuse `FolderbaseVersion`, canonical Chunk Manifest validation, transfer
   verification, portable path rules, root attestation, and local immutable
   object/version writers. Do not duplicate scanners or Platform records.
-- Unit-test closure mismatches, including the current missing-Tombstone case.
+- Unit-test closure mismatches, including the current missing-Tombstone case
+  and an unchanged move whose one Object Version reference has both live-file
+  and retained-Tombstone roles.
 
 Exit: pure plan and verification tests are GREEN; no destination publication
 exists yet.
@@ -46,9 +48,13 @@ exists yet.
   follow-up capture and Tombstone restore.
 - Add deterministic process-loss seams before staging, after object verify,
   before publish, after publish, and before completion output.
+- Preflight the filesystem durability contract and fail before staging on any
+  platform or filesystem where both file and directory-entry persistence
+  cannot be proven.
 
 Exit: focused Core tests prove no partial visible root, no clobber, exact retry,
-and convergence on Linux, macOS, and Windows semantics.
+and convergence on supported Linux, macOS, and Windows filesystems; unsupported
+durability semantics fail before staging or publication.
 
 ### R4 — CLI, SDK, and independent conformance
 
@@ -66,6 +72,9 @@ Exit: a clean consumer can discover and invoke the capability without reading
 
 - Extend managed Version registration to retain every Tombstone last-Object-
   Version reference while preserving exact actor/sponsor/root fences.
+- Add durable Root Reconstruction Session and operation-owned private-stage
+  reachability pins to physical-generation accounting. Collection must fail
+  closed while either pin is live, across restart and collection races.
 - Build packages only from one authorized, retained Root Reconstruction
   Session and download immutable chunks directly from the local S3-compatible
   cell.
@@ -74,7 +83,8 @@ Exit: a clean consumer can discover and invoke the capability without reading
 
 Exit: PostgreSQL 16 plus MinIO reconstructs the real mixed-file fixture on a
 clean device byte-for-byte, restores a retained deleted file, survives process
-restart, and advances only the qualifying Device cursor.
+restart and a concurrent collection attempt, retains session/stage-reachable
+bytes until trusted completion, and advances only the qualifying Device cursor.
 
 ## Required local gates per slice
 

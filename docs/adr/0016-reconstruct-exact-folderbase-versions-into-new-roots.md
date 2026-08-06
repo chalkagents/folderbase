@@ -93,8 +93,8 @@ closed. Identical manifests and chunks may be referenced more than once.
   and encoded `version.json` SHA-256;
 - a strictly sorted, unique array mapping every externally materialized Object
   Version ID to one canonical Chunk Manifest digest;
-- each reference's role: `root_manifest`, `live_regular_file`, or
-  `retained_tombstone`;
+- each reference's nonempty, strictly sorted, unique `roles` set containing
+  `root_manifest`, `live_regular_file`, and/or `retained_tombstone`;
 - the stable Object ID when the Version contains one; and
 - fixed format and size/count limits.
 
@@ -104,15 +104,22 @@ state identity. Chunk Manifest digests remain transfer-plan identities.
 
 The reference closure is exact:
 
-1. the root manifest has exactly one `root_manifest` reference;
-2. every live regular binding has exactly one matching
-   `live_regular_file` reference;
+1. the root manifest Object Version has exactly one reference whose roles
+   contain `root_manifest`, and that role appears nowhere else;
+2. every live regular binding has exactly one matching Object Version
+   reference whose roles contain `live_regular_file`;
 3. every Tombstone with `last_object_version_id` has exactly one matching
-   `retained_tombstone` reference;
+   Object Version reference whose roles contain `retained_tombstone`;
 4. directories require no object bytes;
 5. live symlink Object Version content is derived from and checked against the
    exact UTF-8 target already bound by the Version; and
 6. no unreferenced Object Version or manifest is accepted.
+
+One Object Version reference may carry both `live_regular_file` and
+`retained_tombstone`. This is required when an unchanged regular file moves:
+the new path is live while the old path retains a Tombstone for the same Object
+Version. Duplicate Object Version entries remain invalid; the canonical role
+set expresses the complete usage instead.
 
 For the root manifest and live regular files, Core cross-checks the canonical
 manifest's whole-object digest and length against the Folderbase Version. For a
@@ -146,9 +153,18 @@ Execution:
 6. represents nested Folderbases and unsupported special nodes only through
    the Version's exclusions and never traverses or fabricates their content;
 7. verifies the staged root through the same public Core read/validation paths;
-8. durably flushes files and supported directory entries; and
+8. durably flushes files and every directory entry required for publication;
+   and
 9. publishes the complete root through an atomic no-replace operation on the
    retained destination-parent capability.
+
+Stable success requires Core to prove both file-content and directory-entry
+durability through the target filesystem. When the platform or filesystem
+cannot provide that guarantee, Core fails before creating or publishing any
+staging root with `unsupported_reconstruction_filesystem`. It never reports a
+weaker platform-specific success under this capability version. A future
+capability version may define a distinct weaker guarantee explicitly; Platform
+must not treat it as cursor-advancing evidence for this contract.
 
 Markdown, repositories, PDF, CSV, SQLite snapshots, office documents, videos,
 archives, and unknown regular files all remain opaque bytes. Core does not
@@ -209,6 +225,8 @@ Red fixtures and black-box cases cover:
   references, manifests, descriptors, and chunks;
 - omission or substitution of root, live-regular, or retained-Tombstone
   references;
+- an unchanged move whose one Object Version reference canonically carries
+  both `live_regular_file` and `retained_tombstone` roles;
 - unsafe paths, exact/NFC/case-fold collisions, symlink escapes, nested
   boundary crossing, special nodes, and destination-parent substitution;
 - every existing destination kind and races immediately before publication;
@@ -228,8 +246,9 @@ Green proves:
   capture ordinary follow-up edits without importing private package state;
 - a retained regular-file Tombstone remains restorable after clean-device
   reconstruction;
-- bounded memory, exact no-clobber publication, restart convergence, and exact
-  replay; and
+- bounded memory, exact no-clobber publication, restart convergence, exact
+  replay, and fail-before-staging behavior where publication durability cannot
+  be proven; and
 - independent black-box conformance from a clean extracted source archive.
 
 ## Deliberate non-goals
