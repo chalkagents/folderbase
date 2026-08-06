@@ -1,19 +1,8 @@
 ---
 title: Next Core release
-description: Work accepted after the immutable Folderbase Core 0.6.1 release.
+description: Work accepted after the immutable Folderbase Core 0.7.0 release.
 ---
 
-Folderbase remains a Beta product. The current development line now includes
-the GREEN, stable optional `folderbase.root-reconstruction@0.1.0` capability
-and the typed `FolderbaseClient.reconstruct()` helper in `@folderbase/sdk`.
-
-Root reconstruction consumes one exact provider-neutral retained package and
-publishes one absent ordinary Folderbase root after full verification. Its
-twelve-case public black-box suite covers canonical and legacy Versions,
-retained Tombstone fidelity, no-clobber publication, unsupported filesystem
-preflight, restart, replay, and rejection of ambient authority.
-
-This capability does not expand Compatibility Contract v1. Implementations
-must advertise it through `folderbase protocol contract --json` and pass its
-own conformance suite before claiming support. Use the exact release page for
-immutable release behavior.
+No post-0.7 capability is documented as complete yet. Folderbase remains Beta;
+use the exact release page for immutable behavior and discover optional
+capabilities through `folderbase protocol contract --json`.
