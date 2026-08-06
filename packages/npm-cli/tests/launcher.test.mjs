@@ -18,10 +18,10 @@ import test from "node:test";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const launcher = join(packageRoot, "bin", "folderbase.js");
 const releaseAssetNames = [
-  "folderbase-v0.7.0-aarch64-apple-darwin",
-  "folderbase-v0.7.0-x86_64-apple-darwin",
-  "folderbase-v0.7.0-aarch64-unknown-linux-gnu",
-  "folderbase-v0.7.0-x86_64-unknown-linux-gnu",
+  "folderbase-v0.7.1-aarch64-apple-darwin",
+  "folderbase-v0.7.1-x86_64-apple-darwin",
+  "folderbase-v0.7.1-aarch64-unknown-linux-gnu",
+  "folderbase-v0.7.1-x86_64-unknown-linux-gnu",
 ];
 
 function closedChecksums(digests) {
@@ -72,7 +72,7 @@ function processIsAlive(processId) {
 
 test("a user invocation downloads, verifies, and runs the exact native CLI", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from(
     "#!/bin/sh\nprintf 'native:%s|%s\\n' \"$1\" \"$2\"\n",
   );
@@ -111,7 +111,7 @@ test("a user invocation downloads, verifies, and runs the exact native CLI", asy
       stderr: "",
     });
     assert.deepEqual(
-      await readFile(join(cacheRoot, "v0.7.0", assetName)),
+      await readFile(join(cacheRoot, "v0.7.1", assetName)),
       nativeCli,
     );
   } finally {
@@ -124,7 +124,7 @@ test("a user invocation downloads, verifies, and runs the exact native CLI", asy
 test("a relative XDG cache path falls back to the home cache", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
   const homeRoot = join(temporaryRoot, "home");
-  const assetName = "folderbase-v0.7.0-aarch64-unknown-linux-gnu";
+  const assetName = "folderbase-v0.7.1-aarch64-unknown-linux-gnu";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'xdg-safe\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = closedChecksums(new Map([[assetName, sha256]]));
@@ -173,7 +173,7 @@ test("a relative XDG cache path falls back to the home cache", async () => {
           ".cache",
           "folderbase",
           "cli",
-          "v0.7.0",
+          "v0.7.1",
           assetName,
         ),
       ),
@@ -186,7 +186,7 @@ test("a relative XDG cache path falls back to the home cache", async () => {
           "relative-xdg-cache",
           "folderbase",
           "cli",
-          "v0.7.0",
+          "v0.7.1",
           assetName,
         ),
       ),
@@ -201,7 +201,7 @@ test("a relative XDG cache path falls back to the home cache", async () => {
 
 test("an ambiguous release checksum fails closed before native execution", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = Buffer.from(
@@ -251,8 +251,8 @@ test("an ambiguous release checksum fails closed before native execution", async
 
 test("a release checksum matrix missing a non-host asset fails closed", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
-  const missingAssetName = "folderbase-v0.7.0-x86_64-unknown-linux-gnu";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
+  const missingAssetName = "folderbase-v0.7.1-x86_64-unknown-linux-gnu";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = Buffer.from(
@@ -309,7 +309,7 @@ test("a release checksum matrix missing a non-host asset fails closed", async ()
 
 test("a declared binary download larger than the bounded test limit fails closed", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const script = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n#");
   const nativeCli = Buffer.concat([
     script,
@@ -360,7 +360,7 @@ test("a declared binary download larger than the bounded test limit fails closed
 
 test("a streamed binary download larger than the bounded test limit fails closed", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const oversized = Buffer.alloc(65, 0x61);
   const sha256 = createHash("sha256").update(oversized).digest("hex");
   const checksums = closedChecksums(new Map([[assetName, sha256]]));
@@ -398,7 +398,7 @@ test("a streamed binary download larger than the bounded test limit fails closed
     assert.match(result.stderr, /download exceeds the 64-byte limit/);
     assert.equal(result.stdout, "");
     await assert.rejects(
-      readFile(join(cacheRoot, "v0.7.0", assetName)),
+      readFile(join(cacheRoot, "v0.7.1", assetName)),
       { code: "ENOENT" },
     );
   } finally {
@@ -429,7 +429,7 @@ test("invalid bounded-test byte limits fail closed before download", async () =>
       assert.match(result.stderr, expectedError);
       assert.equal(result.stdout, "");
     }
-    await assert.rejects(readFile(join(cacheRoot, "v0.7.0", "SHA256SUMS")), {
+    await assert.rejects(readFile(join(cacheRoot, "v0.7.1", "SHA256SUMS")), {
       code: "ENOENT",
     });
   } finally {
@@ -439,8 +439,8 @@ test("invalid bounded-test byte limits fail closed before download", async () =>
 
 test("the bounded-test byte override is inert outside loopback test mode", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const versionCache = join(cacheRoot, "v0.7.0");
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const versionCache = join(cacheRoot, "v0.7.1");
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'production-limit\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   await mkdir(versionCache, { recursive: true });
@@ -508,8 +508,8 @@ test("a release download cannot exceed the redirect-count limit", async () => {
 
 test("a corrupt cached binary is replaced with the verified release asset", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const versionCache = join(cacheRoot, "v0.7.0");
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const versionCache = join(cacheRoot, "v0.7.1");
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'cache-replaced\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = closedChecksums(new Map([[assetName, sha256]]));
@@ -565,7 +565,7 @@ test("a corrupt cached binary is replaced with the verified release asset", asyn
 
 test("a downloaded binary with the wrong digest is never cached or executed", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const expectedCli = Buffer.from("#!/bin/sh\nprintf 'expected\\n'\n");
   const downloadedCli = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n");
   const expectedSha256 = createHash("sha256").update(expectedCli).digest("hex");
@@ -600,7 +600,7 @@ test("a downloaded binary with the wrong digest is never cached or executed", as
     assert.match(result.stderr, /SHA-256 mismatch/);
     assert.equal(result.stdout, "");
     await assert.rejects(
-      readFile(join(cacheRoot, "v0.7.0", assetName)),
+      readFile(join(cacheRoot, "v0.7.1", assetName)),
       { code: "ENOENT" },
     );
   } finally {
@@ -612,16 +612,16 @@ test("a downloaded binary with the wrong digest is never cached or executed", as
 
 test("a malformed closed checksum record fails before native execution", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = Buffer.from(
     [
       `${sha256}  ${assetName}`,
-      `${"1".repeat(64)}  folderbase-v0.7.0-x86_64-apple-darwin`,
+      `${"1".repeat(64)}  folderbase-v0.7.1-x86_64-apple-darwin`,
       "this line is not a checksum",
-      `${"2".repeat(64)}  folderbase-v0.7.0-aarch64-unknown-linux-gnu`,
-      `${"3".repeat(64)}  folderbase-v0.7.0-x86_64-unknown-linux-gnu`,
+      `${"2".repeat(64)}  folderbase-v0.7.1-aarch64-unknown-linux-gnu`,
+      `${"3".repeat(64)}  folderbase-v0.7.1-x86_64-unknown-linux-gnu`,
       "",
     ].join("\n"),
   );
@@ -669,13 +669,13 @@ test("a malformed closed checksum record fails before native execution", async (
 
 test("an unexpected checksum entry fails before native execution", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = Buffer.from(
     [
       `${sha256}  ${assetName}`,
-      `${"4".repeat(64)}  folderbase-v0.7.0-x86_64-unknown-freebsd`,
+      `${"4".repeat(64)}  folderbase-v0.7.1-x86_64-unknown-freebsd`,
       "",
     ].join("\n"),
   );
@@ -723,7 +723,7 @@ test("an unexpected checksum entry fails before native execution", async () => {
 
 test("an HTTP redirect outside the explicit loopback test hosts fails closed", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'must-not-run\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = closedChecksums(new Map([[assetName, sha256]]));
@@ -787,7 +787,7 @@ test("an HTTP redirect outside the explicit loopback test hosts fails closed", a
 
 test("the explicit loopback test exception applies across redirect hops", async () => {
   const cacheRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const nativeCli = Buffer.from("#!/bin/sh\nprintf 'redirected-native\\n'\n");
   const sha256 = createHash("sha256").update(nativeCli).digest("hex");
   const checksums = closedChecksums(new Map([[assetName, sha256]]));
@@ -852,8 +852,8 @@ test("the explicit loopback test exception applies across redirect hops", async 
 test("a termination signal reaches the native CLI without leaving an orphan", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "folderbase-npx-test-"));
   const cacheRoot = join(temporaryRoot, "cache");
-  const versionCache = join(cacheRoot, "v0.7.0");
-  const assetName = "folderbase-v0.7.0-aarch64-apple-darwin";
+  const versionCache = join(cacheRoot, "v0.7.1");
+  const assetName = "folderbase-v0.7.1-aarch64-apple-darwin";
   const signalRecord = join(temporaryRoot, "received-signal");
   const processRecord = join(temporaryRoot, "native-process");
   const nativeCli = Buffer.from(
