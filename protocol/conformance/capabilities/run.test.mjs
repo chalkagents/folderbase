@@ -83,6 +83,26 @@ test("a v1 implementation without capability discovery remains conformant", () =
   assert.match(requiredReport.cases[0].message, /is not advertised/);
 });
 
+test("root reconstruction is known but fails closed while the executable is unadvertised", () => {
+  const result = run("v1-without-capabilities.mjs", [
+    "--capability",
+    "folderbase.root-reconstruction@0.1.0",
+  ]);
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.selected, 1);
+  assert.equal(report.passed, 0);
+  assert.equal(report.failed, 1);
+  assert.deepEqual(report.cases, [
+    {
+      id: "folderbase.root-reconstruction@0.1.0",
+      status: "failed",
+      message:
+        "folderbase.root-reconstruction@0.1.0 is not advertised by the implementation",
+    },
+  ]);
+});
+
 test("unknown advertised capabilities are ignored unless explicitly requested", () => {
   const ignored = run("unknown-capability.mjs");
   assert.equal(ignored.status, 0, ignored.stderr || ignored.stdout);

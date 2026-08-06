@@ -13,10 +13,13 @@ Every known entry fixes:
 - `stable` or `experimental` stability; and
 - one implementation-neutral black-box conformance runner.
 
-The registry is canonically ordered by `name@version`. The reference CLI
-embeds an exact package copy and returns only `name`, `version`, and
-`stability` in the additive `capabilities` field of
-`folderbase protocol contract --json`.
+The registry is canonically ordered by `name@version`. The reference CLI has a
+separate embedded advertisement registry and returns only `name`, `version`,
+and `stability` in the additive `capabilities` field of `folderbase protocol
+contract --json`. A stable public package may become known to the selector
+before it is copied into that executable registry. This is the fail-closed RED
+state: explicit selection reports that the capability is not advertised, and
+the executable must not copy the entry until its public black-box suite passes.
 
 The mandatory `folderbase-cli-json-v1` base suite is not an optional
 capability and is never placed in this registry.
