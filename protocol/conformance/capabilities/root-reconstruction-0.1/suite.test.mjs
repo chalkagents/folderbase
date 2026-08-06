@@ -7,13 +7,15 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { writeCanonicalFixture } from "./fixture-generator.mjs";
+import { writeCanonicalFixture, writeLegacyFixture } from "./fixture-generator.mjs";
 import { rootReconstructionRequestSha256 } from "./reference-digests.mjs";
-import { assertRootReconstructionSchema } from "./schema.mjs";
+import { assertJsonSchema, assertRootReconstructionSchema } from "./schema.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(directory, "../../../..");
 const fixtures = join(directory, "fixtures");
+const legacyManifestProtocolPattern =
+  "^0\\.(?:1|2)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$";
 const schema = JSON.parse(
   await readFile(
     resolve(
@@ -22,6 +24,12 @@ const schema = JSON.parse(
     ),
     "utf8",
   ),
+);
+const legacyVersionSchema = JSON.parse(
+  await readFile(resolve(directory, "../../../schemas/0.4/folderbase-version.schema.json"), "utf8"),
+);
+const legacyManifestSchema = JSON.parse(
+  await readFile(resolve(directory, "../../../schemas/0.2/folderbase.schema.json"), "utf8"),
 );
 
 async function treeDigests(root, relative = "") {
@@ -101,15 +109,88 @@ test("public package and process records are closed bounded Draft 2020-12 schema
     max_total_object_bytes: { const: 9007199254740991 },
     max_visible_entries: { const: 16384 },
   });
-  assert.deepEqual(schema.$defs.rootAttestation.properties.protocol_version.enum, [
-    "0.4.0",
+  const manifestProtocol = schema.$defs.rootAttestation.properties.protocol_version;
+  assert.deepEqual(manifestProtocol, {
+    oneOf: [
+      { const: "0.5.0" },
+      { type: "string", pattern: legacyManifestProtocolPattern },
+    ],
+  });
+  for (const accepted of [
+    "0.1.0",
+    "0.1.7-alpha.1+build.5",
+    "0.2.0+reconstruction",
+    "0.2.19-rc.2",
     "0.5.0",
-  ]);
+  ]) {
+    assert.doesNotThrow(
+      () => assertJsonSchema(accepted, manifestProtocol, "manifestProtocol"),
+      accepted,
+    );
+  }
+  for (const rejected of [
+    "0.2",
+    "0.2.01",
+    "0.2.0-01",
+    "0.2.0-alpha..1",
+    "0.4.0",
+    "0.5.0+build.1",
+    "v0.2.0",
+  ]) {
+    assert.throws(
+      () => assertJsonSchema(rejected, manifestProtocol, "manifestProtocol"),
+      /must match exactly one branch/,
+      rejected,
+    );
+  }
   assert.ok(
     schema.$defs.errorDetail.properties.code.enum.includes(
       "unsupported_reconstruction_filesystem",
     ),
   );
+});
+
+test("legacy Version 0.4 package generator is deterministic and preserves its manifest protocol", async () => {
+  const first = await mkdtemp(join(tmpdir(), "folderbase-reconstruction-legacy-a-"));
+  const second = await mkdtemp(join(tmpdir(), "folderbase-reconstruction-legacy-b-"));
+  try {
+    const firstFixture = await writeLegacyFixture(first);
+    const secondFixture = await writeLegacyFixture(second);
+    assert.deepEqual(await treeDigests(first), await treeDigests(second));
+    assert.deepEqual(firstFixture, secondFixture);
+
+    const expected = JSON.parse(await readFile(join(fixtures, "legacy-expected.json"), "utf8"));
+    assert.deepEqual(firstFixture.expected, expected);
+    assert.equal(firstFixture.version.protocol_version, "0.4");
+    assertJsonSchema(firstFixture.version, legacyVersionSchema, "legacyVersion");
+    assert.deepEqual(
+      firstFixture.version.bindings
+        .map(({ path }) => path)
+        .filter((path) => path === ".folderbaseignore" || path === "FOLDERBASE.md"),
+      [".folderbaseignore", "FOLDERBASE.md"],
+    );
+    assertRootReconstructionSchema(firstFixture.index, schema, "packageIndex");
+    assertRootReconstructionSchema(firstFixture.request, schema, "request");
+
+    const rootReference = firstFixture.index.references.find(({ roles }) =>
+      roles.includes("root_manifest"));
+    const rootChunkManifest = JSON.parse(await readFile(
+      join(first, "manifests", `${rootReference.chunk_manifest_sha256}.json`),
+      "utf8",
+    ));
+    assert.equal(rootChunkManifest.chunks.length, 1);
+    const rootManifest = JSON.parse(await readFile(
+      join(first, "chunks", rootChunkManifest.chunks[0].sha256),
+      "utf8",
+    ));
+    assert.equal(rootManifest.protocol_version, "0.2.0+reconstruction");
+    assertJsonSchema(rootManifest, legacyManifestSchema, "legacyManifest");
+  } finally {
+    await Promise.all([
+      rm(first, { recursive: true, force: true }),
+      rm(second, { recursive: true, force: true }),
+    ]);
+  }
 });
 
 test("canonical package generator is deterministic and pins exact encoded transport bytes", async () => {
@@ -164,7 +245,7 @@ test("canonical package generator is deterministic and pins exact encoded transp
 test("scenario inventory covers bounded transport, closure, no-clobber, and restart risks", async () => {
   const scenarios = JSON.parse(await readFile(join(fixtures, "scenarios.json"), "utf8"));
   assert.equal(scenarios.format, "folderbase-root-reconstruction-scenarios-v1");
-  assert.equal(scenarios.cases.length, 11);
+  assert.equal(scenarios.cases.length, 12);
   assert.deepEqual(
     scenarios.cases.map(({ id }) => id),
     [...new Set(scenarios.cases.map(({ id }) => id))].sort(),
@@ -186,6 +267,8 @@ test("scenario inventory covers bounded transport, closure, no-clobber, and rest
     "exact-replay",
     "no-ambient-authority",
     "unsupported-filesystem-preflight",
+    "legacy-version-0.4",
+    "legacy-root-manifest-protocol",
   ]) assert.ok(covered.has(required), required);
 });
 
@@ -203,8 +286,8 @@ test("missing transport produces one complete deterministic RED report", () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.format, "folderbase-capability-suite-report-v1");
   assert.equal(report.capability, "folderbase.root-reconstruction@0.1.0");
-  assert.equal(report.total, 11);
+  assert.equal(report.total, 12);
   assert.equal(report.passed, 0);
-  assert.equal(report.failed, 11);
+  assert.equal(report.failed, 12);
   assert.ok(report.cases.every(({ status }) => status === "failed"));
 });

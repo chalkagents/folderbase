@@ -14,6 +14,13 @@ The command never discovers authority from the current directory, a share
 link, provider identifier, Folder Scope, Cloud record, or ambient
 `.folderbase` state.
 
+The Folderbase Version protocol and the root-manifest protocol are distinct.
+Version `0.4` reconstructs legacy roots whose exact manifest protocol is a
+SemVer-valid `0.1.x` or `0.2.x` value. Version `0.5` reconstructs roots whose
+manifest protocol is exactly `0.5.0`. Success reports that exact root-manifest
+protocol in `root_attestation.protocol_version`; it never rewrites it as the
+Folderbase Version protocol.
+
 The package is stable and known to the public capability selector. The
 reference executable must not advertise it until that executable passes the
 complete public black-box suite. During the RED implementation tranche, its

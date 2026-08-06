@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { writeCanonicalFixture } from "./fixture-generator.mjs";
+import { writeCanonicalFixture, writeLegacyFixture } from "./fixture-generator.mjs";
 import {
   canonicalFolderbaseVersionSha256,
   chunkManifestSha256,
@@ -362,12 +362,12 @@ async function verifyReconstructedRoot(
   );
 }
 
-async function prepare(caseRoot) {
+async function prepare(caseRoot, writeFixture = writeCanonicalFixture) {
   await mkdir(caseRoot, { recursive: true });
   const source = join(caseRoot, "source");
   const destinationParent = join(caseRoot, "destination-parent");
   await Promise.all([mkdir(source), mkdir(destinationParent)]);
-  const fixture = await writeCanonicalFixture(source);
+  const fixture = await writeFixture(source);
   const destination = join(destinationParent, "Reconstructed");
   return { source, destinationParent, destination, fixture };
 }
@@ -423,7 +423,12 @@ async function runCase(implementation, scenario, caseRoot, limits) {
     return;
   }
 
-  const context = await prepare(caseRoot);
+  const context = await prepare(
+    caseRoot,
+    scenario.id === "12-reconstruct-legacy-version-0.4"
+      ? writeLegacyFixture
+      : writeCanonicalFixture,
+  );
   if (scenario.id === "01-reconstruct-mixed-tree") {
     const package_ = await verifyPackage(context.source, context.fixture);
     const result = successJson(
@@ -578,6 +583,28 @@ async function runCase(implementation, scenario, caseRoot, limits) {
       context.destination,
       request,
       "invalid_request",
+      limits,
+    );
+    return;
+  }
+  if (scenario.id === "12-reconstruct-legacy-version-0.4") {
+    const package_ = await verifyPackage(context.source, context.fixture);
+    assert.equal(package_.version.protocol_version, "0.4");
+    const result = successJson(
+      implementation,
+      context.source,
+      context.destination,
+      context.fixture.request,
+      limits,
+    );
+    assert.equal(result.replayed, false);
+    assert.equal(result.root_attestation.protocol_version, "0.2.0+reconstruction");
+    await verifyReconstructedRoot(
+      implementation,
+      context.destination,
+      package_,
+      context.fixture,
+      result,
       limits,
     );
     return;

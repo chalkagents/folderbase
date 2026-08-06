@@ -25,11 +25,14 @@ directory, nested-boundary exclusion, and retained Tombstones. One unchanged
 moved file deliberately uses a single package reference whose canonical role
 set is `["live_regular_file", "retained_tombstone"]`.
 
-The eleven cases prove the mixed root and retained restore, exact package pin,
-closed request, changed Version, reference closure, corrupt chunks, no-follow
-package shape, destination no-clobber, deterministic restart/replay,
+The twelve cases prove the mixed root and retained restore, an exact Version
+`0.4` reconstruction whose root manifest reports `0.2.0+reconstruction`, exact
+package pin, closed request, changed Version, reference closure, corrupt chunks,
+no-follow package shape, destination no-clobber, deterministic restart/replay,
 unsupported-filesystem preflight before staging, and rejection of ambient
-authority. The preflight case presents the conformance-only
+authority. The legacy success keeps the Folderbase Version protocol distinct
+from the exact root-manifest protocol reported by attestation. The preflight
+case presents the conformance-only
 `FOLDERBASE_ROOT_RECONSTRUCTION_CONFORMANCE_FORCE_UNSUPPORTED_FILESYSTEM=1`
 environment control and proves the destination parent remains empty.
 Deterministic process loss uses only the

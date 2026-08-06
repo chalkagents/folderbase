@@ -132,6 +132,14 @@ must retain the immutable association established during authenticated Version
 registration. Future Version formats may bind a closure digest without
 reinterpreting v1.
 
+Folderbase Version protocol values are not root-manifest protocol values.
+Version `0.4` describes roots whose exact manifest protocol is a SemVer-valid
+`0.1.x` or `0.2.x` value; Version `0.5` describes roots whose manifest protocol
+is exactly `0.5.0`. Reconstruction validates that correspondence before
+publication. The result's root attestation reports the exact manifest protocol
+observed in the reconstructed root, including valid legacy prerelease or build
+metadata, rather than synthesizing `0.4.0` from Version `0.4`.
+
 ### Deterministic plan, bounded reconstruction, and publication
 
 Core first decodes and validates the complete Folderbase Version and package,

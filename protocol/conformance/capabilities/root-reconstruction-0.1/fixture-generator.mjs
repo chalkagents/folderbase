@@ -92,6 +92,28 @@ function canonicalRootManifest() {
   });
 }
 
+function legacyRootManifest() {
+  return encodeJson({
+    $schema: "https://folderbase.ai/protocol/0.2/folderbase.schema.json",
+    protocol_version: "0.2.0+reconstruction",
+    folderbase: {
+      id: FOLDERBASE_ID,
+      name: "Legacy root reconstruction conformance fixture",
+      kind: "project",
+      status: "active",
+      created_at: "2026-08-06T00:00:00Z",
+      entry: "FOLDERBASE.md",
+    },
+    adapters: [],
+    policies: {
+      availability: "keep_local",
+      structural_changes: "approve",
+      archive: "manual",
+      cloud_sync: "disabled",
+    },
+  });
+}
+
 function chunkManifest(content) {
   const digest = encodedSha256(content);
   return {
@@ -109,9 +131,14 @@ function chunkManifest(content) {
   };
 }
 
-function fixtureModel() {
-  const rootManifest = canonicalRootManifest();
+function fixtureModel(profile) {
+  const legacy = profile === "legacy-0.4";
+  const rootManifest = legacy ? legacyRootManifest() : canonicalRootManifest();
   const regularFiles = [
+    ...(legacy ? [
+      regular(".folderbaseignore", "0e0", "node_modules/\n"),
+      regular("FOLDERBASE.md", "0f0", "# Legacy reconstructed Folderbase\n"),
+    ] : []),
     regular("README.md", "010", "# Exact reconstructed root\n\nOpaque files stay opaque.\n"),
     regular("archives/bundle.zip", "020", Buffer.from("504b0304140000000000", "hex")),
     regular("data/table.csv", "030", "name,value\nalpha,1\n"),
@@ -158,7 +185,7 @@ function fixtureModel() {
   };
   const version = {
     format: "folderbase-version-v1",
-    protocol_version: "0.5",
+    protocol_version: legacy ? "0.4" : "0.5",
     folderbase_id: FOLDERBASE_ID,
     version_id: FOLDERBASE_VERSION_ID,
     parents: [],
@@ -223,14 +250,14 @@ function addReference(references, binding, role, content) {
   });
 }
 
-export async function writeCanonicalFixture(output) {
+async function writeFixture(output, profile) {
   const source = resolve(output);
   assert.deepEqual(await readdir(source), [], "fixture output directory must be empty");
   await Promise.all([
     mkdir(join(source, "manifests")),
     mkdir(join(source, "chunks")),
   ]);
-  const { rootManifest, regularFiles, deleted, version } = fixtureModel();
+  const { rootManifest, regularFiles, deleted, version } = fixtureModel(profile);
   const references = new Map();
   references.set(version.root_manifest.object_version_id, {
     roles: new Set(["root_manifest"]),
@@ -302,6 +329,14 @@ export async function writeCanonicalFixture(output) {
     ...[...chunks].map(([digest, bytes]) => writeFile(join(source, "chunks", digest), bytes)),
   ]);
   return { index, request, version, expected };
+}
+
+export async function writeCanonicalFixture(output) {
+  return writeFixture(output, "canonical-0.5");
+}
+
+export async function writeLegacyFixture(output) {
+  return writeFixture(output, "legacy-0.4");
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
