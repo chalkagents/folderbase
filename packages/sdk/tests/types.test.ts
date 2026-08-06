@@ -3,6 +3,10 @@ import {
   FolderbaseOperationalError,
   type FolderbaseDaemonEvent,
   type FolderbaseResult,
+  type FolderbaseRootReconstructionAttention,
+  type FolderbaseRootReconstructionError,
+  type FolderbaseRootReconstructionRequest,
+  type FolderbaseRootReconstructionResult,
   type JsonObject,
   type JsonValue,
 } from "../src/index.js";
@@ -19,6 +23,32 @@ const queryDocument: JsonObject = {
 };
 
 async function useClient(): Promise<void> {
+  const reconstructionRequest: FolderbaseRootReconstructionRequest = {
+    format: "folderbase-root-reconstruction-request-v1",
+    operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
+    package_index_sha256: "a".repeat(64),
+  };
+  const reconstructed: FolderbaseResult<
+    FolderbaseRootReconstructionResult,
+    FolderbaseRootReconstructionAttention
+  > = await client.reconstruct(
+    "/absolute/package",
+    "/absolute/reconstructed",
+    reconstructionRequest,
+  );
+  const reconstructionDocument:
+    | FolderbaseRootReconstructionResult
+    | FolderbaseRootReconstructionAttention = reconstructed.document;
+  void reconstructionDocument;
+  const typedError: FolderbaseRootReconstructionError = {
+    format: "folderbase-root-reconstruction-error-v1",
+    operation_id: reconstructionRequest.operation_id,
+    request_sha256: "b".repeat(64),
+    package_index_sha256: reconstructionRequest.package_index_sha256,
+    error: { code: "reconstruction_failed", message: "failed safely" },
+  };
+  void typedError;
+
   const result: FolderbaseResult = await client.query(
     "/absolute/workspace",
     queryDocument,

@@ -83,7 +83,7 @@ test("optional capabilities do not expand Compatibility Contract v1's minimum", 
   assert.equal(registry.format, "folderbase-capability-registry-v1");
 });
 
-test("the public capability registry is exact while RED profiles remain unadvertised", async () => {
+test("the public and embedded capability registries are exact after advertised profiles turn GREEN", async () => {
   const [registry, embeddedRegistry, changeSetCapability, daemonCapability, queryCapability, rootReconstructionCapability, templateCapability, schema] = await Promise.all([
     load(registryUrl),
     load(embeddedRegistryUrl),
@@ -95,17 +95,12 @@ test("the public capability registry is exact while RED profiles remain unadvert
     load(registrySchemaUrl),
   ]);
 
-  assert.deepEqual(embeddedRegistry, {
-    ...registry,
-    capabilities: registry.capabilities.filter(
-      ({ name }) => name !== "folderbase.root-reconstruction",
-    ),
-  });
+  assert.deepEqual(embeddedRegistry, registry);
   assert.equal(
     embeddedRegistry.capabilities.some(
       ({ name }) => name === "folderbase.root-reconstruction",
     ),
-    false,
+    true,
   );
   assert.equal(
     schema.$id,

@@ -97,6 +97,88 @@ export interface FolderbaseValidateOptions {
   level?: "shallow" | "content";
 }
 
+export interface FolderbaseRootReconstructionRequest extends JsonObject {
+  format: "folderbase-root-reconstruction-request-v1";
+  operation_id: string;
+  package_index_sha256: string;
+}
+
+export interface FolderbaseRootAttestation extends JsonObject {
+  root: string;
+  folderbase_id: string;
+  protocol_version: string;
+  manifest_sha256: string;
+  root_instance_sha256: string;
+}
+
+export interface FolderbaseRootReconstructionResult extends JsonObject {
+  format: "folderbase-root-reconstruction-result-v1";
+  operation_id: string;
+  request_sha256: string;
+  folderbase_id: string;
+  folderbase_version_id: string;
+  canonical_version_sha256: string;
+  package_index_sha256: string;
+  verified_object_count: number;
+  version_authenticated_object_count: number;
+  retained_tombstone_object_count: number;
+  visible_entry_count: number;
+  verified_opaque_bytes: number;
+  root_attestation: FolderbaseRootAttestation;
+  replayed: boolean;
+}
+
+export type FolderbaseRootReconstructionAttentionCode =
+  | "destination_occupied"
+  | "reconstruction_in_progress";
+
+export interface FolderbaseRootReconstructionAttentionDetail extends JsonObject {
+  code: FolderbaseRootReconstructionAttentionCode;
+  message: string;
+  retryable: boolean;
+}
+
+export interface FolderbaseRootReconstructionAttention extends JsonObject {
+  format: "folderbase-root-reconstruction-attention-v1";
+  operation_id: string;
+  request_sha256: string;
+  package_index_sha256: string;
+  attention: FolderbaseRootReconstructionAttentionDetail;
+}
+
+export type FolderbaseRootReconstructionErrorCode =
+  | "invalid_invocation"
+  | "invalid_request"
+  | "invalid_package"
+  | "package_index_mismatch"
+  | "package_changed"
+  | "invalid_folderbase_version"
+  | "folderbase_mismatch"
+  | "version_mismatch"
+  | "reference_closure_invalid"
+  | "manifest_invalid"
+  | "chunk_invalid"
+  | "object_verification_failed"
+  | "unsafe_package"
+  | "unsafe_destination"
+  | "operation_id_conflict"
+  | "unsupported_reconstruction_filesystem"
+  | "reconstruction_failed"
+  | "output_failed";
+
+export interface FolderbaseRootReconstructionErrorDetail extends JsonObject {
+  code: FolderbaseRootReconstructionErrorCode;
+  message: string;
+}
+
+export interface FolderbaseRootReconstructionError extends JsonObject {
+  format: "folderbase-root-reconstruction-error-v1";
+  operation_id?: string;
+  request_sha256?: string;
+  package_index_sha256?: string;
+  error: FolderbaseRootReconstructionErrorDetail;
+}
+
 export interface FolderbaseDaemonReady extends JsonObject {
   format: "folderbase-daemon-message-v1";
   kind: "ready";
@@ -187,5 +269,14 @@ export class FolderbaseClient {
   changeSetPropose<T extends JsonValue = JsonObject>(checkout: string, staging: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   changeSetAssess<T extends JsonValue = JsonObject>(root: string, staging: string, document: JsonObject, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   changeSetApply<T extends JsonValue = JsonObject>(root: string, staging: string, document: JsonObject, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
+  reconstruct(
+    source: string,
+    destination: string,
+    request: FolderbaseRootReconstructionRequest,
+    options?: FolderbaseRunOptions,
+  ): Promise<FolderbaseResult<
+    FolderbaseRootReconstructionResult,
+    FolderbaseRootReconstructionAttention
+  >>;
   startDaemon(root: string, options?: FolderbaseDaemonOptions): Promise<FolderbaseDaemonSession>;
 }

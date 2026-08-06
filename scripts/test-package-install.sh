@@ -25,10 +25,9 @@ node scripts/verify-folderbase-version-distribution.mjs
 node scripts/verify-folderbase-version-0.5-digest-vectors.mjs
 node scripts/verify-folderbase-version-0.5-distribution.mjs
 
-# The public registry may contain a stable capability that the reference
-# executable intentionally withholds until its black-box suite is GREEN. The
-# dedicated contract test below proves the exact public/embedded relationship;
-# byte equality here would force premature advertisement.
+# Capability advertisement is verified semantically below so known profiles
+# may still spend time in the fail-closed RED state before a later release
+# copies them into the executable registry.
 
 for template in \
   person \

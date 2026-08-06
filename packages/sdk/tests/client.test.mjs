@@ -112,6 +112,102 @@ test("helpers use exact public arguments and bounded JSON stdin", async () => {
   ]);
 });
 
+test("reconstruct uses the exact universal JSON surface and validates closed outcomes", async () => {
+  const request = {
+    format: "folderbase-root-reconstruction-request-v1",
+    operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
+    package_index_sha256: "a".repeat(64),
+  };
+  const reconstructed = await client().reconstruct(
+    "/tmp/package",
+    "/tmp/reconstructed",
+    request,
+  );
+  assert.equal(reconstructed.kind, "success");
+  assert.equal(reconstructed.document.operation_id, request.operation_id);
+  assert.equal(
+    reconstructed.document.package_index_sha256,
+    request.package_index_sha256,
+  );
+  assert.equal(reconstructed.document.root_attestation.root, "/tmp/reconstructed");
+
+  const attention = await client().reconstruct(
+    "/tmp/package",
+    "/tmp/occupied",
+    request,
+  );
+  assert.equal(attention.kind, "attention");
+  assert.equal(attention.document.attention.code, "destination_occupied");
+
+  await assert.rejects(
+    client().reconstruct("/tmp/package", "/tmp/error", request),
+    (error) => {
+      assert.ok(error instanceof FolderbaseOperationalError);
+      assert.equal(error.document.format, "folderbase-root-reconstruction-error-v1");
+      assert.equal(error.document.error.code, "reconstruction_failed");
+      return true;
+    },
+  );
+  await assert.rejects(
+    client().reconstruct("/tmp/package", "/tmp/malformed-result", request),
+    FolderbaseMalformedOutputError,
+  );
+  await assert.rejects(
+    client().reconstruct("/tmp/package", "/tmp/malformed-error", request),
+    FolderbaseMalformedOutputError,
+  );
+});
+
+test("reconstruct rejects unbounded or open requests before spawning", async () => {
+  const request = {
+    format: "folderbase-root-reconstruction-request-v1",
+    operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
+    package_index_sha256: "a".repeat(64),
+  };
+  await assert.rejects(
+    client().reconstruct("/tmp/package", "/tmp/reconstructed", {
+      ...request,
+      provider_url: "https://ambient.invalid/package",
+    }),
+    TypeError,
+  );
+  await assert.rejects(
+    client().reconstruct("/tmp/package", "/tmp/reconstructed", {
+      ...request,
+      operation_id: `reconstruction_${"x".repeat(5_000)}`,
+    }),
+    TypeError,
+  );
+  await assert.rejects(
+    client().reconstruct("relative/package", "/tmp/reconstructed", request),
+    TypeError,
+  );
+  await assert.rejects(
+    client().reconstruct("/tmp/package", "relative/destination", request),
+    TypeError,
+  );
+});
+
+test("reconstruct rejects request-digest and destination substitution", async () => {
+  const request = {
+    format: "folderbase-root-reconstruction-request-v1",
+    operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
+    package_index_sha256: "a".repeat(64),
+  };
+  for (const destination of [
+    "/tmp/wrong-result-request-digest",
+    "/tmp/wrong-attention-request-digest",
+    "/tmp/wrong-error-request-digest",
+    "/tmp/wrong-root",
+  ]) {
+    await assert.rejects(
+      client().reconstruct("/tmp/package", destination, request),
+      FolderbaseMalformedOutputError,
+      destination,
+    );
+  }
+});
+
 test("daemon session exposes ready, serial responses, hints, and shutdown", async () => {
   const session = await client().startDaemon("/tmp/folder");
   assert.equal(session.ready.root, "/tmp/folder");

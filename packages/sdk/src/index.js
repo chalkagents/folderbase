@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { isAbsolute, resolve } from "node:path";
 
 const DEFAULT_INPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -9,6 +11,35 @@ const MAX_TIMEOUT_MS = 10 * 60_000;
 const DAEMON_REQUEST_FORMAT = "folderbase-daemon-request-v1";
 const DAEMON_MESSAGE_FORMAT = "folderbase-daemon-message-v1";
 const DAEMON_CAPABILITY = "folderbase.daemon-stdio@0.1.0";
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const FOLDERBASE_ID_PATTERN = /^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const FOLDERBASE_VERSION_ID_PATTERN = /^fbversion_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const RECONSTRUCTION_OPERATION_ID_PATTERN = /^reconstruction_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const LEGACY_MANIFEST_PROTOCOL_PATTERN = /^0\.(?:1|2)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const RECONSTRUCTION_ATTENTION_CODES = new Set([
+  "destination_occupied",
+  "reconstruction_in_progress",
+]);
+const RECONSTRUCTION_ERROR_CODES = new Set([
+  "invalid_invocation",
+  "invalid_request",
+  "invalid_package",
+  "package_index_mismatch",
+  "package_changed",
+  "invalid_folderbase_version",
+  "folderbase_mismatch",
+  "version_mismatch",
+  "reference_closure_invalid",
+  "manifest_invalid",
+  "chunk_invalid",
+  "object_verification_failed",
+  "unsafe_package",
+  "unsafe_destination",
+  "operation_id_conflict",
+  "unsupported_reconstruction_filesystem",
+  "reconstruction_failed",
+  "output_failed",
+]);
 const DAEMON_OPERATIONS = new Set([
   "query",
   "explain",
@@ -186,6 +217,179 @@ function hasExactKeys(document, keys) {
   const expected = [...keys].sort();
   return actual.length === expected.length
     && actual.every((key, index) => key === expected[index]);
+}
+
+function hasClosedKeys(document, required, optional = []) {
+  const actual = Object.keys(document);
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(document, key))
+    && actual.every((key) => allowed.has(key));
+}
+
+function isBoundedString(value, maximum = 4_096) {
+  return typeof value === "string"
+    && value.length > 0
+    && [...value].length <= maximum;
+}
+
+function isBoundedInteger(value, minimum, maximum) {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+}
+
+function requireReconstructionPath(value, name) {
+  if (!isBoundedString(value) || value.includes("\u0000") || !isAbsolute(value)) {
+    throw new TypeError(`${name} must be an absolute path no longer than 4096 characters`);
+  }
+  return value;
+}
+
+function validateRootReconstructionRequest(document) {
+  requireJsonObject(document, "request");
+  if (!hasExactKeys(document, ["format", "operation_id", "package_index_sha256"])
+    || document.format !== "folderbase-root-reconstruction-request-v1"
+    || !RECONSTRUCTION_OPERATION_ID_PATTERN.test(document.operation_id)
+    || !SHA256_PATTERN.test(document.package_index_sha256)) {
+    throw new TypeError("request must be one closed Folderbase root-reconstruction request");
+  }
+  return document;
+}
+
+function rootReconstructionRequestSha256(request) {
+  const operationId = Buffer.from(request.operation_id, "utf8");
+  const operationIdLength = Buffer.alloc(4);
+  operationIdLength.writeUInt32BE(operationId.length);
+  return createHash("sha256")
+    .update(Buffer.from("folderbase-root-reconstruction-request-v1\0", "ascii"))
+    .update(operationIdLength)
+    .update(operationId)
+    .update(Buffer.from(request.package_index_sha256, "hex"))
+    .digest("hex");
+}
+
+function malformedReconstruction(message, details = {}) {
+  throw new FolderbaseMalformedOutputError(
+    `Folderbase root reconstruction ${message}`,
+    details,
+  );
+}
+
+function validateRootAttestation(document) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)
+    || !hasExactKeys(document, [
+      "root",
+      "folderbase_id",
+      "protocol_version",
+      "manifest_sha256",
+      "root_instance_sha256",
+    ])
+    || !isBoundedString(document.root)
+    || !FOLDERBASE_ID_PATTERN.test(document.folderbase_id)
+    || !(document.protocol_version === "0.5.0"
+      || (typeof document.protocol_version === "string"
+        && LEGACY_MANIFEST_PROTOCOL_PATTERN.test(document.protocol_version)))
+    || !SHA256_PATTERN.test(document.manifest_sha256)
+    || !SHA256_PATTERN.test(document.root_instance_sha256)) {
+    malformedReconstruction("emitted an invalid root attestation");
+  }
+}
+
+function validateRootReconstructionResult(
+  document,
+  request,
+  requestSha256,
+  resolvedDestination,
+) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)
+    || !hasExactKeys(document, [
+      "format",
+      "operation_id",
+      "request_sha256",
+      "folderbase_id",
+      "folderbase_version_id",
+      "canonical_version_sha256",
+      "package_index_sha256",
+      "verified_object_count",
+      "version_authenticated_object_count",
+      "retained_tombstone_object_count",
+      "visible_entry_count",
+      "verified_opaque_bytes",
+      "root_attestation",
+      "replayed",
+    ])
+    || document.format !== "folderbase-root-reconstruction-result-v1"
+    || document.operation_id !== request.operation_id
+    || document.request_sha256 !== requestSha256
+    || !FOLDERBASE_ID_PATTERN.test(document.folderbase_id)
+    || !FOLDERBASE_VERSION_ID_PATTERN.test(document.folderbase_version_id)
+    || !SHA256_PATTERN.test(document.canonical_version_sha256)
+    || document.package_index_sha256 !== request.package_index_sha256
+    || !isBoundedInteger(document.verified_object_count, 1, 16_385)
+    || !isBoundedInteger(document.version_authenticated_object_count, 1, 16_385)
+    || !isBoundedInteger(document.retained_tombstone_object_count, 0, 16_384)
+    || !isBoundedInteger(document.visible_entry_count, 0, 16_384)
+    || !isBoundedInteger(document.verified_opaque_bytes, 1, Number.MAX_SAFE_INTEGER)
+    || typeof document.replayed !== "boolean") {
+    malformedReconstruction("emitted an invalid result");
+  }
+  validateRootAttestation(document.root_attestation);
+  if (document.root_attestation.folderbase_id !== document.folderbase_id) {
+    malformedReconstruction("result and root attestation name different Folderbases");
+  }
+  if (resolve(document.root_attestation.root) !== resolvedDestination) {
+    malformedReconstruction("result attests a different destination root");
+  }
+  return document;
+}
+
+function validateRootReconstructionAttention(document, request, requestSha256) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)
+    || !hasExactKeys(document, [
+      "format",
+      "operation_id",
+      "request_sha256",
+      "package_index_sha256",
+      "attention",
+    ])
+    || document.format !== "folderbase-root-reconstruction-attention-v1"
+    || document.operation_id !== request.operation_id
+    || document.request_sha256 !== requestSha256
+    || document.package_index_sha256 !== request.package_index_sha256
+    || document.attention === null
+    || typeof document.attention !== "object"
+    || Array.isArray(document.attention)
+    || !hasExactKeys(document.attention, ["code", "message", "retryable"])
+    || !RECONSTRUCTION_ATTENTION_CODES.has(document.attention.code)
+    || !isBoundedString(document.attention.message)
+    || typeof document.attention.retryable !== "boolean") {
+    malformedReconstruction("emitted invalid attention");
+  }
+  return document;
+}
+
+function validateRootReconstructionError(document, request, requestSha256, details) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)
+    || !hasClosedKeys(
+      document,
+      ["format", "error"],
+      ["operation_id", "request_sha256", "package_index_sha256"],
+    )
+    || document.format !== "folderbase-root-reconstruction-error-v1"
+    || (document.operation_id !== undefined
+      && (!RECONSTRUCTION_OPERATION_ID_PATTERN.test(document.operation_id)
+        || document.operation_id !== request.operation_id))
+    || (document.request_sha256 !== undefined
+      && document.request_sha256 !== requestSha256)
+    || (document.package_index_sha256 !== undefined
+      && (document.package_index_sha256 !== request.package_index_sha256))
+    || document.error === null
+    || typeof document.error !== "object"
+    || Array.isArray(document.error)
+    || !hasExactKeys(document.error, ["code", "message"])
+    || !RECONSTRUCTION_ERROR_CODES.has(document.error.code)
+    || !isBoundedString(document.error.message)) {
+    malformedReconstruction("emitted an invalid error", details);
+  }
+  return document;
 }
 
 function appendBounded(chunks, chunk, total, limit, stream) {
@@ -532,6 +736,40 @@ export class FolderbaseClient {
       document,
       options,
     );
+  }
+
+  async reconstruct(source, destination, request, options) {
+    requireReconstructionPath(source, "source");
+    requireReconstructionPath(destination, "destination");
+    validateRootReconstructionRequest(request);
+    const requestSha256 = rootReconstructionRequestSha256(request);
+    const resolvedDestination = resolve(destination);
+    try {
+      const outcome = await this.#runJson(
+        ["reconstruct", source, destination, "--stdin", "--json"],
+        request,
+        options,
+      );
+      if (outcome.kind === "success") {
+        validateRootReconstructionResult(
+          outcome.document,
+          request,
+          requestSha256,
+          resolvedDestination,
+        );
+      } else {
+        validateRootReconstructionAttention(outcome.document, request, requestSha256);
+      }
+      return outcome;
+    } catch (error) {
+      if (error instanceof FolderbaseOperationalError) {
+        validateRootReconstructionError(error.document, request, requestSha256, {
+          exitCode: error.exitCode,
+          stderr: error.stderr,
+        });
+      }
+      throw error;
+    }
   }
 
   startDaemon(root, options = {}) {

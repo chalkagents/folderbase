@@ -46,7 +46,7 @@ async function treeDigests(root, relative = "") {
   return result.sort(([left], [right]) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
 }
 
-test("stable package is selectable but the executable does not advertise it before GREEN", async () => {
+test("stable package and reference executable advertise the profile after GREEN", async () => {
   const packageEntry = JSON.parse(
     await readFile(
       resolve(directory, "../../../capabilities/root-reconstruction/0.1.0/capability.json"),
@@ -73,9 +73,9 @@ test("stable package is selectable but the executable does not advertise it befo
       "utf8",
     ),
   );
-  assert.equal(
-    embeddedRegistry.capabilities.some(({ name }) => name === packageEntry.name),
-    false,
+  assert.deepEqual(
+    embeddedRegistry.capabilities.find(({ name }) => name === packageEntry.name),
+    packageEntry,
   );
 });
 

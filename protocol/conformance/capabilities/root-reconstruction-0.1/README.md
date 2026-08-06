@@ -15,8 +15,9 @@ node protocol/conformance/capabilities/root-reconstruction-0.1/run.mjs \
 
 Exit `0` with `failed: 0` is the complete capability claim. Exit `1` is a
 bounded behavioral report. Bad runner arguments or runner failures exit `2`.
-The v0.6.1 reference executable is expected to be RED because it does not yet
-implement or advertise this later capability.
+The released v0.6.1 executable remains the expected RED baseline because it
+predates this capability. A reference executable built from the implementing
+source advertises the profile only after all twelve cases pass.
 
 The generator creates a bounded exact package containing Markdown, CSV, PDF,
 DOCX-shaped opaque bytes, immutable SQLite-shaped bytes, media, archive,

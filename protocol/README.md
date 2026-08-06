@@ -31,7 +31,10 @@ independent of the Folderbase application and hosted services.
 - `schemas/0.5/folderbase-version.schema.json` validates the protocol 0.5
   profile of the same closed, provider-neutral Version v1 envelope.
 - `schemas/capabilities/change-set/0.1/change-set.schema.json` defines the
-  unadvertised scoped checkout and immutable Change Set 0.1 capability.
+  advertised stable scoped checkout and immutable Change Set 0.1 capability.
+- `schemas/capabilities/root-reconstruction/0.1/root-reconstruction.schema.json`
+  defines the advertised stable exact whole-Version reconstruction package and
+  process contract.
 - `conformance/` contains valid and invalid compatibility fixtures.
 - `compatibility/v1/contract.json` is the machine-readable stable Core
   compatibility inventory.
@@ -54,9 +57,11 @@ independent of the Folderbase application and hosted services.
   fixes markerless and optional-root-file Version states, strict root-manifest
   capture policy, invalid delta cases, canonical Version digests, and exact
   root-manifest byte digests.
-- `conformance/capabilities/change-set-0.1/` is the independently runnable RED
+- `conformance/capabilities/change-set-0.1/` is the independently runnable
   suite for scoped projections, opaque staged bytes, three-way assessment,
   atomic apply, crash recovery, and replay.
+- `conformance/capabilities/root-reconstruction-0.1/` is the independent
+  twelve-case whole-root reconstruction suite.
 - `templates/0.2/project/template.json` is the built-in data-only
   Project package.
 - `templates/project/` is the additive starting point for a new Project

@@ -1,0 +1,102 @@
+---
+title: Root reconstruction capability 0.1
+description: Stable exact-Version reconstruction into a new ordinary Folderbase root.
+---
+
+`folderbase.root-reconstruction@0.1.0` is an advertised stable optional
+capability. It does not expand Compatibility Contract v1 or define Cloud,
+sharing, or sync authority. Discover it through:
+
+```bash
+folderbase protocol contract --json
+```
+
+## Process interface
+
+```text
+folderbase reconstruct SOURCE DESTINATION --stdin --json
+```
+
+`SOURCE` is one closed, no-follow reconstruction package. `DESTINATION` is one
+absent child beneath an existing ordinary directory. Stdin contains one closed
+`folderbase-root-reconstruction-request-v1` document:
+
+```json
+{
+  "format": "folderbase-root-reconstruction-request-v1",
+  "operation_id": "reconstruction_019f0000-0000-7000-8000-000000000001",
+  "package_index_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+Both paths are explicit. The current directory, a share link, provider ID,
+Cloud record, Folder Scope, and ambient `.folderbase` state grant no authority.
+
+## Exact package
+
+```text
+SOURCE/
+├── index.json
+├── version.json
+├── manifests/<chunk-manifest-sha256>.json
+└── chunks/<chunk-sha256>
+```
+
+The encoded `index.json` digest is pinned by the request. It binds the exact
+Folderbase and Version identities, canonical and encoded Version digests,
+every externally materialized Object Version, canonical Chunk Manifests, and
+the retained-Tombstone fidelity closure. Extra entries, aliases, symlinks,
+special nodes, unsafe permissions, changed identities, missing references, or
+unverifiable bytes fail closed.
+
+Folderbase Version v1 does not repeat the deleted content digest or executable
+bit for a retained regular-file Tombstone. The package therefore carries the
+exact retained Object Version association and a path-sorted executable
+fidelity record. These records are transport evidence pinned by the package
+index; they do not change the canonical Folderbase Version digest.
+
+## Publication and replay
+
+Core reconstructs Markdown, repositories, PDFs, CSV, SQLite snapshots, office
+documents, videos, archives, executables, and unknown regular files as opaque
+bytes. It verifies the complete staged root, durably flushes required state,
+and atomically publishes without replacement. Existing destinations return
+typed attention; Core never merges, deletes, reorganizes, or overwrites them.
+
+The operation ID and deterministic request digest form the replay key. Durable
+private state supports restart around preparation, verified staging,
+publication, and completion. An exact replay succeeds only when the
+engine-owned completion record and current root attestation still match.
+
+## Results and exits
+
+| Exit | Stream | Document |
+| --- | --- | --- |
+| `0` | stdout | `folderbase-root-reconstruction-result-v1` |
+| `1` | stdout | `folderbase-root-reconstruction-attention-v1` |
+| `2` | stderr | `folderbase-root-reconstruction-error-v1` |
+
+Success binds the operation and request, Folderbase and Version identities,
+package index, verified counts and opaque bytes, current root attestation, and
+replay status. Messages are explanatory; integrations must use the closed
+codes and schema.
+
+## Independent conformance
+
+Any implementation can run the dependency-free public suite:
+
+```bash
+node protocol/conformance/capabilities/root-reconstruction-0.1/run.mjs \
+  --implementation /absolute/path/to/folderbase
+```
+
+The twelve black-box cases cover exact canonical and legacy reconstruction,
+package pins, closed requests and references, corrupt chunks, no-follow input,
+destination no-clobber, unsupported-filesystem preflight, deterministic
+restart and replay, and rejection of ambient authority. A conforming report
+exits `0` with `passed: 12` and `failed: 0`.
+
+The canonical contract is the public
+[`root-reconstruction.schema.json`](https://github.com/chalkagents/folderbase/blob/main/protocol/schemas/capabilities/root-reconstruction/0.1/root-reconstruction.schema.json),
+the [capability README](https://github.com/chalkagents/folderbase/blob/main/protocol/capabilities/root-reconstruction/0.1.0/README.md), and
+[ADR-0016](https://github.com/chalkagents/folderbase/blob/main/docs/adr/0016-reconstruct-exact-folderbase-versions-into-new-roots.md).

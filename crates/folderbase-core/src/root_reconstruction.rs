@@ -45,6 +45,7 @@ use crate::{
         open_root_nofollow,
     },
     transfer_manifest::{ChunkManifest, ManifestError, ObjectVerificationError},
+    traversal_policy::is_reserved_workspace_component,
 };
 
 pub const PACKAGE_FORMAT_V1: &str = "folderbase-root-reconstruction-package-v1";
@@ -308,13 +309,13 @@ impl RetainedReconstructionPackage {
                 source,
             })?;
         if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-            return Err(RootReconstructionError::PackageChanged(display_root));
+            return Err(RootReconstructionError::UnsafePackage(display_root));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if metadata.permissions().mode() & 0o022 != 0 {
-                return Err(RootReconstructionError::PackageChanged(display_root));
+                return Err(RootReconstructionError::UnsafePackage(display_root));
             }
         }
         let root = Dir::from_std_file(file);
@@ -524,6 +525,8 @@ pub enum RootReconstructionError {
     OperationConflict,
     #[error("root reconstruction package changed at {0}")]
     PackageChanged(PathBuf),
+    #[error("root reconstruction package is unsafe at {0}")]
+    UnsafePackage(PathBuf),
     #[error("root reconstruction filesystem is unsupported at {path}: {reason}")]
     UnsupportedReconstructionFilesystem { path: PathBuf, reason: String },
     #[error("root reconstruction filesystem operation failed: {0}")]
@@ -639,6 +642,7 @@ where
     )? {
         return replay_published_root(&root, destination, &record);
     }
+    require_package_destination_separation(package, destination)?;
     let validated_package = revalidate_package(package, operation.plan)?;
 
     let staged_name = staged_root_name(&operation.operation_id);
@@ -743,6 +747,71 @@ where
         replayed: false,
         attestation: final_attestation,
     })
+}
+
+fn require_package_destination_separation(
+    package: &RetainedReconstructionPackage,
+    destination: &RetainedReconstructionDestination,
+) -> Result<(), RootReconstructionError> {
+    let package_identity = cap_directory_identity(&package.root, &package.display_root)?;
+    let destination_identity =
+        cap_directory_identity(&destination.parent, &destination.display_parent)?;
+    let package_canonical = canonical_retained_directory(
+        &package.root,
+        &package.display_root,
+        RootReconstructionError::PackageChanged(package.display_root.clone()),
+    )?;
+    let destination_canonical = canonical_retained_directory(
+        &destination.parent,
+        &destination.display_parent,
+        RootReconstructionError::InvalidDestination,
+    )?;
+    if package_identity == destination_identity
+        || physical_ancestor_chain_contains(&package_canonical, destination_identity)?
+        || physical_ancestor_chain_contains(&destination_canonical, package_identity)?
+    {
+        return Err(RootReconstructionError::InvalidDestination);
+    }
+    Ok(())
+}
+
+fn canonical_retained_directory(
+    directory: &Dir,
+    display: &Path,
+    mismatch: RootReconstructionError,
+) -> Result<PathBuf, RootReconstructionError> {
+    let canonical =
+        std::fs::canonicalize(display).map_err(|source| RootReconstructionError::Io {
+            path: display.to_path_buf(),
+            source,
+        })?;
+    let canonical_identity =
+        PhysicalIdentity::from_path(&canonical).map_err(|source| RootReconstructionError::Io {
+            path: canonical.clone(),
+            source,
+        })?;
+    if canonical_identity != cap_directory_identity(directory, display)? {
+        return Err(mismatch);
+    }
+    Ok(canonical)
+}
+
+fn physical_ancestor_chain_contains(
+    descendant: &Path,
+    ancestor_identity: PhysicalIdentity,
+) -> Result<bool, RootReconstructionError> {
+    for candidate in descendant.ancestors() {
+        let identity = PhysicalIdentity::from_path(candidate).map_err(|source| {
+            RootReconstructionError::Io {
+                path: candidate.to_path_buf(),
+                source,
+            }
+        })?;
+        if identity == ancestor_identity {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn reconstruction_record(operation: &RootReconstructionOperation<'_>) -> ReconstructionRecord {
@@ -1554,7 +1623,7 @@ fn open_package_directory(
     {
         use cap_std::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o022 != 0 {
-            return Err(RootReconstructionError::PackageChanged(
+            return Err(RootReconstructionError::UnsafePackage(
                 package.display_root.join(name),
             ));
         }
@@ -1577,7 +1646,7 @@ fn require_exact_entries(
         })?
     {
         if actual.len() >= maximum_observations {
-            return Err(RootReconstructionError::PackageChanged(
+            return Err(RootReconstructionError::UnsafePackage(
                 display.to_path_buf(),
             ));
         }
@@ -1587,19 +1656,19 @@ fn require_exact_entries(
         })?;
         let name = entry.file_name();
         if name.as_encoded_bytes().len() > MAX_PATH_COMPONENT_BYTES {
-            return Err(RootReconstructionError::PackageChanged(
+            return Err(RootReconstructionError::UnsafePackage(
                 display.to_path_buf(),
             ));
         }
         let name = name
             .into_string()
-            .map_err(|_| RootReconstructionError::PackageChanged(display.to_path_buf()))?;
+            .map_err(|_| RootReconstructionError::UnsafePackage(display.to_path_buf()))?;
         actual.insert(name);
     }
     if &actual == expected {
         Ok(())
     } else {
-        Err(RootReconstructionError::PackageChanged(
+        Err(RootReconstructionError::UnsafePackage(
             display.to_path_buf(),
         ))
     }
@@ -1673,7 +1742,7 @@ fn validate_package_regular_metadata(
     display: &Path,
 ) -> Result<(), RootReconstructionError> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(RootReconstructionError::PackageChanged(
+        return Err(RootReconstructionError::UnsafePackage(
             display.to_path_buf(),
         ));
     }
@@ -1682,7 +1751,7 @@ fn validate_package_regular_metadata(
         use cap_fs_ext::OsMetadataExt;
         use cap_std::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o022 != 0 || metadata.nlink() != 1 {
-            return Err(RootReconstructionError::PackageChanged(
+            return Err(RootReconstructionError::UnsafePackage(
                 display.to_path_buf(),
             ));
         }
@@ -1729,7 +1798,7 @@ fn open_regular_from(
             source,
         })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(RootReconstructionError::PackageChanged(
+        return Err(RootReconstructionError::UnsafePackage(
             display.to_path_buf(),
         ));
     }
@@ -2005,6 +2074,26 @@ fn materialize_reconstruction(
     plan: &RootReconstructionPlan,
     validated_package: &ValidatedPackage,
 ) -> Result<ReconstructedHistoryClosure, RootReconstructionError> {
+    let mut executable_fidelity = BTreeMap::new();
+    for binding in plan.version().bindings() {
+        if binding.kind() == PathBindingKind::RegularFile {
+            insert_executable_fidelity(
+                &mut executable_fidelity,
+                binding
+                    .object_version_id()
+                    .ok_or(RootReconstructionError::OperationConflict)?,
+                binding.executable().unwrap_or(false),
+            )?;
+        }
+    }
+    for fidelity in plan.tombstone_fidelity() {
+        insert_executable_fidelity(
+            &mut executable_fidelity,
+            fidelity.object_version_id(),
+            fidelity.executable(),
+        )?;
+    }
+
     for binding in plan.version().bindings() {
         if binding.kind() == PathBindingKind::Directory {
             ensure_directory(root, Path::new(binding.path()), display_root)?;
@@ -2039,12 +2128,19 @@ fn materialize_reconstruction(
             Some(value) => ObjectId::parse(value.to_owned())?,
             None => derived_root_object_id(plan)?,
         };
+        let mut extensions = BTreeMap::new();
+        if let Some(executable) = executable_fidelity.get(reference.object_version_id()) {
+            extensions.insert(
+                "executable".to_owned(),
+                serde_json::Value::Bool(*executable),
+            );
+        }
         object_versions.push(LocalVersionRecord {
             id: VersionId::parse(reference.object_version_id().to_owned())?,
             object_id,
             content: installed,
             captured_at: plan.version().created_at().to_owned(),
-            extensions: BTreeMap::new(),
+            extensions,
         });
         object_paths.insert(reference.object_version_id().to_owned(), relative);
     }
@@ -2116,9 +2212,11 @@ fn materialize_reconstruction(
         });
     }
 
-    let mut projections = Vec::new();
+    let mut projections = BTreeMap::new();
     for binding in plan.version().bindings() {
-        if binding.kind() != PathBindingKind::RegularFile {
+        if binding.kind() != PathBindingKind::RegularFile
+            || !can_project_reconstructed_object(binding.path())
+        {
             continue;
         }
         let object_id = ObjectId::parse(binding.object_id().to_owned())?;
@@ -2128,15 +2226,38 @@ fn materialize_reconstruction(
                 .ok_or(RootReconstructionError::OperationConflict)?
                 .to_owned(),
         )?;
-        projections.push(reconstructed_projection(
-            object_id,
-            version_id,
-            binding.path(),
-            plan.version().created_at(),
-        ));
+        merge_reconstructed_projection(
+            &mut projections,
+            reconstructed_projection(
+                object_id,
+                version_id,
+                binding.path(),
+                plan.version().created_at(),
+                "canonical",
+            ),
+        );
+    }
+    for tombstone in plan.version().tombstones() {
+        if tombstone.deleted_kind() != DeletedKind::RegularFile
+            || !can_project_reconstructed_object(tombstone.path())
+        {
+            continue;
+        }
+        let Some(version_id) = tombstone.last_object_version_id() else {
+            continue;
+        };
+        merge_reconstructed_projection(
+            &mut projections,
+            reconstructed_projection(
+                ObjectId::parse(tombstone.object_id().to_owned())?,
+                VersionId::parse(version_id.to_owned())?,
+                tombstone.path(),
+                plan.version().created_at(),
+                "deleted",
+            ),
+        );
     }
     object_versions.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
-    projections.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
     let tombstone_associations = plan
         .tombstone_fidelity()
         .iter()
@@ -2160,9 +2281,29 @@ fn materialize_reconstruction(
         .collect::<Result<Vec<_>, RootReconstructionError>>()?;
     Ok(ReconstructedHistoryClosure {
         object_versions,
-        object_projections: projections,
+        object_projections: projections.into_values().collect(),
         tombstone_associations,
     })
+}
+
+fn can_project_reconstructed_object(path: &str) -> bool {
+    !Path::new(path).components().any(|component| {
+        matches!(component, Component::Normal(name) if is_reserved_workspace_component(name))
+    })
+}
+
+fn insert_executable_fidelity(
+    executable_fidelity: &mut BTreeMap<String, bool>,
+    object_version_id: &str,
+    executable: bool,
+) -> Result<(), RootReconstructionError> {
+    if executable_fidelity
+        .insert(object_version_id.to_owned(), executable)
+        .is_some_and(|previous| previous != executable)
+    {
+        return Err(RootReconstructionError::TombstoneFidelityMismatch);
+    }
+    Ok(())
 }
 
 fn reconstructed_projection(
@@ -2170,6 +2311,7 @@ fn reconstructed_projection(
     version_id: VersionId,
     path: &str,
     created_at: &str,
+    lifecycle_status: &str,
 ) -> LocalObjectRecord {
     LocalObjectRecord {
         schema: "https://folderbase.ai/protocol/0.1/object.schema.json".to_owned(),
@@ -2177,7 +2319,7 @@ fn reconstructed_projection(
         object_type: "file".to_owned(),
         path: path.to_owned(),
         lifecycle: ObjectLifecycle {
-            status: "canonical".to_owned(),
+            status: lifecycle_status.to_owned(),
             extensions: BTreeMap::new(),
         },
         provenance: ObjectProvenance {
@@ -2188,6 +2330,28 @@ fn reconstructed_projection(
         current_version: version_id.clone(),
         versions: vec![version_id],
         extensions: BTreeMap::new(),
+    }
+}
+
+fn merge_reconstructed_projection(
+    projections: &mut BTreeMap<String, LocalObjectRecord>,
+    candidate: LocalObjectRecord,
+) {
+    match projections.entry(candidate.id.as_str().to_owned()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(candidate);
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let existing = entry.get_mut();
+            for version in candidate.versions {
+                if !existing.versions.contains(&version) {
+                    existing.versions.push(version);
+                }
+            }
+            existing
+                .versions
+                .sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        }
     }
 }
 
@@ -2535,6 +2699,69 @@ impl Read for PackageObjectReader<'_> {
             }
         }
     }
+}
+
+/// Plan directly from one retained, no-follow package authority.
+///
+/// This is the integration seam for CLIs and other process adapters: package
+/// paths remain diagnostic-only, every planning input is opened relative to
+/// the retained root, and the exact package shape is revalidated before the
+/// caller can begin reconstruction.
+pub fn plan_retained_package(
+    package: &RetainedReconstructionPackage,
+) -> Result<RootReconstructionPlan, RootReconstructionError> {
+    let (index_encoded, _) = read_package_regular_with_identity(
+        package,
+        Path::new("index.json"),
+        MAX_PACKAGE_INDEX_BYTES,
+    )?;
+    let count: ReferenceCountProbe = serde_json::from_slice(&index_encoded)
+        .map_err(RootReconstructionError::InvalidIndexJson)?;
+    if count.references.exceeds_maximum {
+        return Err(RootReconstructionError::TooManyReferences {
+            maximum: MAX_PACKAGE_REFERENCES,
+        });
+    }
+    let index: PackageIndexWire = serde_json::from_slice(&index_encoded)
+        .map_err(RootReconstructionError::InvalidIndexJson)?;
+    let mut manifest_digests = BTreeSet::new();
+    for reference in &index.references {
+        if !is_sha256(&reference.chunk_manifest_sha256) {
+            return Err(RootReconstructionError::InvalidManifestDigest {
+                object_version_id: reference.object_version_id.clone(),
+            });
+        }
+        manifest_digests.insert(reference.chunk_manifest_sha256.clone());
+    }
+    if manifest_digests.len() > MAX_DISTINCT_MANIFESTS {
+        return Err(RootReconstructionError::TooManyManifests {
+            maximum: MAX_DISTINCT_MANIFESTS,
+        });
+    }
+    let (version_encoded, _) = read_package_regular_with_identity(
+        package,
+        Path::new("version.json"),
+        MAX_PACKAGE_VERSION_BYTES,
+    )?;
+    let manifests_directory = open_package_directory(package, "manifests")?;
+    let mut manifest_inputs = Vec::with_capacity(manifest_digests.len());
+    for digest in manifest_digests {
+        let name = format!("{digest}.json");
+        let (encoded, _) = read_regular_from_with_identity(
+            &manifests_directory,
+            &package.display_root.join("manifests").join(&name),
+            Path::new(&name),
+            MAX_PACKAGE_MANIFEST_BYTES,
+        )?;
+        manifest_inputs.push(ManifestInput::new(digest, std::io::Cursor::new(encoded)));
+    }
+    let plan = decode_and_plan(
+        std::io::Cursor::new(index_encoded),
+        std::io::Cursor::new(version_encoded),
+        manifest_inputs,
+    )?;
+    revalidate_package(package, &plan)?;
+    Ok(plan)
 }
 
 /// Decode one closed package index and Version, validate its exact reference
@@ -3151,8 +3378,10 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         io::{Cursor, Read as _},
         panic::{AssertUnwindSafe, catch_unwind},
+        path::Path,
     };
 
     use serde_json::{Value, json};
@@ -3162,7 +3391,8 @@ mod tests {
         COMPLETED_RECONSTRUCTION_PATH, MAX_PACKAGE_INDEX_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
         MAX_PACKAGE_REFERENCES, RetainedReconstructionDestination, RetainedReconstructionPackage,
         RootReconstructionError, RootReconstructionOperation, RootReconstructionPhase,
-        execute_root_reconstruction, execute_root_reconstruction_with_phase_callback,
+        can_project_reconstructed_object, execute_root_reconstruction,
+        execute_root_reconstruction_with_phase_callback, plan_retained_package,
         root_reconstruction_request_sha256, stage_owner_name, stage_proof_name, staged_root_name,
     };
     use super::{ManifestInput, ReconstructionReferenceRole, decode_and_plan};
@@ -3223,6 +3453,220 @@ mod tests {
             plan.total_object_bytes(),
             root_manifest_bytes().len() as u64 + 7
         );
+    }
+
+    #[test]
+    fn retained_package_planning_uses_the_exact_nofollow_package_shape() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let source = temporary.path().join("package");
+        std::fs::create_dir(&source).expect("package root");
+        let fixture = complete_fixture();
+        write_package(&source, &fixture);
+        let package = RetainedReconstructionPackage::open(&source).expect("retained package");
+
+        let plan = plan_retained_package(&package).expect("retained package plan");
+
+        assert_eq!(plan.version().version_id(), FOLDERBASE_VERSION_ID);
+        assert_eq!(plan.package_index_sha256(), sha256(&fixture.index));
+        assert_eq!(plan.externally_materialized_object_count(), 2);
+        assert!(can_project_reconstructed_object("current.txt"));
+        assert!(!can_project_reconstructed_object("repo/.git/HEAD"));
+        assert!(!can_project_reconstructed_object(
+            ".folderbase/private.json"
+        ));
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("version.json", source.join("version-alias.json"))
+                .expect("unsafe package alias");
+            assert!(matches!(
+                plan_retained_package(&package),
+                Err(RootReconstructionError::UnsafePackage(path)) if path == source
+            ));
+        }
+    }
+
+    #[test]
+    fn destination_inside_source_is_rejected_before_the_package_changes() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let source = temporary.path().join("package");
+        std::fs::create_dir(&source).expect("package root");
+        let fixture = complete_fixture();
+        write_package(&source, &fixture);
+        let package = RetainedReconstructionPackage::open(&source).expect("retained package");
+        let plan = plan_retained_package(&package).expect("retained package plan");
+        let destination = RetainedReconstructionDestination::open(&source, "restored")
+            .expect("retained destination inside source");
+        let before = package_tree_snapshot(&source);
+
+        let result = execute_root_reconstruction(
+            RootReconstructionOperation::new(
+                &plan,
+                "reconstruction_01900000-0000-7000-8000-000000000201",
+                plan.package_index_sha256(),
+            )
+            .expect("valid operation"),
+            &package,
+            &destination,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::InvalidDestination)
+        ));
+        assert_eq!(package_tree_snapshot(&source), before);
+    }
+
+    #[test]
+    fn source_inside_destination_parent_is_rejected_before_the_package_changes() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let destination_parent = temporary.path().join("destination-parent");
+        let source = destination_parent.join("package");
+        std::fs::create_dir(&destination_parent).expect("destination parent");
+        std::fs::create_dir(&source).expect("package root");
+        let fixture = complete_fixture();
+        write_package(&source, &fixture);
+        let package = RetainedReconstructionPackage::open(&source).expect("retained package");
+        let plan = plan_retained_package(&package).expect("retained package plan");
+        let destination = RetainedReconstructionDestination::open(&destination_parent, "restored")
+            .expect("retained destination around source");
+        let before = package_tree_snapshot(&source);
+
+        let result = execute_root_reconstruction(
+            RootReconstructionOperation::new(
+                &plan,
+                "reconstruction_01900000-0000-7000-8000-000000000202",
+                plan.package_index_sha256(),
+            )
+            .expect("valid operation"),
+            &package,
+            &destination,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::InvalidDestination)
+        ));
+        assert_eq!(package_tree_snapshot(&source), before);
+        assert_eq!(
+            std::fs::read_dir(&destination_parent)
+                .expect("destination parent remains readable")
+                .map(|entry| entry.expect("destination parent entry").file_name())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("package")]
+        );
+    }
+
+    #[test]
+    fn destination_parent_beneath_source_is_rejected_before_the_package_changes() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let source = temporary.path().join("package");
+        std::fs::create_dir(&source).expect("package root");
+        let fixture = complete_fixture();
+        write_package(&source, &fixture);
+        let package = RetainedReconstructionPackage::open(&source).expect("retained package");
+        let plan = plan_retained_package(&package).expect("retained package plan");
+        let destination =
+            RetainedReconstructionDestination::open(source.join("chunks"), "restored")
+                .expect("retained destination beneath source");
+        let before = package_tree_snapshot(&source);
+
+        let result = execute_root_reconstruction(
+            RootReconstructionOperation::new(
+                &plan,
+                "reconstruction_01900000-0000-7000-8000-000000000203",
+                plan.package_index_sha256(),
+            )
+            .expect("valid operation"),
+            &package,
+            &destination,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::InvalidDestination)
+        ));
+        assert_eq!(package_tree_snapshot(&source), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliased_source_ancestor_cannot_hide_containment_from_destination_parent() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let destination_parent = temporary.path().join("physical-parent");
+        let source = destination_parent.join("package");
+        let aliased_parent = temporary.path().join("aliased-parent");
+        std::fs::create_dir(&destination_parent).expect("physical destination parent");
+        std::fs::create_dir(&source).expect("package root");
+        std::os::unix::fs::symlink(&destination_parent, &aliased_parent)
+            .expect("destination-parent alias");
+        let fixture = complete_fixture();
+        write_package(&source, &fixture);
+        let package = RetainedReconstructionPackage::open(aliased_parent.join("package"))
+            .expect("retained package through aliased ancestor");
+        let plan = plan_retained_package(&package).expect("retained package plan");
+        let destination = RetainedReconstructionDestination::open(&destination_parent, "restored")
+            .expect("retained physical destination parent");
+        let before = package_tree_snapshot(&source);
+
+        let result = execute_root_reconstruction(
+            RootReconstructionOperation::new(
+                &plan,
+                "reconstruction_01900000-0000-7000-8000-000000000204",
+                plan.package_index_sha256(),
+            )
+            .expect("valid operation"),
+            &package,
+            &destination,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::InvalidDestination)
+        ));
+        assert_eq!(package_tree_snapshot(&source), before);
+        assert_eq!(
+            std::fs::read_dir(&destination_parent)
+                .expect("destination parent remains readable")
+                .map(|entry| entry.expect("destination parent entry").file_name())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("package")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliased_destination_ancestor_cannot_hide_containment_inside_source() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let source = temporary.path().join("package");
+        let aliased_source = temporary.path().join("aliased-package");
+        std::fs::create_dir(&source).expect("package root");
+        let fixture = complete_fixture();
+        write_package(&source, &fixture);
+        std::os::unix::fs::symlink(&source, &aliased_source).expect("package alias");
+        let package = RetainedReconstructionPackage::open(&source).expect("retained package");
+        let plan = plan_retained_package(&package).expect("retained package plan");
+        let destination =
+            RetainedReconstructionDestination::open(aliased_source.join("chunks"), "restored")
+                .expect("retained destination through aliased ancestor");
+        let before = package_tree_snapshot(&source);
+
+        let result = execute_root_reconstruction(
+            RootReconstructionOperation::new(
+                &plan,
+                "reconstruction_01900000-0000-7000-8000-000000000205",
+                plan.package_index_sha256(),
+            )
+            .expect("valid operation"),
+            &package,
+            &destination,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::InvalidDestination)
+        ));
+        assert_eq!(package_tree_snapshot(&source), before);
     }
 
     #[test]
@@ -3346,6 +3790,31 @@ mod tests {
         .expect("root reconstruction");
 
         let restored = destination_parent.join("restored");
+        let local = crate::LocalVersionStore::open(&restored).expect("reopen local versions");
+        local
+            .restore_version(
+                &crate::VersionId::parse(LIVE_VERSION_ID.to_owned())
+                    .expect("valid Object Version ID"),
+                "Restored/previous.txt",
+            )
+            .expect("ordinary Object Version restore preserves retained fidelity");
+        assert_eq!(
+            std::fs::read(restored.join("Restored/previous.txt")).unwrap(),
+            b"payload"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(restored.join("Restored/previous.txt"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0
+            );
+        }
+
         let store = crate::FolderbaseVersionStore::open(&restored).expect("reopen root");
         store
             .restore_tombstone("previous.txt")
@@ -3357,13 +3826,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
+            assert_ne!(
                 std::fs::metadata(restored.join("previous.txt"))
                     .unwrap()
                     .permissions()
                     .mode()
                     & 0o111,
-                0
+                0,
+                "Tombstone restore must retain executable fidelity"
             );
         }
     }
@@ -3804,7 +4274,7 @@ mod tests {
             );
             assert!(matches!(
                 result,
-                Err(RootReconstructionError::PackageChanged(_))
+                Err(RootReconstructionError::UnsafePackage(_))
             ));
             assert!(!parent.join("restored").exists());
             assert!(!parent.join(staged_root_name(&operation_id)).exists());
@@ -4137,7 +4607,7 @@ mod tests {
                 "path": "previous.txt",
                 "object_id": LIVE_OBJECT_ID,
                 "object_version_id": LIVE_VERSION_ID,
-                "executable": false
+                "executable": true
             }],
         }))
         .expect("encode index");
@@ -4193,6 +4663,37 @@ mod tests {
         for bytes in [root_manifest_bytes(), b"payload".to_vec()] {
             std::fs::write(root.join("chunks").join(sha256(&bytes)), bytes).expect("package chunk");
         }
+    }
+
+    fn package_tree_snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn visit(root: &Path, relative: &Path, snapshot: &mut BTreeMap<String, Vec<u8>>) {
+            let directory = root.join(relative);
+            let mut entries = std::fs::read_dir(&directory)
+                .expect("read package directory")
+                .map(|entry| entry.expect("read package entry"))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let child_relative = relative.join(entry.file_name());
+                let wire = child_relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let metadata = entry.metadata().expect("package entry metadata");
+                if metadata.is_dir() {
+                    snapshot.insert(wire, b"directory".to_vec());
+                    visit(root, &child_relative, snapshot);
+                } else {
+                    assert!(metadata.is_file(), "package contains only regular files");
+                    snapshot.insert(wire, std::fs::read(entry.path()).expect("package bytes"));
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, Path::new(""), &mut snapshot);
+        snapshot
     }
 
     fn root_manifest_bytes() -> Vec<u8> {

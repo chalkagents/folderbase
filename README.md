@@ -155,7 +155,8 @@ node protocol/conformance/capabilities/run.mjs \
 - `folderbase`: reference command-line interface
 - `@folderbase/sdk`: typed Node.js process adapter for CLI JSON and daemon stdio
 - metadata-first query/index, additive template expansion, scoped Change Sets,
-  and root-pinned daemon capability profiles
+  exact whole-Version root reconstruction, and root-pinned daemon capability
+  profiles
 - versioned JSON Schemas and conformance fixtures
 - built-in person, organization, customer, engagement, project, temporary, and
   custom templates
@@ -224,6 +225,25 @@ folderbase version restore-tombstone /path/to/project path/to/file --json
 This restores the sealed opaque bytes and executable fidelity under the
 original Object ID and Object Version, then creates one new full-state
 Folderbase Version. Directory and symlink Tombstones are not restored by v1.
+
+An independently produced, package-pinned full Version can reconstruct one
+absent ordinary root through the advertised stable
+`folderbase.root-reconstruction@0.1.0` capability:
+
+```sh
+folderbase reconstruct \
+  /absolute/path/to/reconstruction-package \
+  /absolute/path/to/new-folderbase \
+  --stdin --json < request.json
+```
+
+The request binds one operation ID and the exact package-index SHA-256. Core
+verifies every opaque object, restores all supported file types without
+interpreting them, retains restorable Tombstone history, and publishes the
+destination with no-clobber semantics. Source and destination authorities must
+be absolute and physically separate. See the
+[root reconstruction capability](protocol/capabilities/root-reconstruction/0.1.0/README.md)
+for the closed package and process contracts.
 
 The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
 Core compares it and performs a bounded, metadata-only preflight immediately

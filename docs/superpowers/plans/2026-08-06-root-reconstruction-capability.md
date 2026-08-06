@@ -1,6 +1,6 @@
 # Root reconstruction capability implementation plan
 
-Status: Ready; ADR-0016 accepted 2026-08-06
+Status: R1–R4 implemented locally; ADR-0016 accepted 2026-08-06
 
 ## Outcome
 

@@ -96,6 +96,43 @@ await session.shutdown();
 Daemon 0.1 is serial. Cancelling an active request ends the session instead of
 claiming cooperative mid-request cancellation that Core does not advertise.
 
+## Reconstruct a retained Version into a new root
+
+After capability discovery advertises
+`folderbase.root-reconstruction@0.1.0`, use the typed helper with an explicit
+package, absent destination, operation ID, and exact encoded package-index
+digest:
+
+```js
+const outcome = await folderbase.reconstruct(
+  "/absolute/path/to/reconstruction-package",
+  "/absolute/path/to/new-folderbase",
+  {
+    format: "folderbase-root-reconstruction-request-v1",
+    operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
+    package_index_sha256: "0123456789abcdef".repeat(4),
+  },
+);
+
+if (outcome.kind === "attention") {
+  console.log(outcome.document.attention.code);
+} else {
+  console.log(outcome.document.root_attestation);
+}
+```
+
+The SDK invokes
+`folderbase reconstruct SOURCE DESTINATION --stdin --json`, bounds the process
+and its output, and validates the closed result or attention document. Typed
+exit-2 documents remain available through `FolderbaseOperationalError`.
+
+Core reconstructs ordinary files of every type as opaque bytes and publishes
+only an absent root after exact verification. It does not overwrite or merge
+an existing folder. Provider authorization, package transport, Cloud session
+state, and synchronization into an existing root remain separate concerns.
+See the [root reconstruction reference](/docs/reference/root-reconstruction)
+for the package, replay, and conformance contract.
+
 ## Use the universal surface from remote VMs
 
 A Codex-, Claude-, or Cursor-style VM can install a pinned Core binary plus
@@ -106,4 +143,6 @@ share-link grants, and file transport remain separate from the database Core.
 Read the [process adapter contract](/docs/reference/process-adapters),
 [query/index reference](/docs/reference/query-index), and
 [Change Set guide](/docs/guides/change-sets) before building a long-lived
-integration.
+integration. Use root reconstruction for an absent complete root and Change
+Sets for scoped work against an existing Folderbase; neither operation is a
+Cloud sync protocol.
