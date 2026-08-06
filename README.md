@@ -80,8 +80,8 @@ Prebuilt macOS and Linux binaries and their closed `SHA256SUMS` record are
 available from [GitHub Releases](https://github.com/chalkagents/folderbase/releases/latest).
 Every channel runs the same released Core executable and Compatibility
 Contract. The exact tag, registry identities, checksums, and independent
-clean-install commands for the prior baseline are recorded in the
-[v0.6.1 public distribution evidence](docs/verification/v0.6.1-public-distribution.md).
+clean-install commands are recorded in the
+[v0.7.1 public distribution evidence](docs/verification/v0.7.1-public-distribution.md).
 Core 0.7.1 adds exact whole-Version root reconstruction without expanding
 Compatibility Contract v1.
 
