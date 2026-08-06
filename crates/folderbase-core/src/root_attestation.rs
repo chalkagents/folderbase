@@ -328,6 +328,37 @@ pub(crate) fn attest_folderbase_root_with_profile(
     attest_folderbase_root_with_authority_inner(root, || {}, false)
 }
 
+/// Attest an exact root through a retained directory capability.
+///
+/// `display_root` is used only to identify diagnostics and the returned
+/// receipt. The root is never reopened through that ambient path.
+pub(crate) fn attest_retained_folderbase_root_with_profile(
+    root: &Dir,
+    display_root: &Path,
+) -> Result<
+    (
+        FolderbaseRootAttestation,
+        RootInstanceAuthority,
+        ManifestProtocolProfile,
+    ),
+    RootAttestationError,
+> {
+    let root_file = root
+        .try_clone()
+        .map_err(|source| RootAttestationError::Io {
+            path: display_root.to_path_buf(),
+            source,
+        })?
+        .into_std_file();
+    attest_folderbase_root_from_open_file(
+        root_file,
+        display_root,
+        || {},
+        false,
+        revalidate_retained_root,
+    )
+}
+
 pub(crate) fn attest_folderbase_root_with_profile_allowing_upgrade_recovery(
     root: &Path,
 ) -> Result<
@@ -366,6 +397,32 @@ fn attest_folderbase_root_with_authority_inner(
         path: root.to_path_buf(),
         source,
     })?;
+    attest_folderbase_root_from_open_file(
+        root_file,
+        root,
+        before_final_validation,
+        allow_upgrade_recovery,
+        |_, expected| revalidate_root(root, expected),
+    )
+}
+
+fn attest_folderbase_root_from_open_file<R>(
+    root_file: fs::File,
+    root: &Path,
+    before_final_validation: impl FnOnce(),
+    allow_upgrade_recovery: bool,
+    final_root_revalidation: R,
+) -> Result<
+    (
+        FolderbaseRootAttestation,
+        RootInstanceAuthority,
+        ManifestProtocolProfile,
+    ),
+    RootAttestationError,
+>
+where
+    R: FnOnce(&Dir, &PhysicalIdentity) -> Result<Dir, RootAttestationError>,
+{
     let opened_root_metadata = root_file
         .metadata()
         .map_err(|source| RootAttestationError::Io {
@@ -476,7 +533,7 @@ fn attest_folderbase_root_with_authority_inner(
 
     before_final_validation();
 
-    let reopened_root = revalidate_root(root, &root_identity)?;
+    let reopened_root = final_root_revalidation(&root_dir, &root_identity)?;
     let reopened_state = revalidate_directory(
         &reopened_root,
         STATE_DIRECTORY,
@@ -516,6 +573,31 @@ fn attest_folderbase_root_with_authority_inner(
         root_instance_authority,
         protocol_profile,
     ))
+}
+
+fn revalidate_retained_root(
+    root: &Dir,
+    expected: &PhysicalIdentity,
+) -> Result<Dir, RootAttestationError> {
+    let reopened = root
+        .try_clone()
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    let file = reopened
+        .try_clone()
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?
+        .into_std_file();
+    let metadata = file
+        .metadata()
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
+    let actual = PhysicalIdentity::from_file(&file)
+        .map_err(|_| RootAttestationError::RootChangedDuringAttestation)?;
+    if &actual != expected {
+        return Err(RootAttestationError::RootChangedDuringAttestation);
+    }
+    Ok(reopened)
 }
 
 pub(crate) fn decode_manifest_protocol_profile(
@@ -832,7 +914,7 @@ fn marker_metadata(
         .map_err(|source| marker_open_error(root, marker, source))
 }
 
-fn open_root_nofollow(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_root_nofollow(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

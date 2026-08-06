@@ -88,6 +88,7 @@ test("public package and process records are closed bounded Draft 2020-12 schema
   for (const definition of [
     "packageIndex",
     "packageReference",
+    "tombstoneFidelity",
     "packageLimits",
     "request",
     "result",
@@ -227,6 +228,27 @@ test("canonical package generator is deterministic and pins exact encoded transp
         && roles[0] === "live_regular_file"
         && roles[1] === "retained_tombstone"),
     );
+    assert.deepEqual(firstFixture.index.tombstone_fidelity, [
+      {
+        path: "archive/Moved.md",
+        object_id: "obj_019f0000-0000-7000-8000-000000000070",
+        object_version_id: "version_019f0000-0000-7000-8000-000000000701",
+        executable: false,
+      },
+      {
+        path: "deleted/approved-proposal.docx",
+        object_id: "obj_019f0000-0000-7000-8000-0000000000c0",
+        object_version_id: "version_019f0000-0000-7000-8000-000000000c01",
+        executable: true,
+      },
+    ]);
+
+    const noncanonicalFidelity = structuredClone(firstFixture.index);
+    noncanonicalFidelity.tombstone_fidelity.reverse();
+    assert.throws(
+      () => assertRootReconstructionSchema(noncanonicalFidelity, schema, "packageIndex"),
+      /tombstone_fidelity\[1\]\.path is not in strict canonical order/,
+    );
 
     const unknown = structuredClone(firstFixture.index);
     unknown.provider = "ambient-cloud";
@@ -254,6 +276,8 @@ test("scenario inventory covers bounded transport, closure, no-clobber, and rest
   for (const required of [
     "mixed-opaque-files",
     "retained-tombstone-closure",
+    "retained-tombstone-fidelity-closure",
+    "retained-tombstone-executable-fidelity",
     "move-with-tombstone-shared-reference",
     "exact-package-index-pin",
     "malformed-request",

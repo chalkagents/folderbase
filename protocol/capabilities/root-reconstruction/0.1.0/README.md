@@ -39,3 +39,12 @@ symlink content is derived from the Folderbase Version and is not transported
 as an external object. A retained Tombstone reference proves the supplied
 immutable bytes and local association; Folderbase Version v1 does not itself
 authenticate those deleted bytes.
+
+Because Folderbase Version v1 also does not bind deleted regular-file
+executable state, `index.json` includes a required, exact path-sorted
+`tombstone_fidelity` array. It contains one closed record—path, Object ID,
+Object Version ID, and executable bit—for every regular-file Tombstone with a
+last Object Version, and no others. The request's exact package-index digest
+pins these transport records. They are not canonical Folderbase Version
+evidence and never change its digest; the package producer must preserve them
+from the immutable association established at capture or registration.

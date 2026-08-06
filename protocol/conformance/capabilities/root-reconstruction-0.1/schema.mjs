@@ -135,11 +135,29 @@ function validateReferenceOrder(index) {
   }
 }
 
+function validateTombstoneFidelityOrder(index) {
+  if (!Array.isArray(index.tombstone_fidelity)) return;
+  let previous;
+  for (const [position, record] of index.tombstone_fidelity.entries()) {
+    const current = record.path;
+    if (previous !== undefined) {
+      assert.ok(
+        Buffer.compare(Buffer.from(previous, "utf8"), Buffer.from(current, "utf8")) < 0,
+        `packageIndex.tombstone_fidelity[${position}].path is not in strict canonical order`,
+      );
+    }
+    previous = current;
+  }
+}
+
 export function assertRootReconstructionSchema(value, root, definition) {
   const schema = root.$defs?.[definition];
   assert.ok(schema, `unknown root-reconstruction schema definition ${definition}`);
   validate(value, schema, root, definition);
-  if (definition === "packageIndex") validateReferenceOrder(value);
+  if (definition === "packageIndex") {
+    validateReferenceOrder(value);
+    validateTombstoneFidelityOrder(value);
+  }
 }
 
 export function assertJsonSchema(value, root, label = "document") {

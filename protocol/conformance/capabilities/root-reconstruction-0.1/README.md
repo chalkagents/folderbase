@@ -23,14 +23,19 @@ DOCX-shaped opaque bytes, immutable SQLite-shaped bytes, media, archive,
 unknown binary, executable, Git working-tree state, safe symlink, empty
 directory, nested-boundary exclusion, and retained Tombstones. One unchanged
 moved file deliberately uses a single package reference whose canonical role
-set is `["live_regular_file", "retained_tombstone"]`.
+set is `["live_regular_file", "retained_tombstone"]`. The package's required
+path-sorted `tombstone_fidelity` closure carries both false and true executable
+examples. These records are transport evidence pinned by the exact package
+index, not canonical Folderbase Version evidence.
 
 The twelve cases prove the mixed root and retained restore, an exact Version
 `0.4` reconstruction whose root manifest reports `0.2.0+reconstruction`, exact
 package pin, closed request, changed Version, reference closure, corrupt chunks,
 no-follow package shape, destination no-clobber, deterministic restart/replay,
 unsupported-filesystem preflight before staging, and rejection of ambient
-authority. The legacy success keeps the Folderbase Version protocol distinct
+authority. The mixed-root case proves a retained executable Tombstone restores
+with its package-pinned mode, while the reference-closure case also rejects a
+missing fidelity record. The legacy success keeps the Folderbase Version protocol distinct
 from the exact root-manifest protocol reported by attestation. The preflight
 case presents the conformance-only
 `FOLDERBASE_ROOT_RECONSTRUCTION_CONFORMANCE_FORCE_UNSUPPORTED_FILESYSTEM=1`

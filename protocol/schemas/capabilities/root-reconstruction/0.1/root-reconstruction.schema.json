@@ -31,6 +31,12 @@
       "type": "string",
       "pattern": "^version_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\u0000)(?!.*(?:^|/)\\.folderbase(?:/|$)).+(?<!/)$"
+    },
     "operationId": {
       "type": "string",
       "pattern": "^reconstruction_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -97,6 +103,18 @@
         }
       ]
     },
+    "tombstoneFidelity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "object_id", "object_version_id", "executable"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portablePath" },
+        "object_id": { "$ref": "#/$defs/objectId" },
+        "object_version_id": { "$ref": "#/$defs/objectVersionId" },
+        "executable": { "type": "boolean" }
+      },
+      "description": "Package-index transport evidence for one regular-file Tombstone with a last Object Version. It is not a Folderbase Version claim."
+    },
     "packageIndex": {
       "type": "object",
       "additionalProperties": false,
@@ -107,7 +125,8 @@
         "canonical_version_sha256",
         "encoded_version_sha256",
         "limits",
-        "references"
+        "references",
+        "tombstone_fidelity"
       ],
       "properties": {
         "format": { "const": "folderbase-root-reconstruction-package-v1" },
@@ -123,6 +142,13 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/packageReference" },
           "description": "Strictly sorted and unique by exact UTF-8 object_version_id bytes. Semantic validation rejects duplicate Object Versions and noncanonical order."
+        },
+        "tombstone_fidelity": {
+          "type": "array",
+          "maxItems": 16384,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/tombstoneFidelity" },
+          "description": "Strictly sorted and unique by exact UTF-8 path bytes. Exact semantic closure requires one entry for every regular-file Tombstone with last_object_version_id and no entry for a directory, symlink, or Tombstone without a last Object Version."
         }
       }
     },

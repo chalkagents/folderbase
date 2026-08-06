@@ -383,6 +383,35 @@ pub struct LocalVersionStore {
 }
 
 impl LocalVersionStore {
+    /// Construct the diagnostic half of a store whose filesystem authority is
+    /// supplied independently by `FolderbaseState`.
+    pub(crate) fn for_retained_root(display_root: &Path) -> Self {
+        Self {
+            root: display_root.to_path_buf(),
+        }
+    }
+
+    /// Prepare the ordinary local version-store directories through an
+    /// already-retained Folderbase state capability.
+    ///
+    /// Reconstruction uses this before its root is visible. Recovery remains
+    /// the responsibility of `ensure_store_layout` once a root is published.
+    pub(crate) fn prepare_store_layout_in(state: &FolderbaseState) -> Result<()> {
+        for relative in [
+            OBJECTS_DIRECTORY,
+            VERSION_RECORDS_DIRECTORY,
+            BLOBS_DIRECTORY,
+            ".folderbase/journal",
+            JOURNAL_QUARANTINE_DIRECTORY,
+            TRANSACTIONS_DIRECTORY,
+            LOCKS_DIRECTORY,
+            PATH_IDENTITIES_DIRECTORY,
+        ] {
+            state.ensure_private_dir(Path::new(relative))?;
+        }
+        Ok(())
+    }
+
     /// Open a store rooted at an existing directory.
     ///
     /// Storage directories are created lazily by the first accepted write.

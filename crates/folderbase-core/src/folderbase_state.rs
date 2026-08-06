@@ -66,6 +66,35 @@ struct WorkspaceTargetCapability {
 }
 
 impl FolderbaseState {
+    /// Open mutable state beneath an already-retained root capability.
+    ///
+    /// The display path is diagnostic-only. In particular, this constructor
+    /// does not require the retained directory to be published in the ambient
+    /// namespace yet.
+    pub(crate) fn from_retained_root(root: &Dir, display_root: &Path) -> Result<Self> {
+        let access = StateAccess::Mutable;
+        let root_cap = root
+            .try_clone()
+            .map_err(|source| FolderbaseError::io(display_root, source))?;
+        let state = open_directory_nofollow(
+            &root_cap,
+            OsStr::new(STATE_COMPONENT),
+            &display_root.join(STATE_COMPONENT),
+            access,
+        )
+        .map_err(|source| FolderbaseError::io(display_root.join(STATE_COMPONENT), source))?;
+        let root_identity = directory_identity(&root_cap, display_root)?;
+        let state_identity = directory_identity(&state, &display_root.join(STATE_COMPONENT))?;
+        Ok(Self {
+            root: root_cap,
+            root_identity,
+            state,
+            state_identity,
+            display_root: display_root.to_path_buf(),
+            access,
+        })
+    }
+
     pub(crate) fn open(root: &Path) -> Result<Self> {
         let access = StateAccess::Mutable;
         let root_cap = open_root_nofollow(root, access)?;

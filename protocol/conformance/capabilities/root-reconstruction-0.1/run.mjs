@@ -291,6 +291,22 @@ async function verifyPackage(source, fixture) {
     [...required].sort(([left], [right]) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
       .map(([objectVersionId, roles]) => [objectVersionId, [...roles].sort()]),
   );
+  assert.deepEqual(
+    index.tombstone_fidelity.map(({ path, object_id, object_version_id }) => [
+      path,
+      object_id,
+      object_version_id,
+    ]),
+    version.tombstones
+      .filter(({ deleted_kind, last_object_version_id }) =>
+        deleted_kind === "regular_file" && last_object_version_id !== null)
+      .map(({ path, object_id, last_object_version_id }) => [
+        path,
+        object_id,
+        last_object_version_id,
+      ]),
+    "package index carries exact path-sorted regular-file Tombstone fidelity closure",
+  );
   return { index, version, objectBytes };
 }
 
@@ -360,6 +376,12 @@ async function verifyReconstructedRoot(
     await readFile(join(destination, ...restoredPath.split("/"))),
     package_.objectBytes.get(retained.last_object_version_id),
   );
+  if (process.platform !== "win32") {
+    const fidelity = package_.index.tombstone_fidelity.find(({ path }) => path === retained.path);
+    assert.ok(fidelity, `${retained.path} has transport fidelity evidence`);
+    const mode = (await lstat(join(destination, ...restoredPath.split("/")))).mode & 0o111;
+    assert.equal(mode !== 0, fidelity.executable, `${retained.path} restored executable fidelity`);
+  }
 }
 
 async function prepare(caseRoot, writeFixture = writeCanonicalFixture) {
@@ -502,6 +524,22 @@ async function runCase(implementation, scenario, caseRoot, limits) {
       context.source,
       context.destination,
       request,
+      "reference_closure_invalid",
+      limits,
+    );
+    const fidelityContext = await prepare(join(caseRoot, "missing-fidelity"));
+    const fidelityIndex = structuredClone(fidelityContext.fixture.index);
+    fidelityIndex.tombstone_fidelity.pop();
+    const fidelityIndexBytes = Buffer.from(`${JSON.stringify(fidelityIndex, null, 2)}\n`);
+    await writeFile(join(fidelityContext.source, "index.json"), fidelityIndexBytes);
+    errorJson(
+      implementation,
+      fidelityContext.source,
+      fidelityContext.destination,
+      {
+        ...fidelityContext.fixture.request,
+        package_index_sha256: encodedSha256(fidelityIndexBytes),
+      },
       "reference_closure_invalid",
       limits,
     );

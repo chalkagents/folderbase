@@ -158,7 +158,7 @@ function fixtureModel(profile) {
   const deleted = regular("deleted/approved-proposal.docx", "0c0", Buffer.from(
     "504b030414000000000072657461696e65642d746f6d6273746f6e65",
     "hex",
-  ));
+  ), true);
   const directories = [
     ["archives", "101"],
     ["data", "102"],
@@ -232,7 +232,21 @@ function fixtureModel(profile) {
       },
     ],
   };
-  return { rootManifest, regularFiles, deleted, version };
+  const tombstoneFidelity = exactSort([
+    {
+      path: "archive/Moved.md",
+      object_id: moved.binding.object_id,
+      object_version_id: moved.binding.object_version_id,
+      executable: moved.binding.executable,
+    },
+    {
+      path: deleted.binding.path,
+      object_id: deleted.binding.object_id,
+      object_version_id: deleted.binding.object_version_id,
+      executable: deleted.binding.executable,
+    },
+  ], ({ path }) => path);
+  return { rootManifest, regularFiles, deleted, tombstoneFidelity, version };
 }
 
 function addReference(references, binding, role, content) {
@@ -257,7 +271,7 @@ async function writeFixture(output, profile) {
     mkdir(join(source, "manifests")),
     mkdir(join(source, "chunks")),
   ]);
-  const { rootManifest, regularFiles, deleted, version } = fixtureModel(profile);
+  const { rootManifest, regularFiles, deleted, tombstoneFidelity, version } = fixtureModel(profile);
   const references = new Map();
   references.set(version.root_manifest.object_version_id, {
     roles: new Set(["root_manifest"]),
@@ -294,6 +308,7 @@ async function writeFixture(output, profile) {
     encoded_version_sha256: encodedSha256(versionBytes),
     limits: { ...LIMITS },
     references: exactSort(packageReferences, ({ object_version_id }) => object_version_id),
+    tombstone_fidelity: tombstoneFidelity,
   };
   const indexBytes = encodeJson(index);
   const packageIndexSha256 = encodedSha256(indexBytes);

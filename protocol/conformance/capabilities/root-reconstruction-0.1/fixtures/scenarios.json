@@ -6,6 +6,7 @@
       "covers": [
         "mixed-opaque-files",
         "retained-tombstone-closure",
+        "retained-tombstone-executable-fidelity",
         "move-with-tombstone-shared-reference"
       ]
     },
@@ -23,7 +24,11 @@
     },
     {
       "id": "05-reject-missing-retained-reference",
-      "covers": ["missing-retained-reference", "retained-tombstone-closure"]
+      "covers": [
+        "missing-retained-reference",
+        "retained-tombstone-closure",
+        "retained-tombstone-fidelity-closure"
+      ]
     },
     {
       "id": "06-reject-corrupt-chunk",

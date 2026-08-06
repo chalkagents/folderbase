@@ -95,6 +95,9 @@ closed. Identical manifests and chunks may be referenced more than once.
   Version ID to one canonical Chunk Manifest digest;
 - each reference's nonempty, strictly sorted, unique `roles` set containing
   `root_manifest`, `live_regular_file`, and/or `retained_tombstone`;
+- a strictly path-sorted `tombstone_fidelity` array containing the exact path,
+  Object ID, Object Version ID, and executable bit for every regular-file
+  Tombstone that retains a last Object Version;
 - the stable Object ID when the Version contains one; and
 - fixed format and size/count limits.
 
@@ -120,6 +123,22 @@ One Object Version reference may carry both `live_regular_file` and
 the new path is live while the old path retains a Tombstone for the same Object
 Version. Duplicate Object Version entries remain invalid; the canonical role
 set expresses the complete usage instead.
+
+Folderbase Version v1 does not bind the executable bit of deleted regular
+files. The closed package therefore carries one `tombstone_fidelity` transport
+record for each regular-file Tombstone with `last_object_version_id`, in exact
+UTF-8 path order. Each record must match that Tombstone's path, Object ID, and
+Object Version ID. Directory and symlink Tombstones, and Tombstones without a
+last Object Version, have no record. The executable bit is installed into the
+reconstructed local Object Version state so a later ordinary-file restore
+preserves its filesystem behavior.
+
+This record is evidence supplied by the package producer and pinned by the
+request's exact encoded package-index digest. It is not canonical Folderbase
+Version evidence and does not change the Folderbase Version digest. A Platform
+producer must obtain it from the immutable capture or registration association
+that retained the deleted Object Version; a reconstructor must not infer it
+from a filename, media type, current umask, or ambient filesystem state.
 
 For the root manifest and live regular files, Core cross-checks the canonical
 manifest's whole-object digest and length against the Folderbase Version. For a
@@ -233,6 +252,8 @@ Red fixtures and black-box cases cover:
   references, manifests, descriptors, and chunks;
 - omission or substitution of root, live-regular, or retained-Tombstone
   references;
+- omission, substitution, duplication, or noncanonical ordering of retained
+  Tombstone fidelity records;
 - an unchanged move whose one Object Version reference canonically carries
   both `live_regular_file` and `retained_tombstone` roles;
 - unsafe paths, exact/NFC/case-fold collisions, symlink escapes, nested
@@ -253,7 +274,7 @@ Green proves:
 - a subsequently opened Core sees the exact Version as Local Head and can
   capture ordinary follow-up edits without importing private package state;
 - a retained regular-file Tombstone remains restorable after clean-device
-  reconstruction;
+  reconstruction with its package-pinned executable fidelity;
 - bounded memory, exact no-clobber publication, restart convergence, exact
   replay, and fail-before-staging behavior where publication durability cannot
   be proven; and
