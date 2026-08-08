@@ -247,6 +247,12 @@ be absolute and physically separate. See the
 [root reconstruction capability](protocol/capabilities/root-reconstruction/0.1.0/README.md)
 for the closed package and process contracts.
 
+Package producers use Core's public
+`root_reconstruction::build_root_reconstruction_package` API rather than
+authoring `index.json` themselves. Core derives the exact root, live-regular,
+and retained-Tombstone role closure from Version bytes; live symlinks are
+derived from the Version and never become roleless external object references.
+
 The CLI asks Core for one plan. Apply carries the opaque digest from that plan;
 Core compares it and performs a bounded, metadata-only preflight immediately
 before its first write. The digest includes the physical filesystem identity of
