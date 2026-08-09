@@ -73,17 +73,16 @@ Install the same native CLI persistently with Homebrew or Cargo:
 ```sh
 brew install chalkagents/tap/folderbase
 # or, with Rust 1.96+
-cargo install folderbase-cli --version 0.7.1 --locked
+cargo install folderbase-cli --version 0.7.2 --locked
 ```
 
 Prebuilt macOS and Linux binaries and their closed `SHA256SUMS` record are
 available from [GitHub Releases](https://github.com/chalkagents/folderbase/releases/latest).
 Every channel runs the same released Core executable and Compatibility
-Contract. The exact tag, registry identities, checksums, and independent
-clean-install commands are recorded in the
-[v0.7.1 public distribution evidence](docs/verification/v0.7.1-public-distribution.md).
-Core 0.7.1 adds exact whole-Version root reconstruction without expanding
-Compatibility Contract v1.
+Contract. Core 0.7.2 adds Core-owned reconstruction-package closure derivation
+and deterministic package production without expanding Compatibility Contract
+v1. See the [0.7.2 release notes](apps/docs/content/docs/releases/0.7.2.mdx)
+and the immutable GitHub release for the exact binaries and `SHA256SUMS`.
 
 ## Integrate an agent or application
 
