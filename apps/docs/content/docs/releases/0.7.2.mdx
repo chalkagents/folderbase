@@ -1,0 +1,52 @@
+---
+title: Folderbase Core 0.7.2
+description: Core-owned reconstruction package production for Cloud and App adapters.
+---
+
+Folderbase Core 0.7.2 adds the public producer boundary for exact root
+reconstruction packages. A Platform or App adapter can supply one exact
+Folderbase Version, immutable Object Version-to-Chunk Manifest associations,
+retained-Tombstone fidelity, and canonical manifests without reimplementing
+Core's private package JSON or reference-closure rules.
+
+Folderbase remains Beta. This patch does not expand Compatibility Contract v1,
+change Folderbase Version identity, deploy Folderbase Cloud, synchronize an
+existing non-empty root, or grant any sharing authority.
+
+## Install
+
+```bash
+npx --yes @folderbase/cli@0.7.2 --version
+cargo install folderbase-cli --version 0.7.2 --locked
+brew install chalkagents/tap/folderbase
+```
+
+Native macOS and Linux executables plus `SHA256SUMS` are on the immutable
+[GitHub release](https://github.com/chalkagents/folderbase/releases/tag/v0.7.2).
+
+## Core-owned package closure
+
+The Rust API exposes two bounded operations:
+
+- `derive_root_reconstruction_package_closure` validates the exact Version and
+  derives Object IDs, semantic roles, and retained-Tombstone fidelity without
+  reading manifests; and
+- `build_root_reconstruction_package` consumes canonical manifests, writes a
+  deterministic bounded package index, and validates the result through the
+  same public decoder used by reconstruction consumers.
+
+Live regular files and retained Tombstones become external object references.
+Live symlinks remain exact Version data and are derived during reconstruction,
+so adapters do not invent roleless symlink associations.
+
+The builder handles Markdown, CSV, PDFs, office documents, SQLite snapshots,
+videos, archives, Git working trees, executables, unknown binaries, empty
+files, symlinks, exclusions, and Tombstones as ordinary opaque Folderbase data.
+
+## Compatibility
+
+Core 0.7.2 retains the stable
+`folderbase.root-reconstruction@0.1.0` capability, Compatibility Contract v1,
+CLI JSON v1, native root-manifest profile `0.5.0`, Folderbase Version profiles
+`0.4` and `0.5`, stable IDs, explicit upgrade behavior, and exit meanings `0`,
+`1`, and `2`.

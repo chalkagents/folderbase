@@ -43,6 +43,12 @@ const canonicalTagScript = join(
   "release",
   "assert-canonical-tag.sh",
 );
+const npmCliVersion = JSON.parse(
+  await readFile(
+    join(repositoryRoot, "packages", "npm-cli", "package.json"),
+    "utf8",
+  ),
+).version;
 
 function runScript(script, { args = [], cwd = repositoryRoot, env = {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -216,7 +222,7 @@ case "$*" in
   "pack --dry-run --json")
     printf '%s\n' '[{"integrity":"sha512-local"}]'
     ;;
-  "view @folderbase/cli@0.7.1 version dist.integrity --json")
+  "view @folderbase/cli@${npmCliVersion} version dist.integrity --json")
     printf '%s\n' 'npm error code E404' >&2
     exit 1
     ;;

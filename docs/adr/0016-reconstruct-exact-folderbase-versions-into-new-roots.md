@@ -105,6 +105,15 @@ The exact encoded package-index SHA-256 is a transport pin, not another Version
 identity. The Folderbase Version canonical digest remains the complete visible
 state identity. Chunk Manifest digests remain transfer-plan identities.
 
+Core is also the sole supported producer of this package index. The public
+Rust API accepts the exact encoded Version, strictly ordered immutable Object
+Version-to-Chunk Manifest associations, exact regular-file Tombstone fidelity,
+and the canonical manifests. Core derives Object IDs and the complete role set,
+omits live symlinks from external object references, emits deterministic index
+bytes, and validates its own output through the same decoder used by consumers.
+Platform and App adapters may persist or transport the returned bytes, but must
+not duplicate the private JSON wire shape or reimplement closure derivation.
+
 The reference closure is exact:
 
 1. the root manifest Object Version has exactly one reference whose roles

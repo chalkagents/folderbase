@@ -86,6 +86,158 @@ impl<R> ManifestInput<R> {
     }
 }
 
+/// One immutable Object Version-to-Chunk Manifest association supplied by a
+/// package producer. Core derives the Object ID and canonical role set from
+/// the exact Folderbase Version; callers cannot author either field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootReconstructionObjectAssociation {
+    object_version_id: String,
+    chunk_manifest_sha256: String,
+}
+
+impl RootReconstructionObjectAssociation {
+    pub fn new(
+        object_version_id: impl Into<String>,
+        chunk_manifest_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            object_version_id: object_version_id.into(),
+            chunk_manifest_sha256: chunk_manifest_sha256.into(),
+        }
+    }
+
+    pub fn object_version_id(&self) -> &str {
+        &self.object_version_id
+    }
+
+    pub fn chunk_manifest_sha256(&self) -> &str {
+        &self.chunk_manifest_sha256
+    }
+}
+
+/// Capture-time executable fidelity for one deleted regular file. Core checks
+/// the path and identities against the exact Version and derives no value from
+/// filenames, ambient files, or current process permissions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootReconstructionTombstoneFidelity {
+    path: String,
+    object_id: String,
+    object_version_id: String,
+    executable: bool,
+}
+
+impl RootReconstructionTombstoneFidelity {
+    pub fn new(
+        path: impl Into<String>,
+        object_id: impl Into<String>,
+        object_version_id: impl Into<String>,
+        executable: bool,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            object_id: object_id.into(),
+            object_version_id: object_version_id.into(),
+            executable,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn object_id(&self) -> &str {
+        &self.object_id
+    }
+
+    pub fn object_version_id(&self) -> &str {
+        &self.object_version_id
+    }
+
+    pub fn executable(&self) -> bool {
+        self.executable
+    }
+}
+
+/// Canonical package metadata produced and self-validated by Core. Manifest
+/// and chunk bodies remain caller-owned opaque transfer data.
+#[derive(Debug)]
+pub struct BuiltRootReconstructionPackage {
+    encoded_index: Vec<u8>,
+    encoded_version: Vec<u8>,
+    manifest_digests: Vec<String>,
+    plan: RootReconstructionPlan,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RootReconstructionPackageBuildError {
+    #[error(transparent)]
+    Validation(#[from] RootReconstructionError),
+    #[error("Core could not encode the root reconstruction package index: {0}")]
+    PackageEncoding(#[source] serde_json::Error),
+}
+
+/// Core-derived externally materialized closure for one exact Version. This
+/// lets durable adapters validate and persist the role/object identity mapping
+/// before package bytes are requested, without copying Core's closure rules.
+#[derive(Debug, Clone)]
+pub struct RootReconstructionPackageClosure {
+    encoded_version: Vec<u8>,
+    folderbase_id: String,
+    folderbase_version_id: String,
+    canonical_version_sha256: String,
+    encoded_version_sha256: String,
+    references: Vec<PlannedObjectReference>,
+    tombstone_fidelity: Vec<PlannedTombstoneFidelity>,
+}
+
+impl RootReconstructionPackageClosure {
+    pub fn encoded_version(&self) -> &[u8] {
+        &self.encoded_version
+    }
+
+    pub fn folderbase_id(&self) -> &str {
+        &self.folderbase_id
+    }
+
+    pub fn folderbase_version_id(&self) -> &str {
+        &self.folderbase_version_id
+    }
+
+    pub fn canonical_version_sha256(&self) -> &str {
+        &self.canonical_version_sha256
+    }
+
+    pub fn encoded_version_sha256(&self) -> &str {
+        &self.encoded_version_sha256
+    }
+
+    pub fn references(&self) -> &[PlannedObjectReference] {
+        &self.references
+    }
+
+    pub fn tombstone_fidelity(&self) -> &[PlannedTombstoneFidelity] {
+        &self.tombstone_fidelity
+    }
+}
+
+impl BuiltRootReconstructionPackage {
+    pub fn encoded_index(&self) -> &[u8] {
+        &self.encoded_index
+    }
+
+    pub fn encoded_version(&self) -> &[u8] {
+        &self.encoded_version
+    }
+
+    pub fn manifest_digests(&self) -> &[String] {
+        &self.manifest_digests
+    }
+
+    pub fn plan(&self) -> &RootReconstructionPlan {
+        &self.plan
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReconstructionReferenceRole {
     RootManifest,
@@ -2764,6 +2916,233 @@ pub fn plan_retained_package(
     Ok(plan)
 }
 
+/// Derive the exact externally materialized package closure without reading
+/// any manifest documents. Associations must be strictly ordered by Object
+/// Version ID. Core derives every Object ID and role from the Version and
+/// validates the complete Tombstone-fidelity closure.
+pub fn derive_root_reconstruction_package_closure<VR, AI, TI>(
+    version_reader: VR,
+    associations: AI,
+    tombstone_fidelity: TI,
+) -> Result<RootReconstructionPackageClosure, RootReconstructionPackageBuildError>
+where
+    VR: Read,
+    AI: IntoIterator<Item = RootReconstructionObjectAssociation>,
+    TI: IntoIterator<Item = RootReconstructionTombstoneFidelity>,
+{
+    let encoded_version = read_bounded_version(version_reader)?;
+    let version = FolderbaseVersion::decode_bounded(encoded_version.as_slice())
+        .map_err(RootReconstructionError::InvalidVersion)?;
+    let canonical_version_sha256 = version
+        .canonical_digest()
+        .map_err(RootReconstructionError::InvalidVersion)?;
+    let encoded_version_sha256 = sha256(&encoded_version);
+    let (expected, _) = expected_closure(&version);
+    let expected_count = expected
+        .values()
+        .filter(|object| !object.roles.is_empty())
+        .count();
+
+    let mut references = Vec::with_capacity(expected_count);
+    let mut observed = BTreeSet::new();
+    let mut previous: Option<String> = None;
+    for (position, association) in associations.into_iter().enumerate() {
+        if position >= MAX_PACKAGE_REFERENCES {
+            return Err(RootReconstructionError::TooManyReferences {
+                maximum: MAX_PACKAGE_REFERENCES,
+            }
+            .into());
+        }
+        let Some(expected_object) = expected.get(&association.object_version_id) else {
+            return Err(RootReconstructionError::UnexpectedReference {
+                object_version_id: association.object_version_id,
+            }
+            .into());
+        };
+        if expected_object.roles.is_empty() {
+            return Err(RootReconstructionError::UnexpectedReference {
+                object_version_id: association.object_version_id,
+            }
+            .into());
+        }
+        if !is_sha256(&association.chunk_manifest_sha256) {
+            return Err(RootReconstructionError::InvalidManifestDigest {
+                object_version_id: association.object_version_id,
+            }
+            .into());
+        }
+        if let Some(previous) = &previous {
+            match previous
+                .as_bytes()
+                .cmp(association.object_version_id.as_bytes())
+            {
+                std::cmp::Ordering::Equal => {
+                    return Err(RootReconstructionError::DuplicateReference {
+                        object_version_id: association.object_version_id,
+                    }
+                    .into());
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(RootReconstructionError::ReferencesOutOfOrder.into());
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        previous = Some(association.object_version_id.clone());
+        let roles = expected_object.roles.iter().copied().collect();
+        observed.insert(association.object_version_id.clone());
+        references.push(PlannedObjectReference {
+            object_version_id: association.object_version_id,
+            object_id: expected_object.object_id.clone(),
+            roles,
+            chunk_manifest_sha256: association.chunk_manifest_sha256,
+        });
+    }
+    for (object_version_id, expected_object) in &expected {
+        if !expected_object.roles.is_empty() && !observed.contains(object_version_id) {
+            return Err(RootReconstructionError::MissingReference {
+                object_version_id: object_version_id.clone(),
+            }
+            .into());
+        }
+    }
+
+    let expected_fidelity = version
+        .tombstones()
+        .iter()
+        .filter(|tombstone| tombstone.deleted_kind() == DeletedKind::RegularFile)
+        .filter_map(|tombstone| {
+            tombstone.last_object_version_id().map(|object_version_id| {
+                (tombstone.path(), tombstone.object_id(), object_version_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut fidelity = Vec::with_capacity(expected_fidelity.len());
+    for (position, record) in tombstone_fidelity.into_iter().enumerate() {
+        let Some((path, object_id, object_version_id)) = expected_fidelity.get(position) else {
+            return Err(RootReconstructionError::TombstoneFidelityMismatch.into());
+        };
+        if record.path != *path
+            || record.object_id != *object_id
+            || record.object_version_id != *object_version_id
+        {
+            return Err(RootReconstructionError::TombstoneFidelityMismatch.into());
+        }
+        fidelity.push(PlannedTombstoneFidelity {
+            path: record.path,
+            object_id: record.object_id,
+            object_version_id: record.object_version_id,
+            executable: record.executable,
+        });
+    }
+    if fidelity.len() != expected_fidelity.len() {
+        return Err(RootReconstructionError::TombstoneFidelityMismatch.into());
+    }
+
+    Ok(RootReconstructionPackageClosure {
+        encoded_version,
+        folderbase_id: version.folderbase_id().to_owned(),
+        folderbase_version_id: version.version_id().to_owned(),
+        canonical_version_sha256,
+        encoded_version_sha256,
+        references,
+        tombstone_fidelity: fidelity,
+    })
+}
+
+/// Build one canonical root-reconstruction package index from producer-held
+/// immutable associations, then validate the result through the same public
+/// decoder used by independent consumers.
+pub fn build_root_reconstruction_package<VR, AI, TI, MR, MI>(
+    version_reader: VR,
+    associations: AI,
+    tombstone_fidelity: TI,
+    manifest_inputs: MI,
+) -> Result<BuiltRootReconstructionPackage, RootReconstructionPackageBuildError>
+where
+    VR: Read,
+    AI: IntoIterator<Item = RootReconstructionObjectAssociation>,
+    TI: IntoIterator<Item = RootReconstructionTombstoneFidelity>,
+    MR: Read,
+    MI: IntoIterator<Item = ManifestInput<MR>>,
+{
+    let closure = derive_root_reconstruction_package_closure(
+        version_reader,
+        associations,
+        tombstone_fidelity,
+    )?;
+
+    let index = PackageIndexWire {
+        format: PACKAGE_FORMAT_V1.to_owned(),
+        folderbase_id: closure.folderbase_id.clone(),
+        folderbase_version_id: closure.folderbase_version_id.clone(),
+        canonical_version_sha256: closure.canonical_version_sha256.clone(),
+        encoded_version_sha256: closure.encoded_version_sha256.clone(),
+        limits: PackageLimitsWire::v1(),
+        references: closure
+            .references
+            .iter()
+            .map(|reference| ReferenceWire {
+                object_version_id: reference.object_version_id.clone(),
+                object_id: OptionalObjectId {
+                    present: reference.object_id.is_some(),
+                    value: reference.object_id.clone(),
+                },
+                roles: reference
+                    .roles
+                    .iter()
+                    .copied()
+                    .map(ReferenceRoleWire::from)
+                    .collect(),
+                chunk_manifest_sha256: reference.chunk_manifest_sha256.clone(),
+            })
+            .collect(),
+        tombstone_fidelity: closure
+            .tombstone_fidelity
+            .iter()
+            .map(|record| TombstoneFidelityWire {
+                path: record.path.clone(),
+                object_id: record.object_id.clone(),
+                object_version_id: record.object_version_id.clone(),
+                executable: record.executable,
+            })
+            .collect(),
+    };
+    let mut encoded_index = BoundedPackageIndexWriter::new();
+    if let Err(source) = serde_json::to_writer(&mut encoded_index, &index) {
+        if encoded_index.exceeded {
+            return Err(RootReconstructionError::IndexTooLarge {
+                maximum_bytes: MAX_PACKAGE_INDEX_BYTES,
+            }
+            .into());
+        }
+        return Err(RootReconstructionPackageBuildError::PackageEncoding(source));
+    }
+    if encoded_index.exceeded {
+        return Err(RootReconstructionError::IndexTooLarge {
+            maximum_bytes: MAX_PACKAGE_INDEX_BYTES,
+        }
+        .into());
+    }
+    let encoded_index = encoded_index.bytes;
+    let plan = decode_and_plan(
+        encoded_index.as_slice(),
+        closure.encoded_version.as_slice(),
+        manifest_inputs,
+    )?;
+    let manifest_digests = plan
+        .manifests()
+        .iter()
+        .map(|manifest| manifest.chunk_manifest_sha256().to_owned())
+        .collect();
+    Ok(BuiltRootReconstructionPackage {
+        encoded_index,
+        encoded_version: closure.encoded_version,
+        manifest_digests,
+        plan,
+    })
+}
+
 /// Decode one closed package index and Version, validate its exact reference
 /// and manifest closure, and return a deterministic bounded plan.
 pub fn decode_and_plan<IR, VR, MR, MI>(
@@ -2817,7 +3196,7 @@ where
         return Err(RootReconstructionError::LimitsMismatch);
     }
 
-    let tombstone_fidelity = validate_tombstone_fidelity(&version, index.tombstone_fidelity)?;
+    let tombstone_fidelity = validate_tombstone_fidelity(&version, &index.tombstone_fidelity)?;
     let (expected, derived_symlinks) = expected_closure(&version);
     let references = validate_references(index.references, &expected)?;
     let expected_manifest_digests = references
@@ -2930,7 +3309,7 @@ where
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PackageIndexWire {
     format: String,
@@ -2943,7 +3322,7 @@ struct PackageIndexWire {
     tombstone_fidelity: Vec<TombstoneFidelityWire>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct TombstoneFidelityWire {
     path: String,
@@ -2952,7 +3331,7 @@ struct TombstoneFidelityWire {
     executable: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PackageLimitsWire {
     max_index_bytes: u64,
@@ -2984,18 +3363,23 @@ impl PackageLimitsWire {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReferenceWire {
     object_version_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_object_id")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_object_id",
+        skip_serializing_if = "OptionalObjectId::is_absent",
+        serialize_with = "serialize_optional_object_id"
+    )]
     object_id: OptionalObjectId,
     #[serde(deserialize_with = "deserialize_bounded_roles")]
     roles: Vec<ReferenceRoleWire>,
     chunk_manifest_sha256: String,
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ReferenceRoleWire {
     RootManifest,
@@ -3003,10 +3387,71 @@ enum ReferenceRoleWire {
     RetainedTombstone,
 }
 
+impl From<ReconstructionReferenceRole> for ReferenceRoleWire {
+    fn from(role: ReconstructionReferenceRole) -> Self {
+        match role {
+            ReconstructionReferenceRole::RootManifest => Self::RootManifest,
+            ReconstructionReferenceRole::LiveRegularFile => Self::LiveRegularFile,
+            ReconstructionReferenceRole::RetainedTombstone => Self::RetainedTombstone,
+        }
+    }
+}
+
 #[derive(Default)]
 struct OptionalObjectId {
     present: bool,
     value: Option<String>,
+}
+
+struct BoundedPackageIndexWriter {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl BoundedPackageIndexWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(64 * 1024),
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedPackageIndexWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(next_len) = (self.bytes.len() as u64).checked_add(bytes.len() as u64) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other("package index size overflow"));
+        };
+        if next_len > MAX_PACKAGE_INDEX_BYTES {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "package index exceeds its byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl OptionalObjectId {
+    fn is_absent(&self) -> bool {
+        !self.present
+    }
+}
+
+fn serialize_optional_object_id<S>(
+    object_id: &OptionalObjectId,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    object_id.value.serialize(serializer)
 }
 
 fn deserialize_optional_object_id<'de, D>(deserializer: D) -> Result<OptionalObjectId, D::Error>
@@ -3181,7 +3626,7 @@ fn expected_closure(
 
 fn validate_tombstone_fidelity(
     version: &FolderbaseVersion,
-    supplied: Vec<TombstoneFidelityWire>,
+    supplied: &[TombstoneFidelityWire],
 ) -> Result<Vec<PlannedTombstoneFidelity>, RootReconstructionError> {
     let expected = version
         .tombstones()
@@ -3388,9 +3833,12 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        COMPLETED_RECONSTRUCTION_PATH, MAX_PACKAGE_INDEX_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
-        MAX_PACKAGE_REFERENCES, RetainedReconstructionDestination, RetainedReconstructionPackage,
-        RootReconstructionError, RootReconstructionOperation, RootReconstructionPhase,
+        BuiltRootReconstructionPackage, COMPLETED_RECONSTRUCTION_PATH, MAX_PACKAGE_INDEX_BYTES,
+        MAX_PACKAGE_MANIFEST_BYTES, MAX_PACKAGE_REFERENCES, RetainedReconstructionDestination,
+        RetainedReconstructionPackage, RootReconstructionError,
+        RootReconstructionObjectAssociation, RootReconstructionOperation,
+        RootReconstructionPackageBuildError, RootReconstructionPhase,
+        RootReconstructionTombstoneFidelity, build_root_reconstruction_package,
         can_project_reconstructed_object, execute_root_reconstruction,
         execute_root_reconstruction_with_phase_callback, plan_retained_package,
         root_reconstruction_request_sha256, stage_owner_name, stage_proof_name, staged_root_name,
@@ -3398,6 +3846,7 @@ mod tests {
     use super::{ManifestInput, ReconstructionReferenceRole, decode_and_plan};
     use crate::{
         folderbase_version::FolderbaseVersion,
+        physical_identity::PhysicalIdentity,
         transfer_manifest::{
             CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, MANIFEST_FORMAT_V1,
             ManifestError, STANDARD_PROFILE_V1,
@@ -3452,6 +3901,290 @@ mod tests {
         assert_eq!(
             plan.total_object_bytes(),
             root_manifest_bytes().len() as u64 + 7
+        );
+    }
+
+    #[test]
+    fn public_builder_derives_the_exact_package_without_a_roleless_symlink_reference() {
+        let fixture = complete_fixture();
+        let root_manifest = manifest(&root_manifest_bytes(), 0x11);
+        let live_manifest = manifest(b"payload", 0x22);
+        let associations = vec![
+            RootReconstructionObjectAssociation::new(
+                ROOT_VERSION_ID,
+                root_manifest
+                    .canonical_digest()
+                    .expect("root manifest digest"),
+            ),
+            RootReconstructionObjectAssociation::new(
+                LIVE_VERSION_ID,
+                live_manifest
+                    .canonical_digest()
+                    .expect("live manifest digest"),
+            ),
+        ];
+        let fidelity = vec![RootReconstructionTombstoneFidelity::new(
+            "previous.txt",
+            LIVE_OBJECT_ID,
+            LIVE_VERSION_ID,
+            false,
+        )];
+
+        let package = build_root_reconstruction_package(
+            fixture.version.as_slice(),
+            associations,
+            fidelity,
+            fixture.manifests,
+        )
+        .expect("Core-owned deterministic package");
+
+        assert_eq!(package.plan().references().len(), 2);
+        assert_eq!(package.plan().derived_symlinks().len(), 1);
+        assert_eq!(package.plan().derived_symlinks()[0].path(), "shortcut");
+        assert_eq!(package.manifest_digests().len(), 2);
+        let index: Value =
+            serde_json::from_slice(package.encoded_index()).expect("public package index JSON");
+        assert!(
+            index["references"]
+                .as_array()
+                .expect("reference array")
+                .iter()
+                .all(|reference| !reference["roles"]
+                    .as_array()
+                    .expect("role array")
+                    .is_empty())
+        );
+    }
+
+    #[test]
+    fn public_builder_rejects_a_live_symlink_as_an_external_object_reference() {
+        let fixture = complete_fixture();
+        let root_manifest = manifest(&root_manifest_bytes(), 0x11);
+        let live_manifest = manifest(b"payload", 0x22);
+        let associations = vec![
+            RootReconstructionObjectAssociation::new(
+                ROOT_VERSION_ID,
+                root_manifest
+                    .canonical_digest()
+                    .expect("root manifest digest"),
+            ),
+            RootReconstructionObjectAssociation::new(
+                LIVE_VERSION_ID,
+                live_manifest
+                    .canonical_digest()
+                    .expect("live manifest digest"),
+            ),
+            RootReconstructionObjectAssociation::new(
+                SYMLINK_VERSION_ID,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ];
+
+        let error = build_root_reconstruction_package(
+            fixture.version.as_slice(),
+            associations,
+            [RootReconstructionTombstoneFidelity::new(
+                "previous.txt",
+                LIVE_OBJECT_ID,
+                LIVE_VERSION_ID,
+                false,
+            )],
+            fixture.manifests,
+        )
+        .expect_err("symlink bytes are already bound by the Version");
+
+        assert!(matches!(
+            error,
+            RootReconstructionPackageBuildError::Validation(
+                RootReconstructionError::UnexpectedReference { object_version_id }
+            )
+                if object_version_id == SYMLINK_VERSION_ID
+        ));
+    }
+
+    #[test]
+    fn public_builder_rejects_an_oversized_unknown_association_before_retaining_it() {
+        let fixture = complete_fixture();
+        let oversized_object_version_id = "x".repeat(MAX_PACKAGE_INDEX_BYTES as usize + 1);
+
+        let error = build_root_reconstruction_package(
+            fixture.version.as_slice(),
+            [RootReconstructionObjectAssociation::new(
+                oversized_object_version_id,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )],
+            [RootReconstructionTombstoneFidelity::new(
+                "previous.txt",
+                LIVE_OBJECT_ID,
+                LIVE_VERSION_ID,
+                false,
+            )],
+            fixture.manifests,
+        )
+        .expect_err("unknown association must be rejected before it is retained");
+
+        assert!(matches!(
+            error,
+            RootReconstructionPackageBuildError::Validation(
+                RootReconstructionError::UnexpectedReference { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn public_builder_rejects_an_incomplete_external_object_closure() {
+        let fixture = complete_fixture();
+        let root_manifest = manifest(&root_manifest_bytes(), 0x11);
+
+        let error = build_root_reconstruction_package(
+            fixture.version.as_slice(),
+            [RootReconstructionObjectAssociation::new(
+                ROOT_VERSION_ID,
+                root_manifest
+                    .canonical_digest()
+                    .expect("root manifest digest"),
+            )],
+            [RootReconstructionTombstoneFidelity::new(
+                "previous.txt",
+                LIVE_OBJECT_ID,
+                LIVE_VERSION_ID,
+                false,
+            )],
+            fixture.manifests,
+        )
+        .expect_err("every external object must be represented");
+
+        assert!(matches!(
+            error,
+            RootReconstructionPackageBuildError::Validation(
+                RootReconstructionError::MissingReference { object_version_id }
+            )
+                if object_version_id == LIVE_VERSION_ID
+        ));
+    }
+
+    #[test]
+    fn public_builder_rejects_oversized_untrusted_fidelity_before_encoding() {
+        let fixture = complete_fixture();
+        let root_manifest = manifest(&root_manifest_bytes(), 0x11);
+        let live_manifest = manifest(b"payload", 0x22);
+        let oversized_path = "x".repeat(MAX_PACKAGE_INDEX_BYTES as usize + 1);
+
+        let error = build_root_reconstruction_package(
+            fixture.version.as_slice(),
+            [
+                RootReconstructionObjectAssociation::new(
+                    ROOT_VERSION_ID,
+                    root_manifest
+                        .canonical_digest()
+                        .expect("root manifest digest"),
+                ),
+                RootReconstructionObjectAssociation::new(
+                    LIVE_VERSION_ID,
+                    live_manifest
+                        .canonical_digest()
+                        .expect("live manifest digest"),
+                ),
+            ],
+            [RootReconstructionTombstoneFidelity::new(
+                oversized_path,
+                LIVE_OBJECT_ID,
+                LIVE_VERSION_ID,
+                false,
+            )],
+            fixture.manifests,
+        )
+        .expect_err("untrusted fidelity must match the bounded Version before encoding");
+
+        assert!(matches!(
+            error,
+            RootReconstructionPackageBuildError::Validation(
+                RootReconstructionError::TombstoneFidelityMismatch
+            )
+        ));
+    }
+
+    #[test]
+    fn public_builder_derives_a_retained_tombstone_only_role() {
+        let fixture = tombstone_only_fixture();
+        let root_manifest = manifest(&root_manifest_bytes(), 0x11);
+        let retained_manifest = manifest(b"payload", 0x22);
+
+        let package = build_root_reconstruction_package(
+            fixture.version.as_slice(),
+            [
+                RootReconstructionObjectAssociation::new(
+                    ROOT_VERSION_ID,
+                    root_manifest
+                        .canonical_digest()
+                        .expect("root manifest digest"),
+                ),
+                RootReconstructionObjectAssociation::new(
+                    LIVE_VERSION_ID,
+                    retained_manifest
+                        .canonical_digest()
+                        .expect("retained manifest digest"),
+                ),
+            ],
+            [RootReconstructionTombstoneFidelity::new(
+                "previous.txt",
+                LIVE_OBJECT_ID,
+                LIVE_VERSION_ID,
+                true,
+            )],
+            fixture.manifests,
+        )
+        .expect("Tombstone-only package");
+
+        assert_eq!(
+            package.plan().references()[1].roles(),
+            &[ReconstructionReferenceRole::RetainedTombstone]
+        );
+        assert!(package.plan().tombstone_fidelity()[0].executable());
+    }
+
+    #[test]
+    fn public_builder_is_deterministic_for_the_same_exact_inputs() {
+        fn build() -> BuiltRootReconstructionPackage {
+            let fixture = complete_fixture();
+            let root_manifest = manifest(&root_manifest_bytes(), 0x11);
+            let live_manifest = manifest(b"payload", 0x22);
+            build_root_reconstruction_package(
+                fixture.version.as_slice(),
+                [
+                    RootReconstructionObjectAssociation::new(
+                        ROOT_VERSION_ID,
+                        root_manifest
+                            .canonical_digest()
+                            .expect("root manifest digest"),
+                    ),
+                    RootReconstructionObjectAssociation::new(
+                        LIVE_VERSION_ID,
+                        live_manifest
+                            .canonical_digest()
+                            .expect("live manifest digest"),
+                    ),
+                ],
+                [RootReconstructionTombstoneFidelity::new(
+                    "previous.txt",
+                    LIVE_OBJECT_ID,
+                    LIVE_VERSION_ID,
+                    false,
+                )],
+                fixture.manifests,
+            )
+            .expect("deterministic package")
+        }
+
+        let first = build();
+        let second = build();
+
+        assert_eq!(first.encoded_index(), second.encoded_index());
+        assert_eq!(first.encoded_version(), second.encoded_version());
+        assert_eq!(first.manifest_digests(), second.manifest_digests());
+        assert_eq!(
+            sha256(first.encoded_index()),
+            "9a25ad9ec24a9275e90a42c93cf669552977314ce91b8b5f70491d23edb57258"
         );
     }
 
@@ -4176,7 +4909,9 @@ mod tests {
             .file_name();
         let chunk_path = source.join("chunks").join(chunk_name);
         let original = std::fs::read(&chunk_path).unwrap();
+        let retained_chunk = temporary.path().join("retained-original-chunk");
         let mut substituted = false;
+        let mut substitution_identities = None;
 
         let result = execute_root_reconstruction_with_phase_callback(
             RootReconstructionOperation::new(&plan, operation_id, plan.package_index_sha256())
@@ -4185,11 +4920,20 @@ mod tests {
             &destination,
             |phase| {
                 if phase == RootReconstructionPhase::PreparedJournal && !substituted {
-                    std::fs::remove_file(&chunk_path).unwrap();
+                    let original_identity = PhysicalIdentity::from_path(&chunk_path).unwrap();
+                    std::fs::rename(&chunk_path, &retained_chunk).unwrap();
                     std::fs::write(&chunk_path, &original).unwrap();
+                    let replacement_identity = PhysicalIdentity::from_path(&chunk_path).unwrap();
+                    substitution_identities = Some((original_identity, replacement_identity));
                     substituted = true;
                 }
             },
+        );
+        let (original_identity, replacement_identity) =
+            substitution_identities.expect("substitution identities");
+        assert_ne!(
+            replacement_identity, original_identity,
+            "the adversarial replacement must be a distinct physical object"
         );
         assert!(matches!(
             result,
