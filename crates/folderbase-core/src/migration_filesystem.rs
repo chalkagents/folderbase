@@ -4834,7 +4834,7 @@ mod retained_publication_preflight_tests {
     use cap_std::{ambient_authority, fs::Dir};
 
     use super::require_retained_directory_publication_with_hook;
-    use crate::FolderbaseError;
+    use crate::{FolderbaseError, physical_identity::PhysicalIdentity};
 
     #[test]
     fn preflight_exercises_regular_file_publication_and_leaves_no_artifacts() {
@@ -4909,23 +4909,42 @@ mod retained_publication_preflight_tests {
     #[test]
     fn failed_preflight_never_removes_a_replacement_probe_identity() {
         let root = tempfile::tempdir().expect("failed publication preflight fixture");
+        let retained = tempfile::tempdir_in(
+            root.path()
+                .parent()
+                .expect("preflight fixture has a parent"),
+        )
+        .expect("retained displaced probe fixture");
         let parent = Dir::open_ambient_dir(root.path(), ambient_authority())
             .expect("retained parent capability");
         let mut replacement = None;
+        let mut replacement_identities = None;
 
         let error = require_retained_directory_publication_with_hook(
             &parent,
             root.path(),
             |_, destination| {
                 let path = root.path().join(destination);
-                fs::remove_file(&path).expect("remove owned destination probe");
+                let displaced_identity =
+                    PhysicalIdentity::from_path(&path).expect("owned destination identity");
+                fs::rename(&path, retained.path().join("displaced-probe"))
+                    .expect("retain displaced destination probe");
                 fs::write(&path, b"foreign replacement\n").expect("replace destination probe");
+                let replacement_identity =
+                    PhysicalIdentity::from_path(&path).expect("foreign replacement identity");
+                replacement_identities = Some((displaced_identity, replacement_identity));
                 replacement = Some(path);
             },
         )
         .expect_err("replacement identity must fail the filesystem preflight");
 
         let replacement = replacement.expect("replacement path");
+        let (displaced_identity, replacement_identity) =
+            replacement_identities.expect("replacement identities");
+        assert_ne!(
+            replacement_identity, displaced_identity,
+            "the adversarial replacement must be a distinct physical object"
+        );
         assert!(matches!(
             error,
             FolderbaseError::UnsupportedMigrationFilesystem { path, reason }

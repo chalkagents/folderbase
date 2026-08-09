@@ -3846,6 +3846,7 @@ mod tests {
     use super::{ManifestInput, ReconstructionReferenceRole, decode_and_plan};
     use crate::{
         folderbase_version::FolderbaseVersion,
+        physical_identity::PhysicalIdentity,
         transfer_manifest::{
             CHUNKING_ALGORITHM_V1, ChunkDescriptor, ChunkManifest, MANIFEST_FORMAT_V1,
             ManifestError, STANDARD_PROFILE_V1,
@@ -4908,7 +4909,9 @@ mod tests {
             .file_name();
         let chunk_path = source.join("chunks").join(chunk_name);
         let original = std::fs::read(&chunk_path).unwrap();
+        let retained_chunk = temporary.path().join("retained-original-chunk");
         let mut substituted = false;
+        let mut substitution_identities = None;
 
         let result = execute_root_reconstruction_with_phase_callback(
             RootReconstructionOperation::new(&plan, operation_id, plan.package_index_sha256())
@@ -4917,11 +4920,20 @@ mod tests {
             &destination,
             |phase| {
                 if phase == RootReconstructionPhase::PreparedJournal && !substituted {
-                    std::fs::remove_file(&chunk_path).unwrap();
+                    let original_identity = PhysicalIdentity::from_path(&chunk_path).unwrap();
+                    std::fs::rename(&chunk_path, &retained_chunk).unwrap();
                     std::fs::write(&chunk_path, &original).unwrap();
+                    let replacement_identity = PhysicalIdentity::from_path(&chunk_path).unwrap();
+                    substitution_identities = Some((original_identity, replacement_identity));
                     substituted = true;
                 }
             },
+        );
+        let (original_identity, replacement_identity) =
+            substitution_identities.expect("substitution identities");
+        assert_ne!(
+            replacement_identity, original_identity,
+            "the adversarial replacement must be a distinct physical object"
         );
         assert!(matches!(
             result,
