@@ -55,6 +55,11 @@ try {
       killLeader();
     }
   });
+  child.stdin.on("error", (error) => {
+    if (error?.code !== "EPIPE" && error?.code !== "ERR_STREAM_DESTROYED") {
+      emit({ error: { code: error?.code, message: error?.message ?? String(error) } });
+    }
+  });
   child.stdin.end(Buffer.from(payload.input, "base64"));
   timer = setTimeout(() => {
     if (bound === null) bound = "timeout";

@@ -109,6 +109,12 @@ const resultPromise = new Promise((resolveResult) => {
   });
 });
 
+worker.stdin.on("error", (error) => {
+  if (error?.code !== "EPIPE" && error?.code !== "ERR_STREAM_DESTROYED") {
+    failure = error.message;
+    resolveWorkerResult();
+  }
+});
 worker.stdin.end(payloadText);
 let timedOut = false;
 const timer = setTimeout(() => {

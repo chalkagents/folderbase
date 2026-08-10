@@ -8,6 +8,7 @@ const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 let child;
 let timer;
 let bound = null;
+let inputError = null;
 let stdout = Buffer.alloc(0);
 let stderr = Buffer.alloc(0);
 
@@ -64,6 +65,11 @@ try {
       void killTree();
     }
   });
+  child.stdin.on("error", (error) => {
+    if (error?.code !== "EPIPE" && error?.code !== "ERR_STREAM_DESTROYED") {
+      inputError = { code: error?.code, message: error?.message ?? String(error) };
+    }
+  });
   child.stdin.end(Buffer.from(payload.input, "base64"));
   timer = setTimeout(() => {
     if (bound === null) bound = "timeout";
@@ -78,7 +84,7 @@ try {
   clearTimeout(timer);
   if (bound !== null) await killTree();
   process.stdout.write(JSON.stringify({
-    ...outcome,
+    ...(inputError === null ? outcome : { error: inputError }),
     bound,
     stdout: stdout.toString("utf8"),
     stderr: stderr.toString("utf8"),
