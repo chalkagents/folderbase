@@ -341,3 +341,52 @@ fn renaming_a_scope_rebases_unchanged_nested_boundary_paths() {
         vec!["Active Client Work/Partner".to_owned()]
     );
 }
+
+#[test]
+fn tampered_journal_event_fails_closed_without_rewriting_the_head() {
+    let root = folderbase();
+    observe_folder_scope(root.path(), Path::new("Client Work")).expect("initial observation");
+    let journal = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1");
+    let head_path = journal.join("head.json");
+    let event_path = journal.join("events/00000000000000000001.json");
+    let original_head = fs::read(&head_path).expect("original head");
+    let event = fs::read_to_string(&event_path).expect("original event");
+    assert!(event.contains("Client Work"));
+    fs::write(&event_path, event.replacen("Client Work", "Client W0rk", 1))
+        .expect("tamper event bytes");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("tampered journal must fail closed");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::InvalidJournal { .. }
+    ));
+    assert_eq!(
+        fs::read(head_path).expect("head remains readable"),
+        original_head
+    );
+}
+
+#[test]
+fn restart_recovers_an_identical_event_published_before_its_head() {
+    let root = folderbase();
+    fs::create_dir(root.path().join("Personal")).expect("second selected folder");
+    observe_folder_scope(root.path(), Path::new("Client Work")).expect("first observation");
+    let head_path = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1/head.json");
+    let first_head = fs::read(&head_path).expect("first head");
+    let personal =
+        observe_folder_scope(root.path(), Path::new("Personal")).expect("second event and head");
+    let second_head = fs::read(&head_path).expect("second head");
+    fs::write(&head_path, first_head).expect("simulate crash before head publication");
+
+    let recovered = observe_folder_scope(root.path(), Path::new("Personal"))
+        .expect("recover matching orphan event");
+
+    assert_eq!(recovered, personal);
+    assert_eq!(fs::read(head_path).expect("recovered head"), second_head);
+}
