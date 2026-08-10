@@ -14,17 +14,35 @@ const MANIFEST: &[u8] = br#"{
 
 fn folderbase() -> TempDir {
     let root = tempdir().expect("temporary Folderbase");
-    fs::create_dir(root.path().join(".folderbase")).expect("state directory");
-    fs::write(root.path().join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
-    fs::write(root.path().join(".folderbaseignore"), "").expect("ignore policy");
-    fs::write(root.path().join("FOLDERBASE.md"), "# Folderbase\n").expect("entry marker");
-    fs::create_dir_all(root.path().join("Client Work/Briefs")).expect("selected folder");
+    write_folderbase(root.path());
+    root
+}
+
+fn write_folderbase(root: &Path) {
+    fs::create_dir_all(root.join(".folderbase")).expect("state directory");
+    fs::write(root.join(".folderbase/manifest.json"), MANIFEST).expect("manifest");
+    fs::write(root.join(".folderbaseignore"), "").expect("ignore policy");
+    fs::write(root.join("FOLDERBASE.md"), "# Folderbase\n").expect("entry marker");
+    fs::create_dir_all(root.join("Client Work/Briefs")).expect("selected folder");
     fs::write(
-        root.path().join("Client Work/Briefs/current.md"),
+        root.join("Client Work/Briefs/current.md"),
         "current brief\n",
     )
     .expect("ordinary file");
-    root
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("copy destination directory");
+    for entry in fs::read_dir(source).expect("read copied tree") {
+        let entry = entry.expect("copied tree entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().expect("copied entry type").is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("copy ordinary tree file");
+        }
+    }
 }
 
 #[test]
@@ -170,4 +188,37 @@ fn replay_stays_idempotent_after_another_folder_advances_the_device_journal() {
     assert_eq!(client.device_sequence, 1);
     assert_eq!(personal.device_sequence, 2);
     assert_eq!(client_replay, client);
+}
+
+#[test]
+fn copied_state_cannot_authorize_a_replacement_physical_root() {
+    let root = folderbase();
+    observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe original physical root");
+    let original_head = fs::read(
+        root.path()
+            .join(".folderbase/local/folder-scope-evidence-v1/head.json"),
+    )
+    .expect("original scope journal head");
+    let backup = tempdir().expect("root backup");
+    copy_tree(root.path(), backup.path());
+    fs::remove_dir_all(root.path()).expect("remove original physical root");
+    fs::create_dir(root.path()).expect("replacement physical root");
+    copy_tree(backup.path(), root.path());
+
+    let result = observe_folder_scope(root.path(), Path::new("Client Work"));
+
+    assert!(
+        result.is_err(),
+        "copied state must not bind a replacement root"
+    );
+    assert_eq!(
+        fs::read(
+            root.path()
+                .join(".folderbase/local/folder-scope-evidence-v1/head.json")
+        )
+        .expect("replacement journal head remains present"),
+        original_head,
+        "failed observation must not rewrite the copied journal"
+    );
 }

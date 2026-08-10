@@ -206,8 +206,6 @@ pub fn observe_folder_scope(
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
 
-    state.ensure_private_dir(Path::new(JOURNAL_DIRECTORY))?;
-    state.ensure_private_dir(Path::new(EVENTS_DIRECTORY))?;
     let (head, history) = read_journal(&state, &attestation)?;
     if let Some(existing) = history
         .iter()
@@ -236,6 +234,8 @@ pub fn observe_folder_scope(
             message: format!("journal exceeds {MAX_JOURNAL_EVENTS} events"),
         });
     }
+    state.ensure_private_dir(Path::new(JOURNAL_DIRECTORY))?;
+    state.ensure_private_dir(Path::new(EVENTS_DIRECTORY))?;
     let previous_event_sha256 = head.as_ref().map(|head| head.event_sha256.clone());
     let event_id = event_id(
         &attestation.root_instance_sha256,
@@ -341,7 +341,7 @@ fn read_journal(
     state: &FolderbaseState,
     attestation: &FolderbaseRootAttestation,
 ) -> Result<(Option<JournalHead>, Vec<JournalEvent>), FolderScopeEvidenceError> {
-    let Some(bytes) = state.read_bounded(Path::new(HEAD_PATH), MAX_HEAD_BYTES)? else {
+    let Some(bytes) = state.read_bounded_if_present(Path::new(HEAD_PATH), MAX_HEAD_BYTES)? else {
         return Ok((None, Vec::new()));
     };
     let head: JournalHead =
