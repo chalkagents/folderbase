@@ -70,6 +70,28 @@ await session.shutdown();
 Daemon 0.1 is serial. Aborting an active request terminates that session because
 the capability does not claim cooperative mid-request cancellation.
 
+## Exact folder-scope evidence
+
+```js
+const observed = await folderbase.observeFolderScope(
+  "/absolute/workspace",
+  "Client Work",
+);
+console.log(observed.document.event_id);
+```
+
+The adapter invokes
+`folderbase folder-scope observe ROOT SELECTED_PATH --json`, validates the
+known `folderbase-folder-scope-evidence-v1` fields, preserves additive result
+fields, and preserves typed Core errors. It never reads `.folderbase` state or
+derives continuity from a path, inode, Git remote, or Cloud identifier. This
+operation may advance Core's private device-local journal, so daemon 0.1
+deliberately does not proxy it.
+
+The closed v0.1 result carries at most 256 nested boundaries. Core reports
+`folder_scope_limit_exceeded` before publication when a selected topology is
+larger; the SDK preserves that typed error and all future additive fields.
+
 ## Root reconstruction
 
 The explicit reconstruction adapter uses the same universal CLI JSON surface

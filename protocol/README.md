@@ -32,6 +32,9 @@ independent of the Folderbase application and hosted services.
   profile of the same closed, provider-neutral Version v1 envelope.
 - `schemas/capabilities/change-set/0.1/change-set.schema.json` defines the
   advertised stable scoped checkout and immutable Change Set 0.1 capability.
+- `schemas/capabilities/folder-scope-evidence/0.1/folder-scope-evidence.schema.json`
+  defines the advertised stable exact-folder local continuity evidence
+  capability used before first durable sharing.
 - `schemas/capabilities/root-reconstruction/0.1/root-reconstruction.schema.json`
   defines the advertised stable exact whole-Version reconstruction package and
   process contract.
@@ -60,6 +63,10 @@ independent of the Folderbase application and hosted services.
 - `conformance/capabilities/change-set-0.1/` is the independently runnable
   suite for scoped projections, opaque staged bytes, three-way assessment,
   atomic apply, crash recovery, and replay.
+- `conformance/capabilities/folder-scope-evidence-0.1/` is the independent
+  eleven-case suite for exact-folder observation, replay, Local Head races,
+  rename continuity, attested boundary isolation, crash recovery, event and
+  journal-continuity tampering, and replacement refusal.
 - `conformance/capabilities/root-reconstruction-0.1/` is the independent
   twelve-case whole-root reconstruction suite.
 - `templates/0.2/project/template.json` is the built-in data-only

@@ -14,6 +14,8 @@ const DAEMON_CAPABILITY = "folderbase.daemon-stdio@0.1.0";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const FOLDERBASE_ID_PATTERN = /^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const FOLDERBASE_VERSION_ID_PATTERN = /^fbversion_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const FOLDER_SCOPE_EVENT_ID_PATTERN = /^folder_scope_event_[0-9a-f]{64}$/u;
+const FOLDER_SCOPE_BINDING_PATTERN = /^fb_scope_binding_v1_[0-9a-f]{64}$/u;
 const RECONSTRUCTION_OPERATION_ID_PATTERN = /^reconstruction_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const LEGACY_MANIFEST_PROTOCOL_PATTERN = /^0\.(?:1|2)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const RECONSTRUCTION_ATTENTION_CODES = new Set([
@@ -38,6 +40,23 @@ const RECONSTRUCTION_ERROR_CODES = new Set([
   "operation_id_conflict",
   "unsupported_reconstruction_filesystem",
   "reconstruction_failed",
+  "output_failed",
+]);
+const FOLDER_SCOPE_ERROR_CODES = new Set([
+  "invalid_invocation",
+  "folder_scope_capture_invalid",
+  "folder_scope_state_invalid",
+  "unsafe_selected_path",
+  "selected_folder_not_found",
+  "selected_folder_symlink",
+  "selected_folder_not_directory",
+  "selected_folder_excluded",
+  "unsupported_selected_node",
+  "selected_folder_replaced",
+  "nested_boundary_changed",
+  "folder_scope_observation_changed",
+  "folder_scope_limit_exceeded",
+  "invalid_folder_scope_journal",
   "output_failed",
 ]);
 const DAEMON_OPERATIONS = new Set([
@@ -271,6 +290,67 @@ function malformedReconstruction(message, details = {}) {
     `Folderbase root reconstruction ${message}`,
     details,
   );
+}
+
+function malformedFolderScope(message, details = {}) {
+  throw new FolderbaseMalformedOutputError(
+    `Folderbase folder scope ${message}`,
+    details,
+  );
+}
+
+function isSafeSelectedPath(value) {
+  if (!isBoundedString(value)
+    || value.startsWith("/")
+    || /^[A-Za-z]:/u.test(value)
+    || value.includes("\\")
+    || value.includes("\u0000")) return false;
+  const components = value.split("/");
+  return components.length > 0 && components.every((component) =>
+    component.length > 0
+    && component !== "."
+    && component !== ".."
+    && ![".folderbase", ".git"].includes(component.toLowerCase()));
+}
+
+function validateFolderScopeEvidence(document) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)
+    || document.format !== "folderbase-folder-scope-evidence-v1"
+    || !FOLDERBASE_ID_PATTERN.test(document.folderbase_id)
+    || !isSafeSelectedPath(document.selected_path)
+    || !FOLDER_SCOPE_EVENT_ID_PATTERN.test(document.event_id)
+    || !isBoundedInteger(document.device_sequence, 1, 16_384)
+    || !FOLDER_SCOPE_BINDING_PATTERN.test(document.opaque_binding_proof)
+    || !Array.isArray(document.nested_boundaries)
+    || document.nested_boundaries.length > 256) {
+    malformedFolderScope("emitted invalid evidence");
+  }
+  const prefix = `${document.selected_path}/`;
+  let previous;
+  for (const boundary of document.nested_boundaries) {
+    if (!isSafeSelectedPath(boundary)
+      || !boundary.startsWith(prefix)
+      || boundary.length === prefix.length
+      || (previous !== undefined
+        && Buffer.compare(Buffer.from(previous), Buffer.from(boundary)) >= 0)) {
+      malformedFolderScope("emitted invalid nested boundaries");
+    }
+    previous = boundary;
+  }
+  return document;
+}
+
+function validateFolderScopeError(document, details = {}) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)
+    || document.format !== "folderbase-folder-scope-evidence-error-v1"
+    || document.error === null
+    || typeof document.error !== "object"
+    || Array.isArray(document.error)
+    || !FOLDER_SCOPE_ERROR_CODES.has(document.error.code)
+    || !isBoundedString(document.error.message)) {
+    malformedFolderScope("emitted an invalid error", details);
+  }
+  return document;
 }
 
 function validateRootAttestation(document) {
@@ -643,6 +723,34 @@ export class FolderbaseClient {
 
   attest(root, options) {
     return this.run(["attest", root, "--json"], options);
+  }
+
+  async observeFolderScope(root, selectedPath, options) {
+    if (!isBoundedString(root) || root.includes("\u0000")) {
+      throw new TypeError("root must be a non-empty path no longer than 4096 characters");
+    }
+    if (!isSafeSelectedPath(selectedPath)) {
+      throw new TypeError("selectedPath must be one safe root-relative ordinary folder");
+    }
+    try {
+      const outcome = await this.run(
+        ["folder-scope", "observe", root, selectedPath, "--json"],
+        options,
+      );
+      if (outcome.kind !== "success") {
+        malformedFolderScope("returned an attention result");
+      }
+      validateFolderScopeEvidence(outcome.document);
+      return outcome;
+    } catch (error) {
+      if (error instanceof FolderbaseOperationalError) {
+        validateFolderScopeError(error.document, {
+          exitCode: error.exitCode,
+          stderr: error.stderr,
+        });
+      }
+      throw error;
+    }
   }
 
   init(root, initOptions = {}, runOptions) {

@@ -110,6 +110,39 @@ test("helpers use exact public arguments and bounded JSON stdin", async () => {
   assert.deepEqual(assessed.document.argv, [
     "change-set", "assess", "/tmp/folder", "/tmp/staging", "--stdin", "--json",
   ]);
+
+  const observed = await sdk.observeFolderScope("/tmp/folder", "Client Work");
+  assert.equal(observed.kind, "success");
+  assert.equal(observed.document.selected_path, "Client Work");
+});
+
+test("folder scope adapter validates known fields while preserving additive data", async () => {
+  const additive = await client().observeFolderScope("/tmp/folder", "Additive");
+  assert.deepEqual(additive.document.unknown_vendor, {
+    retained: true,
+    root: "/tmp/folder",
+  });
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Additive Error"),
+    (error) => {
+      assert.ok(error instanceof FolderbaseOperationalError);
+      assert.deepEqual(error.document.unknown_vendor, { retained: true });
+      assert.deepEqual(error.document.error.unknown_vendor, { retained: true });
+      return true;
+    },
+  );
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Malformed"),
+    FolderbaseMalformedOutputError,
+  );
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Malformed Error"),
+    FolderbaseMalformedOutputError,
+  );
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Too Many Boundaries"),
+    FolderbaseMalformedOutputError,
+  );
 });
 
 test("reconstruct uses the exact universal JSON surface and validates closed outcomes", async () => {

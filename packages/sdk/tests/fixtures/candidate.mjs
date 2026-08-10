@@ -17,7 +17,57 @@ function writeJson(stream, value) {
 const RECONSTRUCTION_REQUEST_SHA256 =
   "5efe8d56bc354c89ec52006c25e123dfb42cbdb1eeed2b1f4013a634590133e5";
 
-if (mode === "reconstruct") {
+if (mode === "folder-scope") {
+  const [operation, root, selectedPath, ...flags] = arguments_;
+  if (operation !== "observe" || flags.length !== 1 || flags[0] !== "--json") {
+    writeJson(process.stderr, {
+      format: "folderbase-folder-scope-evidence-error-v1",
+      error: { code: "invalid_invocation", message: "wrong folder scope arguments" },
+    });
+    process.exitCode = 2;
+  } else if (selectedPath === "Malformed Error") {
+    writeJson(process.stderr, {
+      format: "folderbase-folder-scope-evidence-error-v1",
+      error: { code: "unknown_error_code", message: "not found" },
+    });
+    process.exitCode = 2;
+  } else if (selectedPath === "Additive Error") {
+    writeJson(process.stderr, {
+      format: "folderbase-folder-scope-evidence-error-v1",
+      error: {
+        code: "selected_folder_not_found",
+        message: "not found",
+        unknown_vendor: { retained: true },
+      },
+      unknown_vendor: { retained: true },
+    });
+    process.exitCode = 2;
+  } else {
+    writeJson(process.stdout, {
+      format: "folderbase-folder-scope-evidence-v1",
+      folderbase_id: "folderbase_019f0000-0000-7000-8000-000000000001",
+      selected_path: selectedPath,
+      event_id: `folder_scope_event_${"a".repeat(64)}`,
+      device_sequence: 1,
+      opaque_binding_proof: `fb_scope_binding_v1_${"b".repeat(64)}`,
+      nested_boundaries: [],
+      ...(selectedPath === "Too Many Boundaries"
+        ? {
+            nested_boundaries: Array.from(
+              { length: 257 },
+              (_, index) => `${selectedPath}/Boundary ${String(index).padStart(3, "0")}`,
+            ),
+          }
+        : {}),
+      ...(selectedPath === "Malformed"
+        ? { event_id: "folder_scope_event_invalid" }
+        : {}),
+      ...(selectedPath === "Additive"
+        ? { unknown_vendor: { retained: true, root } }
+        : {}),
+    });
+  }
+} else if (mode === "reconstruct") {
   const [source, destination, ...flags] = arguments_;
   const request = JSON.parse(await stdinText());
   if (source !== "/tmp/package"

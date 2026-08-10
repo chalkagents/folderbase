@@ -29,6 +29,30 @@ test("large-object conformance has a bounded cross-platform command budget", () 
   assert.ok(DEFAULT_COMMAND_TIMEOUT_MS <= MAXIMUM_COMMAND_TIMEOUT_MS);
 });
 
+test("candidate exit while request bytes are in flight is a bounded supervisor result", () => {
+  const result = spawnSync(
+    process.execPath,
+    [join(directory, "command-supervisor.mjs")],
+    {
+      input: JSON.stringify({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        environment: {},
+        input: Buffer.alloc(16 * 1024 * 1024, 0x61).toString("base64"),
+        timeoutMs: 2_000,
+        maxBytes: 1024 * 1024,
+      }),
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 10_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const outcome = JSON.parse(result.stdout);
+  assert.equal(outcome.status, 0);
+  assert.equal(outcome.bound, null);
+});
+
 test("stable capability package is advertised identically", async () => {
   const packageEntry = JSON.parse(
     await readFile(
