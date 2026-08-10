@@ -112,3 +112,23 @@ fn a_new_local_head_advances_evidence_without_changing_folder_continuity() {
         "version progress must not erase physical folder continuity"
     );
 }
+
+#[test]
+fn a_physical_folder_rename_preserves_continuity_and_advances_the_journal() {
+    let root = folderbase();
+    let before = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe original folder path");
+    fs::rename(
+        root.path().join("Client Work"),
+        root.path().join("Active Client Work"),
+    )
+    .expect("rename selected folder");
+
+    let after = observe_folder_scope(root.path(), Path::new("Active Client Work"))
+        .expect("observe renamed physical folder");
+
+    assert_eq!(after.selected_path, "Active Client Work");
+    assert_eq!(after.device_sequence, 2);
+    assert_ne!(after.event_id, before.event_id);
+    assert_eq!(after.opaque_binding_proof, before.opaque_binding_proof);
+}
