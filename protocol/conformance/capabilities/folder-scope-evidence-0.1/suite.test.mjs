@@ -122,3 +122,21 @@ test("missing operation produces one complete deterministic seven-case RED repor
   assert.equal(report.cases[0].id, "capability-discovery");
   assert.equal(report.cases[0].status, "failed");
 });
+
+test("schema-invalid evidence cannot pass the stable black-box suite", () => {
+  const candidate = join(directory, "fixtures", "malformed-folder-scope-candidate.mjs");
+  const result = spawnSync(
+    process.execPath,
+    [join(directory, "run.mjs"), "--implementation", candidate],
+    { encoding: "utf8", maxBuffer: 2 * 1024 * 1024, timeout: 30_000 },
+  );
+  assert.equal(result.status, 1, result.error?.message || result.stderr || result.stdout);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.passed, 1);
+  assert.equal(report.failed, 1);
+  assert.equal(report.cases[0].id, "capability-discovery");
+  assert.equal(report.cases[0].status, "passed");
+  assert.equal(report.cases[1].id, "idempotent-arbitrary-folder-observation");
+  assert.equal(report.cases[1].status, "failed");
+  assert.match(report.cases[1].message, /folderbase_id has an invalid format/u);
+});

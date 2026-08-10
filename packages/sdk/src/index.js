@@ -314,15 +314,6 @@ function isSafeSelectedPath(value) {
 
 function validateFolderScopeEvidence(document) {
   if (document === null || typeof document !== "object" || Array.isArray(document)
-    || !hasExactKeys(document, [
-      "format",
-      "folderbase_id",
-      "selected_path",
-      "event_id",
-      "device_sequence",
-      "opaque_binding_proof",
-      "nested_boundaries",
-    ])
     || document.format !== "folderbase-folder-scope-evidence-v1"
     || !FOLDERBASE_ID_PATTERN.test(document.folderbase_id)
     || !isSafeSelectedPath(document.selected_path)
@@ -350,12 +341,10 @@ function validateFolderScopeEvidence(document) {
 
 function validateFolderScopeError(document, details = {}) {
   if (document === null || typeof document !== "object" || Array.isArray(document)
-    || !hasExactKeys(document, ["format", "error"])
     || document.format !== "folderbase-folder-scope-evidence-error-v1"
     || document.error === null
     || typeof document.error !== "object"
     || Array.isArray(document.error)
-    || !hasExactKeys(document.error, ["code", "message"])
     || !FOLDER_SCOPE_ERROR_CODES.has(document.error.code)
     || !isBoundedString(document.error.message)) {
     malformedFolderScope("emitted an invalid error", details);

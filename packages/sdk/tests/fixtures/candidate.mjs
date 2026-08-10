@@ -28,8 +28,18 @@ if (mode === "folder-scope") {
   } else if (selectedPath === "Malformed Error") {
     writeJson(process.stderr, {
       format: "folderbase-folder-scope-evidence-error-v1",
-      error: { code: "selected_folder_not_found", message: "not found" },
-      ambient_cloud: true,
+      error: { code: "unknown_error_code", message: "not found" },
+    });
+    process.exitCode = 2;
+  } else if (selectedPath === "Additive Error") {
+    writeJson(process.stderr, {
+      format: "folderbase-folder-scope-evidence-error-v1",
+      error: {
+        code: "selected_folder_not_found",
+        message: "not found",
+        unknown_vendor: { retained: true },
+      },
+      unknown_vendor: { retained: true },
     });
     process.exitCode = 2;
   } else {
@@ -41,7 +51,12 @@ if (mode === "folder-scope") {
       device_sequence: 1,
       opaque_binding_proof: `fb_scope_binding_v1_${"b".repeat(64)}`,
       nested_boundaries: [],
-      ...(selectedPath === "Malformed" ? { root } : {}),
+      ...(selectedPath === "Malformed"
+        ? { event_id: "folder_scope_event_invalid" }
+        : {}),
+      ...(selectedPath === "Additive"
+        ? { unknown_vendor: { retained: true, root } }
+        : {}),
     });
   }
 } else if (mode === "reconstruct") {

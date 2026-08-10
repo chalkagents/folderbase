@@ -2,16 +2,27 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { assertFolderScopeEvidenceSchema } from "./schema.mjs";
 
 const CAPABILITY = "folderbase.folder-scope-evidence@0.1.0";
 const FORMAT = "folderbase-capability-suite-report-v1";
 const FOLDERBASE_ID = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94792";
 const NESTED_ID = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94793";
-const EVENT_ID = /^folder_scope_event_[0-9a-f]{64}$/u;
-const BINDING = /^fb_scope_binding_v1_[0-9a-f]{64}$/u;
+const directory = dirname(fileURLToPath(import.meta.url));
+const schema = JSON.parse(
+  await readFile(
+    resolve(
+      directory,
+      "../../../schemas/capabilities/folder-scope-evidence/0.1/folder-scope-evidence.schema.json",
+    ),
+    "utf8",
+  ),
+);
 
 function implementationArgument(argv) {
   const flag = argv.indexOf("--implementation");
@@ -41,30 +52,8 @@ function execute(implementation, arguments_) {
   return result;
 }
 
-function exactKeys(value, keys, label) {
-  assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), label);
-  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} has an open shape`);
-}
-
 function validateEvidence(document) {
-  exactKeys(document, [
-    "format",
-    "folderbase_id",
-    "selected_path",
-    "event_id",
-    "device_sequence",
-    "opaque_binding_proof",
-    "nested_boundaries",
-  ], "evidence");
-  assert.equal(document.format, "folderbase-folder-scope-evidence-v1");
-  assert.match(document.folderbase_id, /^folderbase_[0-9a-f-]{36}$/u);
-  assert.ok(typeof document.selected_path === "string" && document.selected_path.length > 0);
-  assert.match(document.event_id, EVENT_ID);
-  assert.ok(Number.isSafeInteger(document.device_sequence));
-  assert.ok(document.device_sequence >= 1 && document.device_sequence <= 16_384);
-  assert.match(document.opaque_binding_proof, BINDING);
-  assert.ok(Array.isArray(document.nested_boundaries));
-  assert.ok(document.nested_boundaries.length <= 16_384);
+  assertFolderScopeEvidenceSchema(document, schema, "evidence");
   const prefix = `${document.selected_path}/`;
   let prior;
   for (const boundary of document.nested_boundaries) {
@@ -77,12 +66,8 @@ function validateEvidence(document) {
 }
 
 function validateError(document, expectedCode) {
-  exactKeys(document, ["format", "error"], "error document");
-  exactKeys(document.error, ["code", "message"], "error detail");
-  assert.equal(document.format, "folderbase-folder-scope-evidence-error-v1");
+  assertFolderScopeEvidenceSchema(document, schema, "error");
   assert.equal(document.error.code, expectedCode);
-  assert.ok(typeof document.error.message === "string" && document.error.message.length > 0);
-  assert.ok([...document.error.message].length <= 4_096);
   return document;
 }
 
