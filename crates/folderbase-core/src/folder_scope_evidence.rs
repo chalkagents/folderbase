@@ -83,6 +83,9 @@ pub enum FolderScopeEvidenceError {
     #[error("a different physical folder now occupies an observed Folder Scope path: {path}")]
     SelectedFolderReplaced { path: PathBuf },
 
+    #[error("nested Folderbase boundaries changed beneath an observed Folder Scope: {path}")]
+    NestedBoundaryChanged { path: PathBuf },
+
     #[error("selected Folder Scope or Folderbase Root changed during observation")]
     ObservationChanged,
 
@@ -102,6 +105,7 @@ impl FolderScopeEvidenceError {
             Self::SelectedFolderExcluded { .. } => "selected_folder_excluded",
             Self::UnsupportedSelectedNode { .. } => "unsupported_selected_node",
             Self::SelectedFolderReplaced { .. } => "selected_folder_replaced",
+            Self::NestedBoundaryChanged { .. } => "nested_boundary_changed",
             Self::ObservationChanged => "folder_scope_observation_changed",
             Self::InvalidJournal { .. } => "invalid_folder_scope_journal",
         }
@@ -217,6 +221,18 @@ pub fn observe_folder_scope(
         event.selected_path == selected_wire && event.opaque_binding_proof != opaque_binding_proof
     }) {
         return Err(FolderScopeEvidenceError::SelectedFolderReplaced {
+            path: selected_path,
+        });
+    }
+    let current_relative_boundaries =
+        relative_nested_boundaries(&selected_wire, &nested_boundaries)
+            .expect("Core capture returns strict descendant boundary paths");
+    if history.iter().any(|event| {
+        event.opaque_binding_proof == opaque_binding_proof
+            && relative_nested_boundaries(&event.selected_path, &event.nested_boundaries)
+                .is_none_or(|boundaries| boundaries != current_relative_boundaries)
+    }) {
+        return Err(FolderScopeEvidenceError::NestedBoundaryChanged {
             path: selected_path,
         });
     }
@@ -405,6 +421,10 @@ fn valid_journal_event(
     sequence: u64,
     expected_previous_event_sha256: Option<&str>,
 ) -> bool {
+    let selected_path_is_canonical = safe_selected_path(Path::new(&event.selected_path))
+        .ok()
+        .and_then(|path| relative_wire_path(&path).ok())
+        .is_some_and(|path| path == event.selected_path);
     if event.format != EVENT_FORMAT
         || event.folderbase_id != attestation.folderbase_id
         || event.root_instance_sha256 != attestation.root_instance_sha256
@@ -417,6 +437,8 @@ fn valid_journal_event(
             .is_some_and(|value| !valid_sha256(value))
         || !valid_sha256(&event.observation_sha256)
         || !valid_prefixed_digest(&event.opaque_binding_proof, "fb_scope_binding_v1_")
+        || !selected_path_is_canonical
+        || relative_nested_boundaries(&event.selected_path, &event.nested_boundaries).is_none()
         || event.opaque_binding_proof
             != binding_proof(
                 &event.folderbase_id,
@@ -441,6 +463,32 @@ fn valid_journal_event(
             expected_previous_event_sha256,
             &event.observation_sha256,
         )
+}
+
+fn relative_nested_boundaries<'a>(
+    selected_path: &str,
+    nested_boundaries: &'a [String],
+) -> Option<Vec<&'a str>> {
+    let prefix = format!("{selected_path}/");
+    let mut relative = Vec::with_capacity(nested_boundaries.len());
+    let mut previous = None;
+    for boundary in nested_boundaries {
+        let suffix = boundary.strip_prefix(&prefix)?;
+        if suffix.is_empty()
+            || previous.is_some_and(|value: &str| value.as_bytes() >= suffix.as_bytes())
+        {
+            return None;
+        }
+        let canonical = safe_selected_path(Path::new(boundary))
+            .ok()
+            .and_then(|path| relative_wire_path(&path).ok())?;
+        if canonical != *boundary {
+            return None;
+        }
+        previous = Some(suffix);
+        relative.push(suffix);
+    }
+    Some(relative)
 }
 
 fn safe_selected_path(path: &Path) -> Result<PathBuf, FolderScopeEvidenceError> {

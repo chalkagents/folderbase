@@ -274,3 +274,70 @@ fn unsupported_node_fails_before_the_scope_journal_is_created() {
         "failed observation must not create its journal"
     );
 }
+
+#[test]
+fn changing_nested_folderbase_boundaries_requires_a_new_explicit_scope() {
+    let root = folderbase();
+    observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe scope without nested boundary");
+    let head_path = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1/head.json");
+    let original_head = fs::read(&head_path).expect("original journal head");
+    fs::create_dir_all(root.path().join("Client Work/Partner/.folderbase"))
+        .expect("nested Folderbase state");
+    fs::write(
+        root.path().join("Client Work/Partner/.folderbase/manifest.json"),
+        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478e"},"capture":{"ignore_rules":[]}}"#,
+    )
+    .expect("nested manifest");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("boundary change must not silently widen or narrow the scope");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::NestedBoundaryChanged { path }
+            if path == Path::new("Client Work")
+    ));
+    assert_eq!(
+        fs::read(head_path).expect("journal head remains readable"),
+        original_head
+    );
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/local/folder-scope-evidence-v1/events/00000000000000000002.json")
+            .exists(),
+        "boundary rejection must not append an event"
+    );
+}
+
+#[test]
+fn renaming_a_scope_rebases_unchanged_nested_boundary_paths() {
+    let root = folderbase();
+    fs::create_dir_all(root.path().join("Client Work/Partner/.folderbase"))
+        .expect("nested Folderbase state");
+    fs::write(
+        root.path().join("Client Work/Partner/.folderbase/manifest.json"),
+        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478f"},"capture":{"ignore_rules":[]}}"#,
+    )
+    .expect("nested manifest");
+    let before = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe original path and boundary");
+    fs::rename(
+        root.path().join("Client Work"),
+        root.path().join("Active Client Work"),
+    )
+    .expect("rename selected folder");
+
+    let after = observe_folder_scope(root.path(), Path::new("Active Client Work"))
+        .expect("rename preserves the same relative boundary topology");
+
+    assert_eq!(after.device_sequence, 2);
+    assert_eq!(after.opaque_binding_proof, before.opaque_binding_proof);
+    assert_eq!(
+        after.nested_boundaries,
+        vec!["Active Client Work/Partner".to_owned()]
+    );
+}
