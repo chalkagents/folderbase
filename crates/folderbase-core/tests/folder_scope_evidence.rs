@@ -222,3 +222,55 @@ fn copied_state_cannot_authorize_a_replacement_physical_root() {
         "failed observation must not rewrite the copied journal"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn escaping_symlink_fails_before_the_scope_journal_is_created() {
+    let root = folderbase();
+    let outside = tempdir().expect("outside directory");
+    fs::write(outside.path().join("secret.txt"), "outside\n").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        root.path().join("Client Work/escape"),
+    )
+    .expect("escaping symlink");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("escaping symlink must fail closed");
+
+    assert_eq!(error.code(), "folder_scope_capture_invalid");
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/local/folder-scope-evidence-v1")
+            .exists(),
+        "failed observation must not create its journal"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unsupported_node_fails_before_the_scope_journal_is_created() {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let root = folderbase();
+    let fifo = root.path().join("Client Work/agent.pipe");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("unsupported node must fail closed");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::UnsupportedSelectedNode { path }
+            if path == Path::new("Client Work/agent.pipe")
+    ));
+    assert!(
+        !root
+            .path()
+            .join(".folderbase/local/folder-scope-evidence-v1")
+            .exists(),
+        "failed observation must not create its journal"
+    );
+}
