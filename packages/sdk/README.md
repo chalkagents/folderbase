@@ -82,10 +82,11 @@ console.log(observed.document.event_id);
 
 The adapter invokes
 `folderbase folder-scope observe ROOT SELECTED_PATH --json`, validates the
-closed `folderbase-folder-scope-evidence-v1` result, and preserves typed Core
-errors. It never reads `.folderbase` state or derives continuity from a path,
-inode, Git remote, or Cloud identifier. This operation may advance Core's
-private device-local journal, so daemon 0.1 deliberately does not proxy it.
+known `folderbase-folder-scope-evidence-v1` fields, preserves additive result
+fields, and preserves typed Core errors. It never reads `.folderbase` state or
+derives continuity from a path, inode, Git remote, or Cloud identifier. This
+operation may advance Core's private device-local journal, so daemon 0.1
+deliberately does not proxy it.
 
 ## Root reconstruction
 

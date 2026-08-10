@@ -114,9 +114,11 @@ console.log(evidence.document.nested_boundaries);
 
 The adapter invokes
 `folderbase folder-scope observe ROOT SELECTED_PATH --json` and validates the
-closed result. It never derives identity by reading `.folderbase`, walking the
-tree, or interpreting an inode. The result is local continuity evidence, not a
-share grant or Cloud credential. See the
+known v0.1 fields while preserving additive fields for forward compatibility.
+It never derives identity by reading `.folderbase`, walking the tree, or
+interpreting an inode. The exact implementation conformance schema remains
+closed. The result is local continuity evidence, not a share grant or Cloud
+credential. See the
 [Folder Scope evidence reference](/docs/reference/folder-scope-evidence).
 
 ## Reconstruct a retained Version into a new root
