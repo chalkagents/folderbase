@@ -1,6 +1,7 @@
 //! Trusted device-local evidence for one exact selected ordinary folder.
 
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     io,
     path::{Component, Path, PathBuf},
@@ -358,6 +359,7 @@ fn read_journal(
     attestation: &FolderbaseRootAttestation,
 ) -> Result<(Option<JournalHead>, Vec<JournalEvent>), FolderScopeEvidenceError> {
     let Some(bytes) = state.read_bounded_if_present(Path::new(HEAD_PATH), MAX_HEAD_BYTES)? else {
+        validate_event_namespace(state, 0)?;
         return Ok((None, Vec::new()));
     };
     let head: JournalHead =
@@ -377,6 +379,7 @@ fn read_journal(
                 .to_owned(),
         });
     }
+    validate_event_namespace(state, head.device_sequence)?;
     let mut events = Vec::with_capacity(head.device_sequence as usize);
     let mut previous_event_sha256 = None;
     for sequence in 1..=head.device_sequence {
@@ -413,6 +416,55 @@ fn read_journal(
         events.push(event);
     }
     Ok((Some(head), events))
+}
+
+fn validate_event_namespace(
+    state: &FolderbaseState,
+    head_sequence: u64,
+) -> Result<(), FolderScopeEvidenceError> {
+    let names = state
+        .private_directory_names_if_present(
+            Path::new(EVENTS_DIRECTORY),
+            MAX_JOURNAL_EVENTS as usize + 2,
+        )
+        .map_err(|_| FolderScopeEvidenceError::InvalidJournal {
+            message: "the journal event namespace exceeds its aggregate bound".to_owned(),
+        })?;
+    let maximum_sequence = if head_sequence < MAX_JOURNAL_EVENTS {
+        head_sequence + 1
+    } else {
+        head_sequence
+    };
+    let mut sequences = BTreeSet::new();
+    for name in names {
+        let Some(name) = name.to_str() else {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal event namespace contains a non-UTF-8 entry".to_owned(),
+            });
+        };
+        let Some(stem) = name.strip_suffix(".json") else {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal event namespace contains an unexpected entry".to_owned(),
+            });
+        };
+        let Ok(sequence) = stem.parse::<u64>() else {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal event namespace contains an invalid sequence".to_owned(),
+            });
+        };
+        if stem.len() != 20
+            || name != format!("{sequence:020}.json")
+            || sequence == 0
+            || sequence > maximum_sequence
+            || !sequences.insert(sequence)
+        {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal event namespace is not a bounded contiguous sequence"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn valid_journal_event(

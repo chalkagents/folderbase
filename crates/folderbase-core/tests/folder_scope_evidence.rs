@@ -390,3 +390,29 @@ fn restart_recovers_an_identical_event_published_before_its_head() {
     assert_eq!(recovered, personal);
     assert_eq!(fs::read(head_path).expect("recovered head"), second_head);
 }
+
+#[test]
+fn unexpected_journal_entries_fail_closed_instead_of_hiding_unbounded_work() {
+    let root = folderbase();
+    let original =
+        observe_folder_scope(root.path(), Path::new("Client Work")).expect("initial observation");
+    let journal = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1");
+    let head_path = journal.join("head.json");
+    let original_head = fs::read(&head_path).expect("original head");
+    fs::write(journal.join("events/rogue.json"), b"{}").expect("unexpected journal entry");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("unexpected entry must invalidate the bounded journal");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::InvalidJournal { .. }
+    ));
+    assert_eq!(
+        fs::read(head_path).expect("head remains readable"),
+        original_head
+    );
+    assert_eq!(original.device_sequence, 1);
+}
