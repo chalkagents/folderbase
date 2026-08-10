@@ -38,6 +38,9 @@ const HEAD_PATH: &str = ".folderbase/local/folder-scope-evidence-v1/head.json";
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_EVENT_BYTES: u64 = 256 * 1024;
 const MAX_JOURNAL_EVENTS: u64 = 16_384;
+const CONFORMANCE_ADVANCE_HEAD_ENV: &str =
+    "FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_ADVANCE_HEAD_AFTER_PLAN";
+const CONFORMANCE_CRASH_AFTER_ENV: &str = "FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_CRASH_AFTER";
 
 /// Bounded observer input for allocating or advancing one durable Folder Scope.
 ///
@@ -197,6 +200,7 @@ fn observe_folder_scope_with_after_plan(
     let store = FolderbaseVersionStore::open(root)?;
     let plan = store.plan_capture()?;
     after_plan();
+    advance_local_head_for_conformance(&store)?;
     let attestation = store.root_attestation.clone();
     let state = FolderbaseState::open_existing(&attestation.root)?;
     state.verify_root_identity(store.root_physical_identity())?;
@@ -355,6 +359,11 @@ fn observe_folder_scope_with_after_plan(
         }
         Err(error) => return Err(error.into()),
     }
+    if std::env::var_os(CONFORMANCE_CRASH_AFTER_ENV).as_deref()
+        == Some(OsStr::new("event-publication"))
+    {
+        std::process::exit(86);
+    }
     let next_head = JournalHead {
         format: JOURNAL_FORMAT.to_owned(),
         folderbase_id: attestation.folderbase_id,
@@ -381,6 +390,17 @@ fn observe_folder_scope_with_after_plan(
     state.verify_still_attached()?;
     verify_attestation(&store.root_attestation)?;
     Ok(event.public_evidence())
+}
+
+fn advance_local_head_for_conformance(
+    store: &FolderbaseVersionStore,
+) -> Result<(), FolderScopeEvidenceError> {
+    if std::env::var_os(CONFORMANCE_ADVANCE_HEAD_ENV).as_deref() != Some(OsStr::new("1")) {
+        return Ok(());
+    }
+    let plan = store.plan_capture()?;
+    store.seal_capture(plan)?;
+    Ok(())
 }
 
 fn scope_nested_boundaries(

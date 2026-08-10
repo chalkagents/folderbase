@@ -2,7 +2,17 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,12 +49,13 @@ function commandFor(implementation, arguments_) {
     : { command: implementation, args: arguments_ };
 }
 
-function execute(implementation, arguments_) {
+function execute(implementation, arguments_, environment = {}) {
   const invocation = commandFor(implementation, arguments_);
   const result = spawnSync(invocation.command, invocation.args, {
     encoding: "utf8",
     shell: false,
     windowsHide: true,
+    env: { ...process.env, ...environment },
     timeout: 30_000,
     maxBuffer: 2 * 1024 * 1024,
   });
@@ -71,19 +82,19 @@ function validateError(document, expectedCode) {
   return document;
 }
 
-function observe(implementation, root, selectedPath) {
+function observe(implementation, root, selectedPath, environment = {}) {
   const result = execute(implementation, [
     "folder-scope", "observe", root, selectedPath, "--json",
-  ]);
+  ], environment);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(result.stderr, "");
   return validateEvidence(JSON.parse(result.stdout));
 }
 
-function observeError(implementation, root, selectedPath, expectedCode) {
+function observeError(implementation, root, selectedPath, expectedCode, environment = {}) {
   const result = execute(implementation, [
     "folder-scope", "observe", root, selectedPath, "--json",
-  ]);
+  ], environment);
   assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(result.stdout, "");
   return validateError(JSON.parse(result.stderr), expectedCode);
@@ -189,6 +200,36 @@ try {
       },
     },
     {
+      id: "non-genesis-head-progress-and-stale-observation-refusal",
+      async run() {
+        const root = join(cleanup, "local-head");
+        await writeRoot(root);
+        observeError(
+          implementation,
+          root,
+          "Client Work",
+          "folder_scope_observation_changed",
+          { FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_ADVANCE_HEAD_AFTER_PLAN: "1" },
+        );
+        await assert.rejects(
+          access(join(root, ".folderbase", "local", "folder-scope-evidence-v1")),
+        );
+        const first = observe(implementation, root, "Client Work");
+        assert.equal(first.device_sequence, 1);
+        await writeFile(join(root, "Client Work", "new-head.md"), "new head\n");
+        observeError(
+          implementation,
+          root,
+          "Client Work",
+          "folder_scope_observation_changed",
+          { FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_ADVANCE_HEAD_AFTER_PLAN: "1" },
+        );
+        const advanced = observe(implementation, root, "Client Work");
+        assert.equal(advanced.device_sequence, 2);
+        assert.equal(advanced.opaque_binding_proof, first.opaque_binding_proof);
+      },
+    },
+    {
       id: "rename-continuity-and-replacement-refusal",
       async run() {
         const root = join(cleanup, "rename");
@@ -211,10 +252,20 @@ try {
         assert.deepEqual(first.nested_boundaries, ["Client Work/Partner"]);
         await addNested(
           root,
-          join("Client Work", "Second Partner"),
+          join("Client Work", "Partner"),
           "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94794",
         );
         observeError(implementation, root, "Client Work", "nested_boundary_changed");
+
+        const topologyRoot = join(cleanup, "boundary-topology");
+        await writeRoot(topologyRoot, "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94795");
+        observe(implementation, topologyRoot, "Client Work");
+        await addNested(
+          topologyRoot,
+          join("Client Work", "Second Partner"),
+          "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94796",
+        );
+        observeError(implementation, topologyRoot, "Client Work", "nested_boundary_changed");
       },
     },
     {
@@ -249,13 +300,67 @@ try {
     {
       id: "escaping-symlink-refusal",
       async run() {
-        if (process.platform === "win32") return;
         const root = join(cleanup, "symlink");
-        const outside = join(cleanup, "outside.txt");
+        const outside = join(cleanup, "outside-directory");
         await writeRoot(root);
-        await writeFile(outside, "outside\n");
-        await symlink(outside, join(root, "Client Work", "escape"));
+        await mkdir(outside);
+        await writeFile(join(outside, "outside.txt"), "outside\n");
+        await symlink(
+          outside,
+          join(root, "Client Work", "escape"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
         observeError(implementation, root, "Client Work", "folder_scope_capture_invalid");
+      },
+    },
+    {
+      id: "unsupported-node-refusal",
+      async run() {
+        if (process.platform === "win32") return;
+        const root = join(cleanup, "unsupported");
+        await writeRoot(root);
+        const fifo = join(root, "Client Work", "agent.pipe");
+        const created = spawnSync("mkfifo", [fifo], {
+          encoding: "utf8",
+          shell: false,
+          windowsHide: true,
+          timeout: 10_000,
+        });
+        if (created.error) throw created.error;
+        assert.equal(created.status, 0, created.stderr || created.stdout);
+        observeError(implementation, root, "Client Work", "unsupported_selected_node");
+      },
+    },
+    {
+      id: "event-publication-crash-recovery",
+      async run() {
+        const root = join(cleanup, "crash-recovery");
+        await writeRoot(root);
+        const crashed = execute(
+          implementation,
+          ["folder-scope", "observe", root, "Client Work", "--json"],
+          { FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_CRASH_AFTER: "event-publication" },
+        );
+        assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
+        assert.equal(crashed.stdout, "");
+        assert.equal(crashed.stderr, "");
+        const recovered = observe(implementation, root, "Client Work");
+        assert.equal(recovered.device_sequence, 1);
+        assert.deepEqual(observe(implementation, root, "Client Work"), recovered);
+      },
+    },
+    {
+      id: "closed-bounded-journal-refusal",
+      async run() {
+        const root = join(cleanup, "journal-bound");
+        await writeRoot(root);
+        const first = observe(implementation, root, "Client Work");
+        const journal = join(root, ".folderbase", "local", "folder-scope-evidence-v1");
+        const originalHead = await readFile(join(journal, "head.json"));
+        await writeFile(join(journal, "rogue.bin"), Buffer.alloc(128));
+        observeError(implementation, root, "Client Work", "invalid_folder_scope_journal");
+        assert.deepEqual(await readFile(join(journal, "head.json")), originalHead);
+        assert.equal(first.device_sequence, 1);
       },
     },
   ];

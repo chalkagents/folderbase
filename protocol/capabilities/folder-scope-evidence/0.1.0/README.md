@@ -14,11 +14,12 @@ unrelated object metadata. The opaque binding proof is continuity evidence; it
 is not a Folder Scope ID or authorization credential.
 
 The operation uses Core's exact metadata inventory, current Local Head, held
-physical identities, and a bounded private journal. Repeated observations are
-idempotent. A proven rename preserves the opaque binding proof. Root or folder
-replacement, stale Local Head, nested Folderbase boundary changes, unsafe
-symlinks, unsupported nodes, and journal tampering fail closed without changing
-ordinary workspace files.
+physical identities, a Core-generated non-reusable private binding nonce, exact
+nested-root attestations, and a bounded private journal. Repeated observations
+are idempotent. A proven rename preserves the opaque binding proof. Root,
+selected-folder, or nested-root replacement, stale Local Head, nested
+Folderbase boundary changes, unsafe symlinks, unsupported nodes, and journal
+tampering fail closed without changing ordinary workspace files.
 
 This one-shot process command is the universal mutation seam. Capability
 discovery is available through `folderbase protocol contract --json`. Daemon

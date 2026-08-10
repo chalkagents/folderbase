@@ -106,7 +106,7 @@ test("public evidence and error records are closed bounded Draft 2020-12 schemas
   );
 });
 
-test("missing operation produces one complete deterministic seven-case RED report", () => {
+test("missing operation produces one complete deterministic eleven-case RED report", () => {
   const candidate = join(directory, "fixtures", "missing-folder-scope-candidate.mjs");
   const result = spawnSync(
     process.execPath,

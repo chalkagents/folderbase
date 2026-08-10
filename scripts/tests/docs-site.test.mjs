@@ -303,7 +303,7 @@ test("Folder Scope evidence has a runnable reference and honest first-share boun
   }
   assert.match(reference, /folder-scope observe/u);
   assert.match(reference, /observeFolderScope/u);
-  assert.match(reference, /seven black-box cases/u);
+  assert.match(reference, /eleven black-box cases/u);
   assert.match(reference, /not authorization/u);
   assert.match(reference, /does not parse or upload file contents/u);
   assert.match(conformance, /capabilities\/folder-scope-evidence-0\.1\/run\.mjs/u);

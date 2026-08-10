@@ -79,9 +79,11 @@ const outcome = await folderbase.observeFolderScope(
 console.log(outcome.document.event_id);
 ```
 
-The SDK supervises the exact Core process and validates the closed document.
-It never reads or repairs `.folderbase` state itself. Daemon stdio 0.1 remains
-query-only; use the one-shot command for this journaled operation.
+The SDK supervises the exact Core process, validates every known v0.1 field,
+and preserves additive fields for forward-compatible clients. The exact v0.1
+candidate conformance schema remains closed. The SDK never reads or repairs
+`.folderbase` state itself. Daemon stdio 0.1 remains query-only; use the
+one-shot command for this journaled operation.
 
 ## Independent conformance
 
@@ -90,9 +92,11 @@ node protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs \
   --implementation /absolute/path/to/folderbase
 ```
 
-The seven black-box cases prove discovery, idempotent arbitrary-folder
-observation, rename continuity, replacement refusal, nested-boundary
-isolation, root replacement, unsafe invocation, and escaping-symlink refusal.
+The eleven black-box cases prove discovery, idempotent arbitrary-folder
+observation, non-genesis Local Head progress, stale-observation refusal, rename
+continuity, selected and root replacement refusal, attested nested-boundary
+identity, cross-platform escaping-link refusal, unsupported-node refusal,
+crash recovery, and the closed aggregate journal namespace.
 
 See the public
 [`folder-scope-evidence.schema.json`](https://github.com/chalkagents/folderbase/blob/main/protocol/schemas/capabilities/folder-scope-evidence/0.1/folder-scope-evidence.schema.json),

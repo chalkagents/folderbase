@@ -71,29 +71,34 @@ Success returns exactly one bounded
 
 Core derives the record while holding the exact root and selected folder with
 no-follow filesystem capabilities. The private binding combines the attested
-Folderbase identity, root-instance continuity, and selected-folder physical
-continuity in a domain-separated Core digest. Raw platform identifiers and
-binding ingredients never cross the public interface.
+Folderbase identity, root-instance continuity, selected-folder physical
+continuity, and one Core-generated non-reusable journal nonce in a
+domain-separated digest. The nonce is created once per newly proven folder
+binding, recovered from an exact orphan event after a crash, and retained
+across proven renames. Raw platform identifiers, the nonce, and other binding
+ingredients never cross the public interface.
 
-Physical identity is only a local continuity ingredient. It is not the public
-identity, is not portable, is not sufficient authority by itself, and is
-never accepted from a caller. The public opaque binding proof remains stable
-across a proven physical rename of the selected folder. Replacing the selected
-folder, replacing or copying the root, or losing the retained continuity
-causes refusal rather than silent reallocation.
+Physical identity is only a local continuity hint bound to Core-owned journal
+state. It is not the public identity, is not portable, is not sufficient
+authority by itself, and is never accepted from a caller. The public opaque
+binding proof remains stable across a proven physical rename of the selected
+folder. Replacing the selected folder, replacing or copying the root, or losing
+the retained continuity causes refusal rather than silent reallocation.
 
 The event identity binds the current selected relative path, current Local
-Head, opaque proof, and exact nested-boundary set. Repeating an identical
-observation returns the original event and sequence. A proven rename or Local
-Head advance creates a new event while retaining the same binding proof. An
-earlier A observation remains replayable after A → B → A without allocating a
-second identity for A.
+Head, opaque proof, and exact nested-boundary attestations. Repeating an
+identical observation returns the original event and sequence. A proven rename
+or Local Head advance creates a new event while retaining the same binding
+proof. An earlier A observation remains replayable after A → B → A without
+allocating a second identity for A.
 
 Nested boundaries are reported root-relative so an authorized observer can
-confine later work. Internally, Core compares their topology relative to the
-selected folder so a proven rename rebases the public paths without claiming
-the boundary changed. Adding, removing, replacing, or crossing a nested
-Folderbase after the first observation fails closed.
+confine later work. Internally, Core retains each boundary's Folderbase ID,
+protocol version, manifest digest, and physical Root Instance digest and
+compares that attested identity relative to the selected folder. A proven
+rename rebases the public paths without claiming the boundary changed. Adding,
+removing, replacing at the same path, or crossing a nested Folderbase after the
+first observation fails closed.
 
 ### Exact observation and durable private journal
 
@@ -106,10 +111,10 @@ operational error and does not advance the evidence journal.
 The device-local journal lives under
 `.folderbase/local/folder-scope-evidence-v1/`. It is engine-owned state, not a
 portable Folderbase Version and not shared authorization. Events form one
-bounded, deterministic, append-only sequence with an independently durable
-head. Core validates the complete retained chain, rejects unknown entries and
-tampering, and limits the profile to 16,384 events and 16,384 nested
-boundaries.
+bounded, deterministic-after-allocation, append-only sequence with an
+independently durable head. Core validates the complete retained chain and
+exact journal root/event namespaces, rejects unknown entries and tampering,
+and limits the profile to 16,384 events and 16,384 nested boundaries.
 
 A crash after writing the exact next event but before advancing the head is
 recoverable. Any other orphan, gap, duplicate, changed event, or unrecognized
@@ -130,8 +135,10 @@ publication. Possessing or copying local evidence never grants access.
 
 Apps, SDKs, agent harnesses, and remote VMs invoke the public process contract.
 They do not read, write, repair, or reinterpret `.folderbase` internals. The
-TypeScript SDK validates the closed result and typed error documents but does
-not derive evidence itself.
+TypeScript SDK validates required v0.1 result and typed-error fields while
+preserving additive fields for forward compatibility; it does not derive
+evidence itself. Exact implementations claiming v0.1 still pass the closed
+public conformance schema.
 
 ### Public contract and conformance
 
@@ -141,12 +148,17 @@ The normative package is:
 - `protocol/schemas/capabilities/folder-scope-evidence/0.1/`; and
 - `protocol/conformance/capabilities/folder-scope-evidence-0.1/`.
 
-Its implementation-neutral suite exercises capability discovery,
+Its eleven-case implementation-neutral suite exercises capability discovery,
 metadata-only arbitrary-folder observation, idempotent replay, A → B → A
-selection, rename continuity, selected-folder replacement, root replacement,
-nested-boundary isolation, unsafe paths, invalid invocation, and symlink
-escape. The same public suite must pass on macOS, Linux, and Windows before the
-capability is advertised by a released Core artifact.
+selection, non-genesis Local Head progress, deterministic stale-observation
+refusal, rename continuity, selected-folder and root replacement, same-path
+nested-root replacement, nested-boundary topology isolation, unsafe paths,
+invalid invocation, cross-platform escaping links, unsupported nodes where the
+host exposes them, crash/restart recovery, and the exact aggregate journal
+namespace. Two reserved environment seams exist only to reproduce the Local
+Head race and event-publication crash inside disposable conformance fixtures;
+they grant no authority. The same public suite must pass on macOS, Linux, and
+Windows before the capability is advertised by a released Core artifact.
 
 Folderbase Platform issue `chalkagents/folderbase-platform#141` must consume a
 tagged Core release with this capability before it can close. The App must not
