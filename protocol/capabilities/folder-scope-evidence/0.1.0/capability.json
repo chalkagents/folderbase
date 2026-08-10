@@ -1,0 +1,6 @@
+{
+  "name": "folderbase.folder-scope-evidence",
+  "version": "0.1.0",
+  "stability": "stable",
+  "conformance_runner": "protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs"
+}

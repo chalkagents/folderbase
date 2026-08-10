@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 
 mod change_set_capability;
 mod daemon_capability;
+mod folder_scope_capability;
 mod query_capability;
 mod root_reconstruction_capability;
 
@@ -236,10 +237,27 @@ enum Command {
         json: bool,
     },
 
+    /// Produce trusted journal evidence for one exact selected ordinary folder.
+    FolderScope {
+        #[command(subcommand)]
+        command: FolderScopeCommand,
+    },
+
     /// Run one root-pinned long-lived Core session over stdio JSON Lines.
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FolderScopeCommand {
+    /// Observe one exact selected folder without exposing filesystem authority.
+    Observe {
+        root: PathBuf,
+        selected_path: PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
     },
 }
 
@@ -637,6 +655,16 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Err(error) if error.exit_code() != 0 && argv_selects_folder_scope_capability() => {
+            let transport = folder_scope_capability::invalid_invocation(error.to_string());
+            return match write_folder_scope_transport(transport) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    write_stderr_best_effort(format_args!("error: {error}"));
+                    ExitCode::from(EXIT_OPERATIONAL_ERROR)
+                }
+            };
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             return match error.print() {
@@ -744,6 +772,16 @@ fn argv_selects_root_reconstruction_capability() -> bool {
             .and_then(|argument| argument.into_string().ok())
             .as_deref(),
         Some("reconstruct")
+    )
+}
+
+fn argv_selects_folder_scope_capability() -> bool {
+    matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|argument| argument.into_string().ok())
+            .as_deref(),
+        Some("folder-scope")
     )
 }
 
@@ -1405,7 +1443,26 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             destination,
             std::io::stdin().lock(),
         )),
+        Command::FolderScope { command } => match command {
+            FolderScopeCommand::Observe {
+                root,
+                selected_path,
+                json: _,
+            } => {
+                write_folder_scope_transport(folder_scope_capability::execute(root, selected_path))
+            }
+        },
     }
+}
+
+fn write_folder_scope_transport(
+    transport: folder_scope_capability::FolderScopeTransport,
+) -> Result<u8, CliError> {
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    write_transport_stream(&mut stdout.lock(), &transport.stdout, "stdout")?;
+    write_transport_stream(&mut stderr.lock(), &transport.stderr, "stderr")?;
+    Ok(transport.exit_code)
 }
 
 fn write_root_reconstruction_transport(
@@ -1744,6 +1801,7 @@ fn command_emits_json_errors(command: &Command) -> bool {
         Command::ChangeSet { .. } => false,
         Command::Daemon { .. } => false,
         Command::Reconstruct { .. } => false,
+        Command::FolderScope { .. } => false,
     }
 }
 

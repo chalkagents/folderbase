@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folderbase.ai/protocol/capabilities/folder-scope-evidence/0.1/folder-scope-evidence.schema.json",
+  "title": "Folderbase folder-scope-evidence capability 0.1",
+  "description": "Closed bounded process records for trusted exact-folder continuity evidence.",
+  "oneOf": [
+    { "$ref": "#/$defs/evidence" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "folderbaseId": {
+      "type": "string",
+      "pattern": "^folderbase_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "portableSelectedPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\u0000)(?!.*(?:^|/)\\.(?:folderbase|git)(?:/|$)).+(?<!/)$"
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^folder_scope_event_[0-9a-f]{64}$"
+    },
+    "bindingProof": {
+      "type": "string",
+      "pattern": "^fb_scope_binding_v1_[0-9a-f]{64}$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "folderbase_id",
+        "selected_path",
+        "event_id",
+        "device_sequence",
+        "opaque_binding_proof",
+        "nested_boundaries"
+      ],
+      "properties": {
+        "format": { "const": "folderbase-folder-scope-evidence-v1" },
+        "folderbase_id": { "$ref": "#/$defs/folderbaseId" },
+        "selected_path": { "$ref": "#/$defs/portableSelectedPath" },
+        "event_id": { "$ref": "#/$defs/eventId" },
+        "device_sequence": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "opaque_binding_proof": { "$ref": "#/$defs/bindingProof" },
+        "nested_boundaries": {
+          "type": "array",
+          "maxItems": 16384,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/portableSelectedPath" },
+          "description": "Strictly sorted unique root-relative descendants of selected_path. Semantic validation enforces component ancestry."
+        }
+      }
+    },
+    "errorDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_invocation",
+            "folder_scope_capture_invalid",
+            "folder_scope_state_invalid",
+            "unsafe_selected_path",
+            "selected_folder_not_found",
+            "selected_folder_symlink",
+            "selected_folder_not_directory",
+            "selected_folder_excluded",
+            "unsupported_selected_node",
+            "selected_folder_replaced",
+            "nested_boundary_changed",
+            "folder_scope_observation_changed",
+            "invalid_folder_scope_journal",
+            "output_failed"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "error"],
+      "properties": {
+        "format": { "const": "folderbase-folder-scope-evidence-error-v1" },
+        "error": { "$ref": "#/$defs/errorDetail" }
+      }
+    }
+  }
+}
