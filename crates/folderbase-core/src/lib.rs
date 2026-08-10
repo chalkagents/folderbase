@@ -9,6 +9,7 @@ mod change_set;
 pub mod chunk_transfer;
 mod error;
 mod folder_analysis;
+mod folder_scope_evidence;
 mod folderbase_capture;
 mod folderbase_restore_authority;
 mod folderbase_seal;
@@ -53,6 +54,9 @@ pub use change_set::{
     checkout_change_set_projection, propose_change_set,
 };
 pub use error::{FolderbaseError, InitializationInventoryLimitKind, Result};
+pub use folder_scope_evidence::{
+    FolderScopeEvidence, FolderScopeEvidenceError, observe_folder_scope,
+};
 pub use folderbase_capture::{
     CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CaptureIgnoredPath,
     CaptureLocalHead, CapturePlan, CapturePlanEntry, CapturePlanExclusion, CapturePlanLimitKind,
