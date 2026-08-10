@@ -97,6 +97,40 @@ export interface FolderbaseValidateOptions {
   level?: "shallow" | "content";
 }
 
+export interface FolderbaseFolderScopeEvidence extends JsonObject {
+  format: "folderbase-folder-scope-evidence-v1";
+  folderbase_id: string;
+  selected_path: string;
+  event_id: string;
+  device_sequence: number;
+  opaque_binding_proof: string;
+  nested_boundaries: string[];
+}
+
+export type FolderbaseFolderScopeErrorCode =
+  | "invalid_invocation"
+  | "folder_scope_capture_invalid"
+  | "folder_scope_state_invalid"
+  | "unsafe_selected_path"
+  | "selected_folder_not_found"
+  | "selected_folder_symlink"
+  | "selected_folder_not_directory"
+  | "selected_folder_excluded"
+  | "unsupported_selected_node"
+  | "selected_folder_replaced"
+  | "nested_boundary_changed"
+  | "folder_scope_observation_changed"
+  | "invalid_folder_scope_journal"
+  | "output_failed";
+
+export interface FolderbaseFolderScopeError extends JsonObject {
+  format: "folderbase-folder-scope-evidence-error-v1";
+  error: {
+    code: FolderbaseFolderScopeErrorCode;
+    message: string;
+  };
+}
+
 export interface FolderbaseRootReconstructionRequest extends JsonObject {
   format: "folderbase-root-reconstruction-request-v1";
   operation_id: string;
@@ -257,6 +291,7 @@ export class FolderbaseClient {
   contract<T extends JsonValue = JsonObject>(options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   inspect<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   attest<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
+  observeFolderScope(root: string, selectedPath: string, options?: FolderbaseRunOptions): Promise<FolderbaseSuccess<FolderbaseFolderScopeEvidence>>;
   init<T extends JsonValue = JsonObject>(root: string, initOptions?: FolderbaseInitOptions, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   validate<T extends JsonValue = JsonObject>(root: string, validateOptions?: FolderbaseValidateOptions, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   query<T extends JsonValue = JsonObject>(root: string, document: JsonObject, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;

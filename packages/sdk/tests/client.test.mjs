@@ -110,6 +110,21 @@ test("helpers use exact public arguments and bounded JSON stdin", async () => {
   assert.deepEqual(assessed.document.argv, [
     "change-set", "assess", "/tmp/folder", "/tmp/staging", "--stdin", "--json",
   ]);
+
+  const observed = await sdk.observeFolderScope("/tmp/folder", "Client Work");
+  assert.equal(observed.kind, "success");
+  assert.equal(observed.document.selected_path, "Client Work");
+});
+
+test("folder scope adapter rejects malformed closed results and errors", async () => {
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Malformed"),
+    FolderbaseMalformedOutputError,
+  );
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Malformed Error"),
+    FolderbaseMalformedOutputError,
+  );
 });
 
 test("reconstruct uses the exact universal JSON surface and validates closed outcomes", async () => {

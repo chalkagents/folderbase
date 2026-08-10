@@ -2,11 +2,13 @@ import {
   FolderbaseClient,
   FolderbaseOperationalError,
   type FolderbaseDaemonEvent,
+  type FolderbaseFolderScopeEvidence,
   type FolderbaseResult,
   type FolderbaseRootReconstructionAttention,
   type FolderbaseRootReconstructionError,
   type FolderbaseRootReconstructionRequest,
   type FolderbaseRootReconstructionResult,
+  type FolderbaseSuccess,
   type JsonObject,
   type JsonValue,
 } from "../src/index.js";
@@ -23,6 +25,11 @@ const queryDocument: JsonObject = {
 };
 
 async function useClient(): Promise<void> {
+  const observed: FolderbaseSuccess<FolderbaseFolderScopeEvidence> =
+    await client.observeFolderScope("/absolute/workspace", "Client Work");
+  const observedPath: string = observed.document.selected_path;
+  void observedPath;
+
   const reconstructionRequest: FolderbaseRootReconstructionRequest = {
     format: "folderbase-root-reconstruction-request-v1",
     operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
