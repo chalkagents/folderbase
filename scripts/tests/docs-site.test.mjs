@@ -289,6 +289,27 @@ test("the daemon capability has a runnable guide, wire reference, and honest aut
   assert.match(release, /no second scanner, mutation engine, network listener/u);
 });
 
+test("Folder Scope evidence has a runnable reference and honest first-share boundary", () => {
+  const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));
+  const reference = read("apps/docs/content/docs/reference/folder-scope-evidence.mdx");
+  const cli = read("apps/docs/content/docs/reference/cli.mdx");
+  const conformance = read("apps/docs/content/docs/reference/conformance.mdx");
+  const release = read("apps/docs/content/docs/releases/next.mdx");
+  const sdk = read("apps/docs/content/docs/guides/typescript-sdk.mdx");
+
+  assert(referenceMeta.pages.includes("folder-scope-evidence"));
+  for (const page of [reference, cli, conformance, release, sdk]) {
+    assert.match(page, /folderbase\.folder-scope-evidence@0\.1\.0/u);
+  }
+  assert.match(reference, /folder-scope observe/u);
+  assert.match(reference, /observeFolderScope/u);
+  assert.match(reference, /seven black-box cases/u);
+  assert.match(reference, /not authorization/u);
+  assert.match(reference, /does not parse or upload file contents/u);
+  assert.match(conformance, /capabilities\/folder-scope-evidence-0\.1\/run\.mjs/u);
+  assert.match(release, /unreleased work/u);
+});
+
 test("the public TypeScript and native process adapter seam is fully documented", () => {
   const guidesMeta = JSON.parse(read("apps/docs/content/docs/guides/meta.json"));
   const referenceMeta = JSON.parse(read("apps/docs/content/docs/reference/meta.json"));

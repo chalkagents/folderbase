@@ -25,6 +25,10 @@ const daemonCapabilityUrl = new URL(
   "../../protocol/capabilities/daemon-stdio/0.1.0/capability.json",
   import.meta.url,
 );
+const folderScopeEvidenceCapabilityUrl = new URL(
+  "../../protocol/capabilities/folder-scope-evidence/0.1.0/capability.json",
+  import.meta.url,
+);
 const queryCapabilityUrl = new URL(
   "../../protocol/capabilities/query-index/0.1.0/capability.json",
   import.meta.url,
@@ -84,11 +88,12 @@ test("optional capabilities do not expand Compatibility Contract v1's minimum", 
 });
 
 test("the public and embedded capability registries are exact after advertised profiles turn GREEN", async () => {
-  const [registry, embeddedRegistry, changeSetCapability, daemonCapability, queryCapability, rootReconstructionCapability, templateCapability, schema] = await Promise.all([
+  const [registry, embeddedRegistry, changeSetCapability, daemonCapability, folderScopeEvidenceCapability, queryCapability, rootReconstructionCapability, templateCapability, schema] = await Promise.all([
     load(registryUrl),
     load(embeddedRegistryUrl),
     load(changeSetCapabilityUrl),
     load(daemonCapabilityUrl),
+    load(folderScopeEvidenceCapabilityUrl),
     load(queryCapabilityUrl),
     load(rootReconstructionCapabilityUrl),
     load(templateCapabilityUrl),
@@ -127,6 +132,11 @@ test("the public and embedded capability registries are exact after advertised p
       stability: "experimental",
     },
     {
+      name: "folderbase.folder-scope-evidence",
+      version: "0.1.0",
+      stability: "stable",
+    },
+    {
       name: "folderbase.query-index",
       version: "0.1.0",
       stability: "experimental",
@@ -158,6 +168,10 @@ test("the public and embedded capability registries are exact after advertised p
   assert.deepEqual(
     registry.capabilities.find(({ name }) => name === "folderbase.daemon-stdio"),
     daemonCapability,
+  );
+  assert.deepEqual(
+    registry.capabilities.find(({ name }) => name === "folderbase.folder-scope-evidence"),
+    folderScopeEvidenceCapability,
   );
   assert.deepEqual(
     registry.capabilities.find(({ name }) => name === "folderbase.query-index"),
