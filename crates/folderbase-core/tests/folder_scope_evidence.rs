@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use folderbase_core::{FolderbaseVersionStore, observe_folder_scope};
+use folderbase_core::{FolderScopeEvidenceError, FolderbaseVersionStore, observe_folder_scope};
 use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478c";
@@ -131,4 +131,43 @@ fn a_physical_folder_rename_preserves_continuity_and_advances_the_journal() {
     assert_eq!(after.device_sequence, 2);
     assert_ne!(after.event_id, before.event_id);
     assert_eq!(after.opaque_binding_proof, before.opaque_binding_proof);
+}
+
+#[test]
+fn a_different_folder_at_an_observed_path_cannot_inherit_scope_continuity() {
+    let root = folderbase();
+    observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe original physical folder");
+    fs::rename(
+        root.path().join("Client Work"),
+        root.path().join("Original Client Work"),
+    )
+    .expect("retain original elsewhere");
+    fs::create_dir(root.path().join("Client Work")).expect("replacement folder");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("replacement must not inherit the observed path");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::SelectedFolderReplaced { path }
+            if path == Path::new("Client Work")
+    ));
+}
+
+#[test]
+fn replay_stays_idempotent_after_another_folder_advances_the_device_journal() {
+    let root = folderbase();
+    fs::create_dir(root.path().join("Personal")).expect("second selected folder");
+
+    let client =
+        observe_folder_scope(root.path(), Path::new("Client Work")).expect("observe client folder");
+    let personal =
+        observe_folder_scope(root.path(), Path::new("Personal")).expect("observe personal folder");
+    let client_replay =
+        observe_folder_scope(root.path(), Path::new("Client Work")).expect("replay client folder");
+
+    assert_eq!(client.device_sequence, 1);
+    assert_eq!(personal.device_sequence, 2);
+    assert_eq!(client_replay, client);
 }

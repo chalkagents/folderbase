@@ -34,6 +34,7 @@ const EVENTS_DIRECTORY: &str = ".folderbase/local/folder-scope-evidence-v1/event
 const HEAD_PATH: &str = ".folderbase/local/folder-scope-evidence-v1/head.json";
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_EVENT_BYTES: u64 = 256 * 1024;
+const MAX_JOURNAL_EVENTS: u64 = 16_384;
 
 /// Bounded observer input for allocating or advancing one durable Folder Scope.
 ///
@@ -79,6 +80,9 @@ pub enum FolderScopeEvidenceError {
     #[error("selected Folder Scope contains an unsupported node: {path}")]
     UnsupportedSelectedNode { path: PathBuf },
 
+    #[error("a different physical folder now occupies an observed Folder Scope path: {path}")]
+    SelectedFolderReplaced { path: PathBuf },
+
     #[error("selected Folder Scope or Folderbase Root changed during observation")]
     ObservationChanged,
 
@@ -97,6 +101,7 @@ impl FolderScopeEvidenceError {
             Self::SelectedFolderNotDirectory { .. } => "selected_folder_not_directory",
             Self::SelectedFolderExcluded { .. } => "selected_folder_excluded",
             Self::UnsupportedSelectedNode { .. } => "unsupported_selected_node",
+            Self::SelectedFolderReplaced { .. } => "selected_folder_replaced",
             Self::ObservationChanged => "folder_scope_observation_changed",
             Self::InvalidJournal { .. } => "invalid_folder_scope_journal",
         }
@@ -203,22 +208,35 @@ pub fn observe_folder_scope(
 
     state.ensure_private_dir(Path::new(JOURNAL_DIRECTORY))?;
     state.ensure_private_dir(Path::new(EVENTS_DIRECTORY))?;
-    let head = read_head(&state, &attestation)?;
-    if let Some((_, current)) = head.as_ref() {
-        if current.observation_sha256 == observation_sha256 {
-            return Ok(current.public_evidence());
-        }
+    let (head, history) = read_journal(&state, &attestation)?;
+    if let Some(existing) = history
+        .iter()
+        .find(|event| event.observation_sha256 == observation_sha256)
+    {
+        return Ok(existing.public_evidence());
+    }
+    if history.iter().any(|event| {
+        event.selected_path == selected_wire && event.opaque_binding_proof != opaque_binding_proof
+    }) {
+        return Err(FolderScopeEvidenceError::SelectedFolderReplaced {
+            path: selected_path,
+        });
     }
 
     let sequence = match head.as_ref() {
-        Some((head, _)) => head.device_sequence.checked_add(1).ok_or_else(|| {
+        Some(head) => head.device_sequence.checked_add(1).ok_or_else(|| {
             FolderScopeEvidenceError::InvalidJournal {
                 message: "device sequence is exhausted".to_owned(),
             }
         })?,
         None => 1,
     };
-    let previous_event_sha256 = head.as_ref().map(|(head, _)| head.event_sha256.clone());
+    if sequence > MAX_JOURNAL_EVENTS {
+        return Err(FolderScopeEvidenceError::InvalidJournal {
+            message: format!("journal exceeds {MAX_JOURNAL_EVENTS} events"),
+        });
+    }
+    let previous_event_sha256 = head.as_ref().map(|head| head.event_sha256.clone());
     let event_id = event_id(
         &attestation.root_instance_sha256,
         sequence,
@@ -319,12 +337,12 @@ fn scope_nested_boundaries(
     Ok(nested_boundaries)
 }
 
-fn read_head(
+fn read_journal(
     state: &FolderbaseState,
     attestation: &FolderbaseRootAttestation,
-) -> Result<Option<(JournalHead, JournalEvent)>, FolderScopeEvidenceError> {
+) -> Result<(Option<JournalHead>, Vec<JournalEvent>), FolderScopeEvidenceError> {
     let Some(bytes) = state.read_bounded(Path::new(HEAD_PATH), MAX_HEAD_BYTES)? else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     let head: JournalHead =
         serde_json::from_slice(&bytes).map_err(|_| FolderScopeEvidenceError::InvalidJournal {
@@ -334,6 +352,7 @@ fn read_head(
         || head.folderbase_id != attestation.folderbase_id
         || head.root_instance_sha256 != attestation.root_instance_sha256
         || head.device_sequence == 0
+        || head.device_sequence > MAX_JOURNAL_EVENTS
         || !valid_prefixed_digest(&head.event_id, "folder_scope_event_")
         || !valid_sha256(&head.event_sha256)
     {
@@ -342,40 +361,86 @@ fn read_head(
                 .to_owned(),
         });
     }
-    let path = event_path(head.device_sequence);
-    let event_bytes = state.read_bounded(&path, MAX_EVENT_BYTES)?.ok_or_else(|| {
-        FolderScopeEvidenceError::InvalidJournal {
-            message: "the journal head event is missing".to_owned(),
+    let mut events = Vec::with_capacity(head.device_sequence as usize);
+    let mut previous_event_sha256 = None;
+    for sequence in 1..=head.device_sequence {
+        let path = event_path(sequence);
+        let event_bytes = state.read_bounded(&path, MAX_EVENT_BYTES)?.ok_or_else(|| {
+            FolderScopeEvidenceError::InvalidJournal {
+                message: format!("journal event {sequence} is missing"),
+            }
+        })?;
+        let event_sha256 = hex_sha256(&event_bytes);
+        let event: JournalEvent = serde_json::from_slice(&event_bytes).map_err(|_| {
+            FolderScopeEvidenceError::InvalidJournal {
+                message: format!("journal event {sequence} is not a closed v1 record"),
+            }
+        })?;
+        if !valid_journal_event(
+            &event,
+            attestation,
+            sequence,
+            previous_event_sha256.as_deref(),
+        ) {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: format!("journal event {sequence} is not self-consistent"),
+            });
         }
-    })?;
-    if hex_sha256(&event_bytes) != head.event_sha256 {
-        return Err(FolderScopeEvidenceError::InvalidJournal {
-            message: "the journal head event digest does not match".to_owned(),
-        });
+        if sequence == head.device_sequence
+            && (event_sha256 != head.event_sha256 || event.event_id != head.event_id)
+        {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal head does not match its final event".to_owned(),
+            });
+        }
+        previous_event_sha256 = Some(event_sha256);
+        events.push(event);
     }
-    let event: JournalEvent = serde_json::from_slice(&event_bytes).map_err(|_| {
-        FolderScopeEvidenceError::InvalidJournal {
-            message: "the journal head event is not a closed v1 record".to_owned(),
-        }
-    })?;
+    Ok((Some(head), events))
+}
+
+fn valid_journal_event(
+    event: &JournalEvent,
+    attestation: &FolderbaseRootAttestation,
+    sequence: u64,
+    expected_previous_event_sha256: Option<&str>,
+) -> bool {
     if event.format != EVENT_FORMAT
-        || event.folderbase_id != head.folderbase_id
-        || event.root_instance_sha256 != head.root_instance_sha256
-        || event.device_sequence != head.device_sequence
-        || event.event_id != head.event_id
-        || !valid_prefixed_digest(&event.opaque_binding_proof, "fb_scope_binding_v1_")
+        || event.folderbase_id != attestation.folderbase_id
+        || event.root_instance_sha256 != attestation.root_instance_sha256
+        || event.device_sequence != sequence
+        || event.previous_event_sha256.as_deref() != expected_previous_event_sha256
         || !valid_sha256(&event.selected_instance_sha256)
         || event
             .local_head_sha256
             .as_deref()
             .is_some_and(|value| !valid_sha256(value))
         || !valid_sha256(&event.observation_sha256)
+        || !valid_prefixed_digest(&event.opaque_binding_proof, "fb_scope_binding_v1_")
+        || event.opaque_binding_proof
+            != binding_proof(
+                &event.folderbase_id,
+                &event.root_instance_sha256,
+                &event.selected_instance_sha256,
+            )
+        || event.observation_sha256
+            != observation_sha256(
+                attestation,
+                &event.selected_path,
+                &event.selected_instance_sha256,
+                event.local_head_sha256.as_deref(),
+                &event.nested_boundaries,
+            )
     {
-        return Err(FolderScopeEvidenceError::InvalidJournal {
-            message: "the journal head event is not self-consistent".to_owned(),
-        });
+        return false;
     }
-    Ok(Some((head, event)))
+    event.event_id
+        == event_id(
+            &event.root_instance_sha256,
+            sequence,
+            expected_previous_event_sha256,
+            &event.observation_sha256,
+        )
 }
 
 fn safe_selected_path(path: &Path) -> Result<PathBuf, FolderScopeEvidenceError> {
