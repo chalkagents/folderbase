@@ -14,8 +14,10 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
 #[cfg(windows)]
 use cap_std::fs::OpenOptions;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
     CaptureEntryKind, CaptureExclusionKind, CapturePlan, FolderbaseCaptureError, FolderbaseError,
@@ -132,13 +134,31 @@ struct JournalEvent {
     root_instance_sha256: String,
     selected_path: String,
     selected_instance_sha256: String,
+    binding_nonce: String,
     local_head_sha256: Option<String>,
     observation_sha256: String,
     event_id: String,
     device_sequence: u64,
     opaque_binding_proof: String,
     nested_boundaries: Vec<String>,
+    nested_boundary_bindings: Vec<NestedBoundaryBinding>,
     previous_event_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NestedBoundaryBinding {
+    path: String,
+    folderbase_id: String,
+    protocol_version: String,
+    manifest_sha256: String,
+    root_instance_sha256: String,
+}
+
+struct JournalRead {
+    head: Option<JournalHead>,
+    history: Vec<JournalEvent>,
+    orphan: Option<JournalEvent>,
 }
 
 impl JournalEvent {
@@ -185,21 +205,11 @@ fn observe_folder_scope_with_after_plan(
         selected_folder_identity(&root_capability, &attestation.root, &selected_path)?;
     let selected_instance_sha256 = selected_identity.stable_sha256();
     let nested_boundaries = scope_nested_boundaries(&plan, &selected_wire)?;
+    let nested_boundary_bindings =
+        scope_nested_boundary_bindings(&root_capability, &attestation.root, &nested_boundaries)?;
     let local_head_sha256 = plan
         .current_local_head()
         .map(|head| head.encoded_sha256().to_owned());
-    let opaque_binding_proof = binding_proof(
-        &attestation.folderbase_id,
-        &attestation.root_instance_sha256,
-        &selected_instance_sha256,
-    );
-    let observation_sha256 = observation_sha256(
-        &attestation,
-        &selected_wire,
-        &selected_instance_sha256,
-        local_head_sha256.as_deref(),
-        &nested_boundaries,
-    );
 
     state.ensure_private_dir(Path::new(".folderbase/locks"))?;
     let _lock = LocalVersionStore::acquire_transaction_lock_for_state(&attestation.root, &state)?;
@@ -214,33 +224,73 @@ fn observe_folder_scope_with_after_plan(
     let final_local_head_sha256 = final_plan
         .current_local_head()
         .map(|head| head.encoded_sha256().to_owned());
-    if scope_nested_boundaries(&final_plan, &selected_wire)? != nested_boundaries
+    let final_nested_boundaries = scope_nested_boundaries(&final_plan, &selected_wire)?;
+    let final_nested_boundary_bindings = scope_nested_boundary_bindings(
+        &root_capability,
+        &attestation.root,
+        &final_nested_boundaries,
+    )?;
+    if final_nested_boundaries != nested_boundaries
+        || final_nested_boundary_bindings != nested_boundary_bindings
         || final_local_head_sha256 != local_head_sha256
     {
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
 
-    let (head, history) = read_journal(&state, &attestation)?;
+    let JournalRead {
+        head,
+        history,
+        orphan,
+    } = read_journal(&state, &attestation)?;
+    if history.iter().any(|event| {
+        event.selected_path == selected_wire
+            && event.selected_instance_sha256 != selected_instance_sha256
+    }) {
+        return Err(FolderScopeEvidenceError::SelectedFolderReplaced {
+            path: selected_path,
+        });
+    }
+    let prior_binding = history
+        .iter()
+        .find(|event| event.selected_instance_sha256 == selected_instance_sha256)
+        .or_else(|| {
+            orphan
+                .as_ref()
+                .filter(|event| event.selected_instance_sha256 == selected_instance_sha256)
+        });
+    let binding_nonce = prior_binding.map_or_else(
+        || format!("folder_scope_binding_nonce_{}", Uuid::now_v7()),
+        |event| event.binding_nonce.clone(),
+    );
+    let opaque_binding_proof = binding_proof(
+        &attestation.folderbase_id,
+        &attestation.root_instance_sha256,
+        &selected_instance_sha256,
+        &binding_nonce,
+    );
+    let observation_sha256 = observation_sha256(
+        &attestation,
+        &selected_wire,
+        &selected_instance_sha256,
+        local_head_sha256.as_deref(),
+        &nested_boundary_bindings,
+    );
     if let Some(existing) = history
         .iter()
         .find(|event| event.observation_sha256 == observation_sha256)
     {
         return Ok(existing.public_evidence());
     }
-    if history.iter().any(|event| {
-        event.selected_path == selected_wire && event.opaque_binding_proof != opaque_binding_proof
-    }) {
-        return Err(FolderScopeEvidenceError::SelectedFolderReplaced {
-            path: selected_path,
-        });
-    }
     let current_relative_boundaries =
-        relative_nested_boundaries(&selected_wire, &nested_boundaries)
+        relative_nested_boundary_bindings(&selected_wire, &nested_boundary_bindings)
             .expect("Core capture returns strict descendant boundary paths");
     if history.iter().any(|event| {
-        event.opaque_binding_proof == opaque_binding_proof
-            && relative_nested_boundaries(&event.selected_path, &event.nested_boundaries)
-                .is_none_or(|boundaries| boundaries != current_relative_boundaries)
+        event.binding_nonce == binding_nonce
+            && relative_nested_boundary_bindings(
+                &event.selected_path,
+                &event.nested_boundary_bindings,
+            )
+            .is_none_or(|boundaries| boundaries != current_relative_boundaries)
     }) {
         return Err(FolderScopeEvidenceError::NestedBoundaryChanged {
             path: selected_path,
@@ -275,12 +325,14 @@ fn observe_folder_scope_with_after_plan(
         root_instance_sha256: attestation.root_instance_sha256.clone(),
         selected_path: selected_wire,
         selected_instance_sha256,
+        binding_nonce,
         local_head_sha256,
         observation_sha256,
         event_id: event_id.clone(),
         device_sequence: sequence,
         opaque_binding_proof,
         nested_boundaries,
+        nested_boundary_bindings,
         previous_event_sha256,
     };
     let event_bytes = encode_bounded(&event, MAX_EVENT_BYTES, "journal event")?;
@@ -363,13 +415,45 @@ fn scope_nested_boundaries(
     Ok(nested_boundaries)
 }
 
+fn scope_nested_boundary_bindings(
+    root: &Dir,
+    display_root: &Path,
+    nested_boundaries: &[String],
+) -> Result<Vec<NestedBoundaryBinding>, FolderScopeEvidenceError> {
+    let mut bindings = Vec::with_capacity(nested_boundaries.len());
+    for path in nested_boundaries {
+        let relative = safe_selected_path(Path::new(path))?;
+        let directory = open_directory_beneath(root, display_root, &relative)?;
+        let display = display_root.join(&relative);
+        let (attestation, _, _) =
+            crate::root_attestation::attest_retained_folderbase_root_with_profile(
+                &directory, &display,
+            )
+            .map_err(FolderbaseCaptureError::from)?;
+        bindings.push(NestedBoundaryBinding {
+            path: path.clone(),
+            folderbase_id: attestation.folderbase_id,
+            protocol_version: attestation.protocol_version,
+            manifest_sha256: attestation.manifest_sha256,
+            root_instance_sha256: attestation.root_instance_sha256,
+        });
+    }
+    Ok(bindings)
+}
+
 fn read_journal(
     state: &FolderbaseState,
     attestation: &FolderbaseRootAttestation,
-) -> Result<(Option<JournalHead>, Vec<JournalEvent>), FolderScopeEvidenceError> {
+) -> Result<JournalRead, FolderScopeEvidenceError> {
+    validate_journal_root_namespace(state)?;
     let Some(bytes) = state.read_bounded_if_present(Path::new(HEAD_PATH), MAX_HEAD_BYTES)? else {
         validate_event_namespace(state, 0)?;
-        return Ok((None, Vec::new()));
+        let orphan = read_optional_journal_event(state, attestation, 1, None)?;
+        return Ok(JournalRead {
+            head: None,
+            history: Vec::new(),
+            orphan,
+        });
     };
     let head: JournalHead =
         serde_json::from_slice(&bytes).map_err(|_| FolderScopeEvidenceError::InvalidJournal {
@@ -424,7 +508,73 @@ fn read_journal(
         previous_event_sha256 = Some(event_sha256);
         events.push(event);
     }
-    Ok((Some(head), events))
+    let orphan = if head.device_sequence < MAX_JOURNAL_EVENTS {
+        read_optional_journal_event(
+            state,
+            attestation,
+            head.device_sequence + 1,
+            previous_event_sha256.as_deref(),
+        )?
+    } else {
+        None
+    };
+    Ok(JournalRead {
+        head: Some(head),
+        history: events,
+        orphan,
+    })
+}
+
+fn validate_journal_root_namespace(
+    state: &FolderbaseState,
+) -> Result<(), FolderScopeEvidenceError> {
+    let names = state
+        .private_directory_names_if_present(Path::new(JOURNAL_DIRECTORY), 3)
+        .map_err(|_| FolderScopeEvidenceError::InvalidJournal {
+            message: "the journal root namespace exceeds its aggregate bound".to_owned(),
+        })?;
+    let mut retained = BTreeSet::new();
+    for name in names {
+        let Some(name) = name.to_str() else {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal root namespace contains a non-UTF-8 entry".to_owned(),
+            });
+        };
+        if !matches!(name, "events" | "head.json") || !retained.insert(name.to_owned()) {
+            return Err(FolderScopeEvidenceError::InvalidJournal {
+                message: "the journal root namespace contains an unexpected entry".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn read_optional_journal_event(
+    state: &FolderbaseState,
+    attestation: &FolderbaseRootAttestation,
+    sequence: u64,
+    expected_previous_event_sha256: Option<&str>,
+) -> Result<Option<JournalEvent>, FolderScopeEvidenceError> {
+    let path = event_path(sequence);
+    let Some(event_bytes) = state.read_bounded_if_present(&path, MAX_EVENT_BYTES)? else {
+        return Ok(None);
+    };
+    let event: JournalEvent = serde_json::from_slice(&event_bytes).map_err(|_| {
+        FolderScopeEvidenceError::InvalidJournal {
+            message: format!("journal event {sequence} is not a closed v1 record"),
+        }
+    })?;
+    if !valid_journal_event(
+        &event,
+        attestation,
+        sequence,
+        expected_previous_event_sha256,
+    ) {
+        return Err(FolderScopeEvidenceError::InvalidJournal {
+            message: format!("journal event {sequence} is not self-consistent"),
+        });
+    }
+    Ok(Some(event))
 }
 
 fn validate_event_namespace(
@@ -492,6 +642,7 @@ fn valid_journal_event(
         || event.device_sequence != sequence
         || event.previous_event_sha256.as_deref() != expected_previous_event_sha256
         || !valid_sha256(&event.selected_instance_sha256)
+        || !valid_binding_nonce(&event.binding_nonce)
         || event
             .local_head_sha256
             .as_deref()
@@ -499,12 +650,19 @@ fn valid_journal_event(
         || !valid_sha256(&event.observation_sha256)
         || !valid_prefixed_digest(&event.opaque_binding_proof, "fb_scope_binding_v1_")
         || !selected_path_is_canonical
-        || relative_nested_boundaries(&event.selected_path, &event.nested_boundaries).is_none()
+        || relative_nested_boundary_bindings(&event.selected_path, &event.nested_boundary_bindings)
+            .is_none()
+        || event
+            .nested_boundary_bindings
+            .iter()
+            .map(|binding| &binding.path)
+            .ne(event.nested_boundaries.iter())
         || event.opaque_binding_proof
             != binding_proof(
                 &event.folderbase_id,
                 &event.root_instance_sha256,
                 &event.selected_instance_sha256,
+                &event.binding_nonce,
             )
         || event.observation_sha256
             != observation_sha256(
@@ -512,7 +670,7 @@ fn valid_journal_event(
                 &event.selected_path,
                 &event.selected_instance_sha256,
                 event.local_head_sha256.as_deref(),
-                &event.nested_boundaries,
+                &event.nested_boundary_bindings,
             )
     {
         return false;
@@ -526,28 +684,38 @@ fn valid_journal_event(
         )
 }
 
-fn relative_nested_boundaries<'a>(
+type RelativeNestedBoundaryBinding<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
+
+fn relative_nested_boundary_bindings<'a>(
     selected_path: &str,
-    nested_boundaries: &'a [String],
-) -> Option<Vec<&'a str>> {
+    bindings: &'a [NestedBoundaryBinding],
+) -> Option<Vec<RelativeNestedBoundaryBinding<'a>>> {
     let prefix = format!("{selected_path}/");
-    let mut relative = Vec::with_capacity(nested_boundaries.len());
+    let mut relative = Vec::with_capacity(bindings.len());
     let mut previous = None;
-    for boundary in nested_boundaries {
-        let suffix = boundary.strip_prefix(&prefix)?;
-        if suffix.is_empty()
-            || previous.is_some_and(|value: &str| value.as_bytes() >= suffix.as_bytes())
+    for binding in bindings {
+        let path = binding.path.strip_prefix(&prefix)?;
+        if path.is_empty()
+            || previous.is_some_and(|value: &str| value.as_bytes() >= path.as_bytes())
+            || safe_selected_path(Path::new(&binding.path))
+                .ok()
+                .and_then(|path| relative_wire_path(&path).ok())?
+                != binding.path
+            || !valid_folderbase_id(&binding.folderbase_id)
+            || Version::parse(&binding.protocol_version).is_err()
+            || !valid_sha256(&binding.manifest_sha256)
+            || !valid_sha256(&binding.root_instance_sha256)
         {
             return None;
         }
-        let canonical = safe_selected_path(Path::new(boundary))
-            .ok()
-            .and_then(|path| relative_wire_path(&path).ok())?;
-        if canonical != *boundary {
-            return None;
-        }
-        previous = Some(suffix);
-        relative.push(suffix);
+        relative.push((
+            path,
+            binding.folderbase_id.as_str(),
+            binding.protocol_version.as_str(),
+            binding.manifest_sha256.as_str(),
+            binding.root_instance_sha256.as_str(),
+        ));
+        previous = Some(path);
     }
     Some(relative)
 }
@@ -598,6 +766,20 @@ fn selected_folder_identity(
     display_root: &Path,
     selected_path: &Path,
 ) -> Result<PhysicalIdentity, FolderScopeEvidenceError> {
+    let directory = open_directory_beneath(root, display_root, selected_path)?;
+    let display = display_root.join(selected_path);
+    let file = directory
+        .try_clone()
+        .map_err(|source| FolderbaseError::io(&display, source))?
+        .into_std_file();
+    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source).into())
+}
+
+fn open_directory_beneath(
+    root: &Dir,
+    display_root: &Path,
+    selected_path: &Path,
+) -> Result<Dir, FolderScopeEvidenceError> {
     let mut directory = root
         .try_clone()
         .map_err(|source| FolderbaseError::io(display_root, source))?;
@@ -630,11 +812,7 @@ fn selected_folder_identity(
         }
         directory = open_directory_nofollow(&directory, name, &display)?;
     }
-    let file = directory
-        .try_clone()
-        .map_err(|source| FolderbaseError::io(&display, source))?
-        .into_std_file();
-    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source).into())
+    Ok(directory)
 }
 
 #[cfg(not(windows))]
@@ -696,12 +874,14 @@ fn binding_proof(
     folderbase_id: &str,
     root_instance_sha256: &str,
     selected_instance_sha256: &str,
+    binding_nonce: &str,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"folderbase-folder-scope-binding-v1\0");
     digest_field(&mut digest, folderbase_id.as_bytes());
     digest_field(&mut digest, root_instance_sha256.as_bytes());
     digest_field(&mut digest, selected_instance_sha256.as_bytes());
+    digest_field(&mut digest, binding_nonce.as_bytes());
     format!("fb_scope_binding_v1_{:x}", digest.finalize())
 }
 
@@ -710,7 +890,7 @@ fn observation_sha256(
     selected_path: &str,
     selected_instance_sha256: &str,
     local_head_sha256: Option<&str>,
-    nested_boundaries: &[String],
+    nested_boundary_bindings: &[NestedBoundaryBinding],
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"folderbase-folder-scope-observation-v1\0");
@@ -728,9 +908,17 @@ fn observation_sha256(
         &mut digest,
         local_head_sha256.unwrap_or_default().as_bytes(),
     );
-    digest.update((nested_boundaries.len() as u64).to_be_bytes());
-    for boundary in nested_boundaries {
-        digest_field(&mut digest, boundary.as_bytes());
+    digest.update((nested_boundary_bindings.len() as u64).to_be_bytes());
+    for binding in nested_boundary_bindings {
+        for value in [
+            binding.path.as_str(),
+            binding.folderbase_id.as_str(),
+            binding.protocol_version.as_str(),
+            binding.manifest_sha256.as_str(),
+            binding.root_instance_sha256.as_str(),
+        ] {
+            digest_field(&mut digest, value.as_bytes());
+        }
     }
     format!("{:x}", digest.finalize())
 }
@@ -792,6 +980,20 @@ fn valid_sha256(value: &str) -> bool {
 
 fn valid_prefixed_digest(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(valid_sha256)
+}
+
+fn valid_binding_nonce(value: &str) -> bool {
+    value
+        .strip_prefix("folder_scope_binding_nonce_")
+        .and_then(|suffix| Uuid::parse_str(suffix).ok().map(|uuid| (suffix, uuid)))
+        .is_some_and(|(suffix, uuid)| suffix == uuid.hyphenated().to_string())
+}
+
+fn valid_folderbase_id(value: &str) -> bool {
+    value
+        .strip_prefix("folderbase_")
+        .and_then(|suffix| Uuid::parse_str(suffix).ok().map(|uuid| (suffix, uuid)))
+        .is_some_and(|(suffix, uuid)| suffix == uuid.hyphenated().to_string())
 }
 
 #[cfg(test)]

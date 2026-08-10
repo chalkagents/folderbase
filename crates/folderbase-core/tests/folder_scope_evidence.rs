@@ -1,7 +1,9 @@
 use std::{fs, path::Path};
 
 use folderbase_core::{FolderScopeEvidenceError, FolderbaseVersionStore, observe_folder_scope};
+use serde_json::Value;
 use tempfile::{TempDir, tempdir};
+use uuid::Uuid;
 
 const FOLDERBASE_ID: &str = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478c";
 const MANIFEST: &[u8] = br#"{
@@ -29,6 +31,32 @@ fn write_folderbase(root: &Path) {
         "current brief\n",
     )
     .expect("ordinary file");
+}
+
+fn nested_manifest(folderbase_id: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "$schema": "https://folderbase.ai/protocol/0.5/folderbase.schema.json",
+        "protocol_version": "0.5.0",
+        "folderbase": {
+            "id": folderbase_id,
+            "name": "Nested project",
+            "kind": "project",
+            "status": "active",
+            "created_at": "2026-08-10T00:00:00Z"
+        },
+        "adapters": [],
+        "policies": {
+            "availability": "keep_local",
+            "structural_changes": "approve",
+            "archive": "manual",
+            "cloud_sync": "disabled",
+            "capture_ignore": {
+                "format": "folderbase-capture-ignore-v1",
+                "rules": []
+            }
+        }
+    }))
+    .expect("nested Folderbase manifest")
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -91,8 +119,9 @@ fn observation_reports_exact_nested_folderbase_boundaries_without_reading_file_c
     fs::create_dir_all(root.path().join("Client Work/Partner/.folderbase"))
         .expect("nested state directory");
     fs::write(
-        root.path().join("Client Work/Partner/.folderbase/manifest.json"),
-        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478d"},"capture":{"ignore_rules":[]}}"#,
+        root.path()
+            .join("Client Work/Partner/.folderbase/manifest.json"),
+        nested_manifest("folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478d"),
     )
     .expect("nested manifest");
     fs::create_dir_all(root.path().join("Client Work/Partner/Inside/Deeper"))
@@ -287,8 +316,9 @@ fn changing_nested_folderbase_boundaries_requires_a_new_explicit_scope() {
     fs::create_dir_all(root.path().join("Client Work/Partner/.folderbase"))
         .expect("nested Folderbase state");
     fs::write(
-        root.path().join("Client Work/Partner/.folderbase/manifest.json"),
-        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478e"},"capture":{"ignore_rules":[]}}"#,
+        root.path()
+            .join("Client Work/Partner/.folderbase/manifest.json"),
+        nested_manifest("folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478e"),
     )
     .expect("nested manifest");
 
@@ -319,8 +349,9 @@ fn renaming_a_scope_rebases_unchanged_nested_boundary_paths() {
     fs::create_dir_all(root.path().join("Client Work/Partner/.folderbase"))
         .expect("nested Folderbase state");
     fs::write(
-        root.path().join("Client Work/Partner/.folderbase/manifest.json"),
-        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478f"},"capture":{"ignore_rules":[]}}"#,
+        root.path()
+            .join("Client Work/Partner/.folderbase/manifest.json"),
+        nested_manifest("folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478f"),
     )
     .expect("nested manifest");
     let before = observe_folder_scope(root.path(), Path::new("Client Work"))
@@ -340,6 +371,78 @@ fn renaming_a_scope_rebases_unchanged_nested_boundary_paths() {
         after.nested_boundaries,
         vec!["Active Client Work/Partner".to_owned()]
     );
+}
+
+#[test]
+fn replacing_a_nested_folderbase_at_the_same_path_invalidates_scope_continuity() {
+    let root = folderbase();
+    let nested_manifest_path = root
+        .path()
+        .join("Client Work/Partner/.folderbase/manifest.json");
+    fs::create_dir_all(nested_manifest_path.parent().expect("nested state parent"))
+        .expect("nested Folderbase state");
+    fs::write(
+        &nested_manifest_path,
+        nested_manifest("folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478f"),
+    )
+    .expect("original nested manifest");
+    observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe original nested boundary authority");
+    let head_path = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1/head.json");
+    let original_head = fs::read(&head_path).expect("original journal head");
+    fs::write(
+        &nested_manifest_path,
+        nested_manifest("folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94791"),
+    )
+    .expect("replacement nested manifest");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("same-path nested Folderbase replacement must invalidate scope continuity");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::NestedBoundaryChanged { path }
+            if path == Path::new("Client Work")
+    ));
+    assert_eq!(
+        fs::read(head_path).expect("journal head remains readable"),
+        original_head
+    );
+}
+
+#[test]
+fn binding_proof_is_bound_to_a_core_owned_non_reusable_nonce() {
+    let root = folderbase();
+    observe_folder_scope(root.path(), Path::new("Client Work")).expect("initial observation");
+    let event_path = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1/events/00000000000000000001.json");
+    let mut event: Value = serde_json::from_slice(&fs::read(&event_path).expect("journal event"))
+        .expect("closed journal event JSON");
+    let nonce = event["binding_nonce"]
+        .as_str()
+        .expect("Core-owned binding nonce is recorded privately");
+    let suffix = nonce
+        .strip_prefix("folder_scope_binding_nonce_")
+        .expect("binding nonce prefix");
+    Uuid::parse_str(suffix).expect("binding nonce UUID");
+    event["binding_nonce"] =
+        Value::String(format!("folder_scope_binding_nonce_{}", Uuid::now_v7()));
+    fs::write(
+        &event_path,
+        serde_json::to_vec(&event).expect("tampered event JSON"),
+    )
+    .expect("tamper private binding nonce");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("changing the Core-owned nonce must invalidate the proof");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::InvalidJournal { .. }
+    ));
 }
 
 #[test]
@@ -405,6 +508,32 @@ fn unexpected_journal_entries_fail_closed_instead_of_hiding_unbounded_work() {
 
     let error = observe_folder_scope(root.path(), Path::new("Client Work"))
         .expect_err("unexpected entry must invalidate the bounded journal");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::InvalidJournal { .. }
+    ));
+    assert_eq!(
+        fs::read(head_path).expect("head remains readable"),
+        original_head
+    );
+    assert_eq!(original.device_sequence, 1);
+}
+
+#[test]
+fn unexpected_journal_root_entries_fail_closed_instead_of_hiding_unbounded_work() {
+    let root = folderbase();
+    let original =
+        observe_folder_scope(root.path(), Path::new("Client Work")).expect("initial observation");
+    let journal = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1");
+    let head_path = journal.join("head.json");
+    let original_head = fs::read(&head_path).expect("original head");
+    fs::write(journal.join("rogue.bin"), vec![0_u8; 128]).expect("unexpected journal root entry");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("unexpected root entry must invalidate the bounded journal");
 
     assert!(matches!(
         error,
