@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use folderbase_core::observe_folder_scope;
+use folderbase_core::{FolderbaseVersionStore, observe_folder_scope};
 use tempfile::{TempDir, tempdir};
 
 const FOLDERBASE_ID: &str = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478c";
@@ -86,5 +86,29 @@ fn observation_reports_exact_nested_folderbase_boundaries_without_reading_file_c
     assert_eq!(
         evidence.nested_boundaries,
         vec!["Client Work/Partner".to_owned()]
+    );
+}
+
+#[test]
+fn a_new_local_head_advances_evidence_without_changing_folder_continuity() {
+    let root = folderbase();
+    let genesis =
+        observe_folder_scope(root.path(), Path::new("Client Work")).expect("genesis observation");
+
+    let store = FolderbaseVersionStore::open(root.path()).expect("open version store");
+    let plan = store.plan_capture().expect("plan first capture");
+    store.seal_capture(plan).expect("publish first Local Head");
+
+    let captured = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("non-genesis observation");
+    let repeated = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("repeat non-genesis observation");
+
+    assert_eq!(captured, repeated);
+    assert_eq!(captured.device_sequence, 2);
+    assert_ne!(captured.event_id, genesis.event_id);
+    assert_eq!(
+        captured.opaque_binding_proof, genesis.opaque_binding_proof,
+        "version progress must not erase physical folder continuity"
     );
 }

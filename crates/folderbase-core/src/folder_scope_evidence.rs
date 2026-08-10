@@ -122,6 +122,7 @@ struct JournalEvent {
     root_instance_sha256: String,
     selected_path: String,
     selected_instance_sha256: String,
+    local_head_sha256: Option<String>,
     observation_sha256: String,
     event_id: String,
     device_sequence: u64,
@@ -165,6 +166,9 @@ pub fn observe_folder_scope(
         selected_folder_identity(&root_capability, &attestation.root, &selected_path)?;
     let selected_instance_sha256 = selected_identity.stable_sha256();
     let nested_boundaries = scope_nested_boundaries(&plan, &selected_wire)?;
+    let local_head_sha256 = plan
+        .current_local_head()
+        .map(|head| head.encoded_sha256().to_owned());
     let opaque_binding_proof = binding_proof(
         &attestation.folderbase_id,
         &attestation.root_instance_sha256,
@@ -174,6 +178,7 @@ pub fn observe_folder_scope(
         &attestation,
         &selected_wire,
         &selected_instance_sha256,
+        local_head_sha256.as_deref(),
         &nested_boundaries,
     );
 
@@ -187,7 +192,12 @@ pub fn observe_folder_scope(
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
     let final_plan = store.plan_capture()?;
-    if scope_nested_boundaries(&final_plan, &selected_wire)? != nested_boundaries {
+    let final_local_head_sha256 = final_plan
+        .current_local_head()
+        .map(|head| head.encoded_sha256().to_owned());
+    if scope_nested_boundaries(&final_plan, &selected_wire)? != nested_boundaries
+        || final_local_head_sha256 != local_head_sha256
+    {
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
 
@@ -221,6 +231,7 @@ pub fn observe_folder_scope(
         root_instance_sha256: attestation.root_instance_sha256.clone(),
         selected_path: selected_wire,
         selected_instance_sha256,
+        local_head_sha256,
         observation_sha256,
         event_id: event_id.clone(),
         device_sequence: sequence,
@@ -354,6 +365,10 @@ fn read_head(
         || event.event_id != head.event_id
         || !valid_prefixed_digest(&event.opaque_binding_proof, "fb_scope_binding_v1_")
         || !valid_sha256(&event.selected_instance_sha256)
+        || event
+            .local_head_sha256
+            .as_deref()
+            .is_some_and(|value| !valid_sha256(value))
         || !valid_sha256(&event.observation_sha256)
     {
         return Err(FolderScopeEvidenceError::InvalidJournal {
@@ -520,6 +535,7 @@ fn observation_sha256(
     attestation: &FolderbaseRootAttestation,
     selected_path: &str,
     selected_instance_sha256: &str,
+    local_head_sha256: Option<&str>,
     nested_boundaries: &[String],
 ) -> String {
     let mut digest = Sha256::new();
@@ -534,6 +550,10 @@ fn observation_sha256(
     ] {
         digest_field(&mut digest, value.as_bytes());
     }
+    digest_field(
+        &mut digest,
+        local_head_sha256.unwrap_or_default().as_bytes(),
+    );
     digest.update((nested_boundaries.len() as u64).to_be_bytes());
     for boundary in nested_boundaries {
         digest_field(&mut digest, boundary.as_bytes());
