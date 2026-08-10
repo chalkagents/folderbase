@@ -77,6 +77,18 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains("\"failed\":0"));
 
     Command::new("node")
+        .arg(repository.join("protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs"))
+        .arg("--implementation")
+        .arg(implementation)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"capability\": \"folderbase.folder-scope-evidence@0.1.0\"",
+        ))
+        .stdout(predicate::str::contains("\"passed\": 7"))
+        .stdout(predicate::str::contains("\"failed\": 0"));
+
+    Command::new("node")
         .arg(repository.join("protocol/conformance/capabilities/run.mjs"))
         .arg("--implementation")
         .arg(implementation)
@@ -85,8 +97,8 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains(
             "\"format\": \"folderbase-capability-conformance-report-v1\"",
         ))
-        .stdout(predicate::str::contains("\"selected\": 6"))
-        .stdout(predicate::str::contains("\"passed\": 6"))
+        .stdout(predicate::str::contains("\"selected\": 7"))
+        .stdout(predicate::str::contains("\"passed\": 7"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")

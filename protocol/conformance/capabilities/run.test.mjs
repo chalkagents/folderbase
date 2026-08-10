@@ -103,6 +103,26 @@ test("root reconstruction is known but fails closed while the executable is unad
   ]);
 });
 
+test("Folder Scope evidence is known but fails closed while the executable is unadvertised", () => {
+  const result = run("v1-without-capabilities.mjs", [
+    "--capability",
+    "folderbase.folder-scope-evidence@0.1.0",
+  ]);
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.selected, 1);
+  assert.equal(report.passed, 0);
+  assert.equal(report.failed, 1);
+  assert.deepEqual(report.cases, [
+    {
+      id: "folderbase.folder-scope-evidence@0.1.0",
+      status: "failed",
+      message:
+        "folderbase.folder-scope-evidence@0.1.0 is not advertised by the implementation",
+    },
+  ]);
+});
+
 test("unknown advertised capabilities are ignored unless explicitly requested", () => {
   const ignored = run("unknown-capability.mjs");
   assert.equal(ignored.status, 0, ignored.stderr || ignored.stdout);

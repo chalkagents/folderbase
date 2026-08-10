@@ -96,6 +96,29 @@ await session.shutdown();
 Daemon 0.1 is serial. Cancelling an active request ends the session instead of
 claiming cooperative mid-request cancellation that Core does not advertise.
 
+## Bind an exact folder before first share
+
+After capability discovery advertises
+`folderbase.folder-scope-evidence@0.1.0`, observe the exact selected ordinary
+folder through Core:
+
+```js
+const evidence = await folderbase.observeFolderScope(
+  "/absolute/path/to/folderbase",
+  "clients/project-2",
+);
+
+console.log(evidence.document.event_id);
+console.log(evidence.document.nested_boundaries);
+```
+
+The adapter invokes
+`folderbase folder-scope observe ROOT SELECTED_PATH --json` and validates the
+closed result. It never derives identity by reading `.folderbase`, walking the
+tree, or interpreting an inode. The result is local continuity evidence, not a
+share grant or Cloud credential. See the
+[Folder Scope evidence reference](/docs/reference/folder-scope-evidence).
+
 ## Reconstruct a retained Version into a new root
 
 After capability discovery advertises

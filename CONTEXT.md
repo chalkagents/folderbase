@@ -22,6 +22,13 @@ It exposes only granted content and never becomes or inherits another governance
 boundary.
 _Avoid_: Sub-Folderbase, inherited share
 
+**Folder Scope Evidence**:
+Bounded, Core-owned device-local continuity evidence for one exact selected
+ordinary folder inside a Folderbase. It lets an observer request the first
+durable Folder Scope without treating a path, inode, App scan, or Cloud record
+as filesystem identity. It is neither authorization nor a Folder Scope ID.
+_Avoid_: Share token, local Folder Scope, access grant
+
 **Knowledge Object**:
 A durably identified item managed by a Folderbase whose identity does not depend
 on its current path.

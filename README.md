@@ -156,8 +156,8 @@ node protocol/conformance/capabilities/run.mjs \
 - `folderbase`: reference command-line interface
 - `@folderbase/sdk`: typed Node.js process adapter for CLI JSON and daemon stdio
 - metadata-first query/index, additive template expansion, scoped Change Sets,
-  exact whole-Version root reconstruction, and root-pinned daemon capability
-  profiles
+  exact-folder share evidence, exact whole-Version root reconstruction, and
+  root-pinned daemon capability profiles
 - versioned JSON Schemas and conformance fixtures
 - built-in person, organization, customer, engagement, project, temporary, and
   custom templates
@@ -226,6 +226,22 @@ folderbase version restore-tombstone /path/to/project path/to/file --json
 This restores the sealed opaque bytes and executable fidelity under the
 original Object ID and Object Version, then creates one new full-state
 Folderbase Version. Directory and symlink Tombstones are not restored by v1.
+
+Before an authenticated App or Cloud service creates the first durable share
+for one selected ordinary folder, ask Core for exact local continuity evidence:
+
+```sh
+folderbase folder-scope observe \
+  /absolute/path/to/folderbase \
+  clients/project-2 \
+  --json
+```
+
+The stable optional `folderbase.folder-scope-evidence@0.1.0` capability is
+metadata-first, rename-aware, and bounded by nested Folderbase boundaries. Its
+opaque result is not a Folder Scope ID, share grant, or credential; those
+remain authenticated Folderbase Cloud authority. See the
+[Folder Scope evidence capability](protocol/capabilities/folder-scope-evidence/0.1.0/README.md).
 
 An independently produced, package-pinned full Version can reconstruct one
 absent ordinary root through the advertised stable

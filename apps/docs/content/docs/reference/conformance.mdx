@@ -125,3 +125,21 @@ exits `0` with `passed: 12` and `failed: 0`.
 
 This stable capability remains optional. Passing its suite proves the named
 root-reconstruction contract; it does not widen Compatibility Contract v1.
+
+Run only the stable Folder Scope evidence profile:
+
+```bash
+node protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs \
+  --implementation /absolute/path/to/your-folderbase
+```
+
+`folderbase.folder-scope-evidence@0.1.0` has seven
+implementation-neutral black-box cases. They prove exact arbitrary-folder
+observation, idempotent journal replay, rename continuity, selected-folder and
+root replacement refusal, nested-boundary isolation, unsafe invocation, and
+escaping-symlink refusal. A passing report exits `0` with `passed: 7` and
+`failed: 0`.
+
+This stable capability remains optional. Passing its suite proves local
+filesystem continuity evidence only; it does not create a Folder Scope ID,
+share, grant, or Cloud authorization.

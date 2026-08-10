@@ -1,0 +1,100 @@
+---
+title: Folder Scope evidence capability 0.1
+description: Bind one exact ordinary folder to Core-owned local continuity before its first Live Folder share.
+---
+
+`folderbase.folder-scope-evidence@0.1.0` is a stable optional Core capability.
+It supplies the local filesystem continuity evidence needed to allocate a
+durable Folder Scope without making a path, inode, App scan, or Cloud record
+the identity of the folder.
+
+It does not upload files, create a share, grant permission, or return a Folder
+Scope ID. Those are authenticated Folderbase Cloud operations.
+
+## Discover support
+
+```bash
+folderbase protocol contract --json
+```
+
+Continue only when the returned `capabilities` array advertises
+`folderbase.folder-scope-evidence@0.1.0` as `stable`.
+
+## Observe one selected folder
+
+```bash
+folderbase folder-scope observe \
+  /absolute/path/to/folderbase \
+  "clients/project-2" \
+  --json
+```
+
+The root must already be an attested Folderbase. The selected path is a safe,
+nonempty, root-relative ordinary directory. It may be a repository and may
+contain Markdown, source code, PDFs, CSV, SQLite, office documents, videos,
+archives, or unknown regular files. Core inventories metadata and boundaries;
+it does not parse or upload file contents.
+
+Success returns one closed record:
+
+```json
+{
+  "format": "folderbase-folder-scope-evidence-v1",
+  "folderbase_id": "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94792",
+  "selected_path": "clients/project-2",
+  "event_id": "folder_scope_event_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "device_sequence": 1,
+  "opaque_binding_proof": "fb_scope_binding_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "nested_boundaries": []
+}
+```
+
+The opaque proof is continuity evidence, not authorization. It contains no
+absolute path, raw filesystem identity, Cloud credential, observer capability,
+grant, file contents, or unrelated Object metadata.
+
+## Continuity behavior
+
+- An identical observation replays the same event and sequence.
+- A proven rename creates a new path event while preserving the opaque binding
+  proof.
+- A Local Head advance creates new evidence for the current exact state.
+- Replacing the selected folder or root fails closed.
+- Adding or removing a nested Folderbase beneath the selection fails closed.
+- Symlink escape, unsupported nodes, stale capture, and journal tampering fail
+  without changing ordinary workspace files.
+
+Nested Folderbases remain independent governance boundaries. Their strictly
+sorted root-relative paths are included so an observer cannot accidentally
+publish across them.
+
+## TypeScript adapter
+
+```js
+const outcome = await folderbase.observeFolderScope(
+  "/absolute/path/to/folderbase",
+  "clients/project-2",
+);
+
+console.log(outcome.document.event_id);
+```
+
+The SDK supervises the exact Core process and validates the closed document.
+It never reads or repairs `.folderbase` state itself. Daemon stdio 0.1 remains
+query-only; use the one-shot command for this journaled operation.
+
+## Independent conformance
+
+```bash
+node protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs \
+  --implementation /absolute/path/to/folderbase
+```
+
+The seven black-box cases prove discovery, idempotent arbitrary-folder
+observation, rename continuity, replacement refusal, nested-boundary
+isolation, root replacement, unsafe invocation, and escaping-symlink refusal.
+
+See the public
+[`folder-scope-evidence.schema.json`](https://github.com/chalkagents/folderbase/blob/main/protocol/schemas/capabilities/folder-scope-evidence/0.1/folder-scope-evidence.schema.json),
+[capability package](https://github.com/chalkagents/folderbase/tree/main/protocol/capabilities/folder-scope-evidence/0.1.0), and
+[ADR-0018](https://github.com/chalkagents/folderbase/blob/main/docs/adr/0018-journal-exact-folder-scope-evidence-under-core-authority.md).
