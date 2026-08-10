@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    FolderbaseCaptureError, FolderbaseError, FolderbaseVersionStore, LocalVersionStore,
-    folderbase_state::FolderbaseState, physical_identity::PhysicalIdentity,
-    root_attestation::FolderbaseRootAttestation, traversal_policy::is_reserved_workspace_component,
+    CaptureEntryKind, CaptureExclusionKind, CapturePlan, FolderbaseCaptureError, FolderbaseError,
+    FolderbaseVersionStore, LocalVersionStore, folderbase_state::FolderbaseState,
+    physical_identity::PhysicalIdentity, root_attestation::FolderbaseRootAttestation,
+    traversal_policy::is_reserved_workspace_component,
 };
 
 #[cfg(windows)]
@@ -72,6 +73,12 @@ pub enum FolderScopeEvidenceError {
     #[error("selected Folder Scope path is not a directory: {path}")]
     SelectedFolderNotDirectory { path: PathBuf },
 
+    #[error("selected Folder Scope path is excluded from the current Core inventory: {path}")]
+    SelectedFolderExcluded { path: PathBuf },
+
+    #[error("selected Folder Scope contains an unsupported node: {path}")]
+    UnsupportedSelectedNode { path: PathBuf },
+
     #[error("selected Folder Scope or Folderbase Root changed during observation")]
     ObservationChanged,
 
@@ -88,6 +95,8 @@ impl FolderScopeEvidenceError {
             Self::SelectedFolderNotFound { .. } => "selected_folder_not_found",
             Self::SelectedFolderSymlink { .. } => "selected_folder_symlink",
             Self::SelectedFolderNotDirectory { .. } => "selected_folder_not_directory",
+            Self::SelectedFolderExcluded { .. } => "selected_folder_excluded",
+            Self::UnsupportedSelectedNode { .. } => "unsupported_selected_node",
             Self::ObservationChanged => "folder_scope_observation_changed",
             Self::InvalidJournal { .. } => "invalid_folder_scope_journal",
         }
@@ -147,6 +156,7 @@ pub fn observe_folder_scope(
     let selected_path = safe_selected_path(selected_path.as_ref())?;
     let selected_wire = relative_wire_path(&selected_path)?;
     let store = FolderbaseVersionStore::open(root)?;
+    let plan = store.plan_capture()?;
     let attestation = store.root_attestation.clone();
     let state = FolderbaseState::open_existing(&attestation.root)?;
     state.verify_root_identity(store.root_physical_identity())?;
@@ -154,7 +164,7 @@ pub fn observe_folder_scope(
     let selected_identity =
         selected_folder_identity(&root_capability, &attestation.root, &selected_path)?;
     let selected_instance_sha256 = selected_identity.stable_sha256();
-    let nested_boundaries = Vec::new();
+    let nested_boundaries = scope_nested_boundaries(&plan, &selected_wire)?;
     let opaque_binding_proof = binding_proof(
         &attestation.folderbase_id,
         &attestation.root_instance_sha256,
@@ -174,6 +184,10 @@ pub fn observe_folder_scope(
     let final_identity =
         selected_folder_identity(&root_capability, &attestation.root, &selected_path)?;
     if final_identity != selected_identity {
+        return Err(FolderScopeEvidenceError::ObservationChanged);
+    }
+    let final_plan = store.plan_capture()?;
+    if scope_nested_boundaries(&final_plan, &selected_wire)? != nested_boundaries {
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
 
@@ -260,6 +274,38 @@ pub fn observe_folder_scope(
     state.verify_still_attached()?;
     verify_attestation(&store.root_attestation)?;
     Ok(event.public_evidence())
+}
+
+fn scope_nested_boundaries(
+    plan: &CapturePlan,
+    selected_path: &str,
+) -> Result<Vec<String>, FolderScopeEvidenceError> {
+    let selected_is_captured_directory = plan
+        .entries()
+        .iter()
+        .any(|entry| entry.path() == selected_path && entry.kind() == CaptureEntryKind::Directory);
+    if !selected_is_captured_directory {
+        return Err(FolderScopeEvidenceError::SelectedFolderExcluded {
+            path: PathBuf::from(selected_path),
+        });
+    }
+
+    let descendant_prefix = format!("{selected_path}/");
+    let mut nested_boundaries = Vec::new();
+    for exclusion in plan
+        .exclusions()
+        .iter()
+        .filter(|exclusion| exclusion.path().starts_with(&descendant_prefix))
+    {
+        if exclusion.kind() == CaptureExclusionKind::NestedFolderbase {
+            nested_boundaries.push(exclusion.path().to_owned());
+        } else {
+            return Err(FolderScopeEvidenceError::UnsupportedSelectedNode {
+                path: PathBuf::from(exclusion.path()),
+            });
+        }
+    }
+    Ok(nested_boundaries)
 }
 
 fn read_head(

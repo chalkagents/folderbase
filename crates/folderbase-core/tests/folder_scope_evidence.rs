@@ -54,3 +54,37 @@ fn first_exact_folder_observation_is_replayed_idempotently() {
     );
     assert!(first.nested_boundaries.is_empty());
 }
+
+#[test]
+fn observation_reports_exact_nested_folderbase_boundaries_without_reading_file_contents() {
+    let root = folderbase();
+    fs::create_dir_all(root.path().join("Client Work/Repository/.git"))
+        .expect("repository metadata");
+    fs::write(
+        root.path().join("Client Work/Repository/archive.bin"),
+        [0_u8, 159, 146, 150, 255],
+    )
+    .expect("opaque binary file");
+    fs::write(
+        root.path().join("Client Work/Repository/records.csv"),
+        "name,value\nalpha,1\n",
+    )
+    .expect("csv file");
+    fs::create_dir_all(root.path().join("Client Work/Partner/.folderbase"))
+        .expect("nested state directory");
+    fs::write(
+        root.path().join("Client Work/Partner/.folderbase/manifest.json"),
+        br#"{"protocol_version":"0.5.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f9478d"},"capture":{"ignore_rules":[]}}"#,
+    )
+    .expect("nested manifest");
+    fs::create_dir_all(root.path().join("Client Work/Partner/Inside/Deeper"))
+        .expect("opaque nested contents");
+
+    let evidence = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect("observe heterogeneous selected folder");
+
+    assert_eq!(
+        evidence.nested_boundaries,
+        vec!["Client Work/Partner".to_owned()]
+    );
+}
