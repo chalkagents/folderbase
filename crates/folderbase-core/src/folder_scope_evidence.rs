@@ -164,10 +164,19 @@ pub fn observe_folder_scope(
     root: impl AsRef<Path>,
     selected_path: impl AsRef<Path>,
 ) -> Result<FolderScopeEvidence, FolderScopeEvidenceError> {
+    observe_folder_scope_with_after_plan(root, selected_path, || {})
+}
+
+fn observe_folder_scope_with_after_plan(
+    root: impl AsRef<Path>,
+    selected_path: impl AsRef<Path>,
+    after_plan: impl FnOnce(),
+) -> Result<FolderScopeEvidence, FolderScopeEvidenceError> {
     let selected_path = safe_selected_path(selected_path.as_ref())?;
     let selected_wire = relative_wire_path(&selected_path)?;
     let store = FolderbaseVersionStore::open(root)?;
     let plan = store.plan_capture()?;
+    after_plan();
     let attestation = store.root_attestation.clone();
     let state = FolderbaseState::open_existing(&attestation.root)?;
     state.verify_root_identity(store.root_physical_identity())?;
@@ -783,4 +792,48 @@ fn valid_sha256(value: &str) -> bool {
 
 fn valid_prefixed_digest(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(valid_sha256)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use tempfile::tempdir;
+
+    use super::{FolderScopeEvidenceError, observe_folder_scope_with_after_plan};
+    use crate::FolderbaseVersionStore;
+
+    #[test]
+    fn local_head_advance_between_plans_fails_without_scope_journal_mutation() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state directory");
+        fs::write(
+            root.path().join(".folderbase/manifest.json"),
+            br#"{"protocol_version":"0.1.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94790"}}"#,
+        )
+        .expect("manifest");
+        fs::write(root.path().join(".folderbaseignore"), "").expect("ignore policy");
+        fs::write(root.path().join("FOLDERBASE.md"), "# Folderbase\n").expect("entry marker");
+        fs::create_dir(root.path().join("Project")).expect("selected folder");
+        fs::write(root.path().join("Project/current.md"), "current\n").expect("ordinary file");
+
+        let error = observe_folder_scope_with_after_plan(root.path(), Path::new("Project"), || {
+            let store = FolderbaseVersionStore::open(root.path()).expect("race capture store");
+            let plan = store.plan_capture().expect("race capture plan");
+            store.seal_capture(plan).expect("race Local Head advance");
+        })
+        .expect_err("mixed-head observation must fail");
+
+        assert!(matches!(
+            error,
+            FolderScopeEvidenceError::ObservationChanged
+        ));
+        assert!(
+            !root
+                .path()
+                .join(".folderbase/local/folder-scope-evidence-v1")
+                .exists(),
+            "stale observation must not create its journal"
+        );
+    }
 }
