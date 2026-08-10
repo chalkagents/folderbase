@@ -24,6 +24,25 @@ const FORMAT = "folderbase-capability-suite-report-v1";
 const FOLDERBASE_ID = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94792";
 const NESTED_ID = "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94793";
 const directory = dirname(fileURLToPath(import.meta.url));
+const commandSupervisor = resolve(directory, "command-supervisor.mjs");
+
+function boundedEnvironmentInteger(name, fallback, minimum, maximum) {
+  const source = process.env[name];
+  if (source === undefined) return fallback;
+  const value = Number(source);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} through ${maximum}`);
+  }
+  return value;
+}
+
+const commandTimeoutMs = boundedEnvironmentInteger(
+  "FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_COMMAND_TIMEOUT_MS",
+  30_000,
+  100,
+  30_000,
+);
+const commandMaxBytes = 8 * 1024 * 1024;
 const schema = JSON.parse(
   await readFile(
     resolve(
@@ -51,15 +70,40 @@ function commandFor(implementation, arguments_) {
 
 function execute(implementation, arguments_, environment = {}) {
   const invocation = commandFor(implementation, arguments_);
-  const result = spawnSync(invocation.command, invocation.args, {
+  const payload = JSON.stringify({
+    command: invocation.command,
+    args: invocation.args,
+    input: "",
+    timeoutMs: commandTimeoutMs,
+    maxBytes: commandMaxBytes,
+    environment,
+  });
+  const supervised = spawnSync(process.execPath, [commandSupervisor], {
     encoding: "utf8",
     shell: false,
     windowsHide: true,
-    env: { ...process.env, ...environment },
-    timeout: 30_000,
-    maxBuffer: 2 * 1024 * 1024,
+    input: payload,
+    killSignal: "SIGKILL",
+    timeout: commandTimeoutMs + 10_000,
+    maxBuffer: commandMaxBytes * 2 + 1024 * 1024,
   });
-  if (result.error) throw result.error;
+  if (supervised.error?.code === "ETIMEDOUT") {
+    throw new Error("candidate process supervisor failed to reap its process tree");
+  }
+  if (supervised.error) throw supervised.error;
+  if (supervised.status !== 0) {
+    throw new Error(supervised.stderr || "candidate process supervisor failed");
+  }
+  const result = JSON.parse(supervised.stdout);
+  if (result.bound === "timeout") {
+    throw new Error(`candidate command timed out after ${commandTimeoutMs} ms`);
+  }
+  if (result.bound === "output") {
+    throw new Error(`candidate command exceeded the ${commandMaxBytes}-byte output limit`);
+  }
+  if (result.error) {
+    throw Object.assign(new Error(result.error.message), { code: result.error.code });
+  }
   return result;
 }
 
@@ -165,6 +209,7 @@ const report = {
   capability: CAPABILITY,
   implementation: "",
   passed: 0,
+  not_applicable: 0,
   failed: 0,
   cases: [],
 };
@@ -250,11 +295,9 @@ try {
         await addNested(root, join("Client Work", "Partner"));
         const first = observe(implementation, root, "Client Work");
         assert.deepEqual(first.nested_boundaries, ["Client Work/Partner"]);
-        await addNested(
-          root,
-          join("Client Work", "Partner"),
-          "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94794",
-        );
+        const nestedRoot = join(root, "Client Work", "Partner");
+        await rm(nestedRoot, { recursive: true, force: true });
+        await addNested(root, join("Client Work", "Partner"));
         observeError(implementation, root, "Client Work", "nested_boundary_changed");
 
         const topologyRoot = join(cleanup, "boundary-topology");
@@ -316,7 +359,9 @@ try {
     {
       id: "unsupported-node-refusal",
       async run() {
-        if (process.platform === "win32") return;
+        if (process.platform === "win32") {
+          return { notApplicable: "Windows does not expose a portable FIFO fixture" };
+        }
         const root = join(cleanup, "unsupported");
         await writeRoot(root);
         const fifo = join(root, "Client Work", "agent.pipe");
@@ -360,7 +405,31 @@ try {
         await writeFile(join(journal, "rogue.bin"), Buffer.alloc(128));
         observeError(implementation, root, "Client Work", "invalid_folder_scope_journal");
         assert.deepEqual(await readFile(join(journal, "head.json")), originalHead);
+        await rm(join(journal, "rogue.bin"));
+        const eventPath = join(journal, "events", "00000000000000000001.json");
+        const originalEvent = await readFile(eventPath, "utf8");
+        assert.match(originalEvent, /Client Work/u);
+        await writeFile(eventPath, originalEvent.replace("Client Work", "Client W0rk"));
+        observeError(implementation, root, "Client Work", "invalid_folder_scope_journal");
+        assert.deepEqual(await readFile(join(journal, "head.json")), originalHead);
         assert.equal(first.device_sequence, 1);
+
+        const continuityRoot = join(cleanup, "journal-continuity");
+        await writeRoot(
+          continuityRoot,
+          "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94797",
+        );
+        observe(implementation, continuityRoot, "Client Work");
+        await rm(
+          join(continuityRoot, ".folderbase", "local", "folder-scope-evidence-v1"),
+          { recursive: true },
+        );
+        observeError(
+          implementation,
+          continuityRoot,
+          "Client Work",
+          "invalid_folder_scope_journal",
+        );
       },
     },
   ];
@@ -368,8 +437,14 @@ try {
   for (const testCase of cases) {
     const result = { id: testCase.id, status: "passed" };
     try {
-      await testCase.run();
-      report.passed += 1;
+      const outcome = await testCase.run();
+      if (outcome?.notApplicable) {
+        result.status = "not_applicable";
+        result.message = outcome.notApplicable;
+        report.not_applicable += 1;
+      } else {
+        report.passed += 1;
+      }
     } catch (error) {
       result.status = "failed";
       result.message = error instanceof Error ? error.message : String(error);

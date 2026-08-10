@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
+    fs::File,
     io,
     path::{Component, Path, PathBuf},
 };
@@ -20,10 +21,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    CaptureEntryKind, CaptureExclusionKind, CapturePlan, FolderbaseCaptureError, FolderbaseError,
-    FolderbaseVersionStore, LocalVersionStore, folderbase_state::FolderbaseState,
-    physical_identity::PhysicalIdentity, root_attestation::FolderbaseRootAttestation,
-    traversal_policy::is_reserved_workspace_component,
+    CaptureEntryKind, CaptureExclusionKind, CaptureExclusionReason, CapturePlan,
+    FolderbaseCaptureError, FolderbaseError, FolderbaseVersionStore, LocalVersionStore,
+    folderbase_state::FolderbaseState, physical_identity::PhysicalIdentity,
+    root_attestation::FolderbaseRootAttestation, traversal_policy::is_reserved_workspace_component,
 };
 
 #[cfg(windows)]
@@ -32,12 +33,17 @@ use crate::root_attestation::metadata_is_link_or_reparse;
 const EVIDENCE_FORMAT: &str = "folderbase-folder-scope-evidence-v1";
 const JOURNAL_FORMAT: &str = "folderbase-folder-scope-journal-v1";
 const EVENT_FORMAT: &str = "folderbase-folder-scope-journal-event-v1";
+const AUTHORITY_FORMAT: &str = "folderbase-folder-scope-journal-authority-v1";
 const JOURNAL_DIRECTORY: &str = ".folderbase/local/folder-scope-evidence-v1";
 const EVENTS_DIRECTORY: &str = ".folderbase/local/folder-scope-evidence-v1/events";
 const HEAD_PATH: &str = ".folderbase/local/folder-scope-evidence-v1/head.json";
+const AUTHORITY_PATH: &str = ".folderbase/local/folder-scope-evidence-authority-v1.json";
+const MAX_AUTHORITY_BYTES: u64 = 16 * 1024;
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
-const MAX_EVENT_BYTES: u64 = 256 * 1024;
+const MAX_EVENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_JOURNAL_EVENTS: u64 = 16_384;
+const MAX_NESTED_BOUNDARIES: usize = 256;
 const CONFORMANCE_ADVANCE_HEAD_ENV: &str =
     "FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_ADVANCE_HEAD_AFTER_PLAN";
 const CONFORMANCE_CRASH_AFTER_ENV: &str = "FOLDERBASE_FOLDER_SCOPE_CONFORMANCE_CRASH_AFTER";
@@ -95,6 +101,9 @@ pub enum FolderScopeEvidenceError {
     #[error("selected Folder Scope or Folderbase Root changed during observation")]
     ObservationChanged,
 
+    #[error("selected Folder Scope exceeds the supported nested-boundary limit of {maximum}")]
+    ScopeLimitExceeded { maximum: usize },
+
     #[error("the device-local Folder Scope journal is invalid: {message}")]
     InvalidJournal { message: String },
 }
@@ -113,6 +122,7 @@ impl FolderScopeEvidenceError {
             Self::SelectedFolderReplaced { .. } => "selected_folder_replaced",
             Self::NestedBoundaryChanged { .. } => "nested_boundary_changed",
             Self::ObservationChanged => "folder_scope_observation_changed",
+            Self::ScopeLimitExceeded { .. } => "folder_scope_limit_exceeded",
             Self::InvalidJournal { .. } => "invalid_folder_scope_journal",
         }
     }
@@ -124,9 +134,20 @@ struct JournalHead {
     format: String,
     folderbase_id: String,
     root_instance_sha256: String,
+    root_continuity_sha256: String,
     device_sequence: u64,
     event_id: String,
     event_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalAuthority {
+    format: String,
+    folderbase_id: String,
+    root_instance_sha256: String,
+    root_continuity_sha256: String,
+    genesis_event_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,10 +156,12 @@ struct JournalEvent {
     format: String,
     folderbase_id: String,
     root_instance_sha256: String,
+    root_continuity_sha256: String,
     selected_path: String,
     selected_instance_sha256: String,
     binding_nonce: String,
     local_head_sha256: Option<String>,
+    inventory_sha256: String,
     observation_sha256: String,
     event_id: String,
     device_sequence: u64,
@@ -156,12 +179,38 @@ struct NestedBoundaryBinding {
     protocol_version: String,
     manifest_sha256: String,
     root_instance_sha256: String,
+    root_continuity_sha256: String,
+}
+
+/// Host-supplied creation evidence paired with the stable physical file ID.
+///
+/// A filesystem may recycle an inode or Windows file ID after deletion. Its
+/// creation marker prevents that replacement from inheriting the prior
+/// Folder Scope binding while preserving continuity across ordinary renames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryBirthMarker {
+    Unix {
+        seconds: i64,
+        nanoseconds: u32,
+    },
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Windows {
+        creation_ticks: i64,
+    },
 }
 
 struct JournalRead {
+    authority: Option<JournalAuthority>,
     head: Option<JournalHead>,
     history: Vec<JournalEvent>,
     orphan: Option<JournalEvent>,
+    encoded_bytes: u64,
+}
+
+struct ReadJournalEvent {
+    event: JournalEvent,
+    encoded_bytes: u64,
+    encoded_sha256: String,
 }
 
 impl JournalEvent {
@@ -199,15 +248,17 @@ fn observe_folder_scope_with_after_plan(
     let selected_wire = relative_wire_path(&selected_path)?;
     let store = FolderbaseVersionStore::open(root)?;
     let plan = store.plan_capture()?;
+    let inventory_sha256 = capture_plan_inventory_sha256(&plan)?;
     after_plan();
     advance_local_head_for_conformance(&store)?;
     let attestation = store.root_attestation.clone();
     let state = FolderbaseState::open_existing(&attestation.root)?;
     state.verify_root_identity(store.root_physical_identity())?;
     let root_capability = state.clone_root_capability()?;
-    let selected_identity =
-        selected_folder_identity(&root_capability, &attestation.root, &selected_path)?;
-    let selected_instance_sha256 = selected_identity.stable_sha256();
+    let root_continuity_sha256 =
+        retained_directory_instance_sha256(&root_capability, &attestation.root)?;
+    let selected_instance_sha256 =
+        selected_folder_instance_sha256(&root_capability, &attestation.root, &selected_path)?;
     let nested_boundaries = scope_nested_boundaries(&plan, &selected_wire)?;
     let nested_boundary_bindings =
         scope_nested_boundary_bindings(&root_capability, &attestation.root, &nested_boundaries)?;
@@ -219,12 +270,16 @@ fn observe_folder_scope_with_after_plan(
     let _lock = LocalVersionStore::acquire_transaction_lock_for_state(&attestation.root, &state)?;
     state.verify_still_attached()?;
     verify_attestation(&attestation)?;
-    let final_identity =
-        selected_folder_identity(&root_capability, &attestation.root, &selected_path)?;
-    if final_identity != selected_identity {
+    if current_root_continuity_sha256(&attestation.root)? != root_continuity_sha256 {
+        return Err(FolderScopeEvidenceError::ObservationChanged);
+    }
+    let final_instance_sha256 =
+        selected_folder_instance_sha256(&root_capability, &attestation.root, &selected_path)?;
+    if final_instance_sha256 != selected_instance_sha256 {
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
     let final_plan = store.plan_capture()?;
+    let final_inventory_sha256 = capture_plan_inventory_sha256(&final_plan)?;
     let final_local_head_sha256 = final_plan
         .current_local_head()
         .map(|head| head.encoded_sha256().to_owned());
@@ -237,15 +292,19 @@ fn observe_folder_scope_with_after_plan(
     if final_nested_boundaries != nested_boundaries
         || final_nested_boundary_bindings != nested_boundary_bindings
         || final_local_head_sha256 != local_head_sha256
+        || final_inventory_sha256 != inventory_sha256
     {
         return Err(FolderScopeEvidenceError::ObservationChanged);
     }
 
     let JournalRead {
+        authority,
         head,
         history,
         orphan,
-    } = read_journal(&state, &attestation)?;
+        encoded_bytes: journal_encoded_bytes,
+    } = read_journal(&state, &attestation, &root_continuity_sha256)?;
+    let orphan_present = orphan.is_some();
     if history.iter().any(|event| {
         event.selected_path == selected_wire
             && event.selected_instance_sha256 != selected_instance_sha256
@@ -269,14 +328,17 @@ fn observe_folder_scope_with_after_plan(
     let opaque_binding_proof = binding_proof(
         &attestation.folderbase_id,
         &attestation.root_instance_sha256,
+        &root_continuity_sha256,
         &selected_instance_sha256,
         &binding_nonce,
     );
     let observation_sha256 = observation_sha256(
         &attestation,
+        &root_continuity_sha256,
         &selected_wire,
         &selected_instance_sha256,
         local_head_sha256.as_deref(),
+        &inventory_sha256,
         &nested_boundary_bindings,
     );
     if let Some(existing) = history
@@ -327,10 +389,12 @@ fn observe_folder_scope_with_after_plan(
         format: EVENT_FORMAT.to_owned(),
         folderbase_id: attestation.folderbase_id.clone(),
         root_instance_sha256: attestation.root_instance_sha256.clone(),
+        root_continuity_sha256: root_continuity_sha256.clone(),
         selected_path: selected_wire,
         selected_instance_sha256,
         binding_nonce,
         local_head_sha256,
+        inventory_sha256,
         observation_sha256,
         event_id: event_id.clone(),
         device_sequence: sequence,
@@ -340,6 +404,14 @@ fn observe_folder_scope_with_after_plan(
         previous_event_sha256,
     };
     let event_bytes = encode_bounded(&event, MAX_EVENT_BYTES, "journal event")?;
+    checked_journal_bytes(
+        journal_encoded_bytes,
+        if orphan_present {
+            0
+        } else {
+            event_bytes.len() as u64
+        },
+    )?;
     let event_sha256 = hex_sha256(&event_bytes);
     let event_path = event_path(sequence);
     match state.publish_new(&event_path, &event_bytes) {
@@ -364,10 +436,47 @@ fn observe_folder_scope_with_after_plan(
     {
         std::process::exit(86);
     }
+    if head.is_none() {
+        let next_authority = JournalAuthority {
+            format: AUTHORITY_FORMAT.to_owned(),
+            folderbase_id: attestation.folderbase_id.clone(),
+            root_instance_sha256: attestation.root_instance_sha256.clone(),
+            root_continuity_sha256: root_continuity_sha256.clone(),
+            genesis_event_sha256: event_sha256.clone(),
+        };
+        if let Some(existing) = authority {
+            if existing != next_authority {
+                return Err(FolderScopeEvidenceError::InvalidJournal {
+                    message: "the journal authority does not match its genesis event".to_owned(),
+                });
+            }
+        } else {
+            let authority_bytes =
+                encode_bounded(&next_authority, MAX_AUTHORITY_BYTES, "journal authority")?;
+            match state.publish_new(Path::new(AUTHORITY_PATH), &authority_bytes) {
+                Ok(()) => {}
+                Err(FolderbaseError::WouldOverwrite(_)) => {
+                    let existing = state
+                        .read_bounded(Path::new(AUTHORITY_PATH), MAX_AUTHORITY_BYTES)?
+                        .ok_or_else(|| FolderScopeEvidenceError::InvalidJournal {
+                            message: "the journal authority disappeared during recovery".to_owned(),
+                        })?;
+                    if existing != authority_bytes {
+                        return Err(FolderScopeEvidenceError::InvalidJournal {
+                            message: "a different journal authority appeared during recovery"
+                                .to_owned(),
+                        });
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     let next_head = JournalHead {
         format: JOURNAL_FORMAT.to_owned(),
         folderbase_id: attestation.folderbase_id,
         root_instance_sha256: attestation.root_instance_sha256,
+        root_continuity_sha256: root_continuity_sha256.clone(),
         device_sequence: sequence,
         event_id,
         event_sha256,
@@ -389,6 +498,9 @@ fn observe_folder_scope_with_after_plan(
     }
     state.verify_still_attached()?;
     verify_attestation(&store.root_attestation)?;
+    if current_root_continuity_sha256(&store.root_attestation.root)? != root_continuity_sha256 {
+        return Err(FolderScopeEvidenceError::ObservationChanged);
+    }
     Ok(event.public_evidence())
 }
 
@@ -426,6 +538,11 @@ fn scope_nested_boundaries(
     {
         if exclusion.kind() == CaptureExclusionKind::NestedFolderbase {
             nested_boundaries.push(exclusion.path().to_owned());
+            if nested_boundaries.len() > MAX_NESTED_BOUNDARIES {
+                return Err(FolderScopeEvidenceError::ScopeLimitExceeded {
+                    maximum: MAX_NESTED_BOUNDARIES,
+                });
+            }
         } else {
             return Err(FolderScopeEvidenceError::UnsupportedSelectedNode {
                 path: PathBuf::from(exclusion.path()),
@@ -450,12 +567,14 @@ fn scope_nested_boundary_bindings(
                 &directory, &display,
             )
             .map_err(FolderbaseCaptureError::from)?;
+        let root_continuity_sha256 = retained_directory_instance_sha256(&directory, &display)?;
         bindings.push(NestedBoundaryBinding {
             path: path.clone(),
             folderbase_id: attestation.folderbase_id,
             protocol_version: attestation.protocol_version,
             manifest_sha256: attestation.manifest_sha256,
             root_instance_sha256: attestation.root_instance_sha256,
+            root_continuity_sha256,
         });
     }
     Ok(bindings)
@@ -464,15 +583,36 @@ fn scope_nested_boundary_bindings(
 fn read_journal(
     state: &FolderbaseState,
     attestation: &FolderbaseRootAttestation,
+    root_continuity_sha256: &str,
 ) -> Result<JournalRead, FolderScopeEvidenceError> {
+    let authority = read_journal_authority(state, attestation, root_continuity_sha256)?;
     validate_journal_root_namespace(state)?;
     let Some(bytes) = state.read_bounded_if_present(Path::new(HEAD_PATH), MAX_HEAD_BYTES)? else {
         validate_event_namespace(state, 0)?;
-        let orphan = read_optional_journal_event(state, attestation, 1, None)?;
+        let orphan =
+            read_optional_journal_event(state, attestation, root_continuity_sha256, 1, None)?;
+        match (&authority, &orphan) {
+            (Some(_), None) => {
+                return Err(FolderScopeEvidenceError::InvalidJournal {
+                    message: "the committed journal continuity is missing".to_owned(),
+                });
+            }
+            (Some(authority), Some(event)) => {
+                if authority.genesis_event_sha256 != event.encoded_sha256 {
+                    return Err(FolderScopeEvidenceError::InvalidJournal {
+                        message: "the journal authority does not match its genesis event"
+                            .to_owned(),
+                    });
+                }
+            }
+            (None, _) => {}
+        }
         return Ok(JournalRead {
+            authority,
             head: None,
             history: Vec::new(),
-            orphan,
+            encoded_bytes: orphan.as_ref().map_or(0, |event| event.encoded_bytes),
+            orphan: orphan.map(|event| event.event),
         });
     };
     let head: JournalHead =
@@ -482,6 +622,7 @@ fn read_journal(
     if head.format != JOURNAL_FORMAT
         || head.folderbase_id != attestation.folderbase_id
         || head.root_instance_sha256 != attestation.root_instance_sha256
+        || head.root_continuity_sha256 != root_continuity_sha256
         || head.device_sequence == 0
         || head.device_sequence > MAX_JOURNAL_EVENTS
         || !valid_prefixed_digest(&head.event_id, "folder_scope_event_")
@@ -492,32 +633,31 @@ fn read_journal(
                 .to_owned(),
         });
     }
+    let authority = authority.ok_or_else(|| FolderScopeEvidenceError::InvalidJournal {
+        message: "the committed journal authority is missing".to_owned(),
+    })?;
     validate_event_namespace(state, head.device_sequence)?;
     let mut events = Vec::with_capacity(head.device_sequence as usize);
     let mut previous_event_sha256 = None;
+    let mut genesis_event_sha256 = None;
+    let mut journal_encoded_bytes = 0;
     for sequence in 1..=head.device_sequence {
-        let path = event_path(sequence);
-        let event_bytes = state.read_bounded(&path, MAX_EVENT_BYTES)?.ok_or_else(|| {
-            FolderScopeEvidenceError::InvalidJournal {
-                message: format!("journal event {sequence} is missing"),
-            }
-        })?;
-        let event_sha256 = hex_sha256(&event_bytes);
-        let event: JournalEvent = serde_json::from_slice(&event_bytes).map_err(|_| {
-            FolderScopeEvidenceError::InvalidJournal {
-                message: format!("journal event {sequence} is not a closed v1 record"),
-            }
-        })?;
-        if !valid_journal_event(
-            &event,
+        let read = read_optional_journal_event(
+            state,
             attestation,
+            root_continuity_sha256,
             sequence,
             previous_event_sha256.as_deref(),
-        ) {
-            return Err(FolderScopeEvidenceError::InvalidJournal {
-                message: format!("journal event {sequence} is not self-consistent"),
-            });
+        )?
+        .ok_or_else(|| FolderScopeEvidenceError::InvalidJournal {
+            message: format!("journal event {sequence} is missing"),
+        })?;
+        journal_encoded_bytes = checked_journal_bytes(journal_encoded_bytes, read.encoded_bytes)?;
+        let event_sha256 = read.encoded_sha256;
+        if sequence == 1 {
+            genesis_event_sha256 = Some(event_sha256.clone());
         }
+        let event = read.event;
         if sequence == head.device_sequence
             && (event_sha256 != head.event_sha256 || event.event_id != head.event_id)
         {
@@ -528,21 +668,60 @@ fn read_journal(
         previous_event_sha256 = Some(event_sha256);
         events.push(event);
     }
+    if genesis_event_sha256.as_deref() != Some(authority.genesis_event_sha256.as_str()) {
+        return Err(FolderScopeEvidenceError::InvalidJournal {
+            message: "the journal authority does not match its genesis event".to_owned(),
+        });
+    }
     let orphan = if head.device_sequence < MAX_JOURNAL_EVENTS {
         read_optional_journal_event(
             state,
             attestation,
+            root_continuity_sha256,
             head.device_sequence + 1,
             previous_event_sha256.as_deref(),
         )?
     } else {
         None
     };
+    if let Some(orphan) = &orphan {
+        journal_encoded_bytes = checked_journal_bytes(journal_encoded_bytes, orphan.encoded_bytes)?;
+    }
     Ok(JournalRead {
+        authority: Some(authority),
         head: Some(head),
         history: events,
-        orphan,
+        orphan: orphan.map(|event| event.event),
+        encoded_bytes: journal_encoded_bytes,
     })
+}
+
+fn read_journal_authority(
+    state: &FolderbaseState,
+    attestation: &FolderbaseRootAttestation,
+    root_continuity_sha256: &str,
+) -> Result<Option<JournalAuthority>, FolderScopeEvidenceError> {
+    let Some(bytes) =
+        state.read_bounded_if_present(Path::new(AUTHORITY_PATH), MAX_AUTHORITY_BYTES)?
+    else {
+        return Ok(None);
+    };
+    let authority: JournalAuthority =
+        serde_json::from_slice(&bytes).map_err(|_| FolderScopeEvidenceError::InvalidJournal {
+            message: "the journal authority is not a closed v1 record".to_owned(),
+        })?;
+    if authority.format != AUTHORITY_FORMAT
+        || authority.folderbase_id != attestation.folderbase_id
+        || authority.root_instance_sha256 != attestation.root_instance_sha256
+        || authority.root_continuity_sha256 != root_continuity_sha256
+        || !valid_sha256(&authority.genesis_event_sha256)
+    {
+        return Err(FolderScopeEvidenceError::InvalidJournal {
+            message: "the journal authority does not bind this exact physical Folderbase Root"
+                .to_owned(),
+        });
+    }
+    Ok(Some(authority))
 }
 
 fn validate_journal_root_namespace(
@@ -572,9 +751,10 @@ fn validate_journal_root_namespace(
 fn read_optional_journal_event(
     state: &FolderbaseState,
     attestation: &FolderbaseRootAttestation,
+    root_continuity_sha256: &str,
     sequence: u64,
     expected_previous_event_sha256: Option<&str>,
-) -> Result<Option<JournalEvent>, FolderScopeEvidenceError> {
+) -> Result<Option<ReadJournalEvent>, FolderScopeEvidenceError> {
     let path = event_path(sequence);
     let Some(event_bytes) = state.read_bounded_if_present(&path, MAX_EVENT_BYTES)? else {
         return Ok(None);
@@ -587,6 +767,7 @@ fn read_optional_journal_event(
     if !valid_journal_event(
         &event,
         attestation,
+        root_continuity_sha256,
         sequence,
         expected_previous_event_sha256,
     ) {
@@ -594,7 +775,25 @@ fn read_optional_journal_event(
             message: format!("journal event {sequence} is not self-consistent"),
         });
     }
-    Ok(Some(event))
+    Ok(Some(ReadJournalEvent {
+        event,
+        encoded_bytes: event_bytes.len() as u64,
+        encoded_sha256: hex_sha256(&event_bytes),
+    }))
+}
+
+fn checked_journal_bytes(current: u64, additional: u64) -> Result<u64, FolderScopeEvidenceError> {
+    let total = current.checked_add(additional).ok_or_else(|| {
+        FolderScopeEvidenceError::InvalidJournal {
+            message: "the journal aggregate byte count overflowed".to_owned(),
+        }
+    })?;
+    if total > MAX_JOURNAL_BYTES {
+        return Err(FolderScopeEvidenceError::InvalidJournal {
+            message: format!("the journal exceeds the {MAX_JOURNAL_BYTES}-byte aggregate bound"),
+        });
+    }
+    Ok(total)
 }
 
 fn validate_event_namespace(
@@ -649,6 +848,7 @@ fn validate_event_namespace(
 fn valid_journal_event(
     event: &JournalEvent,
     attestation: &FolderbaseRootAttestation,
+    root_continuity_sha256: &str,
     sequence: u64,
     expected_previous_event_sha256: Option<&str>,
 ) -> bool {
@@ -659,6 +859,7 @@ fn valid_journal_event(
     if event.format != EVENT_FORMAT
         || event.folderbase_id != attestation.folderbase_id
         || event.root_instance_sha256 != attestation.root_instance_sha256
+        || event.root_continuity_sha256 != root_continuity_sha256
         || event.device_sequence != sequence
         || event.previous_event_sha256.as_deref() != expected_previous_event_sha256
         || !valid_sha256(&event.selected_instance_sha256)
@@ -667,6 +868,7 @@ fn valid_journal_event(
             .local_head_sha256
             .as_deref()
             .is_some_and(|value| !valid_sha256(value))
+        || !valid_sha256(&event.inventory_sha256)
         || !valid_sha256(&event.observation_sha256)
         || !valid_prefixed_digest(&event.opaque_binding_proof, "fb_scope_binding_v1_")
         || !selected_path_is_canonical
@@ -681,15 +883,18 @@ fn valid_journal_event(
             != binding_proof(
                 &event.folderbase_id,
                 &event.root_instance_sha256,
+                &event.root_continuity_sha256,
                 &event.selected_instance_sha256,
                 &event.binding_nonce,
             )
         || event.observation_sha256
             != observation_sha256(
                 attestation,
+                &event.root_continuity_sha256,
                 &event.selected_path,
                 &event.selected_instance_sha256,
                 event.local_head_sha256.as_deref(),
+                &event.inventory_sha256,
                 &event.nested_boundary_bindings,
             )
     {
@@ -704,7 +909,15 @@ fn valid_journal_event(
         )
 }
 
-type RelativeNestedBoundaryBinding<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
+#[derive(Debug, PartialEq, Eq)]
+struct RelativeNestedBoundaryBinding<'a> {
+    path: &'a str,
+    folderbase_id: &'a str,
+    protocol_version: &'a str,
+    manifest_sha256: &'a str,
+    root_instance_sha256: &'a str,
+    root_continuity_sha256: &'a str,
+}
 
 fn relative_nested_boundary_bindings<'a>(
     selected_path: &str,
@@ -725,16 +938,18 @@ fn relative_nested_boundary_bindings<'a>(
             || Version::parse(&binding.protocol_version).is_err()
             || !valid_sha256(&binding.manifest_sha256)
             || !valid_sha256(&binding.root_instance_sha256)
+            || !valid_sha256(&binding.root_continuity_sha256)
         {
             return None;
         }
-        relative.push((
+        relative.push(RelativeNestedBoundaryBinding {
             path,
-            binding.folderbase_id.as_str(),
-            binding.protocol_version.as_str(),
-            binding.manifest_sha256.as_str(),
-            binding.root_instance_sha256.as_str(),
-        ));
+            folderbase_id: binding.folderbase_id.as_str(),
+            protocol_version: binding.protocol_version.as_str(),
+            manifest_sha256: binding.manifest_sha256.as_str(),
+            root_instance_sha256: binding.root_instance_sha256.as_str(),
+            root_continuity_sha256: binding.root_continuity_sha256.as_str(),
+        });
         previous = Some(path);
     }
     Some(relative)
@@ -781,18 +996,159 @@ fn relative_wire_path(path: &Path) -> Result<String, FolderScopeEvidenceError> {
     })
 }
 
-fn selected_folder_identity(
+fn selected_folder_instance_sha256(
     root: &Dir,
     display_root: &Path,
     selected_path: &Path,
-) -> Result<PhysicalIdentity, FolderScopeEvidenceError> {
+) -> Result<String, FolderScopeEvidenceError> {
     let directory = open_directory_beneath(root, display_root, selected_path)?;
     let display = display_root.join(selected_path);
+    retained_directory_instance_sha256(&directory, &display)
+}
+
+fn retained_directory_instance_sha256(
+    directory: &Dir,
+    display: &Path,
+) -> Result<String, FolderScopeEvidenceError> {
     let file = directory
         .try_clone()
-        .map_err(|source| FolderbaseError::io(&display, source))?
+        .map_err(|source| FolderbaseError::io(display, source))?
         .into_std_file();
-    PhysicalIdentity::from_file(&file).map_err(|source| FolderbaseError::io(display, source).into())
+    let physical_identity = PhysicalIdentity::from_file(&file)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    let birth_marker =
+        directory_birth_marker(&file).map_err(|source| FolderbaseError::io(display, source))?;
+    Ok(retained_directory_continuity_sha256(
+        physical_identity,
+        birth_marker,
+    ))
+}
+
+fn current_root_continuity_sha256(root: &Path) -> Result<String, FolderScopeEvidenceError> {
+    let current = FolderbaseState::open_existing(root)?;
+    let directory = current.clone_root_capability()?;
+    retained_directory_instance_sha256(&directory, root)
+}
+
+fn retained_directory_continuity_sha256(
+    physical_identity: PhysicalIdentity,
+    birth_marker: DirectoryBirthMarker,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-folder-scope-retained-directory-continuity-v1\0");
+    digest_field(&mut digest, physical_identity.stable_sha256().as_bytes());
+    match birth_marker {
+        DirectoryBirthMarker::Unix {
+            seconds,
+            nanoseconds,
+        } => {
+            digest_field(&mut digest, b"unix-birth-time-v1");
+            digest.update(seconds.to_be_bytes());
+            digest.update(nanoseconds.to_be_bytes());
+        }
+        DirectoryBirthMarker::Windows { creation_ticks } => {
+            digest_field(&mut digest, b"windows-creation-time-v1");
+            digest.update(creation_ticks.to_be_bytes());
+        }
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(target_os = "macos")]
+fn directory_birth_marker(file: &File) -> io::Result<DirectoryBirthMarker> {
+    use std::os::macos::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    let seconds = metadata.st_birthtime();
+    let nanoseconds = metadata.st_birthtime_nsec();
+    let nanoseconds = u32::try_from(nanoseconds).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory birth time has invalid nanoseconds",
+        )
+    })?;
+    if seconds == 0 && nanoseconds == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the filesystem does not expose directory birth time",
+        ));
+    }
+    Ok(DirectoryBirthMarker::Unix {
+        seconds,
+        nanoseconds,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn directory_birth_marker(file: &File) -> io::Result<DirectoryBirthMarker> {
+    use std::{mem::MaybeUninit, os::fd::AsRawFd};
+
+    let mut information = MaybeUninit::<libc::statx>::zeroed();
+    let empty_path = b"\0";
+    let result = unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            empty_path.as_ptr().cast(),
+            libc::AT_EMPTY_PATH | libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_BTIME,
+            information.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let information = unsafe { information.assume_init() };
+    if information.stx_mask & libc::STATX_BTIME == 0
+        || (information.stx_btime.tv_sec == 0 && information.stx_btime.tv_nsec == 0)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the filesystem does not expose directory birth time",
+        ));
+    }
+    Ok(DirectoryBirthMarker::Unix {
+        seconds: information.stx_btime.tv_sec,
+        nanoseconds: information.stx_btime.tv_nsec,
+    })
+}
+
+#[cfg(windows)]
+fn directory_birth_marker(file: &File) -> io::Result<DirectoryBirthMarker> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx},
+    };
+
+    let mut information = FILE_BASIC_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            (&raw mut information).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if information.CreationTime == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the filesystem does not expose directory creation time",
+        ));
+    }
+    Ok(DirectoryBirthMarker::Windows {
+        creation_ticks: information.CreationTime,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn directory_birth_marker(_file: &File) -> io::Result<DirectoryBirthMarker> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "directory birth evidence is unavailable on this platform",
+    ))
 }
 
 fn open_directory_beneath(
@@ -893,6 +1249,7 @@ fn verify_attestation(
 fn binding_proof(
     folderbase_id: &str,
     root_instance_sha256: &str,
+    root_continuity_sha256: &str,
     selected_instance_sha256: &str,
     binding_nonce: &str,
 ) -> String {
@@ -900,6 +1257,7 @@ fn binding_proof(
     digest.update(b"folderbase-folder-scope-binding-v1\0");
     digest_field(&mut digest, folderbase_id.as_bytes());
     digest_field(&mut digest, root_instance_sha256.as_bytes());
+    digest_field(&mut digest, root_continuity_sha256.as_bytes());
     digest_field(&mut digest, selected_instance_sha256.as_bytes());
     digest_field(&mut digest, binding_nonce.as_bytes());
     format!("fb_scope_binding_v1_{:x}", digest.finalize())
@@ -907,9 +1265,11 @@ fn binding_proof(
 
 fn observation_sha256(
     attestation: &FolderbaseRootAttestation,
+    root_continuity_sha256: &str,
     selected_path: &str,
     selected_instance_sha256: &str,
     local_head_sha256: Option<&str>,
+    inventory_sha256: &str,
     nested_boundary_bindings: &[NestedBoundaryBinding],
 ) -> String {
     let mut digest = Sha256::new();
@@ -919,6 +1279,7 @@ fn observation_sha256(
         attestation.protocol_version.as_str(),
         attestation.manifest_sha256.as_str(),
         attestation.root_instance_sha256.as_str(),
+        root_continuity_sha256,
         selected_path,
         selected_instance_sha256,
     ] {
@@ -928,6 +1289,7 @@ fn observation_sha256(
         &mut digest,
         local_head_sha256.unwrap_or_default().as_bytes(),
     );
+    digest_field(&mut digest, inventory_sha256.as_bytes());
     digest.update((nested_boundary_bindings.len() as u64).to_be_bytes());
     for binding in nested_boundary_bindings {
         for value in [
@@ -936,11 +1298,114 @@ fn observation_sha256(
             binding.protocol_version.as_str(),
             binding.manifest_sha256.as_str(),
             binding.root_instance_sha256.as_str(),
+            binding.root_continuity_sha256.as_str(),
         ] {
             digest_field(&mut digest, value.as_bytes());
         }
     }
     format!("{:x}", digest.finalize())
+}
+
+fn capture_plan_inventory_sha256(plan: &CapturePlan) -> Result<String, FolderScopeEvidenceError> {
+    let mut digest = Sha256::new();
+    digest.update(b"folderbase-folder-scope-visible-inventory-v1\0");
+    digest_field(&mut digest, plan.ignore_policy_sha256().as_bytes());
+
+    digest.update((plan.entries().len() as u64).to_be_bytes());
+    for entry in plan.entries() {
+        digest_field(&mut digest, entry.path().as_bytes());
+        digest_field(&mut digest, capture_entry_kind_wire(entry.kind()));
+        digest_option_u64(&mut digest, entry.bytes());
+        digest_option_bool(&mut digest, entry.executable());
+        digest_field(
+            &mut digest,
+            entry.symlink_target().unwrap_or_default().as_bytes(),
+        );
+        digest_serialized(
+            &mut digest,
+            entry.observed(),
+            "capture metadata fingerprint",
+        )?;
+        digest_serialized(
+            &mut digest,
+            entry.link_commitment(),
+            "capture link commitment",
+        )?;
+    }
+
+    digest.update((plan.exclusions().len() as u64).to_be_bytes());
+    for exclusion in plan.exclusions() {
+        digest_field(&mut digest, exclusion.path().as_bytes());
+        digest_field(&mut digest, capture_exclusion_kind_wire(exclusion.kind()));
+        digest_field(
+            &mut digest,
+            capture_exclusion_reason_wire(exclusion.reason()),
+        );
+    }
+
+    digest.update((plan.ignored_paths().len() as u64).to_be_bytes());
+    for ignored in plan.ignored_paths() {
+        digest_field(&mut digest, ignored.path().as_bytes());
+    }
+
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn capture_entry_kind_wire(kind: CaptureEntryKind) -> &'static [u8] {
+    match kind {
+        CaptureEntryKind::Directory => b"directory",
+        CaptureEntryKind::RegularFile => b"regular_file",
+        CaptureEntryKind::Symlink => b"symlink",
+    }
+}
+
+fn capture_exclusion_kind_wire(kind: CaptureExclusionKind) -> &'static [u8] {
+    match kind {
+        CaptureExclusionKind::NestedFolderbase => b"nested_folderbase",
+        CaptureExclusionKind::HardLink => b"hard_link",
+        CaptureExclusionKind::Fifo => b"fifo",
+        CaptureExclusionKind::Socket => b"socket",
+        CaptureExclusionKind::BlockDevice => b"block_device",
+        CaptureExclusionKind::CharacterDevice => b"character_device",
+        CaptureExclusionKind::OtherSpecial => b"other_special",
+    }
+}
+
+fn capture_exclusion_reason_wire(reason: CaptureExclusionReason) -> &'static [u8] {
+    match reason {
+        CaptureExclusionReason::NestedFolderbaseBoundary => b"nested_folderbase_boundary",
+        CaptureExclusionReason::UnsupportedV1 => b"unsupported_v1",
+    }
+}
+
+fn digest_option_u64(digest: &mut Sha256, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.to_be_bytes());
+        }
+        None => digest.update([0]),
+    }
+}
+
+fn digest_option_bool(digest: &mut Sha256, value: Option<bool>) {
+    match value {
+        Some(value) => digest.update([1, u8::from(value)]),
+        None => digest.update([0]),
+    }
+}
+
+fn digest_serialized<T: Serialize>(
+    digest: &mut Sha256,
+    value: &T,
+    label: &str,
+) -> Result<(), FolderScopeEvidenceError> {
+    let encoded =
+        serde_json::to_vec(value).map_err(|source| FolderScopeEvidenceError::InvalidJournal {
+            message: format!("{label} encoding failed: {source}"),
+        })?;
+    digest_field(digest, &encoded);
+    Ok(())
 }
 
 fn event_id(
@@ -1022,8 +1487,116 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{FolderScopeEvidenceError, observe_folder_scope_with_after_plan};
-    use crate::FolderbaseVersionStore;
+    use super::{
+        DirectoryBirthMarker, FolderScopeEvidenceError, JournalEvent, MAX_EVENT_BYTES,
+        MAX_JOURNAL_BYTES, MAX_NESTED_BOUNDARIES, NestedBoundaryBinding, checked_journal_bytes,
+        encode_bounded, observe_folder_scope_with_after_plan, relative_nested_boundary_bindings,
+        retained_directory_continuity_sha256,
+    };
+    use crate::{FolderbaseVersionStore, physical_identity::PhysicalIdentity};
+
+    #[test]
+    fn retained_directory_digest_rejects_reused_identity_with_a_new_birth_marker() {
+        let reused_identity = PhysicalIdentity::Unix {
+            device: 7,
+            inode: 11,
+        };
+
+        assert_ne!(
+            retained_directory_continuity_sha256(
+                reused_identity,
+                DirectoryBirthMarker::Unix {
+                    seconds: 100,
+                    nanoseconds: 200,
+                },
+            ),
+            retained_directory_continuity_sha256(
+                reused_identity,
+                DirectoryBirthMarker::Unix {
+                    seconds: 100,
+                    nanoseconds: 201,
+                },
+            ),
+            "a recycled inode must not inherit an earlier Folder Scope binding"
+        );
+    }
+
+    #[test]
+    fn advertised_nested_boundary_edge_fits_even_with_maximally_escaped_paths() {
+        let nested_boundaries = (0..MAX_NESTED_BOUNDARIES)
+            .map(|index| {
+                let prefix = format!("S/{index:03}/");
+                format!("{prefix}{}", "\u{1}".repeat(4096 - prefix.len()))
+            })
+            .collect::<Vec<_>>();
+        let nested_boundary_bindings = nested_boundaries
+            .iter()
+            .map(|path| NestedBoundaryBinding {
+                path: path.clone(),
+                folderbase_id: "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94790".to_owned(),
+                protocol_version: "0.5.0".to_owned(),
+                manifest_sha256: "a".repeat(64),
+                root_instance_sha256: "b".repeat(64),
+                root_continuity_sha256: "c".repeat(64),
+            })
+            .collect();
+        let event = JournalEvent {
+            format: "folderbase-folder-scope-journal-event-v1".to_owned(),
+            folderbase_id: "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94790".to_owned(),
+            root_instance_sha256: "d".repeat(64),
+            root_continuity_sha256: "e".repeat(64),
+            selected_path: "S".to_owned(),
+            selected_instance_sha256: "f".repeat(64),
+            binding_nonce: "folder_scope_binding_nonce_019fb97e-9c5f-73ca-9bb2-03dc80f94790"
+                .to_owned(),
+            local_head_sha256: Some("1".repeat(64)),
+            inventory_sha256: "3".repeat(64),
+            observation_sha256: "2".repeat(64),
+            event_id: format!("folder_scope_event_{}", "1".repeat(64)),
+            device_sequence: 1,
+            opaque_binding_proof: format!("fb_scope_binding_v1_{}", "2".repeat(64)),
+            nested_boundaries,
+            nested_boundary_bindings,
+            previous_event_sha256: None,
+        };
+
+        let encoded = encode_bounded(&event, MAX_EVENT_BYTES, "journal event")
+            .expect("every schema-valid boundary path fits at the advertised count edge");
+        assert!(encoded.len() as u64 <= MAX_EVENT_BYTES);
+        assert!(encoded.len() > 12 * 1024 * 1024);
+    }
+
+    #[test]
+    fn aggregate_journal_bytes_refuse_one_byte_beyond_the_advertised_bound() {
+        assert_eq!(
+            checked_journal_bytes(MAX_JOURNAL_BYTES - 1, 1).expect("exact edge"),
+            MAX_JOURNAL_BYTES
+        );
+        assert!(matches!(
+            checked_journal_bytes(MAX_JOURNAL_BYTES, 1),
+            Err(FolderScopeEvidenceError::InvalidJournal { .. })
+        ));
+    }
+
+    #[test]
+    fn nested_binding_rejects_same_manifest_and_recycled_root_id_with_new_birth_evidence() {
+        let binding = NestedBoundaryBinding {
+            path: "Client Work/Partner".to_owned(),
+            folderbase_id: "folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94790".to_owned(),
+            protocol_version: "0.5.0".to_owned(),
+            manifest_sha256: "a".repeat(64),
+            root_instance_sha256: "b".repeat(64),
+            root_continuity_sha256: "c".repeat(64),
+        };
+        let mut recycled = binding.clone();
+        recycled.root_continuity_sha256 = "d".repeat(64);
+
+        assert_ne!(
+            relative_nested_boundary_bindings("Client Work", &[binding]),
+            relative_nested_boundary_bindings("Client Work", &[recycled]),
+            "same manifest and recycled platform ID cannot hide a new nested root"
+        );
+    }
 
     #[test]
     fn local_head_advance_between_plans_fails_without_scope_journal_mutation() {
@@ -1056,6 +1629,42 @@ mod tests {
                 .join(".folderbase/local/folder-scope-evidence-v1")
                 .exists(),
             "stale observation must not create its journal"
+        );
+    }
+
+    #[test]
+    fn visible_inventory_change_between_plans_fails_without_scope_journal_mutation() {
+        let root = tempdir().expect("temporary Folderbase");
+        fs::create_dir(root.path().join(".folderbase")).expect("state directory");
+        fs::write(
+            root.path().join(".folderbase/manifest.json"),
+            br#"{"protocol_version":"0.1.0","folderbase":{"id":"folderbase_019fb97e-9c5f-73ca-9bb2-03dc80f94790"}}"#,
+        )
+        .expect("manifest");
+        fs::write(root.path().join(".folderbaseignore"), "").expect("ignore policy");
+        fs::write(root.path().join("FOLDERBASE.md"), "# Folderbase\n").expect("entry marker");
+        fs::create_dir(root.path().join("Project")).expect("selected folder");
+        fs::write(root.path().join("Project/current.md"), "current\n").expect("ordinary file");
+
+        let error = observe_folder_scope_with_after_plan(root.path(), Path::new("Project"), || {
+            fs::write(
+                root.path().join("Project/current.md"),
+                "changed ordinary content\n",
+            )
+            .expect("race ordinary file update");
+        })
+        .expect_err("mixed-inventory observation must fail");
+
+        assert!(matches!(
+            error,
+            FolderScopeEvidenceError::ObservationChanged
+        ));
+        assert!(
+            !root
+                .path()
+                .join(".folderbase/local/folder-scope-evidence-v1")
+                .exists(),
+            "stale inventory must not create its journal"
         );
     }
 }

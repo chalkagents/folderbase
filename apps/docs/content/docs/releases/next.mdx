@@ -7,6 +7,12 @@ The next release candidate adds the stable optional
 `folderbase.folder-scope-evidence@0.1.0` capability. It lets a supervised App
 or observer bind one exact selected ordinary folder to Core-owned local
 continuity before authenticated Cloud creates the first durable Folder Scope.
+It rejects recycled root, selected-folder, and nested-root filesystem
+identities with platform creation evidence, anchors committed journal
+continuity outside the event directory and to the root's creation continuity,
+binds each event to a stable metadata-only inventory commitment, and exposes at
+most 256 attested nested boundaries in one closed result. Private events retain
+a separate 64 MiB aggregate chain bound.
 
 This page describes unreleased work. Folderbase remains Beta; use the exact
 release page for immutable behavior and discover optional capabilities through

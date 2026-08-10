@@ -76,6 +76,8 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains("\"passed\":10"))
         .stdout(predicate::str::contains("\"failed\":0"));
 
+    let scope_passed = if cfg!(windows) { 10 } else { 11 };
+    let scope_not_applicable = if cfg!(windows) { 1 } else { 0 };
     Command::new("node")
         .arg(repository.join("protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs"))
         .arg("--implementation")
@@ -85,7 +87,12 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains(
             "\"capability\": \"folderbase.folder-scope-evidence@0.1.0\"",
         ))
-        .stdout(predicate::str::contains("\"passed\": 11"))
+        .stdout(predicate::str::contains(format!(
+            "\"passed\": {scope_passed}"
+        )))
+        .stdout(predicate::str::contains(format!(
+            "\"not_applicable\": {scope_not_applicable}"
+        )))
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")

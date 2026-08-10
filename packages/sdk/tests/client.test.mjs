@@ -139,6 +139,10 @@ test("folder scope adapter validates known fields while preserving additive data
     client().observeFolderScope("/tmp/folder", "Malformed Error"),
     FolderbaseMalformedOutputError,
   );
+  await assert.rejects(
+    client().observeFolderScope("/tmp/folder", "Too Many Boundaries"),
+    FolderbaseMalformedOutputError,
+  );
 });
 
 test("reconstruct uses the exact universal JSON surface and validates closed outcomes", async () => {

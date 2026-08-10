@@ -59,14 +59,26 @@ grant, file contents, or unrelated Object metadata.
 - A proven rename creates a new path event while preserving the opaque binding
   proof.
 - A Local Head advance creates new evidence for the current exact state.
-- Replacing the selected folder or root fails closed.
-- Adding or removing a nested Folderbase beneath the selection fails closed.
-- Symlink escape, unsupported nodes, stale capture, and journal tampering fail
-  without changing ordinary workspace files.
+- Replacing the selected folder or root fails closed. Core combines every held
+  authority-bearing directory ID with host creation evidence, so a recycled
+  inode or file ID does not inherit the prior binding or journal authority.
+- Adding, removing, or replacing a nested Folderbase beneath the selection
+  fails closed. Each nested root is bound to its own host creation evidence.
+- Symlink escape, unsupported nodes, stale capture, event tampering, and loss
+  of the separately anchored journal continuity fail without changing ordinary
+  workspace files.
+- Core compares deterministic commitments to the complete metadata-only
+  inventory before and after the locked observation. An ordinary entry change
+  fails with `folder_scope_observation_changed` and does not advance the
+  journal.
 
 Nested Folderbases remain independent governance boundaries. Their strictly
 sorted root-relative paths are included so an observer cannot accidentally
-publish across them.
+publish across them. One evidence record contains at most 256 boundaries;
+larger topologies return `folder_scope_limit_exceeded` before publication.
+Core also caps the complete private encoded event chain at 64 MiB, including a
+recoverable orphan, and enforces the bound before reading or appending further
+history.
 
 ## TypeScript adapter
 
@@ -96,7 +108,12 @@ The eleven black-box cases prove discovery, idempotent arbitrary-folder
 observation, non-genesis Local Head progress, stale-observation refusal, rename
 continuity, selected and root replacement refusal, attested nested-boundary
 identity, cross-platform escaping-link refusal, unsupported-node refusal,
-crash recovery, and the closed aggregate journal namespace.
+crash recovery, event tampering, deleted-journal refusal, and the closed
+aggregate journal namespace. Candidate commands run under a bounded
+whole-process-tree supervisor: Unix process groups and a Windows kill-on-close
+Job Object assigned before the candidate payload is released. On Windows the
+FIFO-specific case is reported as `not_applicable` rather than counted as a
+pass.
 
 See the public
 [`folder-scope-evidence.schema.json`](https://github.com/chalkagents/folderbase/blob/main/protocol/schemas/capabilities/folder-scope-evidence/0.1/folder-scope-evidence.schema.json),

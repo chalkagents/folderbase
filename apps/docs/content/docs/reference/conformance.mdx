@@ -138,9 +138,14 @@ implementation-neutral black-box cases. They prove exact arbitrary-folder
 observation, idempotent journal replay, non-genesis Local Head progress,
 stale-observation refusal, rename continuity, selected-folder and root
 replacement refusal, attested nested-boundary identity, unsafe invocation,
-cross-platform escaping-link and unsupported-node refusal, crash recovery, and
-the closed aggregate journal namespace. A passing report exits `0` with
-`passed: 11` and `failed: 0`.
+cross-platform escaping-link and unsupported-node refusal, crash recovery,
+event and journal-continuity tamper refusal, and the closed aggregate journal
+namespace. Candidate commands run under a bounded whole-process-tree
+supervisor: Unix uses a detached process group and Windows uses a kill-on-close
+Job Object assigned before the candidate payload is released. A passing
+macOS/Linux report exits `0` with `passed: 11`, `not_applicable: 0`, and
+`failed: 0`; Windows reports `passed: 10`, `not_applicable: 1`, and `failed: 0`
+because the FIFO-specific case has no portable Windows fixture.
 
 This stable capability remains optional. Passing its suite proves local
 filesystem continuity evidence only; it does not create a Folder Scope ID,

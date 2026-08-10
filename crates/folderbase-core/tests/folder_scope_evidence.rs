@@ -545,3 +545,109 @@ fn unexpected_journal_root_entries_fail_closed_instead_of_hiding_unbounded_work(
     );
     assert_eq!(original.device_sequence, 1);
 }
+
+#[test]
+fn deleting_a_committed_journal_directory_cannot_restart_scope_authority_at_genesis() {
+    let root = folderbase();
+    let original =
+        observe_folder_scope(root.path(), Path::new("Client Work")).expect("initial observation");
+    let journal = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1");
+    let removed = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1.removed-for-test");
+    fs::rename(&journal, &removed).expect("retain the removed journal outside its authority path");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("lost committed continuity must not become a new genesis");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::InvalidJournal { .. }
+    ));
+    assert!(!journal.exists(), "refusal must not recreate the journal");
+    assert_eq!(original.device_sequence, 1);
+}
+
+#[test]
+fn deleting_the_independent_authority_cannot_adopt_a_committed_journal() {
+    let root = folderbase();
+    observe_folder_scope(root.path(), Path::new("Client Work")).expect("initial observation");
+    let authority = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-authority-v1.json");
+    let removed = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-authority-v1.removed-for-test");
+    let head = root
+        .path()
+        .join(".folderbase/local/folder-scope-evidence-v1/head.json");
+    let original_head = fs::read(&head).expect("committed journal head");
+    fs::rename(&authority, &removed).expect("retain removed authority for the fixture");
+
+    let error = observe_folder_scope(root.path(), Path::new("Client Work"))
+        .expect_err("a committed journal without its authority must fail closed");
+
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::InvalidJournal { .. }
+    ));
+    assert!(
+        !authority.exists(),
+        "refusal must not replace the authority"
+    );
+    assert_eq!(fs::read(head).expect("journal head remains"), original_head);
+}
+
+#[test]
+fn nested_boundary_limit_accepts_the_advertised_edge_and_refuses_one_more() {
+    const ADVERTISED_BOUNDARY_LIMIT: usize = 256;
+
+    let accepted = folderbase();
+    for index in 0..ADVERTISED_BOUNDARY_LIMIT {
+        let manifest = accepted.path().join(format!(
+            "Client Work/Boundary {index:03}/.folderbase/manifest.json"
+        ));
+        fs::create_dir_all(manifest.parent().expect("nested state parent"))
+            .expect("nested state directory");
+        fs::write(
+            manifest,
+            nested_manifest(&format!("folderbase_{}", Uuid::now_v7())),
+        )
+        .expect("nested manifest");
+    }
+    let evidence = observe_folder_scope(accepted.path(), Path::new("Client Work"))
+        .expect("the advertised nested-boundary edge must fit its journal event");
+    assert_eq!(evidence.nested_boundaries.len(), ADVERTISED_BOUNDARY_LIMIT);
+
+    let rejected = folderbase();
+    for index in 0..=ADVERTISED_BOUNDARY_LIMIT {
+        let manifest = rejected.path().join(format!(
+            "Client Work/Boundary {index:03}/.folderbase/manifest.json"
+        ));
+        fs::create_dir_all(manifest.parent().expect("nested state parent"))
+            .expect("nested state directory");
+        fs::write(
+            manifest,
+            nested_manifest(&format!("folderbase_{}", Uuid::now_v7())),
+        )
+        .expect("nested manifest");
+    }
+
+    let error = observe_folder_scope(rejected.path(), Path::new("Client Work"))
+        .expect_err("one boundary beyond the public maximum must fail before publication");
+    assert!(matches!(
+        error,
+        FolderScopeEvidenceError::ScopeLimitExceeded {
+            maximum: ADVERTISED_BOUNDARY_LIMIT
+        }
+    ));
+    assert!(
+        !rejected
+            .path()
+            .join(".folderbase/local/folder-scope-evidence-v1")
+            .exists(),
+        "over-limit topology must not create a journal"
+    );
+}

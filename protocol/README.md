@@ -65,8 +65,8 @@ independent of the Folderbase application and hosted services.
   atomic apply, crash recovery, and replay.
 - `conformance/capabilities/folder-scope-evidence-0.1/` is the independent
   eleven-case suite for exact-folder observation, replay, Local Head races,
-  rename continuity, attested boundary isolation, crash recovery, and
-  replacement refusal.
+  rename continuity, attested boundary isolation, crash recovery, event and
+  journal-continuity tampering, and replacement refusal.
 - `conformance/capabilities/root-reconstruction-0.1/` is the independent
   twelve-case whole-root reconstruction suite.
 - `templates/0.2/project/template.json` is the built-in data-only

@@ -55,6 +55,7 @@ const FOLDER_SCOPE_ERROR_CODES = new Set([
   "selected_folder_replaced",
   "nested_boundary_changed",
   "folder_scope_observation_changed",
+  "folder_scope_limit_exceeded",
   "invalid_folder_scope_journal",
   "output_failed",
 ]);
@@ -321,7 +322,7 @@ function validateFolderScopeEvidence(document) {
     || !isBoundedInteger(document.device_sequence, 1, 16_384)
     || !FOLDER_SCOPE_BINDING_PATTERN.test(document.opaque_binding_proof)
     || !Array.isArray(document.nested_boundaries)
-    || document.nested_boundaries.length > 16_384) {
+    || document.nested_boundaries.length > 256) {
     malformedFolderScope("emitted invalid evidence");
   }
   const prefix = `${document.selected_path}/`;

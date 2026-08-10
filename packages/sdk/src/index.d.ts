@@ -120,6 +120,7 @@ export type FolderbaseFolderScopeErrorCode =
   | "selected_folder_replaced"
   | "nested_boundary_changed"
   | "folder_scope_observation_changed"
+  | "folder_scope_limit_exceeded"
   | "invalid_folder_scope_journal"
   | "output_failed";
 

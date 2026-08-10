@@ -51,6 +51,14 @@ if (mode === "folder-scope") {
       device_sequence: 1,
       opaque_binding_proof: `fb_scope_binding_v1_${"b".repeat(64)}`,
       nested_boundaries: [],
+      ...(selectedPath === "Too Many Boundaries"
+        ? {
+            nested_boundaries: Array.from(
+              { length: 257 },
+              (_, index) => `${selectedPath}/Boundary ${String(index).padStart(3, "0")}`,
+            ),
+          }
+        : {}),
       ...(selectedPath === "Malformed"
         ? { event_id: "folder_scope_event_invalid" }
         : {}),

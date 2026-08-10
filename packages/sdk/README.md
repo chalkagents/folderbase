@@ -88,6 +88,10 @@ derives continuity from a path, inode, Git remote, or Cloud identifier. This
 operation may advance Core's private device-local journal, so daemon 0.1
 deliberately does not proxy it.
 
+The closed v0.1 result carries at most 256 nested boundaries. Core reports
+`folder_scope_limit_exceeded` before publication when a selected topology is
+larger; the SDK preserves that typed error and all future additive fields.
+
 ## Root reconstruction
 
 The explicit reconstruction adapter uses the same universal CLI JSON surface

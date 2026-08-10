@@ -120,6 +120,8 @@ interpreting an inode. The exact implementation conformance schema remains
 closed. The result is local continuity evidence, not a share grant or Cloud
 credential. See the
 [Folder Scope evidence reference](/docs/reference/folder-scope-evidence).
+The result contains at most 256 nested boundaries; larger topologies preserve
+Core's typed `folder_scope_limit_exceeded` error.
 
 ## Reconstruct a retained Version into a new root
 

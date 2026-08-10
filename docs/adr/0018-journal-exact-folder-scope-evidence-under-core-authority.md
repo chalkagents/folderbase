@@ -73,10 +73,16 @@ Core derives the record while holding the exact root and selected folder with
 no-follow filesystem capabilities. The private binding combines the attested
 Folderbase identity, root-instance continuity, selected-folder physical
 continuity, and one Core-generated non-reusable journal nonce in a
-domain-separated digest. The nonce is created once per newly proven folder
-binding, recovered from an exact orphan event after a crash, and retained
-across proven renames. Raw platform identifiers, the nonce, and other binding
-ingredients never cross the public interface.
+domain-separated digest. Root, selected-folder, and nested-root continuity each
+combine the platform file ID with the retained directory handle's creation
+marker (birth time on macOS/Linux and creation time on Windows), so a recycled
+inode or file ID cannot inherit any earlier authority-bearing binding. A host
+filesystem that cannot expose this non-reuse evidence fails closed. The
+independent journal authority binds the root creation continuity as well as the
+genesis event. The nonce is created once per newly proven folder binding,
+recovered from an exact orphan event after a crash, and retained across proven
+renames. Raw platform identifiers, creation evidence, the nonce, and other
+binding ingredients never cross the public interface.
 
 Physical identity is only a local continuity hint bound to Core-owned journal
 state. It is not the public identity, is not portable, is not sufficient
@@ -86,19 +92,23 @@ folder. Replacing the selected folder, replacing or copying the root, or losing
 the retained continuity causes refusal rather than silent reallocation.
 
 The event identity binds the current selected relative path, current Local
-Head, opaque proof, and exact nested-boundary attestations. Repeating an
-identical observation returns the original event and sequence. A proven rename
-or Local Head advance creates a new event while retaining the same binding
-proof. An earlier A observation remains replayable after A → B → A without
-allocating a second identity for A.
+Head, a deterministic commitment to the complete metadata-only capture
+inventory, opaque proof, and exact nested-boundary attestations. Core requires
+the same inventory commitment before and after the locked observation; an
+ordinary entry changing between plans fails closed without journal mutation.
+Repeating an identical observation returns the original event and sequence. A
+proven rename, Local Head advance, or visible-inventory change creates a new
+event while retaining the same binding proof. An earlier A observation remains
+replayable after A → B → A without allocating a second identity for A.
 
 Nested boundaries are reported root-relative so an authorized observer can
 confine later work. Internally, Core retains each boundary's Folderbase ID,
-protocol version, manifest digest, and physical Root Instance digest and
-compares that attested identity relative to the selected folder. A proven
-rename rebases the public paths without claiming the boundary changed. Adding,
-removing, replacing at the same path, or crossing a nested Folderbase after the
-first observation fails closed.
+protocol version, manifest digest, physical Root Instance digest, and
+platform-backed root creation continuity, and compares that attested identity
+relative to the selected folder. A proven rename rebases the public paths
+without claiming the boundary changed. Adding, removing, replacing at the same
+path, or crossing a nested Folderbase after the first observation fails closed,
+including when a filesystem recycles the prior inode or file ID.
 
 ### Exact observation and durable private journal
 
@@ -114,7 +124,19 @@ portable Folderbase Version and not shared authorization. Events form one
 bounded, deterministic-after-allocation, append-only sequence with an
 independently durable head. Core validates the complete retained chain and
 exact journal root/event namespaces, rejects unknown entries and tampering,
-and limits the profile to 16,384 events and 16,384 nested boundaries.
+and limits the profile to 16,384 events and 256 nested boundaries. The private
+event bound is 16 MiB, which accommodates the advertised topology edge even
+when portable paths approach their public maximum. The complete encoded event
+chain, including a recoverable orphan, is additionally capped at 64 MiB and
+checked both while reading and before publication; the event-count limit can
+never multiply the per-event ceiling into unbounded memory or disk work.
+
+The sibling authority record at
+`.folderbase/local/folder-scope-evidence-authority-v1.json` binds the exact
+genesis event outside the journal directory. Once committed, a deleted or
+replaced journal directory cannot be interpreted as a fresh sequence. A
+missing authority beside a committed head, an authority without its genesis,
+or a mismatched genesis fails closed.
 
 A crash after writing the exact next event but before advancing the head is
 recoverable. Any other orphan, gap, duplicate, changed event, or unrecognized
@@ -154,11 +176,17 @@ selection, non-genesis Local Head progress, deterministic stale-observation
 refusal, rename continuity, selected-folder and root replacement, same-path
 nested-root replacement, nested-boundary topology isolation, unsafe paths,
 invalid invocation, cross-platform escaping links, unsupported nodes where the
-host exposes them, crash/restart recovery, and the exact aggregate journal
-namespace. Two reserved environment seams exist only to reproduce the Local
-Head race and event-publication crash inside disposable conformance fixtures;
-they grant no authority. The same public suite must pass on macOS, Linux, and
-Windows before the capability is advertised by a released Core artifact.
+host exposes them, crash/restart recovery, event tampering,
+journal-continuity loss, and the exact aggregate journal namespace.
+Unsupported-node coverage is explicitly `not_applicable` on hosts without a
+portable fixture rather than counted as a pass. Every candidate command runs
+under a bounded whole-process-tree supervisor: Unix uses a detached process
+group, while Windows assigns the blocked worker to a kill-on-close Job Object
+before releasing its candidate payload. Two reserved environment seams
+exist only to reproduce the Local Head race and event-publication crash inside
+disposable conformance fixtures; they grant no authority. The same public
+suite must pass on macOS, Linux, and Windows before the capability is
+advertised by a released Core artifact.
 
 Folderbase Platform issue `chalkagents/folderbase-platform#141` must consume a
 tagged Core release with this capability before it can close. The App must not
