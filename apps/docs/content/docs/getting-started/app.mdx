@@ -1,0 +1,238 @@
+---
+title: Folderbase App journey
+description: See the complete Better Finder, organization, Live Folder, transfer, and Changes experience before every backend is connected.
+---
+
+Folderbase App is a Better Finder for ordinary folders and Folderbases. It keeps
+normal files usable by Finder, Terminal, editors, and local agents while adding
+database identity, reviewable organization, versions, sharing, and Cloud
+workflows through exact public Core interfaces.
+
+> This page shows the first-version product target. Every section states whether
+> it is available in the packaged native App, implemented only in source, a
+> deterministic product preview, or planned. Screens do not imply a connected
+> Cloud or synchronization backend.
+
+## Current status
+
+| Label | Meaning |
+| --- | --- |
+| **Available in Alpha 6** | Works in the packaged Apple-silicon App against exact public Core 0.7.2. |
+| **Source development** | Implemented and tested in source but not claimed by the Alpha 6 package. |
+| **Product preview** | Complete deterministic UI journey with backend authority intentionally disconnected. |
+| **Planned** | Required for the first production version and not yet complete end to end. |
+
+## Install the current native alpha
+
+**Available in Alpha 6.** Download
+[`Folderbase-0.1.0-alpha.6-macos-arm64.zip`](https://github.com/chalkagents/folderbase-platform/releases/tag/app-v0.1.0-alpha.6)
+for Apple silicon on macOS 14 or later.
+
+Verify the archive before opening it:
+
+```text
+6e74596be6472a15b80e3aa6f0553e9899139dc073a69b0b3af5946b33ef2f84
+```
+
+This founder-review build is coherently ad-hoc signed, not Developer ID signed
+or notarized. After verifying and moving `Folderbase.app` to `/Applications`,
+remove quarantine from this App only:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Folderbase.app
+open /Applications/Folderbase.app
+```
+
+Do not disable Gatekeeper globally. A notarized universal installer and updater
+remain **Planned**.
+
+## One App, two navigation levels
+
+**Available in Alpha 6.** The persistent global sidebar owns Home, Recents,
+Favorites, familiar macOS locations, pinned Folderbases, All Folderbases, and
+Shared With Me. Opening a folder adds its contextual Zed-like Explorer and
+focused preview or editor canvas in the same window.
+
+The initials-only rail from older prototypes is retired. Home and the workspace
+are not separate apps.
+
+![Folderbase Home with global navigation](/app-preview/2026-08-16/screenshots/app-unified-navigation-home.jpg)
+
+![Recents in the same global sidebar](/app-preview/2026-08-16/screenshots/app-unified-navigation-recents.jpg)
+
+![An open folder with the contextual Zed-like Explorer](/app-preview/2026-08-16/screenshots/app-unified-navigation-workspace.jpg)
+
+## Open any ordinary folder
+
+**Available in Alpha 6.** Folderbase opens a selected local folder in place. It
+does not require an App-owned container or a special project format.
+
+- Git repositories and ordinary folders remain navigable trees.
+- Markdown, text, code, JSON, and YAML use native previews and the guarded text-save path.
+- PDFs, images, audio, video, Office files, CSVs, SQLite databases, archives, symlinks, packages, and unknown formats remain visible.
+- Large and opaque files are metadata-first until the user explicitly opens or previews them.
+- A sparse 10 GiB movie can be listed without loading its payload into memory.
+
+The same folder remains directly usable by Finder, Terminal, Zed, Codex, Claude
+Code, Cursor, and other local tools under the user's existing operating-system
+authority.
+
+## Use Finder operations
+
+**Available in Alpha 6.** The App supports daily local work without inventing a
+Cloud or synchronization contract:
+
+- create files and folders;
+- rename and duplicate;
+- multi-select, Copy, Cut, and Paste;
+- copy or move between explicitly opened roots;
+- drag to and from Finder;
+- inspect metadata and Finder tags; and
+- Move to Trash with recoverable App-session Undo.
+
+Every mutation starts from a freshly validated held root and refuses silent
+overwrite. App-session Undo is not a cross-device rollback claim.
+
+## Turn the folder into a Folderbase
+
+**Available in Alpha 6.** Initialization is additive. It adds canonical
+`.folderbase` protocol state without moving, renaming, copying, uploading, or
+deleting existing user files.
+
+Before approval the App shows the exact additions, nested Folderbase boundaries,
+reconstructable dependency trees, large and secret-shaped files, and the opaque
+Core plan digest. A template is optional starting guidance, not continuing
+layout authority.
+
+## Answer smart questions
+
+**Product preview.** Organization begins only after initialization and remains a
+separate workflow. Folderbase asks one consequential question at a time with
+clear options, a recommended choice when helpful, **Something else**, Back, and
+Ask me later.
+
+Answers refine an inert proposal. They never move files by themselves.
+
+![One-at-a-time smart organization question](/app-preview/2026-08-16/screenshots/01-smart-questions.png)
+
+## Review current and proposed trees
+
+**Product preview.** The review leads with linked Current and Proposed folder
+trees. It explains every grouping, cites the relevant folder evidence or answer,
+shows exact moves and renames, lists unresolved questions, and states the undo
+expectation. Normal organization contains no deletion by default.
+
+![Current and proposed folder trees](/app-preview/2026-08-16/screenshots/02-reorganization-proposal.png)
+
+Normal Organize and Reorganize update the same live root. Import, Create
+organized copy, cross-boundary adoption, and Split into Folderbases are
+separately named copy-first migration workflows.
+
+The stable public Core process adapter for in-place organization remains
+**Planned** and is tracked in
+[`chalkagents/folderbase#74`](https://github.com/chalkagents/folderbase/issues/74).
+
+## Apply recoverably
+
+**Source development plus public-Core release work.** The App binds Apply to the
+exact immutable approved digest. Core—not an App or agent—must own no-clobber
+mutation, the durable journal, restart recovery, verification, conflict
+preservation, stable Knowledge Object identity, and rollback.
+
+The App retains the returned receipt until the refreshed physical root is
+verified. It does not dismiss an ambiguous or conflicted result.
+
+## Share one Live Folder
+
+**Product preview; owner metadata flow exists in source development.** Sharing
+starts from one selected folder. The owner chooses a recipient, **Can View** or
+**Can Work**, independent **Can Materialize** capability, and Never, 7-day,
+30-day, or 90-day access.
+
+The link is a locator and invitation, never authority. An authenticated Recipient
+Grant authorizes the human, their Devices, and their sponsored Agent Sessions.
+Paths, nesting, and possession of the link do not grant access.
+
+![Live Folder sharing](/app-preview/2026-08-16/screenshots/03-live-folder-sharing.png)
+
+Production identity, deployed Cloud, and packaged sharing acceptance remain
+**Planned**.
+
+## Receive and materialize a Live Folder
+
+**Product preview.** A recipient pastes one Live Folder link, reviews the share
+name and permissions, and chooses an ordinary local destination.
+
+Transfer Activity is minimized by default so the folder remains usable while
+verified files arrive. The user can expand it to see item and byte progress,
+pause, retry, and recoverable failures. Folderbase reports **Local Complete** or
+**Agent-ready** only after every authorized file is present and integrity
+verified.
+
+![Minimized transfer activity](/app-preview/2026-08-16/screenshots/04-transfer-collapsed.png)
+
+![Expanded transfer activity](/app-preview/2026-08-16/screenshots/05-transfer-expanded.png)
+
+![Recoverable transfer failure](/app-preview/2026-08-16/screenshots/06-transfer-recoverable-failure.png)
+
+![Verified ordinary local folder](/app-preview/2026-08-16/screenshots/07-live-folder-ready.png)
+
+Immutable Core Projection Checkout, a durable Cloud session, and native
+materialization remain active dependencies. Alpha 6 does not download a Live
+Folder.
+
+## Work with local and Cloud agents
+
+**Local ordinary-folder access is available now. Cloud Agent materialization is
+planned.** Local agents use the same normal files. The packaged read-only Guide
+uses exact Chalk Harness 0.2.0 around OpenAI Codex `rust-v0.145.0`, stores a
+user-supplied API key through macOS Keychain, and requires no end-user Python or
+global Codex installation.
+
+A future Cloud Agent receives only one permission-scoped, verified ordinary
+folder inside its VM, works with normal tools, and returns an attributed,
+immutable Change Set. It never receives a broader grant than its sponsoring
+human.
+
+## Resolve competing versions
+
+**Product preview; exact local Change Set primitives and source inspection
+exist.** The Changes workspace follows a familiar Git worktree model without
+pretending every file has a text merge:
+
+- list changed files and status;
+- compare local, collaborator, and agent versions;
+- visually compare opaque formats such as DOCX;
+- merge compatible text changes;
+- accept or reject structural operations; and
+- publish one reviewed Change Set.
+
+Folderbase preserves each competing version until explicit resolution.
+
+![Changes workspace](/app-preview/2026-08-16/screenshots/08-changes-workspace.png)
+
+![Text version comparison](/app-preview/2026-08-16/screenshots/10-text-version-diff.png)
+
+![Resolved Change Set](/app-preview/2026-08-16/screenshots/11-resolved-change-set.png)
+
+## Watch the complete product-preview journeys
+
+- [Ordinary folder → Folderbase → Live Folder](/app-preview/2026-08-16/recordings/01-local-folder-lifecycle.webm)
+- [Live Folder link → verified local folder](/app-preview/2026-08-16/recordings/02-live-folder-receiver.webm)
+- [Competing versions → resolved Change Set](/app-preview/2026-08-16/recordings/03-conflict-resolution.webm)
+
+These deterministic recordings do not claim production filesystem mutation,
+Cloud authority, transfer, authentication, synchronization, or agent launch.
+
+## What remains for the first production version
+
+| Product area | Remaining proof |
+| --- | --- |
+| Core | Immutable Projection Checkout release and stable Reorganization process capability. |
+| App | Notarized universal installer, connected organization apply and materialization, sync bridge, Keep Local and Archive, Agent Setup, and three-device acceptance. |
+| Cloud | Production identity, deployed metadata, network, and object-store cell, verified publication, Live Folder sharing, backup, recovery, and conflict-preserving synchronization. |
+| Cloud Agents | Workspace materializer, trusted sidecar, VM runner, scoped secrets and network policy, streaming, Change Set return, teardown, and hosted acceptance. |
+
+The Platform repository keeps the
+[versioned implementation guide](https://github.com/chalkagents/folderbase-platform/blob/main/docs/user-guide/app-first-version.md),
+exact release evidence, and current product roadmap.
