@@ -5,6 +5,8 @@ description: Inspect, preview, initialize, and validate an ordinary folder witho
 
 This workflow turns an existing folder into a Folderbase. Inspection and dry-run steps are read-only.
 
+Prefer a graphical workflow? See the complete [Folderbase App journey](/docs/getting-started/app), including what works in the current native alpha and what remains a product preview.
+
 ## 1. Inspect the folder
 
 ```bash
@@ -51,4 +53,6 @@ The workspace view includes ordinary files while excluding protocol state, repos
 
 ## When the folder is disorganized
 
-Do not manually initialize multiple accidental boundaries. Core 0.7.2 includes an experimental [migration workflow](/docs/guides/migrate) that can analyze the folder and produce a reviewable structure plan. Its JSON is not part of CLI JSON v1 yet.
+Do not manually initialize multiple accidental boundaries. Normal Organize and Reorganize are same-root, review-first operations: an agent may analyze the folder and ask consequential questions, but only an explicitly approved, digest-bound plan may change the live root.
+
+Core 0.7.2 does not yet publish the stable process adapter for that App journey. Its experimental [migration workflow](/docs/guides/migrate) is a separately named copy-first tool for imports, organized copies, cross-boundary adoption, or splits. Its JSON is not part of CLI JSON v1 and it must not be presented as normal in-place organization.
