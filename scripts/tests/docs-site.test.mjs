@@ -79,6 +79,22 @@ test("Vercel Git deployments are enabled only for main", () => {
   assert.equal(runIgnore(undefined).status, 1, "manual deploy should build");
 });
 
+test("owner-sync guide preserves the generalized V0/V1 journey and honest delivery boundary", () => {
+  const guide = read(
+    "apps/docs/content/docs/guides/sync-agent-workspace.mdx",
+  );
+
+  assert.match(guide, /## What works today/u);
+  assert.match(guide, /## V0: Content & Stories/u);
+  assert.match(guide, /## V1: Full personal operating system/u);
+  assert.match(guide, /Device A\s+Folderbase Cloud\s+Device B/u);
+  assert.match(guide, /PR #192/u);
+  assert.match(guide, /deterministic in-memory Cloud adapter—not deployed Folderbase Cloud/u);
+  assert.match(guide, /Physical V0 Device A ↔ Device B pilot \| Not yet passed/u);
+  assert.doesNotMatch(guide, /\/Users\/jerel/u);
+  assert.doesNotMatch(guide, /Jerel-OS/u);
+});
+
 test("published docs describe the released native 0.6 contract", () => {
   const content = readFileSync(
     join(docsRoot, "content", "docs", "getting-started", "quickstart.mdx"),
