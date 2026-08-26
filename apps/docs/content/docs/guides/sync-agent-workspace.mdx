@@ -25,7 +25,11 @@ ordinary-folder experience:
 2. a deterministic owner-sync coordinator verifies required bytes before it
    advances one Remote Head; and
 3. a bounded private journal coalesces rapid changes, preserves Pause and retry
-   across restart, and replays interrupted work without publishing twice.
+   across restart, and replays interrupted work without publishing twice; and
+4. a privacy-safe disposable preflight has exercised a real generalized V0
+   folder containing 47 mixed ordinary files through initialization, capture,
+   stable-edit publication, and restart reconciliation without modifying the
+   source.
 
 The journal stores no changed paths, stays outside the Folderbase, and binds to
 the selected physical root. Opening the service schedules an authoritative scan
@@ -34,7 +38,11 @@ deterministic in-memory Cloud adapter—not deployed Folderbase Cloud.
 
 Current evidence is recorded in Platform
 [PR #190](https://github.com/chalkagents/folderbase-platform/pull/190) and
-[PR #192](https://github.com/chalkagents/folderbase-platform/pull/192).
+[PR #192](https://github.com/chalkagents/folderbase-platform/pull/192). The
+generalized existing-folder preflight is recorded in
+[PR #196](https://github.com/chalkagents/folderbase-platform/pull/196). It uses
+the deterministic in-memory Cloud adapter and is not the physical two-device
+pilot.
 
 ## The experience
 
@@ -149,6 +157,7 @@ mode. The scale gates are explicit:
 | Exact local capture, immutable transfer, and clean restore | Available in Core 0.7.2 |
 | Deterministic publish, Remote Head, and Device Cursor cell | Locally verified |
 | Restart-safe private journal, stable-write coalescing, retry, and Pause | Locally verified |
+| Generalized V0 existing-folder disposable preflight | Locally verified |
 | Native filesystem observer connected to the durable sync service | In development |
 | Production owner-only Cloud on GCP | In development |
 | Verified remote-to-local apply and object-scoped conflict handling | In development |
