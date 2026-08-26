@@ -14,11 +14,12 @@ commit, push, or per-file approval.
 > capture and restore, verified Cloud storage foundations, native restore, and
 > a restart-safe local owner-sync journal now exist. Production Cloud,
 > remote-to-local application, conflict handling, and the physical two-device
-> loop remain in development.
+> loop remain in development. The private GCP deployment architecture and
+> fail-closed operator gates are reviewed, but no hosted project is deployed.
 
 ## What works today
 
-The implementation has crossed three local checkpoints without changing the
+The implementation has crossed four local checkpoints without changing the
 ordinary-folder experience:
 
 1. exact Core captures stable ordinary files as immutable Folderbase Versions;
@@ -43,6 +44,31 @@ generalized existing-folder preflight is recorded in
 [PR #196](https://github.com/chalkagents/folderbase-platform/pull/196). It uses
 the deterministic in-memory Cloud adapter and is not the physical two-device
 pilot.
+
+## The hosted path is fixed before deployment
+
+The first owner-only Cloud cell now has a reviewed architecture rather than an
+open-ended provider choice. The narrow target is one dedicated GCP project in
+`asia-southeast1`: a stateless Cloud Run coordinator, private Cloud SQL
+PostgreSQL, native GCS immutable generations, a KMS-backed narrow Key Broker,
+and locked OpenTofu operations.
+
+The contract preserves the product behavior above:
+
+- exact verified bytes remain durable before Remote Head metadata advances;
+- Cloud SQL is private and reached through an authenticated TLS/IAM proxy;
+- each stored chunk uses the accepted authenticated managed-envelope profile;
+- direct short-lived chunk transfer does not expose reusable bucket authority;
+- provider retries and collection bind exact GCS generations; and
+- public evidence omits private resource identities while remaining verifiable
+  against an owner-private deployment receipt.
+
+No GCP project or billable resource is created by this documentation checkpoint.
+The deployment still requires explicit founder confirmation of identity,
+provider deletion, and infrastructure gates. The reviewed decision and
+RED/GREEN implementation slices are recorded in Platform
+[issue #197](https://github.com/chalkagents/folderbase-platform/issues/197) and
+[PR #198](https://github.com/chalkagents/folderbase-platform/pull/198).
 
 ## The experience
 
@@ -158,6 +184,7 @@ mode. The scale gates are explicit:
 | Deterministic publish, Remote Head, and Device Cursor cell | Locally verified |
 | Restart-safe private journal, stable-write coalescing, retry, and Pause | Locally verified |
 | Generalized V0 existing-folder disposable preflight | Locally verified |
+| Private GCP deployment architecture and fail-closed operator gates | Reviewed; deployment not started |
 | Native filesystem observer connected to the durable sync service | In development |
 | Production owner-only Cloud on GCP | In development |
 | Verified remote-to-local apply and object-scoped conflict handling | In development |
