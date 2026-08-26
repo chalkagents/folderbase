@@ -90,11 +90,18 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   assert.match(guide, /Device A\s+Folderbase Cloud\s+Device B/u);
   assert.match(guide, /PR #192/u);
   assert.match(guide, /PR #196/u);
+  assert.match(guide, /PR #198/u);
+  assert.match(guide, /issue #197/u);
   assert.match(
     guide,
     /Generalized V0 existing-folder disposable preflight \| Locally verified/u,
   );
+  assert.match(
+    guide,
+    /Private GCP deployment architecture and fail-closed operator gates \| Reviewed; deployment not started/u,
+  );
   assert.match(guide, /deterministic in-memory Cloud adapter—not deployed Folderbase Cloud/u);
+  assert.match(guide, /no hosted project is deployed/u);
   assert.match(guide, /Physical V0 Device A ↔ Device B pilot \| Not yet passed/u);
   assert.doesNotMatch(guide, /\/Users\/jerel/u);
   assert.doesNotMatch(guide, /Jerel-OS/u);
