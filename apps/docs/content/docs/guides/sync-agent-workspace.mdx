@@ -10,10 +10,31 @@ commit, push, or per-file approval.
 
 > **Development status:** this page describes the accepted owner-sync product
 > target and its two pilot fixtures. It is not a claim that Folderbase Core
-> 0.7.2 or the current native App provides end-to-end Cloud sync. Local Core
-> capture and restore, verified Cloud storage foundations, and native restore
-> exist today; the automatic two-device reconciliation loop remains in
-> development.
+> 0.7.2 or the current native App provides end-to-end Cloud sync. Exact local
+> capture and restore, verified Cloud storage foundations, native restore, and
+> a restart-safe local owner-sync journal now exist. Production Cloud,
+> remote-to-local application, conflict handling, and the physical two-device
+> loop remain in development.
+
+## What works today
+
+The implementation has crossed three local checkpoints without changing the
+ordinary-folder experience:
+
+1. exact Core captures stable ordinary files as immutable Folderbase Versions;
+2. a deterministic owner-sync coordinator verifies required bytes before it
+   advances one Remote Head; and
+3. a bounded private journal coalesces rapid changes, preserves Pause and retry
+   across restart, and replays interrupted work without publishing twice.
+
+The journal stores no changed paths, stays outside the Folderbase, and binds to
+the selected physical root. Opening the service schedules an authoritative scan
+before it can report **Up to date**. This is working local infrastructure over a
+deterministic in-memory Cloud adapter—not deployed Folderbase Cloud.
+
+Current evidence is recorded in Platform
+[PR #190](https://github.com/chalkagents/folderbase-platform/pull/190) and
+[PR #192](https://github.com/chalkagents/folderbase-platform/pull/192).
 
 ## The experience
 
@@ -62,6 +83,22 @@ The V0 proof uses two owner Macs as equal writers:
 - same-file divergence preserves both versions and appears as one scoped item
   that needs attention.
 
+The generalized V0 acceptance sequence is:
+
+```text
+Device A                 Folderbase Cloud                 Device B
+   │  stable local edit          │                            │
+   ├─ capture + verify ─────────▶│                            │
+   │                    publish Remote Head                  │
+   │                            ├─ verified change ─────────▶│
+   │                            │                    apply locally
+   │◀──────────── verified Device Cursor / Up to date ──────┤
+```
+
+If either process or network connection stops, local editing continues. The
+durable journal resumes the same work; it does not manufacture a second
+canonical publication from a lost response.
+
 ## V1: Full personal operating system
 
 The second pilot expands the exact same model to a large, mixed folder with
@@ -93,6 +130,30 @@ Git working trees require Git-aware reconstruction rather than naïvely syncing
 `node_modules`, build output, editor locks, and disposable agent worktrees can
 be excluded by reviewed policy. A large file can be inventoried by metadata
 before its bytes transfer, but **Keep Local** never silently evicts local work.
+
+V1 reuses the V0 engine rather than introducing a separate “large workspace”
+mode. The scale gates are explicit:
+
+- inventory hundreds of thousands of entries without reading large payloads;
+- synchronize valuable mixed files while excluding only proven reconstructable
+  dependency and build state;
+- resume large verified objects while small documents continue;
+- preserve active Git working state without live-mirroring `.git` internals;
+- treat nested Folderbases as independent sync/security boundaries; and
+- remain responsive during rapid agent refactors and disposable worktrees.
+
+## Delivery ladder
+
+| Checkpoint | Current state |
+| --- | --- |
+| Exact local capture, immutable transfer, and clean restore | Available in Core 0.7.2 |
+| Deterministic publish, Remote Head, and Device Cursor cell | Locally verified |
+| Restart-safe private journal, stable-write coalescing, retry, and Pause | Locally verified |
+| Native filesystem observer connected to the durable sync service | In development |
+| Production owner-only Cloud on GCP | In development |
+| Verified remote-to-local apply and object-scoped conflict handling | In development |
+| Physical V0 Device A ↔ Device B pilot | Not yet passed |
+| Physical V1 mixed personal-OS pilot | Follows V0 |
 
 ## How this differs from drive sync
 
