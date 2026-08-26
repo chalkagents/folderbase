@@ -1,0 +1,125 @@
+---
+title: Sync an agent workspace
+description: The planned local-first owner-sync journey, from a focused content folder to a large mixed personal operating system.
+---
+
+Folderbase Cloud is being designed for folders that humans, editors, and agents
+change directly. Local files remain ordinary files. After one explicit
+connection, stable changes synchronize automatically without requiring a
+commit, push, or per-file approval.
+
+> **Development status:** this page describes the accepted owner-sync product
+> target and its two pilot fixtures. It is not a claim that Folderbase Core
+> 0.7.2 or the current native App provides end-to-end Cloud sync. Local Core
+> capture and restore, verified Cloud storage foundations, and native restore
+> exist today; the automatic two-device reconciliation loop remains in
+> development.
+
+## The experience
+
+1. Open an existing Folderbase in the App.
+2. Choose **Connect to Cloud** once.
+3. Keep working from Finder, Terminal, an editor, or an agent harness.
+4. Folderbase coalesces rapid writes into stable checkpoints in the background.
+5. Verified bytes become durable before Cloud publishes the new Folderbase
+   Version as the one Remote Head.
+6. Another owner device receives the change and updates its ordinary local
+   folder automatically when the change does not conflict.
+
+Local writes never wait for the network. Closing the App window does not stop
+the restart-safe background sync service. The App reports states such as
+**Saving locally**, **Uploading**, **Applying changes**, **Needs attention**,
+and **Up to date** instead of claiming success from a placeholder or an event
+hint.
+
+## V0: Content & Stories
+
+The first pilot is deliberately focused: a normal folder of small content and
+planning files used actively by a person and their agents.
+
+```text
+Content & Stories/
+├── Drafts/
+│   ├── agent-workspaces.md
+│   └── founder-story.md
+├── Published/
+│   └── launch-note.md
+├── Research/
+│   ├── interview-notes.md
+│   └── sources.csv
+├── Assets/
+│   └── cover.svg
+└── editorial-calendar.json
+```
+
+The V0 proof uses two owner Macs as equal writers:
+
+- an edit on device A reaches device B without a manual push;
+- an edit on device B reaches device A through the same path;
+- a network interruption never blocks local work;
+- a restart resumes from durable state without duplicate publication;
+- different-file edits converge automatically; and
+- same-file divergence preserves both versions and appears as one scoped item
+  that needs attention.
+
+## V1: Full personal operating system
+
+The second pilot expands the exact same model to a large, mixed folder with
+active repositories and opaque binary formats.
+
+```text
+Personal OS/
+├── Content & Stories/       # the complete V0 Folderbase boundary
+├── Career/
+│   ├── profile.docx
+│   └── opportunities.xlsx
+├── Projects/
+│   ├── product-app/         # active Git working tree
+│   └── research-database.sqlite
+├── Media/
+│   ├── demo.mov             # large opaque bytes; metadata first
+│   └── screenshots/
+└── Operations/
+    └── planning.pdf
+```
+
+All regular file types remain supported as ordinary bytes: Markdown, source
+code, CSV, spreadsheets, PDFs, SQLite databases, images, audio, and video.
+Folderbase does not pretend every format can be text-merged. Conflicting opaque
+files keep both versions for explicit resolution.
+
+Git working trees require Git-aware reconstruction rather than naïvely syncing
+`.git` internals. Reconstructable dependency trees and transient files such as
+`node_modules`, build output, editor locks, and disposable agent worktrees can
+be excluded by reviewed policy. A large file can be inventoried by metadata
+before its bytes transfer, but **Keep Local** never silently evicts local work.
+
+## How this differs from drive sync
+
+| Folderbase owner sync | Generic drive sync |
+| --- | --- |
+| Ordinary local folder remains primary | Cloud placement can become primary |
+| Stable, verified Folderbase Versions | File-by-file timing is often implicit |
+| One explicit Remote Head with recoverable history | “Latest” may be inferred from arrival time |
+| Object-scoped conflicts preserve every side | Conflicted copies are path-oriented |
+| Agent and Git workspace behavior is deliberate | Agent workspaces look like generic files |
+| No silent Keep Local eviction | Automatic storage optimization may remove bytes |
+
+Folderbase still uses familiar sync-engine safety baselines: authenticated
+devices, encrypted transport, immutable object storage, bounded retries,
+checksums, recoverable deletions, retention policy, audit records, and explicit
+per-folder sharing. Humans and agents remain first-class participants, but an
+ordinary local CLI agent is not interrupted by a second Folderbase permission
+prompt after the operating system has already granted folder access.
+
+## What follows the owner-sync MVP
+
+The two-device private owner-sync pilot is the trust gate. After it passes, the
+same verified foundation can add scoped Live Folder sharing, recipient
+materialization, a third owner device, Cloud Agent workspaces, optional Archive,
+and File Provider integration. Those later surfaces must not weaken the local
+folder or create a second synchronization authority.
+
+For the currently released local workflow, start with the
+[five-minute quickstart](/docs/getting-started/quickstart) and
+[capture local versions](/docs/guides/versioning).
