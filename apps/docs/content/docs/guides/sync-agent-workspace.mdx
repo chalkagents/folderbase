@@ -12,10 +12,12 @@ commit, push, or per-file approval.
 > target and its two pilot fixtures. It is not a claim that Folderbase Core
 > 0.7.2 or the current native App provides end-to-end Cloud sync. Exact local
 > capture and restore, verified Cloud storage foundations, native restore, and
-> a restart-safe local owner-sync journal now exist. Production Cloud,
+> a restart-safe local owner-sync journal now exist. A dedicated private GCP
+> project now contains only the reviewed bootstrap boundary: the Storage API
+> binding and one empty protected regional state bucket. Production Cloud,
 > remote-to-local application, conflict handling, and the physical two-device
-> loop remain in development. The private GCP deployment architecture and
-> fail-closed operator gates are reviewed, but no hosted project is deployed.
+> loop remain in development. No sync data plane, database, coordinator, VM, or
+> App connection is deployed yet.
 
 ## What works today
 
@@ -63,12 +65,21 @@ The contract preserves the product behavior above:
 - public evidence omits private resource identities while remaining verifiable
   against an owner-private deployment receipt.
 
-No GCP project or billable resource is created by this documentation checkpoint.
-The deployment still requires explicit founder confirmation of identity,
-provider deletion, and infrastructure gates. The reviewed decision and
-RED/GREEN implementation slices are recorded in Platform
+The bootstrap is now live in the dedicated private pilot project. One exact
+reviewed OpenTofu plan created only the Storage API binding and one empty
+regional Standard state bucket with uniform access, public-access prevention,
+Object Versioning, and seven-day soft deletion. Provider-read-only status and
+exact-revision conformance re-attest the reviewed plan, private state, live
+bucket policy, and empty live/noncurrent/soft-deleted object inventories. The
+USD 25 monthly budget is an alerts-only guardrail—not a hard spending cap—and
+no Cloud SQL, Cloud Run, VM, VPC, data bucket, KMS key, or standing compute has
+been deployed.
+
+The main cell remains gated until the native GCS and private Cloud SQL paths
+pass their RED/GREEN contracts. The reviewed decision, public commitment,
+bootstrap receipt, and implementation slices are recorded in Platform
 [issue #197](https://github.com/chalkagents/folderbase-platform/issues/197) and
-[PR #198](https://github.com/chalkagents/folderbase-platform/pull/198).
+[PR #200](https://github.com/chalkagents/folderbase-platform/pull/200).
 
 ## The experience
 
@@ -184,7 +195,8 @@ mode. The scale gates are explicit:
 | Deterministic publish, Remote Head, and Device Cursor cell | Locally verified |
 | Restart-safe private journal, stable-write coalescing, retry, and Pause | Locally verified |
 | Generalized V0 existing-folder disposable preflight | Locally verified |
-| Private GCP deployment architecture and fail-closed operator gates | Reviewed; deployment not started |
+| Private GCP bootstrap project, protected empty state bucket, and exact-revision attestation | Live and independently verified |
+| Native GCS and private Cloud SQL data-plane composition | In development; not deployed |
 | Native filesystem observer connected to the durable sync service | In development |
 | Production owner-only Cloud on GCP | In development |
 | Verified remote-to-local apply and object-scoped conflict handling | In development |
