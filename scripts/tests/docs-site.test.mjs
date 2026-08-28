@@ -90,7 +90,7 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   assert.match(guide, /Device A\s+Folderbase Cloud\s+Device B/u);
   assert.match(guide, /PR #192/u);
   assert.match(guide, /PR #196/u);
-  assert.match(guide, /PR #198/u);
+  assert.match(guide, /PR #200/u);
   assert.match(guide, /issue #197/u);
   assert.match(
     guide,
@@ -98,10 +98,11 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   );
   assert.match(
     guide,
-    /Private GCP deployment architecture and fail-closed operator gates \| Reviewed; deployment not started/u,
+    /Private GCP bootstrap project, protected empty state bucket, and exact-revision attestation \| Live and independently verified/u,
   );
   assert.match(guide, /deterministic in-memory Cloud adapter—not deployed Folderbase Cloud/u);
-  assert.match(guide, /no hosted project is deployed/u);
+  assert.match(guide, /No sync data plane, database, coordinator, VM, or/u);
+  assert.match(guide, /no Cloud SQL, Cloud Run, VM, VPC, data bucket, KMS key, or standing compute/u);
   assert.match(guide, /Physical V0 Device A ↔ Device B pilot \| Not yet passed/u);
   assert.doesNotMatch(guide, /\/Users\/jerel/u);
   assert.doesNotMatch(guide, /Jerel-OS/u);
