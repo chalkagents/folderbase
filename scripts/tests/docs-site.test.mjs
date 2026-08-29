@@ -108,12 +108,16 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   );
   assert.match(
     guide,
-    /Private Cloud SQL transport, migration, backup, and restore conformance \| Live proof passed; cost-bearing resources removed/u,
+    /Private Cloud SQL transport, migration, backup, and restore behavioral checkpoint \| Narrow live proof passed; full release gate remains open/u,
   );
   assert.match(guide, /deterministic in-memory Cloud adapter—not deployed Folderbase Cloud/u);
-  assert.match(guide, /Provider conformance does not deploy the owner-sync data plane/u);
-  assert.match(guide, /all cost-bearing Cloud SQL test resources were removed/u);
-  assert.match(guide, /Free network\/API control-plane objects remain under an exact cleanup receipt/u);
+  assert.match(guide, /These proofs do not deploy the owner-sync data plane/u);
+  assert.match(guide, /All cost-bearing Cloud SQL test resources were removed/u);
+  assert.match(
+    guide,
+    /Twelve free network\/API control-plane objects remain under a revision-bound\s+cleanup receipt/u,
+  );
+  assert.match(guide, /behavioral sub-gate, not the full release gate/u);
   assert.match(guide, /Physical V0 Device A ↔ Device B pilot \| Not yet passed/u);
   assert.doesNotMatch(guide, /\/Users\/jerel/u);
   assert.doesNotMatch(guide, /Jerel-OS/u);
