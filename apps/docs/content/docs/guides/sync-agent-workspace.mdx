@@ -17,15 +17,21 @@ commit, push, or per-file approval.
 > have also passed in a dedicated private GCP project. The native
 > GCS/PostgreSQL authority composition and the reviewed Cloud SQL authority
 > install plan/apply/execution-recovery path now pass locally as well.
+> A generalized Content & Stories V0 folder has also passed a one-device
+> PostgreSQL/MinIO local-cell pilot through a descriptor-bound disposable copy:
+> exact managed bytes, Remote Head, Device Cursor, restart replay, and final
+> **Up to date** state were verified without modifying the source.
 > All cost-bearing Cloud SQL test resources were removed.
 > No live authority Job ran for the later local checkpoint.
-> These proofs do not deploy the owner-sync data plane. The main
-> coordinator, App connection, remote-to-local application, conflict handling,
-> and physical two-device loop remain in development.
+> These proofs do not deploy the owner-sync data plane. The native App can now
+> project exact local-service status and Pause/Resume, but it truthfully shows
+> **Not connected** when no verified service session exists. App connection,
+> remote-to-local application, conflict handling, the physical two-device loop,
+> and the full V1 folder remain in development.
 
 ## What works today
 
-The implementation has crossed six local checkpoints and two real-provider
+The implementation has crossed a sequence of local and real-provider
 checkpoints without changing the ordinary-folder experience:
 
 1. exact Core captures stable ordinary files as immutable Folderbase Versions;
@@ -33,10 +39,11 @@ checkpoints without changing the ordinary-folder experience:
    advances one Remote Head; and
 3. a bounded private journal coalesces rapid changes, preserves Pause and retry
    across restart, and replays interrupted work without publishing twice; and
-4. a privacy-safe disposable preflight has exercised a real generalized V0
-   folder containing 47 mixed ordinary files through initialization, capture,
-   stable-edit publication, and restart reconciliation without modifying the
-   source;
+4. a privacy-safe local-cell pilot exercised a real generalized V0 folder
+   containing 47 mixed ordinary files through initialization, exact managed-byte
+   transfer, stable-edit publication, Remote Head revision 1 to 2, Device Cursor
+   revision 2, restart reconciliation, and final settled **Up to date** state
+   without modifying the source;
 5. one disposable native GCS bucket passed exact-generation create, replay,
    conflict, range read, replacement, recovery, marker, and three-inventory
    behavior before returning to zero resources; and
@@ -49,12 +56,16 @@ checkpoints without changing the ordinary-folder experience:
 8. the owner-private operator locally reviews and applies the exact authority
    infrastructure transition, then proves one etag-fenced install execution,
    lost-response adoption without relaunch, and revision-bound cleanup against
-   fixtures. No live authority Job ran.
+   fixtures. No live authority Job ran; and
+9. the native App maps the exact restart-safe owner-sync status and Pause/Resume
+   seam while refusing to imply connection, transfer progress, or conflict when
+   those facts are unavailable.
 
 The journal stores no changed paths, stays outside the Folderbase, and binds to
 the selected physical root. Opening the service schedules an authoritative scan
-before it can report **Up to date**. This is working local infrastructure over a
-deterministic in-memory Cloud adapter—not deployed Folderbase Cloud.
+before it can report **Up to date**. The deterministic tests still use an
+in-memory adapter where appropriate; the generalized V0 pilot instead used the
+sealed PostgreSQL/MinIO local cell. Neither is deployed Folderbase Cloud.
 
 Current evidence is recorded in Platform
 [PR #190](https://github.com/chalkagents/folderbase-platform/pull/190) and
@@ -62,7 +73,13 @@ Current evidence is recorded in Platform
 generalized existing-folder preflight is recorded in
 [PR #196](https://github.com/chalkagents/folderbase-platform/pull/196). It uses
 the deterministic in-memory Cloud adapter and is not the physical two-device
-pilot. The native provider/database composition is recorded in
+pilot. The durable PostgreSQL/MinIO owner-sync composition is recorded in
+[PR #218](https://github.com/chalkagents/folderbase-platform/pull/218), the
+truthful native App status projection in
+[PR #219](https://github.com/chalkagents/folderbase-platform/pull/219), and the
+generalized one-device V0 local-cell pilot in
+[PR #220](https://github.com/chalkagents/folderbase-platform/pull/220). The
+earlier native provider/database composition is recorded in
 [PR #204](https://github.com/chalkagents/folderbase-platform/pull/204), and the
 latest local authority execution checkpoint is recorded in
 [PR #215](https://github.com/chalkagents/folderbase-platform/pull/215) under
@@ -172,7 +189,10 @@ Content & Stories/
 └── editorial-calendar.json
 ```
 
-The V0 proof uses two owner Macs as equal writers:
+The completed one-device local-cell checkpoint proves the engine can capture,
+publish, restart, edit, republish, and settle the generalized folder without
+touching its source. The final V0 product proof still uses two owner Macs as
+equal writers:
 
 - an edit on device A reaches device B without a manual push;
 - an edit on device B reaches device A through the same path;
@@ -197,6 +217,28 @@ Device A                 Folderbase Cloud                 Device B
 If either process or network connection stops, local editing continues. The
 durable journal resumes the same work; it does not manufacture a second
 canonical publication from a lost response.
+
+### One-device V0 checkpoint passed
+
+On August 29, 2026, the generalized folder passed twice through a native
+PostgreSQL 16.10 and exact MinIO local cell running on disposable storage. The
+pilot verified:
+
+- the descriptor-bound source byte and metadata snapshot was identical before
+  and after the run;
+- every managed candidate and referenced immutable byte matched exact Core
+  evidence;
+- Remote Head advanced from revision 1 to revision 2 after one stable edit;
+- Device Cursor reached revision 2;
+- restart returned `AlreadyCurrent` instead of publishing again;
+- the final local journal had equal observed and settled generations and
+  projected **Up to date**; and
+- the per-run PostgreSQL schema, object bucket, keys, marker, services, and
+  disposable pilot scratch were cleaned and attested absent.
+
+This proves the one-device local engine and durable provider composition. It
+does not yet prove live GCP, Device A to Device B application, bidirectional
+convergence, conflict handling, or the V1 full-folder scale boundary.
 
 ## V1: Full personal operating system
 
@@ -249,15 +291,18 @@ mode. The scale gates are explicit:
 | Deterministic publish, Remote Head, and Device Cursor cell | Locally verified |
 | Restart-safe private journal, stable-write coalescing, retry, and Pause | Locally verified |
 | Generalized V0 existing-folder disposable preflight | Locally verified |
+| Generalized V0 PostgreSQL/MinIO one-device local-cell pilot | Passed twice; source unchanged and disposable authority removed |
 | Private GCP bootstrap project, protected empty state bucket, and exact-revision attestation | Live and independently verified |
 | Native GCS exact-generation provider conformance | Live proof passed; disposable bucket removed |
 | Private Cloud SQL transport, migration, backup, and restore behavioral checkpoint | Narrow live proof passed; full release gate remains open |
 | Native GCS/PostgreSQL owner-sync composition | Locally verified; not deployed |
 | Cloud SQL authority install plan, apply, and execution recovery | Locally verified; no live authority Job ran |
 | Native filesystem observer connected to the durable sync service | In development |
+| Native App exact owner-sync status and Pause/Resume projection | Locally verified; production remains Not connected without a verified session |
 | Production owner-only Cloud on GCP | In development |
 | Verified remote-to-local apply and object-scoped conflict handling | In development |
 | Physical V0 Device A ↔ Device B pilot | Not yet passed |
+| V1 full personal OS with active repositories, mixed files, and large volume | Not yet passed |
 | Physical V1 mixed personal-OS pilot | Follows V0 |
 
 ## How this differs from drive sync

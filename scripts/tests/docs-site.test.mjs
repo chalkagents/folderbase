@@ -96,6 +96,9 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   assert.match(guide, /issue #207/u);
   assert.match(guide, /PR #204/u);
   assert.match(guide, /PR #215/u);
+  assert.match(guide, /PR #218/u);
+  assert.match(guide, /PR #219/u);
+  assert.match(guide, /PR #220/u);
   assert.match(guide, /issue #211/u);
   assert.match(
     guide,
@@ -121,9 +124,20 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
     guide,
     /Cloud SQL authority install plan, apply, and execution recovery \| Locally verified; no live authority Job ran/u,
   );
+  assert.match(
+    guide,
+    /Generalized V0 PostgreSQL\/MinIO one-device local-cell pilot \| Passed twice; source unchanged and disposable authority removed/u,
+  );
+  assert.match(
+    guide,
+    /Native App exact owner-sync status and Pause\/Resume projection \| Locally verified; production remains Not connected without a verified session/u,
+  );
   assert.match(guide, /exact\s+`Ready` Job and immutable Execution/u);
   assert.match(guide, /No live authority Job ran/u);
-  assert.match(guide, /deterministic in-memory Cloud adapter—not deployed Folderbase Cloud/u);
+  assert.match(guide, /sealed PostgreSQL\/MinIO local cell/u);
+  assert.match(guide, /Neither is deployed Folderbase Cloud/u);
+  assert.match(guide, /Remote Head advanced from revision 1 to revision 2/u);
+  assert.match(guide, /restart returned `AlreadyCurrent`/u);
   assert.match(guide, /These proofs do not deploy the owner-sync data plane/u);
   assert.match(guide, /All cost-bearing Cloud SQL test resources were removed/u);
   assert.match(
@@ -132,6 +146,10 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   );
   assert.match(guide, /behavioral sub-gate, not the full release gate/u);
   assert.match(guide, /Physical V0 Device A ↔ Device B pilot \| Not yet passed/u);
+  assert.match(
+    guide,
+    /V1 full personal OS with active repositories, mixed files, and large volume \| Not yet passed/u,
+  );
   assert.doesNotMatch(guide, /\/Users\/jerel/u);
   assert.doesNotMatch(guide, /Jerel-OS/u);
 });
