@@ -99,6 +99,7 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   assert.match(guide, /PR #218/u);
   assert.match(guide, /PR #219/u);
   assert.match(guide, /PR #220/u);
+  assert.match(guide, /PR #221/u);
   assert.match(guide, /issue #211/u);
   assert.match(
     guide,
@@ -130,6 +131,14 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   );
   assert.match(
     guide,
+    /Encrypted logical MacBook → hosted authority → clean Mac mini bootstrap \| Locally verified with direct ciphertext transfer; not live GCP or physical devices/u,
+  );
+  assert.match(
+    guide,
+    /Expiring create-only GCS V4 upload and exact-generation download capability shapes \| Locally verified against request-validating loopback fixtures; live IAM\/GCS remains open/u,
+  );
+  assert.match(
+    guide,
     /Native App exact owner-sync status and Pause\/Resume projection \| Locally verified; production remains Not connected without a verified session/u,
   );
   assert.match(guide, /exact\s+`Ready` Job and immutable Execution/u);
@@ -138,6 +147,10 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   assert.match(guide, /Neither is deployed Folderbase Cloud/u);
   assert.match(guide, /Remote Head advanced from revision 1 to revision 2/u);
   assert.match(guide, /restart returned `AlreadyCurrent`/u);
+  assert.match(guide, /Logical two-Device hosted bootstrap passed locally/u);
+  assert.match(guide, /committed upload with a lost response is adopted/u);
+  assert.match(guide, /no Device bearer credential reached\s+the provider/u);
+  assert.match(guide, /it is not that run/u);
   assert.match(guide, /These proofs do not deploy the owner-sync data plane/u);
   assert.match(guide, /All cost-bearing Cloud SQL test resources were removed/u);
   assert.match(
