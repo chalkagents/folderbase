@@ -14,15 +14,18 @@ commit, push, or per-file approval.
 > capture and restore, verified Cloud storage foundations, native restore, and
 > a restart-safe local owner-sync journal now exist. Disposable native GCS
 > provider conformance and a narrower private Cloud SQL behavioral checkpoint
-> have also passed in a dedicated private GCP project.
+> have also passed in a dedicated private GCP project. The native
+> GCS/PostgreSQL authority composition and the reviewed Cloud SQL authority
+> install plan/apply/execution-recovery path now pass locally as well.
 > All cost-bearing Cloud SQL test resources were removed.
+> No live authority Job ran for the later local checkpoint.
 > These proofs do not deploy the owner-sync data plane. The main
 > coordinator, App connection, remote-to-local application, conflict handling,
 > and physical two-device loop remain in development.
 
 ## What works today
 
-The implementation has crossed four local checkpoints and two real-provider
+The implementation has crossed six local checkpoints and two real-provider
 checkpoints without changing the ordinary-folder experience:
 
 1. exact Core captures stable ordinary files as immutable Folderbase Versions;
@@ -39,7 +42,14 @@ checkpoints without changing the ordinary-folder experience:
    behavior before returning to zero resources; and
 6. one disposable private Cloud SQL cell behaviorally passed loopback-only
    private-IP proxy transport, passwordless IAM authentication, schema
-   migration, portable collation, receipt-bound backup/clean restore, and replay.
+   migration, portable collation, receipt-bound backup/clean restore, and replay;
+7. the native GCS/PostgreSQL composition locally binds immutable provider
+   generations to PostgreSQL staging, managed promotion, reconstruction,
+   terminal collection, and backup/restore evidence; and
+8. the owner-private operator locally reviews and applies the exact authority
+   infrastructure transition, then proves one etag-fenced install execution,
+   lost-response adoption without relaunch, and revision-bound cleanup against
+   fixtures. No live authority Job ran.
 
 The journal stores no changed paths, stays outside the Folderbase, and binds to
 the selected physical root. Opening the service schedules an authoritative scan
@@ -52,7 +62,12 @@ Current evidence is recorded in Platform
 generalized existing-folder preflight is recorded in
 [PR #196](https://github.com/chalkagents/folderbase-platform/pull/196). It uses
 the deterministic in-memory Cloud adapter and is not the physical two-device
-pilot. Real provider evidence is recorded in Platform
+pilot. The native provider/database composition is recorded in
+[PR #204](https://github.com/chalkagents/folderbase-platform/pull/204), and the
+latest local authority execution checkpoint is recorded in
+[PR #215](https://github.com/chalkagents/folderbase-platform/pull/215) under
+[issue #211](https://github.com/chalkagents/folderbase-platform/issues/211).
+Real provider evidence is recorded in Platform
 [issue #205](https://github.com/chalkagents/folderbase-platform/issues/205) and
 [issue #207](https://github.com/chalkagents/folderbase-platform/issues/207).
 
@@ -94,6 +109,16 @@ run must still bind the image build to exact committed source, re-attest live
 provider state before the Job, compare every authoritative restored row and
 native-GCS receipt tuple, prove the distinct runtime/migrator install-to-steady
 authority, and finish exact provider-absence cleanup.
+
+The local continuation now reviews the deterministic runtime/migrator
+identities and install-configured Job, applies that exact authority
+infrastructure state with lost-response recovery, and validates an exact
+`Ready` Job and immutable Execution through the existing `sql-test` seam. It
+binds the complete terminal proof and refuses a partial authority phase,
+ambiguous execution history, changed provider inputs, or cleanup substitution.
+This is fixture-backed orchestration evidence only: no live authority Job ran,
+no SQL authority phase changed in GCP, and the later migrate, prepare, bootstrap
+removal, protected fence, and steady-state proofs remain open.
 
 Twelve free network/API control-plane objects remain under a revision-bound
 cleanup receipt while temporary serverless and deleted-producer references
@@ -227,7 +252,8 @@ mode. The scale gates are explicit:
 | Private GCP bootstrap project, protected empty state bucket, and exact-revision attestation | Live and independently verified |
 | Native GCS exact-generation provider conformance | Live proof passed; disposable bucket removed |
 | Private Cloud SQL transport, migration, backup, and restore behavioral checkpoint | Narrow live proof passed; full release gate remains open |
-| Native GCS/PostgreSQL main owner-sync composition | In development; not deployed |
+| Native GCS/PostgreSQL owner-sync composition | Locally verified; not deployed |
+| Cloud SQL authority install plan, apply, and execution recovery | Locally verified; no live authority Job ran |
 | Native filesystem observer connected to the durable sync service | In development |
 | Production owner-only Cloud on GCP | In development |
 | Verified remote-to-local apply and object-scoped conflict handling | In development |
