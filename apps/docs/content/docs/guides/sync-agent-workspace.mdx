@@ -12,17 +12,17 @@ commit, push, or per-file approval.
 > target and its two pilot fixtures. It is not a claim that Folderbase Core
 > 0.7.2 or the current native App provides end-to-end Cloud sync. Exact local
 > capture and restore, verified Cloud storage foundations, native restore, and
-> a restart-safe local owner-sync journal now exist. A dedicated private GCP
-> project now contains only the reviewed bootstrap boundary: the Storage API
-> binding and one empty protected regional state bucket. Production Cloud,
-> remote-to-local application, conflict handling, and the physical two-device
-> loop remain in development. No sync data plane, database, coordinator, VM, or
-> App connection is deployed yet.
+> a restart-safe local owner-sync journal now exist. Disposable native GCS and
+> private Cloud SQL provider conformance have also passed in a dedicated private
+> GCP project, and all cost-bearing Cloud SQL test resources were removed.
+> Provider conformance does not deploy the owner-sync data plane. The main
+> coordinator, App connection, remote-to-local application, conflict handling,
+> and physical two-device loop remain in development.
 
 ## What works today
 
-The implementation has crossed four local checkpoints without changing the
-ordinary-folder experience:
+The implementation has crossed four local checkpoints and two real-provider
+checkpoints without changing the ordinary-folder experience:
 
 1. exact Core captures stable ordinary files as immutable Folderbase Versions;
 2. a deterministic owner-sync coordinator verifies required bytes before it
@@ -32,7 +32,13 @@ ordinary-folder experience:
 4. a privacy-safe disposable preflight has exercised a real generalized V0
    folder containing 47 mixed ordinary files through initialization, capture,
    stable-edit publication, and restart reconciliation without modifying the
-   source.
+   source;
+5. one disposable native GCS bucket passed exact-generation create, replay,
+   conflict, range read, replacement, recovery, marker, and three-inventory
+   behavior before returning to zero resources; and
+6. one disposable private Cloud SQL cell passed loopback-only private-IP proxy
+   transport, passwordless IAM authentication, schema migration, portable
+   collation, receipt-bound backup/clean restore, and replay.
 
 The journal stores no changed paths, stays outside the Folderbase, and binds to
 the selected physical root. Opening the service schedules an authoritative scan
@@ -45,7 +51,9 @@ Current evidence is recorded in Platform
 generalized existing-folder preflight is recorded in
 [PR #196](https://github.com/chalkagents/folderbase-platform/pull/196). It uses
 the deterministic in-memory Cloud adapter and is not the physical two-device
-pilot.
+pilot. Real provider evidence is recorded in Platform
+[issue #205](https://github.com/chalkagents/folderbase-platform/issues/205) and
+[issue #207](https://github.com/chalkagents/folderbase-platform/issues/207).
 
 ## The hosted path is fixed before deployment
 
@@ -65,19 +73,33 @@ The contract preserves the product behavior above:
 - public evidence omits private resource identities while remaining verifiable
   against an owner-private deployment receipt.
 
-The bootstrap is now live in the dedicated private pilot project. One exact
-reviewed OpenTofu plan created only the Storage API binding and one empty
-regional Standard state bucket with uniform access, public-access prevention,
-Object Versioning, and seven-day soft deletion. Provider-read-only status and
-exact-revision conformance re-attest the reviewed plan, private state, live
-bucket policy, and empty live/noncurrent/soft-deleted object inventories. The
-USD 25 monthly budget is an alerts-only guardrail—not a hard spending cap—and
-no Cloud SQL, Cloud Run, VM, VPC, data bucket, KMS key, or standing compute has
-been deployed.
+The bootstrap remains live in the dedicated private pilot project. Its reviewed
+boundary contains the Storage API binding and one empty regional Standard state
+bucket with uniform access, public-access prevention, Object Versioning, and
+seven-day soft deletion. Provider-read-only status and exact-revision
+conformance re-attest the reviewed plan, private state, live bucket policy, and
+empty live/noncurrent/soft-deleted object inventories.
 
-The main cell remains gated until the native GCS and private Cloud SQL paths
-pass their RED/GREEN contracts. The reviewed decision, public commitment,
-bootstrap receipt, and implementation slices are recorded in Platform
+Two disposable provider proofs have now passed beyond that bootstrap:
+
+- native GCS exact-generation behavior passed against one temporary data bucket,
+  which was proven empty and removed; and
+- private Cloud SQL transport, migration, collation, backup, clean restore, and
+  replay passed through one bounded Cloud Run Job. The database, Job and
+  executions, temporary identity, and private images were removed.
+
+Free network/API control-plane objects remain under an exact cleanup receipt
+while temporary serverless and deleted-producer references expire. The cleanup
+can only delete that reviewed remainder. The USD 25 monthly
+budget remains an alerts-only guardrail—not a hard spending cap—and no Cloud SQL,
+Cloud Run Job, VM, GKE, Artifact Registry image, KMS key, or other cost-bearing
+test resource remains.
+
+The main cell remains gated on zero-state network cleanup, the reviewed
+install-to-steady runtime/migrator authority split, managed-envelope readiness,
+and hosted recovery—not on another provider proof. The reviewed decision,
+public commitment, bootstrap receipt, and implementation slices are recorded in
+Platform
 [issue #197](https://github.com/chalkagents/folderbase-platform/issues/197) and
 [PR #200](https://github.com/chalkagents/folderbase-platform/pull/200).
 
@@ -196,7 +218,9 @@ mode. The scale gates are explicit:
 | Restart-safe private journal, stable-write coalescing, retry, and Pause | Locally verified |
 | Generalized V0 existing-folder disposable preflight | Locally verified |
 | Private GCP bootstrap project, protected empty state bucket, and exact-revision attestation | Live and independently verified |
-| Native GCS and private Cloud SQL data-plane composition | In development; not deployed |
+| Native GCS exact-generation provider conformance | Live proof passed; disposable bucket removed |
+| Private Cloud SQL transport, migration, backup, and restore conformance | Live proof passed; cost-bearing resources removed |
+| Native GCS/PostgreSQL main owner-sync composition | In development; not deployed |
 | Native filesystem observer connected to the durable sync service | In development |
 | Production owner-only Cloud on GCP | In development |
 | Verified remote-to-local apply and object-scoped conflict handling | In development |
