@@ -94,6 +94,9 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
   assert.match(guide, /issue #197/u);
   assert.match(guide, /issue #205/u);
   assert.match(guide, /issue #207/u);
+  assert.match(guide, /PR #204/u);
+  assert.match(guide, /PR #215/u);
+  assert.match(guide, /issue #211/u);
   assert.match(
     guide,
     /Generalized V0 existing-folder disposable preflight \| Locally verified/u,
@@ -110,6 +113,16 @@ test("owner-sync guide preserves the generalized V0/V1 journey and honest delive
     guide,
     /Private Cloud SQL transport, migration, backup, and restore behavioral checkpoint \| Narrow live proof passed; full release gate remains open/u,
   );
+  assert.match(
+    guide,
+    /Native GCS\/PostgreSQL owner-sync composition \| Locally verified; not deployed/u,
+  );
+  assert.match(
+    guide,
+    /Cloud SQL authority install plan, apply, and execution recovery \| Locally verified; no live authority Job ran/u,
+  );
+  assert.match(guide, /exact\s+`Ready` Job and immutable Execution/u);
+  assert.match(guide, /No live authority Job ran/u);
   assert.match(guide, /deterministic in-memory Cloud adapter—not deployed Folderbase Cloud/u);
   assert.match(guide, /These proofs do not deploy the owner-sync data plane/u);
   assert.match(guide, /All cost-bearing Cloud SQL test resources were removed/u);
