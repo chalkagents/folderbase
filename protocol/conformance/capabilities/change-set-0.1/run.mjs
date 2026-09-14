@@ -297,6 +297,54 @@ function includeCheckoutOrdinary(path) {
   return path !== ".folderbase" && !path.startsWith(".folderbase/");
 }
 
+function includeInScope(path) {
+  return path === "shared" || path.startsWith("shared/");
+}
+
+async function movedRegularIdentities(root, envelope) {
+  const identities = [];
+  for (const delta of envelope.payload.deltas) {
+    if (delta.before?.kind !== "regular_file" || delta.after?.kind !== "regular_file" ||
+        delta.before.path === delta.after.path ||
+        delta.before.content_sha256 === delta.after.content_sha256) continue;
+    const before = resolveBeneath(root, delta.before.path);
+    const metadata = await lstat(before, { bigint: true }).catch(async (error) => {
+      if (error.code !== "ENOENT") throw error;
+      return lstat(resolveBeneath(root, delta.after.path), { bigint: true });
+    });
+    assert.ok(metadata.isFile(), "in-place crash fixture starts from an ordinary regular file");
+    identities.push({ delta, device: metadata.dev, inode: metadata.ino });
+  }
+  assert.ok(identities.length > 0, "in-place crash fixture includes a moved-and-edited regular file");
+  return identities;
+}
+
+async function assertInPlaceWriteBoundary(root, checkout, identities) {
+  for (const { delta, device, inode } of identities) {
+    const target = resolveBeneath(root, delta.after.path);
+    const metadata = await lstat(target, { bigint: true }).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    });
+    if (metadata === null || !metadata.isFile() || metadata.size > 1n ||
+        metadata.dev !== device || metadata.ino !== inode) continue;
+    await assert.rejects(lstat(resolveBeneath(root, delta.before.path)), { code: "ENOENT" });
+    if (metadata.size === 1n) {
+      const expected = await open(resolveBeneath(checkout, delta.after.path), "r");
+      try {
+        const prefix = Buffer.alloc(1);
+        const { bytesRead } = await expected.read(prefix, 0, 1, 0);
+        assert.equal(bytesRead, 1, "interrupted byte belongs to nonempty proposed content");
+        assert.deepEqual(await readFile(target), prefix, "interrupted write contains only the proposed first byte");
+      } finally {
+        await expected.close();
+      }
+    }
+    return;
+  }
+  assert.fail("in-place crash must preserve a moved file's identity and leave at most one byte");
+}
+
 function u32(parts, value) {
   const bytes = Buffer.alloc(4);
   bytes.writeUInt32BE(value);
@@ -637,6 +685,10 @@ async function runScenario(implementation, scenario, index) {
 
     let historyHeadSnapshot;
     for (const crashPoint of scenario.crash_sequence ?? []) {
+      const ordinaryBeforeCrash = await treeSnapshot(root, includeCheckoutOrdinary);
+      const movedIdentities = crashPoint === "in-place-write"
+        ? await movedRegularIdentities(root, envelope)
+        : [];
       const crashed = execute(
         implementation,
         ["change-set", "apply", root, staging, "--stdin", "--json"],
@@ -644,8 +696,34 @@ async function runScenario(implementation, scenario, index) {
         { FOLDERBASE_CHANGE_SET_CONFORMANCE_CRASH_AFTER: crashPoint },
       );
       assert.notEqual(crashed.status, 0, `conformance crash hook terminates at ${crashPoint}`);
-      if (crashPoint === "history-head") {
+      assert.deepEqual(
+        await treeSnapshot(root, includeOutOfScope),
+        outOfScopeBefore,
+        `crash at ${crashPoint} preserves every out-of-scope ordinary entry`,
+      );
+      if (crashPoint === "prepared-journal") {
+        assert.deepEqual(
+          await treeSnapshot(root, includeCheckoutOrdinary),
+          ordinaryBeforeCrash,
+          "prepared journal precedes every ordinary-path mutation",
+        );
+        // Recovery must rely on its durable prepared work, not a fresh retry
+        // against the original external staging after an unrelated error.
+        await rm(staging, { recursive: true, force: true });
+      } else if (crashPoint === "first-mutation") {
+        assert.notDeepEqual(
+          await treeSnapshot(root, includeInScope),
+          ordinaryBeforeCrash.filter(({ path }) => includeInScope(path)),
+          "first-mutation crash must follow a visible in-scope mutation",
+        );
+      } else if (crashPoint === "in-place-write") {
+        await assertInPlaceWriteBoundary(root, checkout, movedIdentities);
+      } else if (crashPoint === "history-head") {
+        await assertScenarioResults(root, scenario.expected.assertions);
+        await assertChangeSetHistory(root, scenario, envelope);
         historyHeadSnapshot = await immutableVersionSnapshot(root);
+      } else {
+        assert.fail(`unknown conformance crash point ${crashPoint}`);
       }
     }
 
