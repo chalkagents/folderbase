@@ -22,9 +22,8 @@ if (contract.kind !== "success") throw new Error("contract needs attention");
 
 const query = await folderbase.query("/absolute/workspace", {
   format: "folderbase-query-request-v1",
-  source: "live",
+  scope: { kind: "live" },
   filters: {},
-  order: [{ field: "path", direction: "ascending" }],
   page: { limit: 100 },
 });
 console.log(query.document.entries);
