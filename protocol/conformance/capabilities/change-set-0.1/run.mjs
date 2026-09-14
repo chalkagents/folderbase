@@ -684,6 +684,49 @@ async function runScenario(implementation, scenario, index) {
       versionsBeforeReplay,
       "idempotent replay installs no additional immutable Versions",
     );
+
+    if (scenario.follow_up_changes !== undefined) {
+      const followUpCheckout = join(owner, "follow-up-checkout");
+      const followUpStaging = join(owner, "follow-up-staging");
+      successJson(
+        implementation,
+        ["change-set", "checkout", root, followUpCheckout, "--stdin", "--json"],
+        `${JSON.stringify({ ...request, projection_id: `projection_019f0000-0000-7000-8001-${suffix}` })}\n`,
+        "checkoutResult",
+      );
+      const followUpReceipt = JSON.parse(
+        await readFile(join(followUpCheckout, ".folderbase", "checkout.json"), "utf8"),
+      );
+      for (const delta of envelope.payload.deltas.filter(({ after }) => after !== null)) {
+        const entry = followUpReceipt.entries.find(({ path }) => path === delta.after.path);
+        assert.equal(entry?.object_id, delta.object_id, "next session retains created Object identity");
+      }
+      await applyOperations(followUpCheckout, scenario.follow_up_changes);
+      const followUp = successJson(
+        implementation,
+        ["change-set", "propose", followUpCheckout, followUpStaging, "--json"],
+        "",
+        "changeSetEnvelope",
+      );
+      validateEnvelope(followUp);
+      const followUpInput = `${JSON.stringify(followUp)}\n`;
+      successJson(
+        implementation,
+        ["change-set", "assess", root, followUpStaging, "--stdin", "--json"],
+        followUpInput,
+        "changeSetAssessment",
+      );
+      const followedUp = successJson(
+        implementation,
+        ["change-set", "apply", root, followUpStaging, "--stdin", "--json"],
+        followUpInput,
+        "changeSetApplyResult",
+      );
+      assert.equal(followedUp.status, "applied");
+      await assertScenarioResults(root, scenario.follow_up_assertions);
+      await assertChangeSetHistory(root, scenario, followUp);
+      assert.deepEqual(await treeSnapshot(root, includeOutOfScope), outOfScopeBefore);
+    }
   } finally {
     await rm(owner, { force: true, recursive: true });
   }

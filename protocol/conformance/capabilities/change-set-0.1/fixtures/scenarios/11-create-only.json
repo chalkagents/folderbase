@@ -1,0 +1,23 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "create-only",
+  "covers": ["create", "created-object-identity", "second-session-continuity", "idempotent-replay"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/result.md", "content": "Agent-created result.\n" }
+  ],
+  "follow_up_changes": [
+    { "operation": "rename", "from": "shared/result.md", "to": "shared/final.md" },
+    { "operation": "write_utf8", "path": "shared/final.md", "content": "Second session continued the result.\n" }
+  ],
+  "follow_up_assertions": [
+    { "kind": "absent", "path": "shared/result.md" },
+    { "kind": "utf8", "path": "shared/final.md", "content": "Second session continued the result.\n" }
+  ],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "utf8", "path": "shared/result.md", "content": "Agent-created result.\n" },
+      { "kind": "utf8", "path": "shared/notes.md", "content": "base notes\n" }
+    ]
+  }
+}

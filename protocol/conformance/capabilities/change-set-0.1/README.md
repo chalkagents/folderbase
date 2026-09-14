@@ -1,6 +1,6 @@
 # Folderbase Change Set 0.1 conformance
 
-This dependency-free black-box suite specifies the unadvertised
+This dependency-free black-box suite specifies the stable optional
 `folderbase.change-set@0.1.0` capability through only a candidate process,
 standard streams, ordinary temporary folders, and provider-neutral staging.
 It never imports Rust or uses Folderbase Core as its expected-value oracle.
@@ -14,10 +14,10 @@ node protocol/conformance/capabilities/change-set-0.1/run.mjs \
 
 Exit 0 with `failed: 0` is the complete capability claim. Exit 1 is a bounded
 report with behavioral failures. Bad runner arguments or runner failures exit
-2. The released executable is expected to be RED until the runtime capability
-is implemented; the package is intentionally absent from both registries.
+2. The capability is advertised through the public registry. A candidate must
+pass every scenario, including successful creation, to satisfy this suite.
 
-The ten public scenarios cover:
+The thirteen public scenarios cover:
 
 - clean scoped work with concurrent private sibling activity;
 - one move-plus-edit delta;
@@ -26,8 +26,10 @@ The ten public scenarios cover:
 - stable-identity rename;
 - Unicode/full-case-fold aliases;
 - nested Folderbase boundaries;
-- a missing trusted projection base; and
-- crash-after-prepare, restart recovery, and idempotent replay.
+- a missing trusted projection base;
+- created-file and created-directory identity, including binary and empty files;
+- combined creation, modification, move, and deletion; and
+- crash-after-prepare, restart recovery, and idempotent replay for edits and creations.
 
 Every checkout is restricted to `shared/**` while a marker under `private/**`
 proves that result, receipt, proposal, assessment, attention, and apply output do
@@ -48,14 +50,14 @@ publish once; a third identical apply must return `already_applied` without
 creating more history.
 
 The self-tests verify the public schema, fixed Change Set digest vector,
-scenario inventory, legacy-prototype non-reinterpretation, absent advertisement,
+scenario inventory, legacy-prototype non-reinterpretation, stable advertisement,
 and the expected RED report:
 
 ```sh
 node --test protocol/conformance/capabilities/change-set-0.1/suite.test.mjs
 ```
 
-The runner enforces a 30-second and 8 MiB bound for each candidate command.
+The runner enforces a 90-second and 8 MiB bound for each candidate command.
 Hosts may tighten or raise those values only inside the closed ranges through
 `FOLDERBASE_CHANGE_SET_CONFORMANCE_COMMAND_TIMEOUT_MS` and
 `FOLDERBASE_CHANGE_SET_CONFORMANCE_COMMAND_MAX_BYTES`. POSIX uses a fresh

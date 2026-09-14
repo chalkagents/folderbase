@@ -186,7 +186,7 @@ test("fixture inventory covers every accepted Change Set risk before runtime exi
       .sort()
       .map(async (name) => JSON.parse(await readFile(join(fixtures, "scenarios", name), "utf8"))),
   );
-  assert.equal(scenarios.length, 10);
+  assert.equal(scenarios.length, 13);
   const covered = new Set(scenarios.flatMap(({ covers }) => covers));
   for (const required of [
     "clean",
@@ -209,10 +209,15 @@ test("fixture inventory covers every accepted Change Set risk before runtime exi
     "crash-after-history-head",
     "restart-recovery",
     "idempotent-replay",
+    "create",
+    "created-object-identity",
+    "created-directory-identity",
+    "delete",
+    "mixed-deltas",
   ]) assert.ok(covered.has(required), required);
 });
 
-test("missing capability produces one complete ten-case RED report", () => {
+test("missing capability produces one complete thirteen-case RED report", () => {
   const candidate = join(fixtures, "missing-change-set-candidate.mjs");
   const result = spawnSync(
     process.execPath,
@@ -223,8 +228,8 @@ test("missing capability produces one complete ten-case RED report", () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.format, "folderbase-capability-suite-report-v1");
   assert.equal(report.capability, "folderbase.change-set@0.1.0");
-  assert.equal(report.total, 10);
+  assert.equal(report.total, 13);
   assert.equal(report.passed, 0);
-  assert.equal(report.failed, 10);
+  assert.equal(report.failed, 13);
   assert.ok(report.cases.every(({ status }) => status === "failed"));
 });

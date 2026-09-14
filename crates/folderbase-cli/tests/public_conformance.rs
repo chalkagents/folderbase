@@ -61,7 +61,7 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains(
             "\"capability\":\"folderbase.change-set@0.1.0\"",
         ))
-        .stdout(predicate::str::contains("\"passed\":10"))
+        .stdout(predicate::str::contains("\"passed\":13"))
         .stdout(predicate::str::contains("\"failed\":0"));
 
     Command::new("node")

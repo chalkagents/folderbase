@@ -1,0 +1,16 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "create-crash-restart",
+  "covers": ["create", "created-object-identity", "crash-after-prepare", "crash-mid-publication", "crash-after-history-head", "restart-recovery", "idempotent-replay"],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/result.md", "content": "created through interruption\n" }
+  ],
+  "crash_sequence": ["prepared-journal", "first-mutation", "history-head"],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "utf8", "path": "shared/result.md", "content": "created through interruption\n" },
+      { "kind": "utf8", "path": "shared/notes.md", "content": "base notes\n" }
+    ]
+  }
+}

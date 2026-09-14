@@ -471,6 +471,22 @@ impl FolderbaseVersionStore {
         self.seal_capture_with_hook(plan, |_| {})
     }
 
+    /// Retain the identities Core already assigned to newly created proposal
+    /// Objects when the published workspace enters durable capture.
+    pub(crate) fn seal_change_set_capture(
+        &self,
+        plan: CapturePlan,
+        deltas: &[ObjectDelta],
+    ) -> Result<SealedCapture, FolderbaseCaptureError> {
+        self.seal_capture_with_change_set_identities(
+            plan,
+            |_| {},
+            MAX_CAPTURE_TRANSACTION_BYTES,
+            MAX_ENCODED_VERSION_BYTES,
+            deltas,
+        )
+    }
+
     /// Read one complete append-only Folderbase Version and verify every
     /// referenced local Object Version and content blob.
     pub fn read_version(
@@ -708,9 +724,26 @@ impl FolderbaseVersionStore {
     fn seal_capture_with_hook_and_limits(
         &self,
         plan: CapturePlan,
+        checkpoint: impl FnMut(&CaptureCheckpoint),
+        maximum_transaction_bytes: u64,
+        maximum_version_bytes: u64,
+    ) -> Result<SealedCapture, FolderbaseCaptureError> {
+        self.seal_capture_with_change_set_identities(
+            plan,
+            checkpoint,
+            maximum_transaction_bytes,
+            maximum_version_bytes,
+            &[],
+        )
+    }
+
+    fn seal_capture_with_change_set_identities(
+        &self,
+        plan: CapturePlan,
         mut checkpoint: impl FnMut(&CaptureCheckpoint),
         maximum_transaction_bytes: u64,
         maximum_version_bytes: u64,
+        deltas: &[ObjectDelta],
     ) -> Result<SealedCapture, FolderbaseCaptureError> {
         if plan.root() != self.root_attestation.root
             || plan.folderbase_id() != self.root_attestation.folderbase_id
@@ -839,7 +872,11 @@ impl FolderbaseVersionStore {
         let transaction = match active {
             Some(transaction) => transaction,
             None => {
-                let transaction = assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
+                let mut transaction =
+                    assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
+                if !deltas.is_empty() {
+                    bind_created_change_set_identities(&mut transaction, deltas)?;
+                }
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
@@ -869,6 +906,9 @@ impl FolderbaseVersionStore {
             ));
         }
         validate_transaction_against_plan(&plan, &transaction, prior.as_ref())?;
+        if !deltas.is_empty() {
+            validate_change_set_capture_identities(&transaction, deltas)?;
+        }
         preflight_capture_envelopes(
             &plan,
             &transaction,
@@ -3110,6 +3150,75 @@ fn ensure_same_plan(
             .unwrap_or(".");
         return Err(FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(
             path,
+        )));
+    }
+    Ok(())
+}
+
+fn bind_created_change_set_identities(
+    transaction: &mut CaptureTransaction,
+    deltas: &[ObjectDelta],
+) -> Result<(), FolderbaseCaptureError> {
+    let mut created = BTreeMap::new();
+    for delta in deltas.iter().filter(|delta| delta.before.is_none()) {
+        let after = delta.after.as_ref().ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(
+                "created Change Set Object has no after-state".to_owned(),
+            )
+        })?;
+        created.insert(after.path(), delta.object_id.as_str());
+    }
+    for assignment in &mut transaction.assignments {
+        let Some(object_id) = created.remove(assignment.path.as_str()) else {
+            continue;
+        };
+        if assignment.reused_object {
+            if assignment.object_id == object_id {
+                continue;
+            }
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "created Change Set path already has another Object identity: {}",
+                assignment.path
+            )));
+        }
+        ObjectId::parse(object_id.to_owned())?;
+        assignment.object_id = object_id.to_owned();
+    }
+    if let Some((path, _)) = created.first_key_value() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "capture plan omitted created Change Set path {path}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_change_set_capture_identities(
+    transaction: &CaptureTransaction,
+    deltas: &[ObjectDelta],
+) -> Result<(), FolderbaseCaptureError> {
+    let mut expected = deltas
+        .iter()
+        .filter_map(|delta| {
+            delta
+                .after
+                .as_ref()
+                .map(|after| (after.path(), delta.object_id.as_str()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for assignment in &transaction.assignments {
+        let Some(object_id) = expected.remove(assignment.path.as_str()) else {
+            continue;
+        };
+        if assignment.object_id != object_id {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "capture assignment differs from Change Set Object at {}",
+                assignment.path
+            )));
+        }
+    }
+    if let Some((path, _)) = expected.first_key_value() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "capture assignment omitted Change Set path {path}"
         )));
     }
     Ok(())
