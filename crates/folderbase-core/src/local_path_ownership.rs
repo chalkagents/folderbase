@@ -25,6 +25,7 @@ pub(super) struct OwnershipHistory {
     pub(super) current: FolderbaseVersion,
     ancestors: Vec<FolderbaseVersion>,
     anchored: Vec<RetiredObjectClaim>,
+    created: Option<file_create::CreatedObjectClaim>,
 }
 
 impl OwnershipHistory {
@@ -39,6 +40,7 @@ impl OwnershipHistory {
             current,
             ancestors: Vec::new(),
             anchored: Vec::new(),
+            created: None,
         };
         let unresolved = |history: &Self| {
             candidates.iter().any(|(path, id)| {
@@ -142,6 +144,55 @@ impl OwnershipHistory {
             .into());
         }
         Ok(result)
+    }
+
+    /// Resolve a provisional ancestry graph only through one exact creation
+    /// receipt. Every other claimant still requires independent retirement.
+    pub(super) fn resolve_created<E: From<FolderbaseError>>(
+        mut self,
+        root: &Path,
+        state: &FolderbaseState,
+        path: &Path,
+        candidates: &[(&Path, &LocalObjectRecord)],
+        read: impl FnMut(&Path, u64) -> std::result::Result<Option<Vec<u8>>, E>,
+    ) -> std::result::Result<Self, E> {
+        if self
+            .current
+            .bindings()
+            .iter()
+            .any(|binding| Path::new(binding.path()) == path)
+        {
+            return Ok(self);
+        }
+        let unresolved = candidates
+            .iter()
+            .filter(|(_, object)| self.retired(path, &object.id).is_none())
+            .collect::<Vec<_>>();
+        let [(_, object)] = unresolved.as_slice() else {
+            return Err(invalid_record(
+                path,
+                "creation ownership requires exactly one unretired Object",
+            )
+            .into());
+        };
+        if self.previously_known(&object.id) {
+            return Err(invalid_record(
+                path,
+                "an older create receipt cannot revive a previously known Object",
+            )
+            .into());
+        }
+        self.created = Some(file_create::completed_object_claim(
+            root, state, path, object, read,
+        )?);
+        Ok(self)
+    }
+
+    pub(super) fn verify_created(&self, root: &Path, state: &FolderbaseState) -> Result<()> {
+        if let Some(proof) = &self.created {
+            proof.verify(root, state)?;
+        }
+        Ok(())
     }
 
     pub(super) fn retired(&self, path: &Path, id: &ObjectId) -> Option<&str> {
@@ -289,7 +340,16 @@ pub(super) fn select<'a>(
         .bindings()
         .iter()
         .find(|binding| Path::new(binding.path()) == path)
-        .filter(|binding| binding.kind() == PathBindingKind::RegularFile)
+        .filter(|binding| binding.kind() == PathBindingKind::RegularFile);
+    let created = history.created.as_ref();
+    let live_id = binding
+        .map(|binding| binding.object_id())
+        .or_else(|| created.map(|proof| proof.object_id().as_str()))
+        .ok_or_else(invalid)?;
+    let live_version = binding
+        .and_then(|binding| binding.object_version_id())
+        .map(str::to_owned)
+        .or_else(|| created.map(|proof| proof.version().id.to_string()))
         .ok_or_else(invalid)?;
     let mut live = None;
     for (record_path, object) in candidates {
@@ -314,12 +374,9 @@ pub(super) fn select<'a>(
                 return Err(invalid());
             }
         }
-        if object.id.as_str() == binding.object_id() {
+        if object.id.as_str() == live_id {
             if live.replace((*record_path, *object)).is_some()
-                || !object
-                    .versions
-                    .iter()
-                    .any(|id| Some(id.as_str()) == binding.object_version_id())
+                || !object.versions.iter().any(|id| id.as_str() == live_version)
             {
                 return Err(invalid());
             }
@@ -346,8 +403,16 @@ pub(super) fn verify_references<E: From<FolderbaseError>>(
         let id = binding
             .and_then(|binding| binding.object_version_id())
             .or_else(|| history.retired(path, &object.id))
+            .map(str::to_owned)
+            .or_else(|| {
+                history
+                    .created
+                    .as_ref()
+                    .filter(|proof| proof.object_id() == &object.id)
+                    .map(|proof| proof.version().id.to_string())
+            })
             .ok_or_else(|| invalid_record(path, "Object claim has no bound Version metadata"))?;
-        let id = VersionId::parse(id.to_owned())?;
+        let id = VersionId::parse(id)?;
         let relative = local.version_record_relative_path(&id);
         let bytes = read(&relative, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?.ok_or_else(|| {
             invalid_record(&relative, "Object ownership Version record is missing")
@@ -356,6 +421,11 @@ pub(super) fn verify_references<E: From<FolderbaseError>>(
             .map_err(|error| FolderbaseError::json(root.join(&relative), error))?;
         local.validate_version_record(&id, &record, &root.join(&relative))?;
         if record.object_id != object.id
+            || history
+                .created
+                .as_ref()
+                .filter(|proof| proof.object_id() == &object.id)
+                .is_some_and(|proof| record != proof.version())
             || binding.is_some_and(|binding| {
                 binding.content_sha256() != Some(record.content.digest.as_str())
                     || binding.bytes() != Some(record.content.bytes)

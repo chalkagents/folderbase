@@ -388,6 +388,127 @@ fn verify_authority(
     Ok(())
 }
 
+/// Historical creation provenance, never an assertion about current file bytes.
+/// Only the closed receipt reader below constructs this private proof.
+pub(super) struct CreatedObjectClaim {
+    intent: Intent,
+    receipt: PathBuf,
+    encoded: Vec<u8>,
+    names: Vec<std::ffi::OsString>,
+}
+
+impl CreatedObjectClaim {
+    pub(super) fn object_id(&self) -> &ObjectId {
+        &self.intent.object_id
+    }
+
+    pub(super) fn version(&self) -> LocalVersionRecord {
+        self.intent.version()
+    }
+
+    pub(super) fn verify(&self, root: &Path, state: &FolderbaseState) -> Result<()> {
+        let mut names =
+            state.private_directory_names_if_present(Path::new(RECEIPTS_DIRECTORY), MAX_OBJECTS)?;
+        names.sort();
+        if names != self.names
+            || path_ownership::read_metadata(state, &self.receipt, MAX_INTENT_BYTES)?.as_ref()
+                != Some(&self.encoded)
+            || path_ownership::read_metadata(
+                state,
+                Path::new(ACTIVE_CREATE_PATH),
+                MAX_INTENT_BYTES,
+            )?
+            .is_some()
+        {
+            return Err(invalid_record(
+                &self.receipt,
+                "completed create ownership evidence changed",
+            ));
+        }
+        verify_authority(root, state, &self.intent, true)
+            .map_err(|error| invalid_record(&self.receipt, error.to_string()))
+    }
+}
+
+pub(super) fn completed_object_claim<E: From<FolderbaseError>>(
+    root: &Path,
+    state: &FolderbaseState,
+    selected: &Path,
+    object: &LocalObjectRecord,
+    mut read: impl FnMut(&Path, u64) -> std::result::Result<Option<Vec<u8>>, E>,
+) -> std::result::Result<CreatedObjectClaim, E> {
+    let invalid = || {
+        invalid_record(
+            selected,
+            "unbound Object has no valid completed create ownership receipt",
+        )
+    };
+    if read(Path::new(ACTIVE_CREATE_PATH), MAX_INTENT_BYTES)?.is_some() {
+        return Err(invalid().into());
+    }
+    let mut names =
+        state.private_directory_names_if_present(Path::new(RECEIPTS_DIRECTORY), MAX_OBJECTS)?;
+    names.sort();
+    let mut total = 0usize;
+    let mut found = None;
+    for name in &names {
+        let path = Path::new(RECEIPTS_DIRECTORY).join(name);
+        let encoded = read(&path, MAX_INTENT_BYTES)?.ok_or_else(invalid)?;
+        total = total.checked_add(encoded.len()).ok_or_else(invalid)?;
+        if total > MAX_READ_BYTES as usize {
+            return Err(
+                invalid_record(&path, "completed create receipt inventory exceeds 64 MiB").into(),
+            );
+        }
+        let receipt: Receipt = serde_json::from_slice(&encoded)
+            .map_err(|error| FolderbaseError::json(&path, error))?;
+        receipt
+            .intent
+            .validate()
+            .map_err(|error| invalid_record(&path, error.to_string()))?;
+        if receipt.format != RECEIPT_FORMAT
+            || receipt.intent.stage.is_none()
+            || receipt_path(&receipt.intent.request.operation_id) != path
+        {
+            return Err(invalid_record(&path, "invalid completed create receipt inventory").into());
+        }
+        if receipt.intent.object_id != object.id {
+            continue;
+        }
+        if found.is_some()
+            || receipt.outcome != Outcome::Created
+            || Path::new(&receipt.intent.request.path) != selected
+            || !object.versions.contains(&receipt.intent.version_id)
+        {
+            return Err(invalid().into());
+        }
+        verify_authority(root, state, &receipt.intent, true)
+            .map_err(|error| invalid_record(&path, error.to_string()))?;
+        let version_path = Path::new(VERSION_RECORDS_DIRECTORY)
+            .join(format!("{}.json", receipt.intent.version_id));
+        let version_bytes =
+            read(&version_path, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?.ok_or_else(invalid)?;
+        let version: LocalVersionRecord = serde_json::from_slice(&version_bytes)
+            .map_err(|error| FolderbaseError::json(&version_path, error))?;
+        if version != receipt.intent.version() {
+            return Err(invalid_record(
+                &version_path,
+                "original create Version differs from its receipt",
+            )
+            .into());
+        }
+        found = Some(CreatedObjectClaim {
+            intent: receipt.intent,
+            receipt: path,
+            encoded,
+            names: names.clone(),
+        });
+    }
+    let proof = found.ok_or_else(invalid)?;
+    proof.verify(root, state)?;
+    Ok(proof)
+}
+
 /// Create one absent, non-executable regular file under an existing safe parent.
 ///
 /// Requires a canonical operation UUID persisted by the caller, an initialized
@@ -578,6 +699,8 @@ fn create_with_checkpoint(
         )?;
     }
     checkpoint(Checkpoint::StageDurable)?;
+    verify_authority(root, &state, &intent, false)?;
+    verify_claimants(&local, &state, &intent.request.path, Some(&intent))?;
     // The callback is a narrow test seam; preserve the error until the helper
     // completes its immediate post-link durability work.
     let mut callback_error = None;
@@ -828,14 +951,17 @@ fn verify_claimants(
     allowed: Option<&Intent>,
 ) -> CreateResult<()> {
     let mut total = 0_u64;
+    let mut observations = BTreeMap::new();
+    let mut selected_records = Vec::new();
     let mut paths = WorkspacePathLookup::new(local.root())?;
-    for name in
-        state.private_directory_names_if_present(Path::new(OBJECTS_DIRECTORY), MAX_OBJECTS)?
-    {
+    let mut names =
+        state.private_directory_names_if_present(Path::new(OBJECTS_DIRECTORY), MAX_OBJECTS)?;
+    names.sort();
+    for name in &names {
         if name.to_str().is_none_or(|name| !name.ends_with(".json")) {
             continue;
         }
-        let path = Path::new(OBJECTS_DIRECTORY).join(&name);
+        let path = Path::new(OBJECTS_DIRECTORY).join(name);
         let bytes = state
             .read_bounded(&path, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?
             .ok_or_else(|| invalid_record(&path, "Object record disappeared"))?;
@@ -845,6 +971,10 @@ fn verify_claimants(
                 invalid_record(OBJECTS_DIRECTORY, "create Object metadata limit exceeded").into(),
             );
         }
+        observations.insert(
+            path.clone(),
+            (MAX_CAPTURE_PROJECTION_RECORD_BYTES, Some(bytes.clone())),
+        );
         let record: LocalObjectRecord = serde_json::from_slice(&bytes)
             .map_err(|source| FolderbaseError::json(&path, source))?;
         record.id.validate(&path)?;
@@ -857,12 +987,146 @@ fn verify_claimants(
                 return Err(invalid_record(path, "create Object projection changed").into());
             }
         } else if object_path_matches(&mut paths, &stored, Path::new(selected), &path)? {
+            selected_records.push((path, record));
+        }
+    }
+    paths.finish()?;
+    if !selected_records.is_empty() {
+        let mut read = |path: &Path, maximum| {
+            let bytes = path_ownership::read_metadata(state, path, maximum)?;
+            if let Some((_, expected)) = observations.get(path) {
+                if expected != &bytes {
+                    return Err(invalid_record(path, "create ownership metadata changed"));
+                }
+            } else {
+                total += bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+                if total > MAX_READ_BYTES {
+                    return Err(invalid_record(
+                        path,
+                        "create ownership metadata exceeds 64 MiB",
+                    ));
+                }
+                observations.insert(path.to_path_buf(), (maximum, bytes.clone()));
+            }
+            Ok::<_, FolderbaseError>(bytes)
+        };
+        let current = path_ownership::current_version(local.root(), state, &mut read)?;
+        if current
+            .bindings()
+            .iter()
+            .any(|binding| Path::new(binding.path()) == Path::new(selected))
+        {
             return Err(WorkspaceCreateError::DestinationOccupied(
                 selected.to_owned(),
             ));
         }
+        let history = path_ownership::OwnershipHistory::load(
+            current,
+            &selected_records
+                .iter()
+                .map(|(_, object)| (PathBuf::from(selected), object.id.clone()))
+                .collect::<Vec<_>>(),
+            false,
+            None,
+            &mut read,
+        )?;
+        let folderbase_id = &history.current.folderbase_id();
+        let mut versions = 0usize;
+        for (path, record) in &selected_records {
+            let last = history
+                .retired(Path::new(selected), &record.id)
+                .ok_or_else(|| WorkspaceCreateError::DestinationOccupied(selected.to_owned()))?;
+            if Path::new(&record.path) != Path::new(selected)
+                || record.schema != OBJECT_SCHEMA
+                || record.object_type != "file"
+                || !matches!(record.lifecycle.status.as_str(), "canonical" | "deleted")
+                || !record.versions.iter().any(|id| id.as_str() == last)
+            {
+                return Err(invalid_record(
+                    path,
+                    "create refuses an invalid or aliased retired Object claim",
+                )
+                .into());
+            }
+            local.validate_object_record_membership(&record.id, record, path)?;
+            let mut ids = std::collections::BTreeSet::new();
+            for id in &record.versions {
+                versions += 1;
+                if versions > MAX_OBJECTS || !ids.insert(id) {
+                    return Err(invalid_record(
+                        path,
+                        "retired Version list exceeds its bound or contains duplicates",
+                    )
+                    .into());
+                }
+                let version_path = local.version_record_relative_path(id);
+                let encoded = read(&version_path, MAX_CAPTURE_PROJECTION_RECORD_BYTES)?
+                    .ok_or_else(|| invalid_record(&version_path, "retired Version is missing"))?;
+                let version: LocalVersionRecord = serde_json::from_slice(&encoded)
+                    .map_err(|error| FolderbaseError::json(&version_path, error))?;
+                local.validate_version_record(id, &version, &version_path)?;
+                if version.object_id != record.id {
+                    return Err(invalid_record(
+                        &version_path,
+                        "retired Version belongs to another Object",
+                    )
+                    .into());
+                }
+                if id == &record.current_version {
+                    state.verify_sha256_blob(
+                        Path::new(BLOBS_DIRECTORY),
+                        &version.content.digest,
+                        version.content.bytes,
+                    )?;
+                }
+            }
+            let outgoing =
+                Path::new(HISTORY_TRANSFER_OUTGOING_DIRECTORY).join(format!("{}.json", record.id));
+            if let Some(bytes) = read(&outgoing, MAX_CAPTURE_PROJECTION_RECORD_BYTES)? {
+                validate_chunk_transfer_receipt_bytes(
+                    &bytes,
+                    &outgoing,
+                    &record.id,
+                    folderbase_id,
+                )?;
+            }
+            let incoming =
+                Path::new(HISTORY_TRANSFER_INCOMING_DIRECTORY).join(format!("{}.json", record.id));
+            if let Some(bytes) = read(&incoming, MAX_CAPTURE_PROJECTION_RECORD_BYTES)? {
+                let receipt: HistoryTransferReceipt = serde_json::from_slice(&bytes)
+                    .map_err(|error| FolderbaseError::json(&incoming, error))?;
+                validate_history_transfer_receipt(&receipt, &incoming)?;
+                if receipt.object_id != record.id
+                    || receipt.destination_folderbase_id != *folderbase_id
+                    || !receipt
+                        .version_ids
+                        .iter()
+                        .all(|id| record.versions.contains(id))
+                {
+                    return Err(invalid_record(
+                        &incoming,
+                        "retired Object transfer receipt disagrees",
+                    )
+                    .into());
+                }
+            }
+        }
     }
-    paths.finish()?;
+    for (path, (maximum, expected)) in observations {
+        if path_ownership::read_metadata(state, &path, maximum)? != expected {
+            return Err(invalid_record(
+                path,
+                "create ownership metadata changed before publication",
+            )
+            .into());
+        }
+    }
+    let mut final_names =
+        state.private_directory_names_if_present(Path::new(OBJECTS_DIRECTORY), MAX_OBJECTS)?;
+    final_names.sort();
+    if final_names != names {
+        return Err(invalid_record(OBJECTS_DIRECTORY, "create Object names changed").into());
+    }
     state.verify_still_attached()?;
     Ok(())
 }
@@ -887,6 +1151,210 @@ mod tests {
 
     fn id() -> String {
         Uuid::now_v7().to_string()
+    }
+
+    #[test]
+    fn recreated_files_have_immediate_separate_history_and_cas_before_capture() {
+        let root = fixture();
+        let full = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+        let local = LocalVersionStore::open(root.path()).unwrap();
+        let mut retired = Vec::new();
+        let mut identities = std::collections::BTreeSet::new();
+        for cycle in 0..3 {
+            let content = format!("generation {cycle}");
+            let created =
+                create_workspace_file(root.path(), "tasks/task.txt", &id(), content.as_bytes())
+                    .unwrap();
+            assert!(identities.insert(created.object_id.clone()));
+            let history = read_file_history(root.path(), "tasks/task.txt").unwrap();
+            assert_eq!(history.object_id, Some(created.object_id.clone()));
+            assert_eq!(history.versions.len(), 1);
+            assert_eq!(history.versions[0].id, created.version_id);
+            let edited = format!("app edit {cycle}");
+            save_workspace_text(
+                root.path(),
+                "tasks/task.txt",
+                &created.content.digest,
+                &edited,
+            )
+            .unwrap();
+            let before_capture = read_file_history(root.path(), "tasks/task.txt").unwrap();
+            assert_eq!(before_capture.object_id, history.object_id);
+            assert_eq!(before_capture.versions.len(), 2);
+            full.seal_capture(full.plan_capture().unwrap()).unwrap();
+            let captured = read_file_history(root.path(), "tasks/task.txt").unwrap();
+            assert_eq!(captured.object_id, history.object_id);
+            assert_eq!(&captured.versions[..2], &before_capture.versions);
+            for (object_path, bytes) in &retired {
+                assert_eq!(fs::read(object_path).unwrap(), *bytes);
+            }
+            local
+                .restore_version(&created.version_id, format!("tasks/recovered-{cycle}.txt"))
+                .unwrap();
+            assert_eq!(
+                fs::read(root.path().join(format!("tasks/recovered-{cycle}.txt"))).unwrap(),
+                content.as_bytes()
+            );
+            fs::remove_file(root.path().join("tasks/task.txt")).unwrap();
+            full.seal_capture(full.plan_capture().unwrap()).unwrap();
+            let object_path = local.object_record_path(&created.object_id);
+            retired.push((object_path.clone(), fs::read(object_path).unwrap()));
+        }
+    }
+
+    fn recreate_before_capture() -> (TempDir, WorkspaceCreateResult) {
+        let root = fixture();
+        create_workspace_file(root.path(), "tasks/task.txt", &id(), b"old").unwrap();
+        let full = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        fs::remove_file(root.path().join("tasks/task.txt")).unwrap();
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        let created = create_workspace_file(root.path(), "tasks/task.txt", &id(), b"new").unwrap();
+        (root, created)
+    }
+
+    #[test]
+    fn recreated_ownership_refuses_wrong_tampered_missing_and_copied_receipts() {
+        for field in [
+            "path", "object", "version", "content", "root", "state", "outcome", "stage", "missing",
+            "copied",
+        ] {
+            let (root, created) = recreate_before_capture();
+            let path = root.path().join(receipt_path(&created.operation_id));
+            let mut receipt: Receipt = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            match field {
+                "path" => receipt.intent.request.path = "tasks/other.txt".into(),
+                "object" => receipt.intent.object_id = ObjectId::new(),
+                "version" => receipt.intent.version_id = VersionId::new(),
+                "content" => receipt.intent.request.content.digest = "0".repeat(64),
+                "root" => receipt.intent.root_instance_sha256 = "0".repeat(64),
+                "state" => receipt.intent.state_identity_sha256 = "0".repeat(64),
+                "outcome" => receipt.outcome = Outcome::Conflicted,
+                "stage" => receipt.intent.stage = None,
+                "missing" => {}
+                "copied" => {
+                    let (foreign, foreign_created) = recreate_before_capture();
+                    let foreign_receipt: Receipt = serde_json::from_slice(
+                        &fs::read(
+                            foreign
+                                .path()
+                                .join(receipt_path(&foreign_created.operation_id)),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    receipt.intent.root_instance_sha256 =
+                        foreign_receipt.intent.root_instance_sha256;
+                    receipt.intent.state_identity_sha256 =
+                        foreign_receipt.intent.state_identity_sha256;
+                }
+                _ => unreachable!(),
+            }
+            if field == "missing" {
+                fs::remove_file(&path).unwrap();
+            } else {
+                fs::write(&path, json_bytes(&path, &receipt).unwrap()).unwrap();
+            }
+            assert!(
+                read_file_history(root.path(), "tasks/task.txt").is_err(),
+                "history accepted {field}"
+            );
+            assert!(
+                save_workspace_text(
+                    root.path(),
+                    "tasks/task.txt",
+                    &created.content.digest,
+                    "unsafe edit"
+                )
+                .is_err(),
+                "save accepted {field}"
+            );
+            assert_eq!(
+                fs::read(root.path().join("tasks/task.txt")).unwrap(),
+                b"new"
+            );
+        }
+    }
+
+    #[test]
+    fn recreated_receipt_proves_identity_while_native_bytes_can_change() {
+        let (root, created) = recreate_before_capture();
+        let original = read_file_history(root.path(), "tasks/task.txt").unwrap();
+        fs::write(root.path().join("tasks/task.txt"), b"native edit").unwrap();
+        assert_eq!(
+            read_file_history(root.path(), "tasks/task.txt").unwrap(),
+            original
+        );
+        let current = crate::read_workspace_text(root.path(), "tasks/task.txt").unwrap();
+        save_workspace_text(root.path(), "tasks/task.txt", &current.sha256, "app edit").unwrap();
+        let history = read_file_history(root.path(), "tasks/task.txt").unwrap();
+        assert_eq!(history.object_id, Some(created.object_id));
+        assert_eq!(history.versions.len(), 3);
+        assert_eq!(history.versions[0].id, created.version_id);
+    }
+
+    #[test]
+    fn retired_file_and_stale_live_directory_binding_refuse_creation_until_captured() {
+        let root = fixture();
+        let old = create_workspace_file(root.path(), "tasks/task.txt", &id(), b"old").unwrap();
+        let full = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        fs::remove_file(root.path().join("tasks/task.txt")).unwrap();
+        fs::create_dir(root.path().join("tasks/task.txt")).unwrap();
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        fs::remove_dir(root.path().join("tasks/task.txt")).unwrap();
+        let object_path = root
+            .path()
+            .join(format!("{OBJECTS_DIRECTORY}/{}.json", old.object_id));
+        let object = fs::read(&object_path).unwrap();
+        assert!(matches!(
+            create_workspace_file(root.path(), "tasks/task.txt", &id(), b"new"),
+            Err(WorkspaceCreateError::DestinationOccupied(_))
+        ));
+        assert!(!root.path().join("tasks/task.txt").exists());
+        assert!(!root.path().join(ACTIVE_CREATE_PATH).exists());
+        assert_eq!(fs::read(&object_path).unwrap(), object);
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        let new = create_workspace_file(root.path(), "tasks/task.txt", &id(), b"new").unwrap();
+        assert_ne!(old.object_id, new.object_id);
+        assert_eq!(
+            read_file_history(root.path(), "tasks/task.txt")
+                .unwrap()
+                .object_id,
+            Some(new.object_id)
+        );
+        assert_eq!(fs::read(object_path).unwrap(), object);
+    }
+
+    #[test]
+    fn retired_claim_corruption_at_stage_boundary_refuses_before_visible_creation() {
+        let root = fixture();
+        let old = create_workspace_file(root.path(), "tasks/task.txt", &id(), b"old").unwrap();
+        let full = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        fs::remove_file(root.path().join("tasks/task.txt")).unwrap();
+        full.seal_capture(full.plan_capture().unwrap()).unwrap();
+        let object = root
+            .path()
+            .join(format!("{OBJECTS_DIRECTORY}/{}.json", old.object_id));
+        let mut reached = false;
+        let result = create_with_checkpoint(
+            root.path(),
+            Path::new("tasks/task.txt"),
+            &id(),
+            b"new",
+            |phase| {
+                if phase == Checkpoint::StageDurable {
+                    reached = true;
+                    fs::write(&object, b"damaged metadata").unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert!(reached);
+        assert!(result.is_err());
+        assert!(!root.path().join("tasks/task.txt").exists());
+        assert_eq!(fs::read(object).unwrap(), b"damaged metadata");
     }
 
     fn interrupt(phase: Checkpoint) -> CreateResult<()> {
