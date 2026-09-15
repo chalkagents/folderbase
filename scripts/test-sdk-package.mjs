@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   chmod,
@@ -166,6 +167,62 @@ try {
   assert.equal(initialized.kind, "success");
   const attestation = await client.attest(root);
   assert.equal(attestation.kind, "success");
+
+  // Exercise the installed helpers against native Core in an independent root.
+  // A stale writer must preserve both accepted bytes and recorded history.
+  const textRoot = join(owner, "workspace with spaces");
+  const textPath = "notes/résumé.md";
+  const originalText = "# Résumé 🗂️\r\nfirst line\nno final newline";
+  const savedText = "# Résumé 🗂️\r\naccepted edit\nno final newline";
+  const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+  await mkdir(join(textRoot, "notes"), { recursive: true });
+  await writeFile(join(textRoot, textPath), originalText);
+  assert.equal((await client.init(textRoot)).kind, "success");
+  const listing = await client.workspaceList(textRoot);
+  assert.equal(listing.kind, "success");
+  const listedText = listing.document.entries.find(({ path }) => path === textPath);
+  assert.ok(listedText, "workspace listing must include the existing text file");
+  assert.equal(listedText.kind, "file");
+  assert.equal(listedText.editable, true);
+  assert.equal(listedText.bytes, Buffer.byteLength(originalText));
+
+  const firstRead = await client.workspaceRead(textRoot, textPath);
+  assert.equal(firstRead.kind, "success");
+  assert.equal(firstRead.document.content, originalText);
+  assert.equal(firstRead.document.sha256, sha256(originalText));
+  const saved = await client.workspaceSave(textRoot, textPath, {
+    expectedSha256: firstRead.document.sha256,
+    content: savedText,
+  });
+  assert.equal(saved.kind, "success");
+  assert.equal(saved.document.previous_sha256, firstRead.document.sha256);
+  assert.equal(saved.document.document.sha256, sha256(savedText));
+  assert.equal(saved.document.document.bytes, Buffer.byteLength(savedText));
+  assert.equal(Object.hasOwn(saved.document.document, "content"), false);
+  assert.equal(await readFile(join(textRoot, textPath), "utf8"), savedText);
+  const savedHistory = await client.fileHistory(textRoot, textPath);
+  assert.equal(savedHistory.kind, "success");
+  assert.equal(savedHistory.document.object_id, saved.document.object_id);
+  assert.equal(savedHistory.document.current_version, saved.document.version_id);
+  assert.ok(savedHistory.document.versions.some(
+    ({ content }) => content.digest === sha256(originalText),
+  ), "guarded save must retain the original bytes in history");
+  assert.ok(savedHistory.document.versions.some(
+    ({ id, content }) => id === saved.document.version_id && content.digest === sha256(savedText),
+  ));
+
+  await assert.rejects(
+    client.workspaceSave(textRoot, textPath, {
+      expectedSha256: firstRead.document.sha256,
+      content: "stale draft must survive in the caller",
+    }),
+    (error) => error instanceof sdk.FolderbaseOperationalError
+      && error.document?.error?.code === "workspace_content_changed",
+  );
+  const freshClient = new sdk.FolderbaseClient({ executable: implementation });
+  assert.equal((await freshClient.workspaceRead(textRoot, textPath)).document.content, savedText);
+  assert.deepEqual(await freshClient.fileHistory(textRoot, textPath), savedHistory);
+  assert.equal(await readFile(join(textRoot, textPath), "utf8"), savedText);
 
   const queryRequest = {
     format: "folderbase-query-request-v1",

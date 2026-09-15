@@ -721,6 +721,27 @@ export class FolderbaseClient {
     return this.run(["version", "list", root, path, "--json"], options);
   }
 
+  workspaceList(root, options) {
+    return this.run(["workspace", "list", root, "--json"], options);
+  }
+
+  workspaceRead(root, path, options) {
+    return this.run(["workspace", "read", root, path, "--json"], options);
+  }
+
+  workspaceSave(root, path, { expectedSha256, content }, options = {}) {
+    if (typeof expectedSha256 !== "string" || !SHA256_PATTERN.test(expectedSha256)) {
+      throw new TypeError("expectedSha256 must be the lowercase SHA-256 from the last read");
+    }
+    if (typeof content !== "string" || !content.isWellFormed()) {
+      throw new TypeError("content must be a well-formed UTF-8 text string");
+    }
+    return this.run([
+      "workspace", "save", root, path,
+      "--expected-sha256", expectedSha256, "--stdin", "--json",
+    ], { ...options, stdin: content });
+  }
+
   inspect(root, options) {
     return this.run(["inspect", root, "--json"], options);
   }

@@ -296,6 +296,43 @@ export interface FolderbaseFileHistory extends JsonObject {
   versions: FolderbaseFileVersionRecord[];
 }
 
+export interface FolderbaseWorkspaceEntry extends JsonObject {
+  path: string;
+  name: string;
+  kind: "folderbase" | "directory" | "file" | "symlink";
+  bytes: number;
+  editable: boolean;
+  reconstructable: boolean;
+}
+
+export interface FolderbaseWorkspaceListing extends JsonObject {
+  root: string;
+  entries: FolderbaseWorkspaceEntry[];
+}
+
+export interface FolderbaseWorkspaceDocumentState extends JsonObject {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface FolderbaseWorkspaceTextDocument extends FolderbaseWorkspaceDocumentState {
+  content: string;
+}
+
+export interface FolderbaseWorkspaceSaveResult extends JsonObject {
+  path: string;
+  previous_sha256: string;
+  document: FolderbaseWorkspaceDocumentState;
+  object_id: string;
+  version_id: string;
+}
+
+export interface FolderbaseWorkspaceSaveInput {
+  expectedSha256: string;
+  content: string;
+}
+
 export class FolderbaseClient {
   constructor(options?: FolderbaseClientOptions);
 
@@ -306,6 +343,9 @@ export class FolderbaseClient {
 
   contract<T extends JsonValue = JsonObject>(options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   fileHistory(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseFileHistory>>;
+  workspaceList(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceListing>>;
+  workspaceRead(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceTextDocument>>;
+  workspaceSave(root: string, path: string, input: FolderbaseWorkspaceSaveInput, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceSaveResult>>;
   inspect<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   attest<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   observeFolderScope(root: string, selectedPath: string, options?: FolderbaseRunOptions): Promise<FolderbaseSuccess<FolderbaseFolderScopeEvidence>>;
