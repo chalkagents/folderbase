@@ -9449,23 +9449,69 @@ mod tests {
                 };
                 let mut assigned = None;
                 let mut advanced = false;
-                let error = store
-                    .seal_capture_with_hook(store.plan_capture().expect("plan"), |checkpoint| {
+                let mut rename_prevented = false;
+                let result = store.seal_capture_with_hook(
+                    store.plan_capture().expect("plan"),
+                    |checkpoint| {
                         if checkpoint == &CaptureCheckpoint::ImmutableDirectory(phase) {
                             assigned = Some(
                                 active_transaction(root.path())
                                     .expect("active intent")
                                     .target_version_id,
                             );
-                            fs::rename(&original, &detached).expect("detach retained directory");
-                            fs::create_dir(&original).expect("replacement directory");
-                            fs::write(original.join("sentinel"), b"outside").expect("sentinel");
+                            match fs::rename(&original, &detached) {
+                                Ok(()) => {
+                                    fs::create_dir(&original).expect("replacement directory");
+                                    fs::write(original.join("sentinel"), b"outside")
+                                        .expect("sentinel");
+                                }
+                                // Windows can prevent detaching a directory with retained
+                                // handles. That prevents the injected replacement itself;
+                                // it does not exercise the swapped-capability error path.
+                                Err(error)
+                                    if cfg!(windows)
+                                        && matches!(error.raw_os_error(), Some(5 | 32)) =>
+                                {
+                                    rename_prevented = true;
+                                }
+                                Err(error) => panic!(
+                                    "detach retained directory {relative:?} at {phase:?}: {error}"
+                                ),
+                            }
                         }
                         if checkpoint == &CaptureCheckpoint::ObjectWritesDurable {
                             advanced = true;
                         }
-                    })
-                    .expect_err("swapped capability must fail");
+                    },
+                );
+                let assigned = assigned.expect("fault-injection checkpoint reached");
+                if rename_prevented {
+                    let sealed = result.expect("prevented replacement leaves capture usable");
+                    assert!(advanced);
+                    assert!(original.is_dir());
+                    assert!(!detached.try_exists().expect("detached path observation"));
+                    assert!(
+                        !original
+                            .join("sentinel")
+                            .try_exists()
+                            .expect("no replacement")
+                    );
+                    assert_eq!(sealed.version_id(), assigned);
+                    assert_eq!(
+                        local_head(root.path()).expect("verified Head").version_id,
+                        assigned
+                    );
+                    assert!(active_transaction(root.path()).is_none());
+                    assert_eq!(
+                        fs::read(root.path().join("active.bin")).expect("original visible bytes"),
+                        b"first opaque bytes"
+                    );
+                    store
+                        .read_version(sealed.version_id())
+                        .expect("complete verified Version");
+                    continue;
+                }
+                let error = result.expect_err("swapped capability must fail");
                 assert!(matches!(error, FolderbaseCaptureError::LocalStore(_)));
                 assert!(!advanced);
                 assert_eq!(fs::read_dir(&original).expect("replacement").count(), 1);
@@ -9476,7 +9522,6 @@ mod tests {
                 fs::remove_dir_all(&original).expect("remove test replacement");
                 fs::rename(&detached, &original).expect("reattach original for recovery");
                 assert!(local_head(root.path()).is_none());
-                let assigned = assigned.expect("assigned target");
                 assert_eq!(
                     active_transaction(root.path())
                         .expect("intent retained")
