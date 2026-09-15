@@ -171,7 +171,7 @@ try {
   // Exercise the installed helpers against native Core in an independent root.
   // A stale writer must preserve both accepted bytes and recorded history.
   const textRoot = join(owner, "workspace with spaces");
-  const textPath = join("notes", "résumé.md");
+  const textPath = "notes/résumé.md";
   const originalText = "# Résumé 🗂️\r\nfirst line\nno final newline";
   const savedText = "# Résumé 🗂️\r\naccepted edit\nno final newline";
   const sha256 = (text) => createHash("sha256").update(text).digest("hex");
@@ -217,7 +217,7 @@ try {
       content: "stale draft must survive in the caller",
     }),
     (error) => error instanceof sdk.FolderbaseOperationalError
-      && error.document.error.code === "workspace_content_changed",
+      && error.document?.error?.code === "workspace_content_changed",
   );
   const freshClient = new sdk.FolderbaseClient({ executable: implementation });
   assert.equal((await freshClient.workspaceRead(textRoot, textPath)).document.content, savedText);

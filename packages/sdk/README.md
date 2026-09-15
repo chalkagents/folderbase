@@ -70,7 +70,7 @@ try {
   console.log(saved.document.version_id, saved.document.document.sha256);
 } catch (error) {
   if (!(error instanceof FolderbaseOperationalError)
-      || error.document.error.code !== "workspace_content_changed") throw error;
+      || error.document?.error?.code !== "workspace_content_changed") throw error;
   // Keep the draft for the user to compare with the latest file before retrying.
   const latest = await folderbase.workspaceRead(root, "notes.md");
   console.log({ draft, latest: latest.document });
