@@ -22,6 +22,14 @@ implementation. Discovery uses only `protocol contract --json`. Registered
 suites invoke only the candidate's process interface and ordinary temporary
 filesystem effects.
 
+The registry lists known profiles; an executable advertises only its supported
+subset. The development Core candidate advertises root reconstruction on Linux
+and macOS release targets. Windows and other targets omit that profile because
+the complete publication/replay behavior is unavailable there. The universal
+command still returns typed refusals. Explicitly requiring an omitted profile
+fails; an unsupported-filesystem refusal is not a passing reconstruction suite.
+Eligible targets must still pass Core's runtime destination-filesystem preflight.
+
 Every child process is bounded. Discovery defaults to 15 seconds, each
 candidate command within a registered suite defaults to 120 seconds, and a
 whole registered suite defaults to 5 minutes. These bounds retain the existing

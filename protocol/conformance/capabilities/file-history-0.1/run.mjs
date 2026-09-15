@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile, mkdir, readdir, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, join, normalize, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const FORMAT = "folderbase-capability-suite-report-v1";
@@ -131,7 +131,8 @@ const cases = [
       const before = await snapshot(source);
       for (const path of ["tasks/created.json", "tasks/attachment.bin"]) {
         const output = ok(["version", "list", source, path, "--json"]);
-        assert.equal(output.format, "folderbase-file-history-v1"); assert.equal(output.path, path);
+        assert.equal(output.format, "folderbase-file-history-v1");
+        assert.equal(output.path, normalize(path), "history returns canonical native filesystem spelling");
         assert.ok(output.versions.length > 0);
         assert.match(output.current_version, VERSION_ID);
         assert.ok(output.versions.some((version) => version.id === output.current_version));
