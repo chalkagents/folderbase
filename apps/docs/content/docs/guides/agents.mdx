@@ -1,6 +1,6 @@
 ---
 title: Operate Folderbase from an agent
-description: Give an agent a bounded workspace with safe reads, optimistic saves, and stable JSON output.
+description: Let an agent list and read local files, save with a version precondition, and consume stable JSON output.
 ---
 
 Agents can use the Folderbase CLI directly. An MCP server is optional rather than required.
@@ -12,6 +12,18 @@ folderbase protocol contract --json
 ```
 
 Use the reported contract and the stable command inventory in [CLI JSON v1](/docs/reference/cli-json-v1) instead of guessing which commands or fields exist.
+
+## Access boundaries
+
+These commands operate with the caller's filesystem permissions. Listing
+filters affect the displayed view, while Core validates paths and preconditions
+for its own commands. Neither restricts an agent's other tools. Direct saves
+below change the source folder immediately.
+
+For a separate working copy and review before application, use
+[scoped Change Sets](/docs/guides/change-sets). Read that guide's Core 0.7.2
+new-file warning before trying the workflow. Process isolation, when needed,
+must be supplied by the host environment.
 
 ## List the workspace
 

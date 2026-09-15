@@ -40,18 +40,22 @@ with the exact omitted-Object operational error from issue 78.
 
 ### Development verification
 
-- Workspace regression suite: 1,106 passed, zero failed, three ignored across
-  43 suites. This run preceded the equivalent private lookup optimization.
-- Final optimized CLI: all thirteen Change Set scenarios passed, including
-  second-session identity and crash/replay coverage.
-- Final optimized CLI: the local loop and legacy-pending characterization below
-  passed.
-- Conformance/registry runner self-tests: 20 passed.
-- Final formatting, clippy with warnings denied, CI policy, public naming
-  policy, and diff whitespace checks passed.
+Final local verification used immutable candidate
+`37ffaac7cb1eb37e5ba2a8bf4c05ff077a8d7df3`. All nine local gates passed:
 
-These are local development checks. A published release still needs its
-complete checks on the selected immutable candidate and supported platforms.
+- Workspace regression suite: 1,107 passed, zero failed, three ignored across
+  44 suites.
+- CLI JSON conformance: 108 passed; all seven advertised capability suites
+  passed, including thirteen Change Set scenarios.
+- Conformance/registry runner self-tests: 12 passed.
+- Formatting, clippy with warnings denied, CI policy, public naming policy,
+  and a fresh package installation passed.
+
+The local loop and legacy-pending characterization below also passed during
+repair verification. Required CI checks passed on the same candidate in
+[draft PR #90](https://github.com/chalkagents/folderbase/pull/90). This is still
+unreleased; these results do not certify a published release or every
+supported platform.
 
 ## Reproduce the local product loop
 
