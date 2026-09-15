@@ -65,6 +65,123 @@ struct WorkspaceTargetCapability {
     display: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureDirectoryCheckpoint {
+    BeforeFlushes,
+    BlobsFlushed,
+    RecordsFlushed,
+}
+
+struct RetainedStateDirectory {
+    directory: Dir,
+    identity: PhysicalIdentity,
+    relative: PathBuf,
+    display: PathBuf,
+}
+
+impl RetainedStateDirectory {
+    fn open(state: &FolderbaseState, path: &Path) -> Result<Self> {
+        let relative = state_relative(path)?;
+        state.require_mutable(&relative)?;
+        let directory = state.open_dir(&relative)?;
+        let display = state.display_path(&relative);
+        let identity = directory_identity(&directory, &display)?;
+        Ok(Self {
+            directory,
+            identity,
+            relative,
+            display,
+        })
+    }
+
+    fn verify_attached(&self, state: &FolderbaseState) -> Result<()> {
+        let reopened = state.open_dir(&self.relative)?;
+        if directory_identity(&reopened, &self.display)? != self.identity {
+            return Err(FolderbaseError::UnsafePath(self.display.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// Capture-only publication: installed names are not durable until `finish`.
+/// The generic state publisher remains immediately durable.
+#[must_use = "capture immutable publication must finish before advancing history"]
+pub(crate) struct CaptureImmutablePublication<'a> {
+    state: &'a FolderbaseState,
+    blobs: RetainedStateDirectory,
+    records: RetainedStateDirectory,
+}
+
+impl<'a> CaptureImmutablePublication<'a> {
+    pub(crate) fn new(state: &'a FolderbaseState, blobs: &Path, records: &Path) -> Result<Self> {
+        state.verify_still_attached()?;
+        Ok(Self {
+            state,
+            blobs: RetainedStateDirectory::open(state, blobs)?,
+            records: RetainedStateDirectory::open(state, records)?,
+        })
+    }
+
+    pub(crate) fn publish_reader_sha256(
+        &self,
+        reader: impl Read,
+        source_label: &Path,
+        maximum_bytes: u64,
+    ) -> Result<PublishedBlob> {
+        publish_reader_sha256_in(
+            &self.blobs.directory,
+            &self.blobs.display,
+            reader,
+            source_label,
+            maximum_bytes,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn publish_version_record(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        let relative = state_relative(path)?;
+        if relative.parent() != Some(self.records.relative.as_path()) {
+            return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+        }
+        let name = relative
+            .file_name()
+            .ok_or_else(|| FolderbaseError::UnsafePath(path.to_path_buf()))?;
+        publish_new_in(
+            &self.records.directory,
+            name,
+            bytes,
+            &self.records.display.join(name),
+            || Ok(()),
+        )
+    }
+
+    fn verify_attached(&self) -> Result<()> {
+        self.state.verify_still_attached()?;
+        self.blobs.verify_attached(self.state)?;
+        self.records.verify_attached(self.state)
+    }
+
+    pub(crate) fn finish(self, checkpoint: impl FnMut(CaptureDirectoryCheckpoint)) -> Result<()> {
+        self.finish_with_sync(checkpoint, sync_directory)
+    }
+
+    fn finish_with_sync(
+        self,
+        mut checkpoint: impl FnMut(CaptureDirectoryCheckpoint),
+        mut sync: impl FnMut(&Dir, &Path) -> Result<()>,
+    ) -> Result<()> {
+        checkpoint(CaptureDirectoryCheckpoint::BeforeFlushes);
+        self.verify_attached()?;
+        // Replay may reuse names installed before an earlier failed barrier.
+        // Both parents must be flushed, even when this call installed no names.
+        sync(&self.blobs.directory, &self.blobs.display)?;
+        checkpoint(CaptureDirectoryCheckpoint::BlobsFlushed);
+        sync(&self.records.directory, &self.records.display)?;
+        checkpoint(CaptureDirectoryCheckpoint::RecordsFlushed);
+        self.verify_attached()
+    }
+}
+
 impl FolderbaseState {
     /// Open mutable state beneath an already-retained root capability.
     ///
@@ -367,7 +484,7 @@ impl FolderbaseState {
     pub(crate) fn publish_reader_sha256(
         &self,
         directory: &Path,
-        mut reader: impl Read,
+        reader: impl Read,
         source_label: &Path,
         maximum_bytes: u64,
     ) -> Result<PublishedBlob> {
@@ -375,84 +492,14 @@ impl FolderbaseState {
         self.require_mutable(&relative)?;
         let parent = self.open_dir(&relative)?;
         let display = self.display_path(&relative);
-        let temporary = OsString::from(format!(".blob-{}.tmp", Uuid::now_v7()));
-        let mut options = CapOpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut staged = parent
-            .open_with(&temporary, &options)
-            .map_err(|source| FolderbaseError::io(&display, source))?;
-        let mut hasher = Sha256::new();
-        let mut bytes = 0_u64;
-        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
-        let copy_result = (|| -> Result<()> {
-            let mut bounded = reader.by_ref().take(maximum_bytes.saturating_add(1));
-            loop {
-                let read = bounded
-                    .read(&mut buffer)
-                    .map_err(|source| FolderbaseError::io(source_label, source))?;
-                if read == 0 {
-                    break;
-                }
-                bytes = bytes.checked_add(read as u64).ok_or_else(|| {
-                    FolderbaseError::InvalidRecord {
-                        path: source_label.to_path_buf(),
-                        message: "content length exceeds supported range".to_owned(),
-                    }
-                })?;
-                if bytes > maximum_bytes {
-                    return Err(FolderbaseError::InvalidRecord {
-                        path: source_label.to_path_buf(),
-                        message: "source grew beyond its approved byte length".to_owned(),
-                    });
-                }
-                staged
-                    .write_all(&buffer[..read])
-                    .map_err(|source| FolderbaseError::io(&display, source))?;
-                hasher.update(&buffer[..read]);
-            }
-            staged
-                .sync_all()
-                .map_err(|source| FolderbaseError::io(&display, source))
-        })();
-        drop(staged);
-        if let Err(error) = copy_result {
-            let _ = parent.remove_file(&temporary);
-            return Err(error);
-        }
-
-        let digest = format!("{:x}", hasher.finalize());
-        match parent.hard_link(&temporary, &parent, &digest) {
-            Ok(()) => {
-                parent
-                    .remove_file(&temporary)
-                    .map_err(|source| FolderbaseError::io(&display, source))?;
-                sync_directory(&parent, &display)?;
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                parent
-                    .remove_file(&temporary)
-                    .map_err(|source| FolderbaseError::io(&display, source))?;
-            }
-            Err(source) => {
-                let _ = parent.remove_file(&temporary);
-                return Err(FolderbaseError::io(display, source));
-            }
-        }
-        verify_blob(
+        publish_reader_sha256_in(
             &parent,
-            OsStr::new(&digest),
-            bytes,
-            &self.display_path(&relative.join(&digest)),
-        )?;
-        Ok(PublishedBlob { digest, bytes })
+            &display,
+            reader,
+            source_label,
+            maximum_bytes,
+            || sync_directory(&parent, &display),
+        )
     }
 
     pub(crate) fn verify_sha256_blob(
@@ -1515,25 +1562,9 @@ impl FolderbaseState {
         let (parent, name) = self.open_parent(&relative)?;
         after_parent_open();
         let display = self.display_path(&relative);
-        let temporary = OsString::from(format!(".publish-{}.tmp", Uuid::now_v7()));
-        write_staged(&parent, &temporary, bytes, &display)?;
-        match parent.hard_link(&temporary, &parent, &name) {
-            Ok(()) => {
-                parent
-                    .remove_file(&temporary)
-                    .map_err(|source| FolderbaseError::io(&display, source))?;
-                sync_directory(&parent, &display)?;
-                verify_exact_file(&parent, &name, bytes, &display)
-            }
-            Err(source) => {
-                let _ = parent.remove_file(&temporary);
-                if source.kind() == std::io::ErrorKind::AlreadyExists {
-                    Err(FolderbaseError::WouldOverwrite(display))
-                } else {
-                    Err(FolderbaseError::io(display, source))
-                }
-            }
-        }
+        publish_new_in(&parent, &name, bytes, &display, || {
+            sync_directory(&parent, &display)
+        })
     }
 
     pub(crate) fn replace(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
@@ -2603,6 +2634,118 @@ fn private_directory_builder() -> cap_std::fs::DirBuilder {
     builder
 }
 
+fn publish_reader_sha256_in(
+    parent: &Dir,
+    display: &Path,
+    mut reader: impl Read,
+    source_label: &Path,
+    maximum_bytes: u64,
+    after_install: impl FnOnce() -> Result<()>,
+) -> Result<PublishedBlob> {
+    let temporary = OsString::from(format!(".blob-{}.tmp", Uuid::now_v7()));
+    let mut options = CapOpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut staged = parent
+        .open_with(&temporary, &options)
+        .map_err(|source| FolderbaseError::io(display, source))?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    let copy_result = (|| -> Result<()> {
+        let mut bounded = reader.by_ref().take(maximum_bytes.saturating_add(1));
+        loop {
+            let read = bounded
+                .read(&mut buffer)
+                .map_err(|source| FolderbaseError::io(source_label, source))?;
+            if read == 0 {
+                break;
+            }
+            bytes =
+                bytes
+                    .checked_add(read as u64)
+                    .ok_or_else(|| FolderbaseError::InvalidRecord {
+                        path: source_label.to_path_buf(),
+                        message: "content length exceeds supported range".to_owned(),
+                    })?;
+            if bytes > maximum_bytes {
+                return Err(FolderbaseError::InvalidRecord {
+                    path: source_label.to_path_buf(),
+                    message: "source grew beyond its approved byte length".to_owned(),
+                });
+            }
+            staged
+                .write_all(&buffer[..read])
+                .map_err(|source| FolderbaseError::io(display, source))?;
+            hasher.update(&buffer[..read]);
+        }
+        staged
+            .sync_all()
+            .map_err(|source| FolderbaseError::io(display, source))
+    })();
+    drop(staged);
+    if let Err(error) = copy_result {
+        let _ = parent.remove_file(&temporary);
+        return Err(error);
+    }
+
+    let digest = format!("{:x}", hasher.finalize());
+    match parent.hard_link(&temporary, parent, &digest) {
+        Ok(()) => {
+            parent
+                .remove_file(&temporary)
+                .map_err(|source| FolderbaseError::io(display, source))?;
+            after_install()?;
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            parent
+                .remove_file(&temporary)
+                .map_err(|source| FolderbaseError::io(display, source))?;
+        }
+        Err(source) => {
+            let _ = parent.remove_file(&temporary);
+            return Err(FolderbaseError::io(display, source));
+        }
+    }
+    verify_blob(parent, OsStr::new(&digest), bytes, &display.join(&digest))?;
+    Ok(PublishedBlob { digest, bytes })
+}
+
+fn publish_new_in(
+    parent: &Dir,
+    name: &OsStr,
+    bytes: &[u8],
+    display: &Path,
+    after_install: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let temporary = OsString::from(format!(".publish-{}.tmp", Uuid::now_v7()));
+    write_staged(parent, &temporary, bytes, display)?;
+    match parent.hard_link(&temporary, parent, name) {
+        Ok(()) => {
+            parent
+                .remove_file(&temporary)
+                .map_err(|source| FolderbaseError::io(display, source))?;
+            after_install()?;
+            verify_exact_file(parent, name, bytes, display)
+        }
+        Err(source) => {
+            let _ = parent.remove_file(&temporary);
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                Err(FolderbaseError::WouldOverwrite(display.to_path_buf()))
+            } else {
+                Err(FolderbaseError::io(display, source))
+            }
+        }
+    }
+}
+
 fn write_staged(parent: &Dir, name: &OsStr, bytes: &[u8], display: &Path) -> Result<()> {
     let mut options = CapOpenOptions::new();
     options
@@ -2880,6 +3023,295 @@ mod tests {
     const RESTORE_SOURCE: &str = ".folderbase/source";
     const RESTORE_STAGE: &str = ".folderbase/transactions/restore-stage";
     const RESTORE_DESTINATION: &str = "project/restored.bin";
+
+    const CAPTURE_BLOBS: &str = ".folderbase/versions/blobs/sha256";
+    const CAPTURE_RECORDS: &str = ".folderbase/versions/records";
+
+    fn capture_publication(state: &FolderbaseState) -> CaptureImmutablePublication<'_> {
+        CaptureImmutablePublication::new(
+            state,
+            Path::new(CAPTURE_BLOBS),
+            Path::new(CAPTURE_RECORDS),
+        )
+        .expect("retain immutable parents")
+    }
+
+    fn capture_publication_fixture() -> (TempDir, FolderbaseState) {
+        let root = tempdir().expect("fixture");
+        let state = FolderbaseState::open(root.path()).expect("state");
+        state
+            .ensure_private_dir(Path::new(CAPTURE_BLOBS))
+            .expect("blobs");
+        state
+            .ensure_private_dir(Path::new(CAPTURE_RECORDS))
+            .expect("records");
+        (root, state)
+    }
+
+    #[test]
+    fn capture_batch_flushes_both_parents_when_retry_reuses_every_entry() {
+        let (_root, state) = capture_publication_fixture();
+        let record_path = Path::new(CAPTURE_RECORDS).join("exact.json");
+        let first = capture_publication(&state);
+        let expected = first
+            .publish_reader_sha256(&b"blob"[..], Path::new("source"), 4)
+            .expect("blob");
+        first
+            .publish_version_record(&record_path, b"record")
+            .expect("record");
+        drop(first); // An interrupted caller never reached the directory barrier.
+
+        let retry = capture_publication(&state);
+        let reused = retry
+            .publish_reader_sha256(&b"blob"[..], Path::new("source"), 4)
+            .expect("same blob");
+        assert_eq!(reused.digest, expected.digest);
+        assert!(matches!(
+            retry.publish_version_record(&record_path, b"record"),
+            Err(FolderbaseError::WouldOverwrite(_))
+        ));
+        let mut flushed = Vec::new();
+        retry
+            .finish_with_sync(
+                |_| {},
+                |directory, display| {
+                    flushed.push(display.to_path_buf());
+                    sync_directory(directory, display)
+                },
+            )
+            .expect("reused names become durable");
+        assert_eq!(
+            flushed,
+            [
+                state.display_root().join(CAPTURE_BLOBS),
+                state.display_root().join(CAPTURE_RECORDS)
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_batch_has_two_directory_barriers_for_many_distinct_immutable_writes() {
+        let (root, state) = capture_publication_fixture();
+        let batch = capture_publication(&state);
+        for index in 0..16 {
+            let bytes = format!("distinct immutable bytes {index}");
+            let blob = batch
+                .publish_reader_sha256(bytes.as_bytes(), Path::new("source"), bytes.len() as u64)
+                .expect("blob");
+            assert_eq!(
+                fs::read(root.path().join(CAPTURE_BLOBS).join(blob.digest))
+                    .expect("installed blob"),
+                bytes.as_bytes()
+            );
+            batch
+                .publish_version_record(
+                    &Path::new(CAPTURE_RECORDS).join(format!("{index}.json")),
+                    bytes.as_bytes(),
+                )
+                .expect("record");
+        }
+        let mut flushed = Vec::new();
+        batch
+            .finish_with_sync(
+                |_| {},
+                |directory, display| {
+                    flushed.push(display.to_path_buf());
+                    sync_directory(directory, display)
+                },
+            )
+            .expect("durability barrier");
+        assert_eq!(
+            flushed,
+            [
+                root.path().join(CAPTURE_BLOBS),
+                root.path().join(CAPTURE_RECORDS)
+            ]
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join(CAPTURE_BLOBS))
+                .expect("blobs")
+                .count(),
+            16
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join(CAPTURE_RECORDS))
+                .expect("records")
+                .count(),
+            16
+        );
+    }
+
+    #[test]
+    fn capture_batch_propagates_each_directory_flush_failure_without_completing_barrier() {
+        for fail_at in 0..2 {
+            let (_root, state) = capture_publication_fixture();
+            let batch = capture_publication(&state);
+            batch
+                .publish_reader_sha256(&b"blob"[..], Path::new("source"), 4)
+                .expect("blob");
+            let mut calls = 0;
+            let mut checkpoints = Vec::new();
+            let error = batch
+                .finish_with_sync(
+                    |phase| checkpoints.push(phase),
+                    |directory, display| {
+                        let index = calls;
+                        calls += 1;
+                        if index == fail_at {
+                            Err(FolderbaseError::io(
+                                display,
+                                io::Error::other("injected directory flush failure"),
+                            ))
+                        } else {
+                            sync_directory(directory, display)
+                        }
+                    },
+                )
+                .expect_err("flush failure must propagate");
+            assert!(
+                matches!(error, FolderbaseError::Io { source, .. } if source.to_string().contains("injected directory flush"))
+            );
+            assert_eq!(calls, fail_at + 1);
+            assert!(!checkpoints.contains(&CaptureDirectoryCheckpoint::RecordsFlushed));
+            capture_publication(&state)
+                .finish(|_| {})
+                .expect("explicit retry barrier");
+        }
+    }
+
+    #[test]
+    fn capture_batch_refuses_corrupt_blob_collision_and_preserves_record_no_clobber() {
+        let (root, state) = capture_publication_fixture();
+        let digest = format!("{:x}", Sha256::digest(b"blob"));
+        fs::write(root.path().join(CAPTURE_BLOBS).join(&digest), b"evil")
+            .expect("corrupt collision");
+        let batch = capture_publication(&state);
+        assert!(
+            batch
+                .publish_reader_sha256(&b"blob"[..], Path::new("source"), 4)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(root.path().join(CAPTURE_BLOBS).join(digest)).expect("unchanged collision"),
+            b"evil"
+        );
+        let path = Path::new(CAPTURE_RECORDS).join("existing.json");
+        state
+            .publish_new(&path, b"original")
+            .expect("existing record");
+        assert!(matches!(
+            batch.publish_version_record(&path, b"replacement"),
+            Err(FolderbaseError::WouldOverwrite(_))
+        ));
+        assert_eq!(
+            state.read_bounded(&path, 100).expect("record"),
+            Some(b"original".to_vec())
+        );
+    }
+
+    #[test]
+    fn capture_batch_cleans_partial_source_stream_without_installing_a_blob() {
+        struct InterruptedReader(bool);
+        impl Read for InterruptedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::other("injected source read failure"));
+                }
+                self.0 = true;
+                buffer[..4].copy_from_slice(b"part");
+                Ok(4)
+            }
+        }
+        let (root, state) = capture_publication_fixture();
+        let batch = capture_publication(&state);
+        let error =
+            match batch.publish_reader_sha256(InterruptedReader(false), Path::new("source"), 8) {
+                Ok(_) => panic!("partial stream cannot succeed"),
+                Err(error) => error,
+            };
+        assert!(
+            matches!(error, FolderbaseError::Io { source, .. } if source.to_string().contains("injected source read"))
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join(CAPTURE_BLOBS))
+                .expect("blob directory")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn capture_batch_rejects_each_parent_replacement_before_and_after_flushes() {
+        for relative in [CAPTURE_BLOBS, CAPTURE_RECORDS] {
+            for at in [
+                CaptureDirectoryCheckpoint::BeforeFlushes,
+                CaptureDirectoryCheckpoint::BlobsFlushed,
+                CaptureDirectoryCheckpoint::RecordsFlushed,
+            ] {
+                let (root, state) = capture_publication_fixture();
+                let batch = capture_publication(&state);
+                batch
+                    .publish_reader_sha256(&b"blob"[..], Path::new("source"), 4)
+                    .expect("blob");
+                let path = root.path().join(relative);
+                let detached = path.with_file_name("detached-parent");
+                let error = batch
+                    .finish(|phase| {
+                        if phase == at {
+                            fs::rename(&path, &detached).expect("detach retained parent");
+                            fs::create_dir(&path).expect("replacement parent");
+                            fs::write(path.join("sentinel"), b"outside").expect("sentinel");
+                        }
+                    })
+                    .expect_err("changed parent must fail closed");
+                assert!(matches!(error, FolderbaseError::UnsafePath(changed) if changed == path));
+                assert_eq!(fs::read_dir(&path).expect("replacement").count(), 1);
+                assert_eq!(
+                    fs::read(path.join("sentinel")).expect("sentinel"),
+                    b"outside"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generic_publication_flushes_before_return_and_surfaces_flush_errors() {
+        let (_root, state) = capture_publication_fixture();
+        let parent = state
+            .open_dir(&state_relative(Path::new(CAPTURE_RECORDS)).expect("relative"))
+            .expect("parent");
+        let display = state
+            .display_root()
+            .join(CAPTURE_RECORDS)
+            .join("proof.json");
+        let mut flushed = false;
+        publish_new_in(
+            &parent,
+            OsStr::new("proof.json"),
+            b"proof",
+            &display,
+            || {
+                flushed = true;
+                sync_directory(&parent, display.parent().expect("parent display"))
+            },
+        )
+        .expect("immediately durable publication");
+        assert!(flushed);
+        let error = publish_new_in(
+            &parent,
+            OsStr::new("failed.json"),
+            b"proof",
+            &display,
+            || {
+                Err(FolderbaseError::io(
+                    &display,
+                    io::Error::other("injected flush error"),
+                ))
+            },
+        )
+        .expect_err("immediate wrapper must surface flush failure");
+        assert!(matches!(error, FolderbaseError::Io { .. }));
+    }
 
     #[test]
     fn private_namespace_sanitizer_rescans_after_a_root_entry_is_skipped() {
