@@ -134,7 +134,7 @@ With `folderbase.file-history@0.1.0`, read complete stored Version metadata with
 capturing the current file or running recovery:
 
 ```js
-const history = await client.fileHistory(root, "tasks/task.json");
+const history = await folderbase.fileHistory("/absolute/workspace", "tasks/task.json");
 if (history.kind === "success") {
   console.log(history.document.current_version, history.document.versions);
 }
