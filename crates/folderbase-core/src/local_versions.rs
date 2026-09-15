@@ -29,12 +29,17 @@ use crate::{
     workspace_path_lookup::WorkspacePathLookup,
 };
 
+#[path = "local_file_create.rs"]
+mod file_create;
 #[path = "local_file_history.rs"]
 mod file_history;
 
 #[path = "local_capture_adoption.rs"]
 mod capture_adoption;
 pub(crate) use capture_adoption::CaptureObjectClaims;
+pub use file_create::{
+    MAX_WORKSPACE_CREATE_BYTES, WorkspaceCreateError, WorkspaceCreateResult, create_workspace_file,
+};
 pub use file_history::{FileHistoryError, FileVersionHistory, read_file_history};
 
 #[path = "local_path_ownership.rs"]
@@ -1370,6 +1375,24 @@ impl LocalVersionStore {
     }
 
     fn acquire_transaction_lock_file(
+        display_root: &Path,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
+        let lock = Self::acquire_transaction_lock_file_for_create(display_root, state)?;
+        if state
+            .read_bounded_if_present(Path::new(file_create::ACTIVE_CREATE_PATH), 64 * 1024)?
+            .is_some()
+        {
+            return Err(FolderbaseError::RecoveryRequired {
+                work: "workspace create; retry its original operation ID and content".to_owned(),
+            });
+        }
+        Ok(lock)
+    }
+
+    // Only the create coordinator may acquire this lease before validating its
+    // own active intent. Protocol-upgrade recovery still uses the guarded path.
+    fn acquire_transaction_lock_file_for_create(
         display_root: &Path,
         state: &FolderbaseState,
     ) -> Result<StoreTransactionLock> {

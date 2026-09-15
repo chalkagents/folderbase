@@ -131,3 +131,14 @@ if (fileHistory.kind === "success") {
   const capturedAt: string | undefined = fileHistory.document.versions[0]?.captured_at;
   void [recordedVersion, capturedAt];
 }
+
+
+const created = await client.workspaceCreate("/workspace", "tasks/new.json", {
+  operationId: "019f0000-0000-7000-8000-000000000001", content: new Uint8Array([0,255]),
+});
+if (created.kind === "success") {
+  const objectId: string = created.document.object_id;
+  const replayed: boolean = created.document.replayed;
+  const digest: string = created.document.content.digest;
+  void [objectId, replayed, digest];
+}

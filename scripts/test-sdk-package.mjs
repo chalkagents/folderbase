@@ -346,6 +346,8 @@ try {
       "folderbase.version-cli-json@0.1.0",
       "--capability",
       "folderbase.file-history@0.1.0",
+      "--capability",
+      "folderbase.workspace-create@0.1.0",
     ],
     { env: conformanceEnvironment, timeout: 20 * 60_000 },
   );
@@ -353,7 +355,7 @@ try {
     capabilityReport,
     "folderbase-capability-conformance-report-v1",
   );
-  assert.equal(capabilities.passed, 5);
+  assert.equal(capabilities.passed, 6);
 
   process.stdout.write(
     "Packed SDK installed outside the checkout and passed the real-Core adapter journey.\n",

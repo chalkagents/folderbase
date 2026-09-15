@@ -74,8 +74,9 @@ pub use inspection::inspect;
 pub use local_versions::{
     ApprovedHistoryTransfer, CaptureResult, ContentDigest, FileHistoryError, FileVersionHistory,
     HistoryTransferPlan, HistoryTransferResult, HistoryTransferState, JournalAction,
-    LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId, ObjectJournalEvent,
-    RestoreResult, VersionId, apply_history_transfer, approve_history_transfer, read_file_history,
+    LocalObjectRecord, LocalVersionRecord, LocalVersionStore, MAX_WORKSPACE_CREATE_BYTES, ObjectId,
+    ObjectJournalEvent, RestoreResult, VersionId, WorkspaceCreateError, WorkspaceCreateResult,
+    apply_history_transfer, approve_history_transfer, create_workspace_file, read_file_history,
 };
 pub use migration::{
     ApprovedMigration, MigrationAnalysis, MigrationAnswer, MigrationAnswerException,

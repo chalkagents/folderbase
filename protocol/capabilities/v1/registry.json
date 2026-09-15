@@ -49,6 +49,12 @@
       "version": "0.1.0",
       "stability": "experimental",
       "conformance_runner": "protocol/conformance/capabilities/version-cli-json-0.1/run.mjs"
+    },
+    {
+      "name": "folderbase.workspace-create",
+      "version": "0.1.0",
+      "stability": "experimental",
+      "conformance_runner": "protocol/conformance/capabilities/workspace-create-0.1/run.mjs"
     }
   ]
 }
