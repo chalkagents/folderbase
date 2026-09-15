@@ -310,6 +310,9 @@ jobs:
       - name: Test the root-attestation CLI contract
         run: cargo test --package folderbase-cli --test attest --locked
 
+      - name: Test native capability discovery and reconstruction eligibility
+        run: cargo test --package folderbase-cli --test protocol_check --test root_reconstruction_public_conformance --locked
+
       - name: Build the native capability candidate
         run: cargo build --package folderbase-cli --locked
 

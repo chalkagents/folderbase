@@ -18,6 +18,14 @@ This page describes unreleased work. Folderbase remains Beta; use the exact
 release page for immutable behavior and discover optional capabilities through
 `folderbase protocol contract --json`.
 
+The candidate now advertises `folderbase.root-reconstruction@0.1.0` only on
+Linux and macOS release targets. Windows and other targets omit it because the
+complete retained publication/replay behavior is unavailable. The command
+preserves its typed filesystem refusal; returning that refusal is not proof of
+the complete capability. Per-destination filesystem checks remain required on
+eligible targets. The file-history conformance runner also accepts the
+documented native path separators instead of assuming POSIX separators.
+
 ## Local application candidate
 
 The local candidate repairs Change Set application when a proposal adds a new
