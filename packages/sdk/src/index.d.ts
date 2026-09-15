@@ -296,6 +296,41 @@ export interface FolderbaseFileHistory extends JsonObject {
   versions: FolderbaseFileVersionRecord[];
 }
 
+export interface FolderbaseExportSelection { versionId?: string; }
+export interface FolderbaseExportVersion extends JsonObject {
+  version_id: string;
+  canonical_sha256: string;
+  created_at: string;
+  visible_entries: number;
+  retained_tombstones: number;
+}
+export interface FolderbaseExportVersions extends JsonObject {
+  format: "folderbase-export-version-list-v1";
+  versions: FolderbaseExportVersion[];
+}
+export interface FolderbaseExportResult extends JsonObject {
+  format: "folderbase-local-export-v1";
+  export_index_sha256: string;
+  retention_profile: "selected-snapshot-file-history-v1";
+  selection: "current_workspace" | "retained_version";
+  folderbase_id: string;
+  folderbase_version_id: string;
+  retained_objects: number;
+  retained_file_versions: number;
+  capture_exclusions: number;
+  snapshot_only_reserved_paths: JsonObject[];
+  omitted_objects: JsonObject[];
+  retired_objects: JsonObject[];
+}
+export interface FolderbaseExportRestoreRequest extends JsonObject {
+  operation_id: string;
+  export_index_sha256: string;
+}
+export interface FolderbaseExportRestoreResult extends JsonObject {
+  replayed: boolean;
+  export: FolderbaseExportResult;
+}
+
 export class FolderbaseClient {
   constructor(options?: FolderbaseClientOptions);
 
@@ -305,6 +340,9 @@ export class FolderbaseClient {
   ): Promise<FolderbaseResult<TSuccess, TAttention>>;
 
   contract<T extends JsonValue = JsonObject>(options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
+  exportVersions(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseExportVersions>>;
+  exportWorkspace(root: string, packagePath: string, selection?: FolderbaseExportSelection, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseExportResult>>;
+  restoreWorkspace(packagePath: string, destination: string, request: FolderbaseExportRestoreRequest, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseExportRestoreResult>>;
   fileHistory(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseFileHistory>>;
   inspect<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   attest<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;

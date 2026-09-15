@@ -33,51 +33,59 @@ fn protocol_contract_discovers_the_stable_machine_interface() {
     assert_eq!(descriptor["format"], "folderbase-compatibility-contract-v1");
     assert_eq!(descriptor["contract_version"], "1.0.0");
     assert_eq!(descriptor["cli_json"], "folderbase-cli-json-v1");
-    assert_eq!(
-        descriptor["capabilities"],
-        serde_json::json!([
-            {
-                "name": "folderbase.change-set",
-                "version": "0.1.0",
-                "stability": "stable"
-            },
-            {
-                "name": "folderbase.daemon-stdio",
+    let mut expected_capabilities = serde_json::json!([
+        {
+            "name": "folderbase.change-set",
+            "version": "0.1.0",
+            "stability": "stable"
+        },
+        {
+            "name": "folderbase.daemon-stdio",
+            "version": "0.1.0",
+            "stability": "experimental"
+        },
+        {
+            "name": "folderbase.file-history",
+            "version": "0.1.0",
+            "stability": "experimental"
+        },
+        {
+            "name": "folderbase.folder-scope-evidence",
+            "version": "0.1.0",
+            "stability": "stable"
+        },
+        {
+            "name": "folderbase.query-index",
+            "version": "0.1.0",
+            "stability": "experimental"
+        },
+        {
+            "name": "folderbase.root-reconstruction",
+            "version": "0.1.0",
+            "stability": "stable"
+        },
+        {
+            "name": "folderbase.template-expansion",
+            "version": "0.1.0",
+            "stability": "stable"
+        },
+        {
+            "name": "folderbase.version-cli-json",
+            "version": "0.1.0",
+            "stability": "experimental"
+        }
+    ]);
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        expected_capabilities.as_array_mut().unwrap().insert(
+            4,
+            serde_json::json!({
+                "name": "folderbase.local-export",
                 "version": "0.1.0",
                 "stability": "experimental"
-            },
-            {
-                "name": "folderbase.file-history",
-                "version": "0.1.0",
-                "stability": "experimental"
-            },
-            {
-                "name": "folderbase.folder-scope-evidence",
-                "version": "0.1.0",
-                "stability": "stable"
-            },
-            {
-                "name": "folderbase.query-index",
-                "version": "0.1.0",
-                "stability": "experimental"
-            },
-            {
-                "name": "folderbase.root-reconstruction",
-                "version": "0.1.0",
-                "stability": "stable"
-            },
-            {
-                "name": "folderbase.template-expansion",
-                "version": "0.1.0",
-                "stability": "stable"
-            },
-            {
-                "name": "folderbase.version-cli-json",
-                "version": "0.1.0",
-                "stability": "experimental"
-            }
-        ])
-    );
+            }),
+        );
+    }
+    assert_eq!(descriptor["capabilities"], expected_capabilities);
 }
 
 #[test]

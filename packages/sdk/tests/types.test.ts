@@ -106,3 +106,13 @@ if (fileHistory.kind === "success") {
   const capturedAt: string | undefined = fileHistory.document.versions[0]?.captured_at;
   void [recordedVersion, capturedAt];
 }
+
+const exported = await client.exportWorkspace("/workspace", "/backup", {versionId: "fbversion_selected"});
+if (exported.kind === "success") {
+  const pin: string = exported.document.export_index_sha256;
+  const restored = await client.restoreWorkspace("/backup", "/new-workspace", {operation_id: "reconstruction_example", export_index_sha256: pin});
+  if (restored.kind === "success") {
+    const count: number = restored.document.export.retained_file_versions;
+    void count;
+  }
+}

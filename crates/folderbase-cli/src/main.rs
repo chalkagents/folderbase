@@ -69,6 +69,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Export a selected folder snapshot and retained ordinary-file history.
+    Export {
+        #[command(subcommand)]
+        command: ExportCommand,
+    },
+
     /// Inspect a folder without changing it.
     Inspect {
         path: PathBuf,
@@ -365,6 +371,34 @@ enum ProtocolArtifactArg {
 }
 
 #[derive(Debug, Subcommand)]
+enum ExportCommand {
+    /// Discover retained full-Version metadata without adopting Local Head.
+    List {
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create an absent portable export package; Git metadata is snapshot-only.
+    Create {
+        root: PathBuf,
+        package: PathBuf,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore into an absent root, or exactly replay the same pinned request.
+    Restore {
+        package: PathBuf,
+        destination: PathBuf,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum VersionCommand {
     /// Read all retained Version metadata for one existing file without writing.
     List {
@@ -562,6 +596,7 @@ enum CliError {
     Capture(FolderbaseCaptureError),
     RootAttestation(RootAttestationError),
     FileHistory(FileHistoryError),
+    LocalExport(folderbase_core::LocalExportError),
     OutputSerialization(serde_json::Error),
     OutputWrite {
         stream: &'static str,
@@ -576,6 +611,7 @@ impl fmt::Display for CliError {
             Self::Capture(source) => source.fmt(formatter),
             Self::RootAttestation(source) => source.fmt(formatter),
             Self::FileHistory(source) => source.fmt(formatter),
+            Self::LocalExport(source) => source.fmt(formatter),
             Self::OutputSerialization(source) => {
                 write!(formatter, "failed to serialize command output: {source}")
             }
@@ -593,6 +629,7 @@ impl std::error::Error for CliError {
             Self::Capture(source) => Some(source),
             Self::RootAttestation(source) => Some(source),
             Self::FileHistory(source) => Some(source),
+            Self::LocalExport(source) => Some(source),
             Self::OutputSerialization(source) => Some(source),
             Self::OutputWrite { source, .. } => Some(source),
         }
@@ -608,6 +645,12 @@ impl From<FolderbaseError> for CliError {
 impl From<FolderbaseCaptureError> for CliError {
     fn from(source: FolderbaseCaptureError) -> Self {
         Self::Capture(source)
+    }
+}
+
+impl From<folderbase_core::LocalExportError> for CliError {
+    fn from(source: folderbase_core::LocalExportError) -> Self {
+        Self::LocalExport(source)
     }
 }
 
@@ -1203,6 +1246,90 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
             Ok(EXIT_SUCCESS)
         }
+        Command::Export { command } => {
+            match command {
+                ExportCommand::List { root, json } => {
+                    let result = folderbase_core::list_export_versions(root)?;
+                    if json {
+                        print_json(&result)?;
+                    } else {
+                        for version in result.versions {
+                            println!("{} {}", version.version_id, version.created_at);
+                        }
+                    }
+                }
+                ExportCommand::Create {
+                    root,
+                    package,
+                    version,
+                    json,
+                } => {
+                    let selection = version
+                        .map(folderbase_core::ExportSnapshotSelection::RetainedVersion)
+                        .unwrap_or(folderbase_core::ExportSnapshotSelection::CurrentWorkspace);
+                    let result = folderbase_core::create_local_export(root, package, selection)?;
+                    if json {
+                        print_json(&result)?;
+                    } else {
+                        println!(
+                            "Exported {} with {} retained file Versions. Export SHA-256: {}",
+                            result.folderbase_version_id,
+                            result.retained_file_versions,
+                            result.export_index_sha256
+                        );
+                    }
+                }
+                ExportCommand::Restore {
+                    package,
+                    destination,
+                    stdin,
+                    json,
+                } => {
+                    if !stdin {
+                        return Err(FolderbaseError::InvalidRecord {
+                            path: PathBuf::from("stdin"),
+                            message: "export restore requires --stdin".to_owned(),
+                        }
+                        .into());
+                    }
+                    let mut bytes = Vec::new();
+                    std::io::stdin()
+                        .lock()
+                        .take(65_537)
+                        .read_to_end(&mut bytes)
+                        .map_err(|source| FolderbaseError::Io {
+                            path: PathBuf::from("stdin"),
+                            source,
+                        })?;
+                    if bytes.len() > 65_536 {
+                        return Err(FolderbaseError::InvalidRecord {
+                            path: PathBuf::from("stdin"),
+                            message: "export restore request exceeds 65536 bytes".to_owned(),
+                        }
+                        .into());
+                    }
+                    let request: folderbase_core::LocalExportRestoreRequest =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            FolderbaseError::InvalidRecord {
+                                path: PathBuf::from("stdin"),
+                                message: format!("invalid export restore request: {error}"),
+                            }
+                        })?;
+                    let result =
+                        folderbase_core::restore_local_export(package, destination, request)?;
+                    if json {
+                        print_json(&result)?;
+                    } else {
+                        println!(
+                            "Restored {} with {} retained file Versions",
+                            result.export.folderbase_version_id,
+                            result.export.retained_file_versions
+                        );
+                    }
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
         Command::Version { command } => {
             match command {
                 VersionCommand::Capture {
@@ -1408,9 +1535,13 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Protocol { command } => match command {
             ProtocolCommand::Contract { json } => {
                 if json {
-                    let registry: EmbeddedCapabilityRegistry =
+                    let mut registry: EmbeddedCapabilityRegistry =
                         serde_json::from_str(CAPABILITY_REGISTRY)
                             .expect("embedded capability registry must be valid JSON");
+                    registry.capabilities.retain(|capability| {
+                        capability.name != "folderbase.local-export"
+                            || local_export_supported_on_target(std::env::consts::OS)
+                    });
                     print_json(&serde_json::json!({
                         "format": "folderbase-compatibility-contract-v1",
                         "contract_version": "1.0.0",
@@ -1795,6 +1926,10 @@ fn template_wire_path(path: &Path) -> String {
         .join("/")
 }
 
+fn local_export_supported_on_target(target_os: &str) -> bool {
+    matches!(target_os, "linux" | "macos")
+}
+
 fn command_emits_json_errors(command: &Command) -> bool {
     match command {
         Command::Inspect { json, .. }
@@ -1805,6 +1940,11 @@ fn command_emits_json_errors(command: &Command) -> bool {
         | Command::Migrate { json, .. } => *json,
         Command::Template { command } => match command {
             TemplateCommand::Plan { json, .. } | TemplateCommand::Apply { json, .. } => *json,
+        },
+        Command::Export { command } => match command {
+            ExportCommand::List { json, .. }
+            | ExportCommand::Create { json, .. }
+            | ExportCommand::Restore { json, .. } => *json,
         },
         Command::Version { command } => match command {
             VersionCommand::List { json, .. }
@@ -1869,6 +2009,7 @@ fn error_code(error: &CliError) -> &'static str {
         }
         CliError::RootAttestation(error) => return error.code(),
         CliError::FileHistory(error) => return error.code(),
+        CliError::LocalExport(error) => return error.code(),
         CliError::OutputSerialization(_) => return "output_serialization",
         CliError::OutputWrite { .. } => return "output_write_failed",
     };
@@ -2398,6 +2539,22 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn local_export_discovery_requires_a_complete_target_backend() {
+        assert!(local_export_supported_on_target("linux"));
+        assert!(local_export_supported_on_target("macos"));
+        assert!(!local_export_supported_on_target("windows"));
+        assert!(!local_export_supported_on_target("freebsd"));
+        let registry: EmbeddedCapabilityRegistry =
+            serde_json::from_str(CAPABILITY_REGISTRY).unwrap();
+        assert!(
+            registry
+                .capabilities
+                .iter()
+                .any(|capability| capability.name == "folderbase.local-export")
+        );
     }
 
     #[test]
