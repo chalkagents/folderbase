@@ -29,6 +29,20 @@ created first, then referenced by a separate record compare-and-swap update.
 If that update conflicts, the attachment remains discoverable ordinary data;
 the application owns retry/orphan handling and must not claim atomicity.
 
+Same-path recreation allocates a new Object only when every prior claim is
+independently retired by verified full-Version Tombstone ancestry. Completed
+creation provenance provides a private ownership proof for immediate history
+and CAS before the next full capture: exactly one canonical claimant may remain
+unretired, it must never have appeared in the retained full-Version graph, and
+there must be no current binding at that path. Its closed completed receipt must
+match the current physical root/state, path, Object and original immutable Version
+metadata/membership. Every other claimant remains independently retired. Receipt
+inventory and authority are rechecked alongside the caller's raw metadata
+witnesses. This is identity provenance, not current-byte authority. Pending create
+remains refused by readers/writers; no hidden whole capture or merged history is
+permitted. Receipt inventory is bounded to 16,384 names and 64 MiB within the
+caller's metadata budget; required ancestry retains issue #102's bounds.
+
 ## State and durability
 
 One closed, independently versioned intent lives at

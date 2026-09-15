@@ -130,16 +130,25 @@ fn read_file_history_with_hook(
         let current = path_ownership::current_version(&root, &state, |path, maximum| {
             observation.read(path, maximum)
         })?;
-        Some(path_ownership::OwnershipHistory::load(
-            current,
-            &candidates
-                .iter()
-                .map(|(_, object)| (canonical.clone(), object.id.clone()))
-                .collect::<Vec<_>>(),
-            false,
-            None,
-            |path, maximum| observation.read(path, maximum),
-        )?)
+        Some(
+            path_ownership::OwnershipHistory::load(
+                current,
+                &candidates
+                    .iter()
+                    .map(|(_, object)| (canonical.clone(), object.id.clone()))
+                    .collect::<Vec<_>>(),
+                true,
+                None,
+                |path, maximum| observation.read(path, maximum),
+            )?
+            .resolve_created(
+                &root,
+                &state,
+                &canonical,
+                &candidates,
+                |path, maximum| observation.read(path, maximum),
+            )?,
+        )
     } else {
         None
     };
@@ -236,6 +245,9 @@ fn read_file_history_with_hook(
     }
     before_revalidation();
     observation.verify()?;
+    if let Some(ownership) = &ownership {
+        ownership.verify_created(&root, &state)?;
+    }
     let mut final_pending = Observation::new(&state);
     ensure_idle(&mut final_pending)?;
     if select_claimant(
@@ -425,6 +437,13 @@ impl<'a> Observation<'a> {
 
     pub(super) fn names(&mut self, path: &Path) -> HistoryResult<Vec<OsString>> {
         let names = directory_names(self.state, path)?;
+        if self
+            .directories
+            .get(path)
+            .is_some_and(|prior| prior != &names)
+        {
+            return Err(FileHistoryError::ObservationChanged);
+        }
         self.directories.insert(path.to_path_buf(), names.clone());
         Ok(names)
     }
@@ -632,6 +651,95 @@ mod tests {
         fs::write(root.path().join("tasks/a.json"), "a different file").unwrap();
         store.seal_capture(store.plan_capture().unwrap()).unwrap();
         root
+    }
+
+    #[test]
+    fn completed_create_ownership_is_read_only_and_rechecks_receipt_inventory() {
+        for change in [
+            "none",
+            "receipt",
+            "inventory",
+            "pending",
+            "original-version",
+        ] {
+            let root = fixture();
+            let store = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+            store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            fs::remove_file(root.path().join("tasks/a.json")).unwrap();
+            store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            let created = crate::create_workspace_file(
+                root.path(),
+                "tasks/a.json",
+                &Uuid::now_v7().to_string(),
+                b"new generation",
+            )
+            .unwrap();
+            let before = snapshot(root.path());
+            let mut after_external_change = None;
+            let result =
+                read_file_history_with_hook(root.path(), Path::new("tasks/a.json"), || {
+                    match change {
+                        "none" => {}
+                        "receipt" => {
+                            let path = root.path().join(format!(
+                                ".folderbase/local/workspace-create/receipts/{}.json",
+                                created.operation_id
+                            ));
+                            let mut bytes = fs::read(&path).unwrap();
+                            bytes.push(b' ');
+                            fs::write(path, bytes).unwrap();
+                        }
+                        "inventory" => fs::write(
+                            root.path()
+                                .join(".folderbase/local/workspace-create/receipts/foreign.json"),
+                            b"{}",
+                        )
+                        .unwrap(),
+                        "pending" => {
+                            fs::write(root.path().join(file_create::ACTIVE_CREATE_PATH), b"{}")
+                                .unwrap()
+                        }
+                        "original-version" => fs::write(
+                            root.path().join(format!(
+                                "{VERSION_RECORDS_DIRECTORY}/{}.json",
+                                created.version_id
+                            )),
+                            b"{}",
+                        )
+                        .unwrap(),
+                        _ => unreachable!(),
+                    }
+                    after_external_change = Some(snapshot(root.path()));
+                });
+            if change == "none" {
+                assert_eq!(result.unwrap().object_id, Some(created.object_id));
+                assert_eq!(before, snapshot(root.path()));
+            } else {
+                assert!(result.is_err(), "accepted changed {change}");
+                assert_eq!(
+                    after_external_change.unwrap(),
+                    snapshot(root.path()),
+                    "history wrote after {change}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_ownership_observation_cannot_replace_its_first_witness() {
+        let root = fixture();
+        let state = FolderbaseState::open_existing_read_only(root.path()).unwrap();
+        let mut observation = Observation::new(&state);
+        let path = Path::new(".folderbase/manifest.json");
+        let original = observation.read(path, MAX_JOURNAL_BYTES).unwrap().unwrap();
+        let mut changed = original.clone();
+        changed.push(b' ');
+        fs::write(root.path().join(path), changed).unwrap();
+        assert!(matches!(
+            observation.read(path, MAX_JOURNAL_BYTES),
+            Err(FileHistoryError::ObservationChanged)
+        ));
+        assert_eq!(observation.files[path].1.as_ref(), Some(&original));
     }
 
     #[test]

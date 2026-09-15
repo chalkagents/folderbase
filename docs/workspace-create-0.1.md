@@ -69,8 +69,14 @@ history without a whole-folder capture. Create an attachment first, then add its
 path to an application record with a separate compare-and-swap save. A conflicting
 save can leave an unlinked ordinary attachment. The application should list it
 and provide explicit retry/link handling. These two operations are not atomic.
-Later whole-folder capture must use the identity-preservation fix from issue #102;
-that integration is a separate release gate.
+After deletion has been recorded by a whole-folder capture, a new operation may
+create a new Object at the same absent path. Every older same-path claim must
+have independently verified Tombstone ancestry; unexplained claims still refuse.
+Old Objects and their Version lists remain separate and unchanged. History and
+CAS work immediately before the next whole-folder capture: a completed receipt
+proves the new Object's original identity and Version membership, not its current
+bytes. No hidden capture or history merge occurs. A competing current full-Version
+binding or an ID already known to older full Versions cannot use this exception.
 
 ## Bounds and operational refusals
 
@@ -82,6 +88,13 @@ bound. The journal is limited to 64 MiB and can be rewritten in full per create.
 Existing bytes are preserved; corrupt or partial tails and conflicting duplicate
 event IDs refuse instead of invoking legacy repair. None of these limits truncate
 history or return a partial success.
+
+When same-path recreation needs creation provenance, ownership resolution scans
+at most 16,384 receipts, 64 KiB each, within the caller's 64 MiB metadata budget.
+Required full-Version ancestry is bounded to 1,024 records and 64 MiB; missing
+ancestry is refused. Reading history observes receipt metadata only and rechecks
+the original receipt bytes, inventory and physical authority without blob reads,
+recovery or writes. Copying or altering a receipt cannot establish ownership.
 
 Operational failures use exit 2, empty stdout and the normal JSON error envelope
 on stderr. SDK callers read `error.document?.error?.code` (transport errors may
@@ -115,6 +128,8 @@ deletions, unsafe/bounded input and pending-work refusal. Rust tests additionall
 interrupt real child processes at publication/cleanup joins, verify root/state/
 parent/stage replacement refusals, preserve unpinned artifacts, reject corrupt
 Versions/journals, and inject fresh/retry parent-flush failures.
+The packed SDK proof also runs three creation/deletion generations through
+immediate history, CAS, whole capture and exact original-Version recovery.
 
 ```sh
 node protocol/conformance/capabilities/run.mjs --implementation ./target/debug/folderbase --capability folderbase.workspace-create@0.1.0

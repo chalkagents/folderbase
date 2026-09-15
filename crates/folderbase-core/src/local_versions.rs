@@ -40,6 +40,7 @@ pub(crate) use capture_adoption::CaptureObjectClaims;
 pub use file_create::{
     MAX_WORKSPACE_CREATE_BYTES, WorkspaceCreateError, WorkspaceCreateResult, create_workspace_file,
 };
+
 pub use file_history::{FileHistoryError, FileVersionHistory, read_file_history};
 
 #[path = "local_export.rs"]
@@ -2089,6 +2090,12 @@ impl LocalVersionStore {
                                 "Object ownership metadata exceeds 64 MiB",
                             ));
                         }
+                        if witnesses
+                            .get(path)
+                            .is_some_and(|(_, prior)| prior != &bytes)
+                        {
+                            return Err(invalid_record(path, "Object ownership evidence changed"));
+                        }
                         witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
                         Ok::<_, FolderbaseError>(bytes)
                     })?;
@@ -2102,7 +2109,7 @@ impl LocalVersionStore {
                         .iter()
                         .map(|(_, object)| (relative_path.to_path_buf(), object.id.clone()))
                         .collect::<Vec<_>>(),
-                    false,
+                    true,
                     None,
                     |path, maximum| {
                         let bytes = path_ownership::read_metadata(&state, path, maximum)?;
@@ -2119,6 +2126,43 @@ impl LocalVersionStore {
                                 path,
                                 "Object ownership metadata exceeds 64 MiB",
                             ));
+                        }
+                        if witnesses
+                            .get(path)
+                            .is_some_and(|(_, prior)| prior != &bytes)
+                        {
+                            return Err(invalid_record(path, "Object ownership evidence changed"));
+                        }
+                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
+                        Ok::<_, FolderbaseError>(bytes)
+                    },
+                )?;
+                let version = version.resolve_created(
+                    &self.root,
+                    &state,
+                    relative_path,
+                    &candidates,
+                    |path, maximum| {
+                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
+                        if witnesses
+                            .values()
+                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
+                                bytes.as_ref().map_or(0, Vec::len)
+                            })
+                            .sum::<usize>()
+                            + bytes.as_ref().map_or(0, Vec::len)
+                            > 64 * 1024 * 1024
+                        {
+                            return Err(invalid_record(
+                                path,
+                                "Object ownership metadata exceeds 64 MiB",
+                            ));
+                        }
+                        if witnesses
+                            .get(path)
+                            .is_some_and(|(_, prior)| prior != &bytes)
+                        {
+                            return Err(invalid_record(path, "Object ownership evidence changed"));
                         }
                         witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
                         Ok::<_, FolderbaseError>(bytes)
@@ -2148,10 +2192,17 @@ impl LocalVersionStore {
                                 "Object ownership metadata exceeds 64 MiB",
                             ));
                         }
+                        if witnesses
+                            .get(path)
+                            .is_some_and(|(_, prior)| prior != &bytes)
+                        {
+                            return Err(invalid_record(path, "Object ownership evidence changed"));
+                        }
                         witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
                         Ok::<_, FolderbaseError>(bytes)
                     },
                 )?;
+                version.verify_created(&self.root, &state)?;
                 for (path, (maximum, bytes)) in witnesses {
                     if path_ownership::read_metadata(&state, &path, maximum)? != bytes {
                         return Err(invalid_record(&path, "Object ownership evidence changed"));
