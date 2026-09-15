@@ -113,6 +113,12 @@ Newer or unrelated missing ancestry still refuses. Re-export may reuse these
 verified imported witnesses at that anchor without reviving copied local
 authority. Replay verifies the anchor inventory and all retained history.
 
+Ownership resolution obtains this authority through bounded metadata callbacks
+covered by each operation's existing observations. Read-only history never
+hashes Tombstone blobs or loads the complete export history payload to resolve
+ownership. Export, restoration and replay retain their full content verification.
+Current bindings/Tombstones that explain every claimant need no anchor lookup.
+
 Missing/corrupt records, duplicate IDs, incomplete Object membership, transferred
 out ownership, aliases that cannot be unambiguously projected, unsupported
 migration/transfer state, or bounds violations refuse the whole export. There

@@ -2073,100 +2073,52 @@ impl LocalVersionStore {
             _ => {
                 let state = FolderbaseState::open_existing_read_only(&self.root)?;
                 let mut witnesses = BTreeMap::new();
-                let version =
-                    path_ownership::current_version(&self.root, &state, |path, maximum| {
-                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
-                        if witnesses
-                            .values()
-                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
-                                bytes.as_ref().map_or(0, Vec::len)
-                            })
-                            .sum::<usize>()
-                            + bytes.as_ref().map_or(0, Vec::len)
-                            > 64 * 1024 * 1024
-                        {
-                            return Err(invalid_record(
-                                path,
-                                "Object ownership metadata exceeds 64 MiB",
-                            ));
-                        }
-                        if witnesses
-                            .get(path)
-                            .is_some_and(|(_, prior)| prior != &bytes)
-                        {
+                let mut observe = |path: &Path, maximum| {
+                    let bytes = path_ownership::read_metadata(&state, path, maximum)?;
+                    if let Some((_, original)) = witnesses.get(path) {
+                        if original != &bytes {
                             return Err(invalid_record(path, "Object ownership evidence changed"));
                         }
-                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
-                        Ok::<_, FolderbaseError>(bytes)
-                    })?;
+                        return Ok(bytes);
+                    }
+                    if witnesses
+                        .values()
+                        .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
+                            bytes.as_ref().map_or(0, Vec::len)
+                        })
+                        .sum::<usize>()
+                        + bytes.as_ref().map_or(0, Vec::len)
+                        > 64 * 1024 * 1024
+                    {
+                        return Err(invalid_record(
+                            path,
+                            "Object ownership metadata exceeds 64 MiB",
+                        ));
+                    }
+                    witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
+                    Ok::<_, FolderbaseError>(bytes)
+                };
+                let version = path_ownership::current_version(&self.root, &state, &mut observe)?;
                 let candidates = found
                     .iter()
                     .map(|(path, record)| (path.as_path(), record))
                     .collect::<Vec<_>>();
-                let version = path_ownership::OwnershipHistory::load(
+                let version = path_ownership::OwnershipHistory::load_with_export_anchor(
+                    &state,
                     version,
                     &candidates
                         .iter()
                         .map(|(_, object)| (relative_path.to_path_buf(), object.id.clone()))
                         .collect::<Vec<_>>(),
                     true,
-                    None,
-                    |path, maximum| {
-                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
-                        if witnesses
-                            .values()
-                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
-                                bytes.as_ref().map_or(0, Vec::len)
-                            })
-                            .sum::<usize>()
-                            + bytes.as_ref().map_or(0, Vec::len)
-                            > 64 * 1024 * 1024
-                        {
-                            return Err(invalid_record(
-                                path,
-                                "Object ownership metadata exceeds 64 MiB",
-                            ));
-                        }
-                        if witnesses
-                            .get(path)
-                            .is_some_and(|(_, prior)| prior != &bytes)
-                        {
-                            return Err(invalid_record(path, "Object ownership evidence changed"));
-                        }
-                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
-                        Ok::<_, FolderbaseError>(bytes)
-                    },
+                    &mut observe,
                 )?;
                 let version = version.resolve_created(
                     &self.root,
                     &state,
                     relative_path,
                     &candidates,
-                    |path, maximum| {
-                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
-                        if witnesses
-                            .values()
-                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
-                                bytes.as_ref().map_or(0, Vec::len)
-                            })
-                            .sum::<usize>()
-                            + bytes.as_ref().map_or(0, Vec::len)
-                            > 64 * 1024 * 1024
-                        {
-                            return Err(invalid_record(
-                                path,
-                                "Object ownership metadata exceeds 64 MiB",
-                            ));
-                        }
-                        if witnesses
-                            .get(path)
-                            .is_some_and(|(_, prior)| prior != &bytes)
-                        {
-                            return Err(invalid_record(path, "Object ownership evidence changed"));
-                        }
-                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
-                        Ok::<_, FolderbaseError>(bytes)
-                    },
+                    &mut observe,
                 )?;
                 let selected = path_ownership::select(relative_path, &candidates, &version)?
                     .1
@@ -2176,31 +2128,7 @@ impl LocalVersionStore {
                     relative_path,
                     &candidates,
                     &version,
-                    |path, maximum| {
-                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
-                        if witnesses
-                            .values()
-                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
-                                bytes.as_ref().map_or(0, Vec::len)
-                            })
-                            .sum::<usize>()
-                            + bytes.as_ref().map_or(0, Vec::len)
-                            > 64 * 1024 * 1024
-                        {
-                            return Err(invalid_record(
-                                path,
-                                "Object ownership metadata exceeds 64 MiB",
-                            ));
-                        }
-                        if witnesses
-                            .get(path)
-                            .is_some_and(|(_, prior)| prior != &bytes)
-                        {
-                            return Err(invalid_record(path, "Object ownership evidence changed"));
-                        }
-                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
-                        Ok::<_, FolderbaseError>(bytes)
-                    },
+                    &mut observe,
                 )?;
                 version.verify_created(&self.root, &state)?;
                 for (path, (maximum, bytes)) in witnesses {

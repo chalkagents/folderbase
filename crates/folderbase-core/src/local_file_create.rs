@@ -1020,14 +1020,14 @@ fn verify_claimants(
                 selected.to_owned(),
             ));
         }
-        let history = path_ownership::OwnershipHistory::load(
+        let history = path_ownership::OwnershipHistory::load_with_export_anchor(
+            state,
             current,
             &selected_records
                 .iter()
                 .map(|(_, object)| (PathBuf::from(selected), object.id.clone()))
                 .collect::<Vec<_>>(),
             false,
-            None,
             &mut read,
         )?;
         let folderbase_id = &history.current.folderbase_id();

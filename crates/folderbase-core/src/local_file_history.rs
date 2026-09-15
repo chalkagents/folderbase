@@ -131,14 +131,14 @@ fn read_file_history_with_hook(
             observation.read(path, maximum)
         })?;
         Some(
-            path_ownership::OwnershipHistory::load(
+            path_ownership::OwnershipHistory::load_with_export_anchor(
+                &state,
                 current,
                 &candidates
                     .iter()
                     .map(|(_, object)| (canonical.clone(), object.id.clone()))
                     .collect::<Vec<_>>(),
                 true,
-                None,
                 |path, maximum| observation.read(path, maximum),
             )?
             .resolve_created(
@@ -740,6 +740,121 @@ mod tests {
             Err(FileHistoryError::ObservationChanged)
         ));
         assert_eq!(observation.files[path].1.as_ref(), Some(&original));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exported_ancestry_observes_every_proof_file_and_rechecks_before_history_success() {
+        let original = recreated();
+        let store = crate::FolderbaseVersionStore::open(original.path()).unwrap();
+        fs::remove_file(original.path().join("tasks/a.json")).unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        fs::write(original.path().join("tasks/a.json"), "third generation").unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        let owner = tempfile::tempdir().unwrap();
+        let package = owner.path().join("package");
+        let root = owner.path().join("restored");
+        let exported = crate::create_local_export(
+            original.path(),
+            &package,
+            crate::ExportSnapshotSelection::CurrentWorkspace,
+        )
+        .unwrap();
+        crate::restore_local_export(
+            &package,
+            &root,
+            crate::LocalExportRestoreRequest {
+                operation_id: format!("reconstruction_{}", uuid::Uuid::now_v7()),
+                export_index_sha256: exported.export_index_sha256,
+            },
+        )
+        .unwrap();
+        let expected = read_file_history(&root, "tasks/a.json").unwrap();
+        let before = snapshot(&root);
+        let mut proof_paths =
+            crate::root_reconstruction::local_export_package::EXPORT_ANCESTRY_PROOF_PATHS
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+        proof_paths.push(PathBuf::from(format!(
+            ".folderbase/versions/folderbase/{}.json",
+            exported.folderbase_version_id
+        )));
+        let state = FolderbaseState::open_existing_read_only(&root).unwrap();
+        let mut observed = std::collections::BTreeSet::new();
+        crate::root_reconstruction::local_export_package::verified_export_ancestry_metadata(
+            &state,
+            |path, maximum| {
+                assert!(
+                    proof_paths.iter().any(|expected| expected == path),
+                    "unexpected export proof read: {}",
+                    path.display()
+                );
+                observed.insert(path.to_path_buf());
+                path_ownership::read_metadata(&state, path, maximum)
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(observed, proof_paths.iter().cloned().collect());
+        assert_eq!(snapshot(&root), before);
+        for relative in proof_paths {
+            let path = root.join(relative);
+            let bytes = fs::read(&path).unwrap();
+            let mut reached = false;
+            let result = read_file_history_with_hook(&root, Path::new("tasks/a.json"), || {
+                reached = true;
+                fs::write(&path, b"changed export proof").unwrap();
+            });
+            assert!(
+                reached,
+                "failure must occur after observing the intended proof"
+            );
+            assert!(
+                matches!(result, Err(FileHistoryError::ObservationChanged)),
+                "{result:?}"
+            );
+            assert_eq!(
+                fs::read(root.join("tasks/a.json")).unwrap(),
+                b"third generation"
+            );
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(read_file_history(&root, "tasks/a.json").unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn current_ownership_witnesses_do_not_read_unneeded_export_ancestry() {
+        let root = recreated();
+        let expected = read_file_history(root.path(), "tasks/a.json").unwrap();
+        let unrelated = root.path().join(".folderbase/local/root-reconstruction");
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(
+            unrelated.join("export-anchor.json"),
+            b"unrelated invalid data",
+        )
+        .unwrap();
+        assert_eq!(
+            read_file_history(root.path(), "tasks/a.json").unwrap(),
+            expected
+        );
+        let document = crate::read_workspace_text(root.path(), "tasks/a.json").unwrap();
+        let saved = crate::save_workspace_text(
+            root.path(),
+            "tasks/a.json",
+            &document.sha256,
+            "current witnesses suffice",
+        )
+        .unwrap();
+        assert_eq!(Some(saved.object_id), expected.object_id);
+        let store = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        assert_eq!(
+            read_file_history(root.path(), "tasks/a.json")
+                .unwrap()
+                .object_id,
+            expected.object_id
+        );
     }
 
     #[test]

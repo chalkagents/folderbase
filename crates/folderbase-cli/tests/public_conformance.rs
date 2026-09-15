@@ -122,7 +122,7 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
     let advertised_count = if cfg!(any(target_os = "linux", target_os = "macos")) {
         10
     } else {
-        8
+        9
     };
     Command::new("node")
         .arg(repository.join("protocol/conformance/capabilities/run.mjs"))

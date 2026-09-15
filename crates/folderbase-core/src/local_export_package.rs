@@ -1407,102 +1407,98 @@ pub(crate) struct VerifiedExportAncestry {
     pub tombstone_associations: Vec<ReconstructedTombstoneAssociation>,
 }
 
-/// This is new-root local authority, never portable authority. Callers must
-/// observe/recheck EXPORT_ANCESTRY_PROOF_PATHS alongside their Version reads.
-fn read_export_ancestry_proof(
+/// Every stored export-proof byte comes through the caller's bounded observations.
+/// This parser reads no content blobs or retained-history payload.
+fn read_export_ancestry_metadata<E: From<FolderbaseError>>(
     state: &FolderbaseState,
-) -> Result<Option<(VerifiedExportAncestry, String)>, RootReconstructionError> {
-    let anchor_bytes =
-        match state.read_bounded(Path::new(ANCHOR_PATH), MAX_RECONSTRUCTION_RECORD_BYTES) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(FolderbaseError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
+    mut read: impl FnMut(&Path, u64) -> Result<Option<Vec<u8>>, E>,
+) -> Result<Option<(VerifiedExportAncestry, String)>, E> {
+    let invalid_metadata = || FolderbaseError::InvalidRecord {
+        path: PathBuf::from(ANCHOR_PATH),
+        message: "invalid completed export ancestry metadata".to_owned(),
+    };
+    let Some(anchor_bytes) = read(Path::new(ANCHOR_PATH), MAX_RECONSTRUCTION_RECORD_BYTES)? else {
+        return Ok(None);
+    };
     let anchor: ExportAnchor =
-        serde_json::from_slice(&anchor_bytes).map_err(|_| invalid_export())?;
-    if bounded_json(&anchor, MAX_RECONSTRUCTION_RECORD_BYTES)? != anchor_bytes
+        serde_json::from_slice(&anchor_bytes).map_err(|_| invalid_metadata())?;
+    if bounded_json(&anchor, MAX_RECONSTRUCTION_RECORD_BYTES).map_err(|_| invalid_metadata())?
+        != anchor_bytes
         || anchor.format != "folderbase-local-export-anchor-v1"
         || !is_sha256(&anchor.export_index_sha256)
         || anchor.operation.request_sha256
             != export_request_sha256(&anchor.operation.operation_id, &anchor.export_index_sha256)
     {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
-    let completion_bytes = state
-        .read_bounded(
-            Path::new(COMPLETED_RECONSTRUCTION_PATH),
-            MAX_RECONSTRUCTION_RECORD_BYTES,
-        )?
-        .ok_or_else(invalid_export)?;
+    let completion_bytes = read(
+        Path::new(COMPLETED_RECONSTRUCTION_PATH),
+        MAX_RECONSTRUCTION_RECORD_BYTES,
+    )?
+    .ok_or_else(&invalid_metadata)?;
     let completion: ReconstructionCompletion =
-        serde_json::from_slice(&completion_bytes).map_err(|_| invalid_export())?;
-    if bounded_json(&completion, MAX_RECONSTRUCTION_RECORD_BYTES)? != completion_bytes
+        serde_json::from_slice(&completion_bytes).map_err(|_| invalid_metadata())?;
+    if bounded_json(&completion, MAX_RECONSTRUCTION_RECORD_BYTES).map_err(|_| invalid_metadata())?
+        != completion_bytes
         || completion.operation != anchor.operation
     {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
     let root = state.clone_root_capability()?;
-    let attestation = attest_retained_folderbase_root_with_profile(&root, state.display_root())?.0;
+    let attestation = attest_retained_folderbase_root_with_profile(&root, state.display_root())
+        .map_err(|_| invalid_metadata())?
+        .0;
     if attestation.folderbase_id != anchor.operation.folderbase_id {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
-    let index_bytes = state
-        .read_bounded(Path::new(ANCHOR_INDEX_PATH), MAX_PACKAGE_INDEX_BYTES)?
-        .ok_or_else(invalid_export)?;
+    let index_bytes = read(Path::new(ANCHOR_INDEX_PATH), MAX_PACKAGE_INDEX_BYTES)?
+        .ok_or_else(&invalid_metadata)?;
     if sha256(&index_bytes) != anchor.export_index_sha256 {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
-    let index: ExportIndex = serde_json::from_slice(&index_bytes).map_err(|_| invalid_export())?;
+    let index: ExportIndex =
+        serde_json::from_slice(&index_bytes).map_err(|_| invalid_metadata())?;
     if index.format != EXPORT_FORMAT
         || index.retention_profile != RETENTION_PROFILE
         || index.retired_objects.len() > MAX_HISTORY_VERSIONS
         || index.root_index_sha256 != anchor.operation.package_index_sha256
     {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
-    let root_index_bytes = state
-        .read_bounded(Path::new(ANCHOR_ROOT_INDEX_PATH), MAX_PACKAGE_INDEX_BYTES)?
-        .ok_or_else(invalid_export)?;
+    let root_index_bytes = read(Path::new(ANCHOR_ROOT_INDEX_PATH), MAX_PACKAGE_INDEX_BYTES)?
+        .ok_or_else(&invalid_metadata)?;
     if sha256(&root_index_bytes) != index.root_index_sha256 {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
     let counts: ReferenceCountProbe =
-        serde_json::from_slice(&root_index_bytes).map_err(|_| invalid_export())?;
+        serde_json::from_slice(&root_index_bytes).map_err(|_| invalid_metadata())?;
     if counts.references.exceeds_maximum {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
     let root_index: PackageIndexWire =
-        serde_json::from_slice(&root_index_bytes).map_err(|_| invalid_export())?;
+        serde_json::from_slice(&root_index_bytes).map_err(|_| invalid_metadata())?;
     if root_index.folderbase_id != anchor.operation.folderbase_id
         || root_index.folderbase_version_id != anchor.operation.folderbase_version_id
         || root_index.canonical_version_sha256 != anchor.operation.canonical_version_sha256
         || root_index.format != PACKAGE_FORMAT_V1
         || root_index.limits != PackageLimitsWire::v1()
     {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
     let version_path = Path::new(".folderbase/versions/folderbase")
         .join(format!("{}.json", anchor.operation.folderbase_version_id));
-    let version_bytes = state
-        .read_bounded(&version_path, MAX_PACKAGE_VERSION_BYTES)?
-        .ok_or_else(invalid_export)?;
+    let version_bytes =
+        read(&version_path, MAX_PACKAGE_VERSION_BYTES)?.ok_or_else(&invalid_metadata)?;
     let version = FolderbaseVersion::decode_bounded(version_bytes.as_slice())
-        .map_err(RootReconstructionError::InvalidVersion)?;
+        .map_err(|_| invalid_metadata())?;
     if version.version_id() != anchor.operation.folderbase_version_id
         || version.folderbase_id() != anchor.operation.folderbase_id
-        || version
-            .canonical_digest()
-            .map_err(RootReconstructionError::InvalidVersion)?
+        || version.canonical_digest().map_err(|_| invalid_metadata())?
             != anchor.operation.canonical_version_sha256
         || sha256(&version_bytes) != root_index.encoded_version_sha256
         || version.root_manifest().content_sha256() != completion.manifest_sha256
     {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
     let mut previous = None;
     let mut seen = BTreeSet::new();
@@ -1511,7 +1507,7 @@ fn read_export_ancestry_proof(
         if previous.is_some_and(|previous| previous >= key)
             || !seen.insert(retired.object_id.as_str())
         {
-            return Err(invalid_export());
+            return Err(invalid_metadata().into());
         }
         previous = Some(key);
         ObjectId::parse(retired.object_id.clone())?;
@@ -1527,12 +1523,11 @@ fn read_export_ancestry_proof(
                 .iter()
                 .any(|tombstone| tombstone.object_id() == retired.object_id)
         {
-            return Err(invalid_export());
+            return Err(invalid_metadata().into());
         }
     }
-    let local = LocalVersionStore::for_retained_root(state.display_root());
     if index.tombstone_associations.len() != root_index.tombstone_fidelity.len() {
-        return Err(invalid_export());
+        return Err(invalid_metadata().into());
     }
     for (association, fidelity) in index
         .tombstone_associations
@@ -1551,18 +1546,8 @@ fn read_export_ancestry_proof(
                         == Some(association.object_version_id.as_str())
             })
         {
-            return Err(invalid_export());
+            return Err(invalid_metadata().into());
         }
-        local.verify_capture_object_version_in(
-            state,
-            &ObjectId::parse(association.object_id.clone())?,
-            &VersionId::parse(association.object_version_id.clone())?,
-            &crate::ContentDigest {
-                algorithm: "sha256".to_owned(),
-                digest: association.content_sha256.clone(),
-                bytes: association.bytes,
-            },
-        )?;
     }
     state.verify_still_attached()?;
     Ok(Some((
@@ -1574,6 +1559,65 @@ fn read_export_ancestry_proof(
         },
         completion.root_instance_sha256,
     )))
+}
+
+/// Content-verifying callers retain the full original verification, separately
+/// from the metadata-only ownership proof used by read-only file history.
+fn read_export_ancestry_proof(
+    state: &FolderbaseState,
+) -> Result<Option<(VerifiedExportAncestry, String)>, RootReconstructionError> {
+    let proof = read_export_ancestry_metadata(state, |path, maximum| {
+        match state.read_bounded(path, maximum) {
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            result => result.map_err(RootReconstructionError::from),
+        }
+    })?;
+    if let Some((proof, _)) = &proof {
+        let local = LocalVersionStore::for_retained_root(state.display_root());
+        for association in &proof.tombstone_associations {
+            local.verify_capture_object_version_in(
+                state,
+                &ObjectId::parse(association.object_id.clone())?,
+                &VersionId::parse(association.object_version_id.clone())?,
+                &crate::ContentDigest {
+                    algorithm: "sha256".to_owned(),
+                    digest: association.content_sha256.clone(),
+                    bytes: association.bytes,
+                },
+            )?;
+        }
+    }
+    state.verify_still_attached()?;
+    Ok(proof)
+}
+
+/// Root-attested ownership evidence only. The callback must retain every read
+/// in the operation's bounded witness set and recheck those bytes before success.
+pub(crate) fn verified_export_ancestry_metadata<E: From<FolderbaseError>>(
+    state: &FolderbaseState,
+    read: impl FnMut(&Path, u64) -> Result<Option<Vec<u8>>, E>,
+) -> Result<Option<VerifiedExportAncestry>, E> {
+    let Some((proof, expected_physical_root)) = read_export_ancestry_metadata(state, read)? else {
+        return Ok(None);
+    };
+    let root = state.clone_root_capability()?;
+    let invalid = || FolderbaseError::InvalidRecord {
+        path: PathBuf::from(ANCHOR_PATH),
+        message: "export ancestry proof belongs to a different physical root".to_owned(),
+    };
+    if attest_retained_folderbase_root_with_profile(&root, state.display_root())
+        .map_err(|_| invalid())?
+        .0
+        .root_instance_sha256
+        != expected_physical_root
+    {
+        return Err(invalid().into());
+    }
+    Ok(Some(proof))
 }
 
 /// Admit this profile's ancestry cutoff for operations in this physical root.
@@ -2001,6 +2045,313 @@ mod tests {
         assert_eq!(old.omitted_objects.len(), 2);
         assert!(old.retired_objects.is_empty());
     }
+    #[test]
+    fn restored_generations_continue_with_metadata_only_history_and_complete_reexport() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("source");
+        let package = fixture.path().join("package");
+        let restored = fixture.path().join("restored");
+        initialized(&root);
+        let mut generations = Vec::new();
+        for (index, content) in ["first", "second", "third"].into_iter().enumerate() {
+            fs::write(root.join("task.json"), content).unwrap();
+            capture(&root);
+            generations.push(crate::read_file_history(&root, "task.json").unwrap());
+            if index < 2 {
+                fs::remove_file(root.join("task.json")).unwrap();
+                capture(&root);
+            }
+        }
+        let export =
+            create_local_export(&root, &package, ExportSnapshotSelection::CurrentWorkspace)
+                .unwrap();
+        assert_eq!(export.retained_objects, 3);
+        assert_eq!(export.retired_objects.len(), 1);
+        let restore_request = request(&export);
+        restore_local_export(&package, &restored, restore_request.clone()).unwrap();
+        let initial = crate::read_file_history(&restored, "task.json")
+            .expect("restored live history resolves every retired generation");
+        assert_eq!(
+            initial,
+            crate::read_file_history(&root, "task.json").unwrap()
+        );
+        assert_eq!(initial.object_id, generations[2].object_id);
+
+        // This is the noncurrent Tombstone's blob, which the old content
+        // accessor would hash even when only asking for live-file metadata.
+        let retired = &generations[1].versions[0];
+        let blob = restored
+            .join(".folderbase/versions/blobs/sha256")
+            .join(&retired.content.digest);
+        let retained_bytes = fs::read(&blob).unwrap();
+        fs::remove_file(&blob).unwrap();
+        assert_eq!(
+            crate::read_file_history(&restored, "task.json").unwrap(),
+            initial
+        );
+        assert!(
+            LocalVersionStore::open(&restored)
+                .unwrap()
+                .restore_version(&retired.id, "unrecoverable.json")
+                .is_err()
+        );
+        let unavailable_package = fixture.path().join("unavailable-package");
+        assert!(
+            create_local_export(
+                &restored,
+                &unavailable_package,
+                ExportSnapshotSelection::RetainedVersion(export.folderbase_version_id.clone())
+            )
+            .is_err()
+        );
+        assert!(!unavailable_package.exists());
+        assert!(restore_local_export(&package, &restored, restore_request).is_err());
+        fs::write(&blob, retained_bytes).unwrap();
+
+        let old = crate::read_workspace_text(&restored, "task.json").unwrap();
+        let saved =
+            crate::save_workspace_text(&restored, "task.json", &old.sha256, "continued third")
+                .unwrap();
+        assert_eq!(Some(saved.object_id.clone()), initial.object_id);
+        assert!(
+            crate::save_workspace_text(&restored, "task.json", &old.sha256, "stale edit").is_err()
+        );
+        assert_eq!(
+            fs::read(restored.join("task.json")).unwrap(),
+            b"continued third"
+        );
+        let local = LocalVersionStore::open(&restored).unwrap();
+        fs::write(restored.join("new-task.json"), b"new task").unwrap();
+        let new_task = local.capture_file("new-task.json").unwrap();
+        fs::write(restored.join("attachment.bin"), [0, 255, 3, 7]).unwrap();
+        let attachment = local.capture_file("attachment.bin").unwrap();
+        capture(&restored);
+        assert_eq!(
+            crate::read_file_history(&restored, "new-task.json")
+                .unwrap()
+                .object_id,
+            Some(new_task.object.id)
+        );
+        assert_eq!(
+            crate::read_file_history(&restored, "attachment.bin")
+                .unwrap()
+                .object_id,
+            Some(attachment.object.id)
+        );
+        let continued = crate::read_file_history(&restored, "task.json").unwrap();
+        assert_eq!(continued.object_id, initial.object_id);
+        assert!(continued.versions.starts_with(&initial.versions));
+        assert!(
+            continued
+                .versions
+                .iter()
+                .any(|version| version.id == saved.version_id)
+        );
+
+        let again_package = fixture.path().join("again-package");
+        let again_export = create_local_export(
+            &restored,
+            &again_package,
+            ExportSnapshotSelection::CurrentWorkspace,
+        )
+        .unwrap();
+        assert_eq!(again_export.retained_objects, 5);
+        let again_root = fixture.path().join("again-root");
+        restore_local_export(&again_package, &again_root, request(&again_export)).unwrap();
+        assert_eq!(
+            crate::read_file_history(&again_root, "task.json").unwrap(),
+            crate::read_file_history(&restored, "task.json").unwrap()
+        );
+        assert_eq!(
+            fs::read(again_root.join("attachment.bin")).unwrap(),
+            [0, 255, 3, 7]
+        );
+        let again_local = LocalVersionStore::open(&again_root).unwrap();
+        for (index, generation) in generations.iter().take(2).enumerate() {
+            let path = format!("recovered-{index}.json");
+            again_local
+                .restore_version(&generation.versions[0].id, &path)
+                .unwrap();
+            assert_eq!(
+                fs::read(again_root.join(path)).unwrap(),
+                [b"first".as_slice(), b"second".as_slice()][index]
+            );
+        }
+        capture(&again_root);
+        assert_eq!(
+            crate::read_file_history(&again_root, "task.json")
+                .unwrap()
+                .object_id,
+            initial.object_id
+        );
+    }
+
+    #[test]
+    fn restored_generations_allow_expected_absent_recreation_and_immediate_history() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        initialized(&source);
+        let mut generations = Vec::new();
+        for (index, bytes) in [b"first".as_slice(), b"second", b"third"]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(source.join("task.json"), bytes).unwrap();
+            capture(&source);
+            generations.push(crate::read_file_history(&source, "task.json").unwrap());
+            if index < 2 {
+                fs::remove_file(source.join("task.json")).unwrap();
+                capture(&source);
+            }
+        }
+        let package = fixture.path().join("package");
+        let export =
+            create_local_export(&source, &package, ExportSnapshotSelection::CurrentWorkspace)
+                .unwrap();
+        let restored = fixture.path().join("restored");
+        restore_local_export(&package, &restored, request(&export)).unwrap();
+        fs::remove_file(restored.join("task.json")).unwrap();
+        capture(&restored);
+
+        let operation = uuid::Uuid::now_v7().to_string();
+        let created = crate::create_workspace_file(&restored, "task.json", &operation, b"fourth")
+            .expect(
+                "completed export anchor admits recreation after every prior generation retired",
+            );
+        assert!(
+            generations
+                .iter()
+                .all(|generation| generation.object_id.as_ref() != Some(&created.object_id))
+        );
+        let immediate = crate::read_file_history(&restored, "task.json")
+            .expect("completed create receipt selects the new Object before another full capture");
+        assert_eq!(immediate.object_id, Some(created.object_id.clone()));
+        assert_eq!(immediate.versions[0].id, created.version_id);
+        let document = crate::read_workspace_text(&restored, "task.json").unwrap();
+        let saved = crate::save_workspace_text(
+            &restored,
+            "task.json",
+            &document.sha256,
+            "continued fourth",
+        )
+        .unwrap();
+        assert_eq!(saved.object_id, created.object_id);
+        let retry =
+            crate::create_workspace_file(&restored, "task.json", &operation, b"fourth").unwrap();
+        assert!(retry.replayed);
+        assert_eq!(retry.object_id, created.object_id);
+        assert_eq!(retry.version_id, created.version_id);
+        assert_eq!(
+            fs::read(restored.join("task.json")).unwrap(),
+            b"continued fourth"
+        );
+        assert_eq!(
+            crate::read_file_history(&restored, "task.json")
+                .unwrap()
+                .versions
+                .last()
+                .unwrap()
+                .id,
+            saved.version_id
+        );
+
+        let again_package = fixture.path().join("again-package");
+        let again = create_local_export(
+            &restored,
+            &again_package,
+            ExportSnapshotSelection::CurrentWorkspace,
+        )
+        .unwrap();
+        assert_eq!(again.retained_objects, 4);
+        let again_root = fixture.path().join("again-root");
+        restore_local_export(&again_package, &again_root, request(&again)).unwrap();
+        let continued = crate::read_file_history(&again_root, "task.json").unwrap();
+        assert_eq!(continued.object_id, Some(created.object_id.clone()));
+        assert!(
+            continued
+                .versions
+                .iter()
+                .any(|version| version.id == saved.version_id)
+        );
+        let local = LocalVersionStore::open(&again_root).unwrap();
+        for (index, generation) in generations.iter().enumerate() {
+            let path = format!("recovered-{index}.json");
+            local
+                .restore_version(&generation.versions[0].id, &path)
+                .unwrap();
+            assert_eq!(
+                fs::read(again_root.join(path)).unwrap(),
+                [b"first".as_slice(), b"second", b"third"][index]
+            );
+        }
+        capture(&again_root);
+        assert_eq!(
+            crate::read_file_history(&again_root, "task.json")
+                .unwrap()
+                .object_id,
+            Some(created.object_id)
+        );
+        assert_eq!(fs::read(source.join("task.json")).unwrap(), b"third");
+    }
+
+    #[test]
+    fn exported_file_directory_file_replacement_keeps_retired_recovery_and_live_identity() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("source");
+        initialized(&root);
+        fs::write(root.join("entry"), b"old file").unwrap();
+        capture(&root);
+        let original = crate::read_file_history(&root, "entry").unwrap();
+        fs::remove_file(root.join("entry")).unwrap();
+        fs::create_dir(root.join("entry")).unwrap();
+        capture(&root);
+        fs::remove_dir(root.join("entry")).unwrap();
+        fs::write(root.join("entry"), b"new file").unwrap();
+        capture(&root);
+        let live = crate::read_file_history(&root, "entry").unwrap();
+        assert_ne!(live.object_id, original.object_id);
+        let package = fixture.path().join("package");
+        let export =
+            create_local_export(&root, &package, ExportSnapshotSelection::CurrentWorkspace)
+                .unwrap();
+        let restored = fixture.path().join("restored");
+        restore_local_export(&package, &restored, request(&export)).unwrap();
+        assert_eq!(
+            crate::read_file_history(&restored, "entry")
+                .unwrap()
+                .object_id,
+            live.object_id
+        );
+        let document = crate::read_workspace_text(&restored, "entry").unwrap();
+        crate::save_workspace_text(&restored, "entry", &document.sha256, "continued new file")
+            .unwrap();
+        LocalVersionStore::open(&restored)
+            .unwrap()
+            .restore_version(&original.versions[0].id, "old-copy")
+            .unwrap();
+        assert_eq!(fs::read(restored.join("old-copy")).unwrap(), b"old file");
+        capture(&restored);
+        assert_eq!(
+            crate::read_file_history(&restored, "entry")
+                .unwrap()
+                .object_id,
+            live.object_id
+        );
+        let reexport = create_local_export(
+            &restored,
+            fixture.path().join("reexport"),
+            ExportSnapshotSelection::CurrentWorkspace,
+        )
+        .unwrap();
+        assert!(
+            reexport
+                .retired_objects
+                .iter()
+                .any(|retired| Some(retired.object_id.as_str())
+                    == original.object_id.as_ref().map(|id| id.as_str()))
+        );
+    }
+
     #[test]
     fn imported_anchor_does_not_excuse_a_missing_newer_ancestor() {
         let fixture = tempdir().unwrap();

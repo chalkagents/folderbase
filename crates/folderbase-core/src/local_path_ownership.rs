@@ -29,6 +29,63 @@ pub(super) struct OwnershipHistory {
 }
 
 impl OwnershipHistory {
+    fn unresolved(&self, candidates: &[(PathBuf, ObjectId)]) -> bool {
+        candidates.iter().any(|(path, id)| {
+            !self.current.bindings().iter().any(|binding| {
+                Path::new(binding.path()) == path && binding.object_id() == id.as_str()
+            }) && self.retired(path, id).is_none()
+        })
+    }
+
+    pub(super) fn load_with_export_anchor<E: From<FolderbaseError>>(
+        state: &FolderbaseState,
+        current: FolderbaseVersion,
+        candidates: &[(PathBuf, ObjectId)],
+        allow_new: bool,
+        mut read: impl FnMut(&Path, u64) -> std::result::Result<Option<Vec<u8>>, E>,
+    ) -> std::result::Result<Self, E> {
+        let current_only = Self {
+            current,
+            ancestors: Vec::new(),
+            anchored: Vec::new(),
+            created: None,
+        };
+        if !current_only.unresolved(candidates) {
+            return Ok(current_only);
+        }
+        let proof =
+            crate::root_reconstruction::local_export_package::verified_export_ancestry_metadata(
+                state, &mut read,
+            )?;
+        let anchor = if let Some(proof) = proof {
+            let retired = proof
+                .retired_objects
+                .into_iter()
+                .map(|claim| {
+                    Ok(RetiredObjectClaim {
+                        path: PathBuf::from(claim.path),
+                        object_id: ObjectId::parse(claim.object_id)?,
+                        last_version_id: VersionId::parse(claim.last_object_version_id)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Some(OwnershipAnchor {
+                version_id: proof.version_id,
+                version_sha256: proof.version_sha256,
+                retired,
+            })
+        } else {
+            None
+        };
+        Self::load(
+            current_only.current,
+            candidates,
+            allow_new,
+            anchor.as_ref(),
+            read,
+        )
+    }
+
     pub(super) fn load<E: From<FolderbaseError>>(
         current: FolderbaseVersion,
         candidates: &[(PathBuf, ObjectId)],
@@ -42,14 +99,7 @@ impl OwnershipHistory {
             anchored: Vec::new(),
             created: None,
         };
-        let unresolved = |history: &Self| {
-            candidates.iter().any(|(path, id)| {
-                !history.current.bindings().iter().any(|binding| {
-                    Path::new(binding.path()) == path && binding.object_id() == id.as_str()
-                }) && history.retired(path, id).is_none()
-            })
-        };
-        if !unresolved(&result) {
+        if !result.unresolved(candidates) {
             return Ok(result);
         }
         let invalid = |message: &str| invalid_record(".folderbase/versions/folderbase", message);
@@ -133,11 +183,11 @@ impl OwnershipHistory {
             pending.extend(parents.iter().cloned());
             graph.insert(id, parents);
             ensure_observed_acyclic(&graph)?;
-            if !unresolved(&result) {
+            if !result.unresolved(candidates) {
                 break;
             }
         }
-        if !allow_new && unresolved(&result) {
+        if !allow_new && result.unresolved(candidates) {
             return Err(invalid(
                 "multiple object records claim path without retired ancestry proof",
             )
