@@ -1608,6 +1608,46 @@ fn find_restore_binding(
     )
 }
 
+/// The export producer reuses the same verified ancestral executable fidelity
+/// as restoration. This does not grant local authority to the selected Version.
+pub(crate) fn export_tombstone_binding(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    version: &FolderbaseVersion,
+    tombstone: &Tombstone,
+) -> Result<PathBinding, FolderbaseCaptureError> {
+    let portable =
+        crate::root_reconstruction::local_export_package::read_portable_export_ancestry_for_source(
+            state,
+        )
+        .map_err(|error| {
+            FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                "export ancestry data is invalid: {error}"
+            ))
+        })?;
+    let cutoff = portable.map(|proof| RestoreAncestryCutoff {
+        version_id: proof.version_id,
+        version_sha256: proof.version_sha256,
+        tombstone_associations: proof.tombstone_associations,
+    });
+    find_restore_binding_with_cutoff(
+        store,
+        local,
+        state,
+        version,
+        tombstone,
+        crate::folderbase_version::MAX_VERSION_ENTRIES,
+        cutoff,
+    )
+}
+
+struct RestoreAncestryCutoff {
+    version_id: String,
+    version_sha256: String,
+    tombstone_associations: Vec<ReconstructedTombstoneAssociation>,
+}
+
 fn find_restore_binding_with_limit(
     store: &FolderbaseVersionStore,
     local: &LocalVersionStore,
@@ -1616,21 +1656,83 @@ fn find_restore_binding_with_limit(
     tombstone: &Tombstone,
     maximum_ancestors: usize,
 ) -> Result<PathBinding, FolderbaseCaptureError> {
+    let anchor = crate::root_reconstruction::local_export_package::verified_export_ancestry(state)
+        .map_err(|error| {
+            FolderbaseCaptureError::InvalidRestoreAncestry(format!(
+                "export ancestry anchor is invalid: {error}"
+            ))
+        })?;
+    let cutoff = anchor.map(|proof| RestoreAncestryCutoff {
+        version_id: proof.version_id,
+        version_sha256: proof.version_sha256,
+        tombstone_associations: proof.tombstone_associations,
+    });
+    find_restore_binding_with_cutoff(
+        store,
+        local,
+        state,
+        current,
+        tombstone,
+        maximum_ancestors,
+        cutoff,
+    )
+}
+
+fn find_restore_binding_with_cutoff(
+    store: &FolderbaseVersionStore,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    current: &FolderbaseVersion,
+    tombstone: &Tombstone,
+    maximum_ancestors: usize,
+    anchor: Option<RestoreAncestryCutoff>,
+) -> Result<PathBinding, FolderbaseCaptureError> {
     let expected_version = tombstone.last_object_version_id().ok_or_else(|| {
         FolderbaseCaptureError::InvalidRestoreAncestry(
             "regular-file Tombstone omitted its Object Version".to_owned(),
         )
     })?;
+    let current_is_anchor = anchor.as_ref().is_some_and(|anchor| {
+        anchor.version_id == current.version_id()
+            && current.canonical_digest().ok().as_deref() == Some(anchor.version_sha256.as_str())
+    });
+    let current_parents = if current_is_anchor {
+        Vec::new()
+    } else {
+        current.parents().to_vec()
+    };
     let mut queue = VecDeque::new();
-    for parent in current.parents() {
+    for parent in &current_parents {
         queue.push_back((parent.clone(), 1_usize));
     }
     let mut expanded = BTreeSet::new();
-    let mut adjacency =
-        BTreeMap::from([(current.version_id().to_owned(), current.parents().to_vec())]);
+    let mut adjacency = BTreeMap::from([(current.version_id().to_owned(), current_parents)]);
     let mut visited = 0_usize;
     let mut candidates = Vec::new();
     let mut candidate_depth = None;
+    let anchor_binding = anchor
+        .as_ref()
+        .and_then(|anchor| {
+            anchor.tombstone_associations.iter().find(|association| {
+                association.path == tombstone.path()
+                    && association.object_id == tombstone.object_id()
+                    && association.object_version_id == expected_version
+            })
+        })
+        .map(|association| {
+            PathBinding::regular_file_from_verified_producer(
+                &association.path,
+                &association.object_id,
+                &association.object_version_id,
+                &association.content_sha256,
+                association.bytes,
+                association.executable,
+            )
+        });
+    if current_is_anchor && let Some(binding) = &anchor_binding {
+        candidates.push(binding.clone());
+        candidate_depth = Some(0);
+    }
     while let Some((version_id, depth)) = queue.pop_front() {
         if !expanded.insert(version_id.clone()) {
             continue;
@@ -1647,7 +1749,32 @@ fn find_restore_binding_with_limit(
                     "ancestor {version_id} could not be verified: {error}"
                 ))
             })?;
-        adjacency.insert(version_id.clone(), version.parents().to_vec());
+        let is_anchor = anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.version_id == version_id);
+        if is_anchor
+            && version.canonical_digest().ok().as_deref()
+                != anchor.as_ref().map(|anchor| anchor.version_sha256.as_str())
+        {
+            return Err(FolderbaseCaptureError::InvalidRestoreAncestry(
+                "export ancestry anchor Version digest differs".to_owned(),
+            ));
+        }
+        adjacency.insert(
+            version_id.clone(),
+            if is_anchor {
+                Vec::new()
+            } else {
+                version.parents().to_vec()
+            },
+        );
+        if is_anchor
+            && candidate_depth.is_none_or(|candidate_depth| candidate_depth == depth)
+            && let Some(binding) = &anchor_binding
+        {
+            candidate_depth.get_or_insert(depth);
+            candidates.push(binding.clone());
+        }
         if let Some(binding) = version.lookup_binding(tombstone.path())
             && binding.kind() == PathBindingKind::RegularFile
             && binding.object_id() == tombstone.object_id()
@@ -1657,16 +1784,19 @@ fn find_restore_binding_with_limit(
             candidate_depth.get_or_insert(depth);
             candidates.push(binding.clone());
         }
-        for parent in version.parents() {
-            queue.push_back((parent.clone(), depth + 1));
+        if !is_anchor {
+            for parent in version.parents() {
+                queue.push_back((parent.clone(), depth + 1));
+            }
         }
     }
     ensure_restore_ancestry_acyclic(&adjacency)?;
     if !candidates.is_empty() {
         return unique_restore_candidate(candidates, tombstone);
     }
-    if let Some(association) =
-        read_reconstructed_tombstone_association(local, state, tombstone, expected_version)?
+    if anchor.is_none()
+        && let Some(association) =
+            read_reconstructed_tombstone_association(local, state, tombstone, expected_version)?
     {
         return Ok(PathBinding::regular_file_from_verified_producer(
             tombstone.path(),
@@ -1683,7 +1813,7 @@ fn find_restore_binding_with_limit(
     )))
 }
 
-fn ensure_restore_ancestry_acyclic(
+pub(crate) fn ensure_restore_ancestry_acyclic(
     adjacency: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), FolderbaseCaptureError> {
     let mut incoming = adjacency

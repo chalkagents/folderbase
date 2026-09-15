@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import {randomUUID} from "node:crypto";
 import { once } from "node:events";
 import {
   chmod,
@@ -254,6 +255,20 @@ try {
     await restartedSession.stop().catch(() => {});
   }
 
+  const exported = await client.exportWorkspace(root, join(owner, "export-package"));
+  assert.equal(exported.kind, "success");
+  const versions = await client.exportVersions(root);
+  assert.ok(versions.document.versions.some(({version_id}) => version_id === exported.document.folderbase_version_id));
+  const sourceHistory = await client.fileHistory(root, "shared/notes.md");
+  const restoredRoot = join(owner, "restored-workspace");
+  const restoreRequest = {operation_id: `reconstruction_${randomUUID()}`, export_index_sha256: exported.document.export_index_sha256};
+  const restored = await client.restoreWorkspace(join(owner, "export-package"), restoredRoot, restoreRequest);
+  assert.equal(restored.kind, "success");
+  assert.equal(restored.document.replayed, false);
+  assert.deepEqual((await client.fileHistory(restoredRoot, "shared/notes.md")).document, sourceHistory.document);
+  assert.deepEqual(await readFile(join(restoredRoot, "media/demo.mov")), await readFile(join(root, "media/demo.mov")));
+  assert.equal((await client.restoreWorkspace(join(owner, "export-package"), restoredRoot, restoreRequest)).document.replayed, true);
+
   const adapter = join(consumer, "folderbase-sdk-adapter.js");
   await writeFile(adapter, adapterSource);
   await chmod(adapter, 0o755);
@@ -289,6 +304,8 @@ try {
       "folderbase.version-cli-json@0.1.0",
       "--capability",
       "folderbase.file-history@0.1.0",
+      "--capability",
+      "folderbase.local-export@0.1.0",
     ],
     { env: conformanceEnvironment, timeout: 20 * 60_000 },
   );
@@ -296,7 +313,7 @@ try {
     capabilityReport,
     "folderbase-capability-conformance-report-v1",
   );
-  assert.equal(capabilities.passed, 5);
+  assert.equal(capabilities.passed, 6);
 
   process.stdout.write(
     "Packed SDK installed outside the checkout and passed the real-Core adapter journey.\n",

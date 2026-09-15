@@ -155,9 +155,36 @@ pub struct ChunkTransferSource {
     version: LocalVersionRecord,
     manifest: ChunkManifest,
     manifest_digest: String,
+    membership: SourceMembership,
+}
+
+/// The capture-only variant is reachable only through a crate-private
+/// producer that has already verified the immutable full-Version reference.
+#[derive(Debug)]
+enum SourceMembership {
+    LocalObject,
+    VerifiedCapture(LocalVersionRecord),
 }
 
 impl LocalVersionStore {
+    /// Export full-Version-only content (for example the root manifest and
+    /// Git metadata) without manufacturing ordinary Object projections.
+    /// The caller must obtain `version` by verifying the selected immutable
+    /// Folderbase Version closure through retained Core state.
+    pub(crate) fn open_captured_chunk_transfer(
+        &self,
+        version: LocalVersionRecord,
+        profile: ChunkTransferProfile,
+    ) -> Result<ChunkTransferSource, TransferSourceError> {
+        let id = version.id.clone();
+        ChunkTransferSource::open_with_membership(
+            self.clone(),
+            &id,
+            profile,
+            SourceMembership::VerifiedCapture(version),
+        )
+    }
+
     /// Plan a canonical transfer from an exact immutable Core-owned version.
     pub fn open_chunk_transfer(
         &self,
@@ -195,6 +222,15 @@ impl ChunkTransferSource {
         version_id: &VersionId,
         profile: ChunkTransferProfile,
     ) -> Result<Self, TransferSourceError> {
+        Self::open_with_membership(store, version_id, profile, SourceMembership::LocalObject)
+    }
+
+    fn open_with_membership(
+        store: LocalVersionStore,
+        version_id: &VersionId,
+        profile: ChunkTransferProfile,
+        membership: SourceMembership,
+    ) -> Result<Self, TransferSourceError> {
         VersionId::parse(version_id.as_str().to_owned())?;
         let root_file = open_root_nofollow(store.root()).map_err(TransferSourceError::Io)?;
         let root_dir = Dir::from_std_file(root_file);
@@ -204,7 +240,8 @@ impl ChunkTransferSource {
             .into_std_file();
         let root_identity =
             PhysicalIdentity::from_file(&root_guard).map_err(TransferSourceError::Io)?;
-        let (version, _object, version_record) = read_bound_records(&store, &root_dir, version_id)?;
+        let (version, version_record) =
+            read_source_record(&store, &root_dir, version_id, &membership)?;
         if version.content.bytes > MAX_OBJECT_BYTES {
             return Err(TransferSourceError::ObjectTooLarge {
                 maximum: MAX_OBJECT_BYTES,
@@ -239,6 +276,7 @@ impl ChunkTransferSource {
             version,
             manifest,
             manifest_digest,
+            membership,
         };
         source.verify_binding()?;
         Ok(source)
@@ -326,8 +364,12 @@ impl ChunkTransferSource {
             return Err(TransferSourceError::SourceChanged);
         }
 
-        let (current_version, _object, current_version_file) =
-            read_bound_records(&self.store, &self.root_dir, &self.version.id)?;
+        let (current_version, current_version_file) = read_source_record(
+            &self.store,
+            &self.root_dir,
+            &self.version.id,
+            &self.membership,
+        )?;
         if current_version != self.version {
             return Err(TransferSourceError::SourceChanged);
         }
@@ -476,6 +518,32 @@ fn read_bound_records(
         .map_err(|_| TransferSourceError::SourceChanged)?;
     TransferAuthority::new(store, root).validate(&version.object_id, &object_path)?;
     Ok((version, object, version_file))
+}
+
+fn read_source_record(
+    store: &LocalVersionStore,
+    root: &Dir,
+    version_id: &VersionId,
+    membership: &SourceMembership,
+) -> Result<(LocalVersionRecord, fs::File), TransferSourceError> {
+    match membership {
+        SourceMembership::LocalObject => {
+            let (version, _object, file) = read_bound_records(store, root, version_id)?;
+            Ok((version, file))
+        }
+        SourceMembership::VerifiedCapture(expected) => {
+            let mut file =
+                open_file_nofollow(root, &store.version_record_relative_path(version_id))
+                    .map_err(TransferSourceError::Io)?;
+            let version: LocalVersionRecord =
+                read_json_bounded(&mut file, MAX_VERSION_RECORD_BYTES)?;
+            if &version != expected || version.id != *version_id {
+                return Err(TransferSourceError::SourceChanged);
+            }
+            ObjectId::parse(version.object_id.as_str().to_owned())?;
+            Ok((version, file))
+        }
+    }
 }
 
 struct TransferAuthority<'a> {

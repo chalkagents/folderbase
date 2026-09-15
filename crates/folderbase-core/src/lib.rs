@@ -72,10 +72,11 @@ pub use initialization::{
 };
 pub use inspection::inspect;
 pub use local_versions::{
-    ApprovedHistoryTransfer, CaptureResult, ContentDigest, FileHistoryError, FileVersionHistory,
-    HistoryTransferPlan, HistoryTransferResult, HistoryTransferState, JournalAction,
-    LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId, ObjectJournalEvent,
-    RestoreResult, VersionId, apply_history_transfer, approve_history_transfer, read_file_history,
+    ApprovedHistoryTransfer, CaptureResult, ContentDigest, ExportVersionEntry, ExportVersionList,
+    FileHistoryError, FileVersionHistory, HistoryTransferPlan, HistoryTransferResult,
+    HistoryTransferState, JournalAction, LocalExportError, LocalObjectRecord, LocalVersionRecord,
+    LocalVersionStore, ObjectId, ObjectJournalEvent, RestoreResult, VersionId,
+    apply_history_transfer, approve_history_transfer, list_export_versions, read_file_history,
 };
 pub use migration::{
     ApprovedMigration, MigrationAnalysis, MigrationAnswer, MigrationAnswerException,
@@ -144,4 +145,12 @@ pub use workspace::{
     MAX_WORKSPACE_TEXT_BYTES, WorkspaceDocumentState, WorkspaceEntry, WorkspaceEntryKind,
     WorkspaceListing, WorkspaceSaveResult, WorkspaceTextDocument, list_workspace,
     read_workspace_text, save_workspace_text,
+};
+
+pub use local_versions::local_export::{
+    ExportSnapshotSelection, OmittedExportObject, SnapshotOnlyReservedPath,
+};
+pub use root_reconstruction::local_export_package::{
+    LocalExportRestoreRequest, LocalExportRestoreResult, LocalExportResult, create_local_export,
+    restore_local_export, restore_local_export_with_phase_callback,
 };

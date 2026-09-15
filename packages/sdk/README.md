@@ -149,3 +149,15 @@ refuses pending work, changed observations, corrupt or oversized metadata, and
 instruction. See [the capability contract](../../docs/file-history-0.1.md) for
 exact bounds, read-only guarantees and error codes. Existing `version history`
 continues to describe the whole-root journal, not a complete per-file list.
+
+
+## Local export and restore (unreleased)
+
+The candidate-only experimental `folderbase.local-export@0.1.0` capability adds
+`exportVersions(root)`, `exportWorkspace(root, packagePath, {versionId?})`, and
+`restoreWorkspace(packagePath, destination, {operation_id, export_index_sha256})`.
+Use `contract()` to discover support; public Core 0.7.2 lacks these commands.
+See [the retention contract and complete example](../../docs/local-export-0.1.md).
+Packages preserve the selected folder snapshot and retained ordinary-file
+histories; Git metadata is snapshot-only. Restore requires an absent destination
+or the same unchanged, exactly replayable reconstruction.

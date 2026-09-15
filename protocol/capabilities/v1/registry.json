@@ -27,6 +27,12 @@
       "conformance_runner": "protocol/conformance/capabilities/folder-scope-evidence-0.1/run.mjs"
     },
     {
+      "name": "folderbase.local-export",
+      "version": "0.1.0",
+      "stability": "experimental",
+      "conformance_runner": "protocol/conformance/capabilities/local-export-0.1/run.mjs"
+    },
+    {
       "name": "folderbase.query-index",
       "version": "0.1.0",
       "stability": "experimental",
