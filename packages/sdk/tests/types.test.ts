@@ -152,3 +152,9 @@ if (exported.kind === "success") {
     void count;
   }
 }
+
+const exportVersions = await client.exportVersions("/workspace");
+if (exportVersions.kind === "success") {
+  const folderbaseId: string = exportVersions.document.folderbase_id;
+  void folderbaseId;
+}

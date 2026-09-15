@@ -359,6 +359,7 @@ export interface FolderbaseExportVersion extends JsonObject {
 }
 export interface FolderbaseExportVersions extends JsonObject {
   format: "folderbase-export-version-list-v1";
+  folderbase_id: string;
   versions: FolderbaseExportVersion[];
 }
 export interface FolderbaseExportResult extends JsonObject {
