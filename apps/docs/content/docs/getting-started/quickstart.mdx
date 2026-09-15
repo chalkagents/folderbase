@@ -43,13 +43,17 @@ npx @folderbase/cli validate /path/to/project --json
 
 Validation checks the Folderbase protocol surface and returns machine-readable diagnostics.
 
-## 5. See what agents can access
+## 5. List the workspace
 
 ```bash
 npx @folderbase/cli workspace list /path/to/project --json
 ```
 
 The workspace view includes ordinary files while excluding protocol state, repository internals, and reconstructable dependency trees from agent context.
+
+This filters the CLI's workspace view. It does not restrict an agent process's
+filesystem permissions. See [agent access boundaries](/docs/guides/agents#access-boundaries)
+before giving an agent direct access to the folder.
 
 ## When the folder is disorganized
 
