@@ -36,7 +36,14 @@ mod file_history;
 pub use file_create::{
     MAX_WORKSPACE_CREATE_BYTES, WorkspaceCreateError, WorkspaceCreateResult, create_workspace_file,
 };
+
+#[path = "local_capture_adoption.rs"]
+mod capture_adoption;
+pub(crate) use capture_adoption::CaptureObjectClaims;
 pub use file_history::{FileHistoryError, FileVersionHistory, read_file_history};
+
+#[path = "local_path_ownership.rs"]
+pub(crate) mod path_ownership;
 
 const OBJECT_SCHEMA: &str = "https://folderbase.ai/protocol/0.1/object.schema.json";
 const OBJECTS_DIRECTORY: &str = ".folderbase/objects";
@@ -317,30 +324,41 @@ fn object_path_matches(
     relative_path: &Path,
     record_path: &Path,
 ) -> Result<bool> {
-    Ok(if stored_path == relative_path {
-        true
-    } else {
-        match paths.resolve(stored_path) {
-            Ok((_, canonical_path)) => canonical_path == relative_path,
-            Err(FolderbaseError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                if paths_equal_ignoring_ascii_case(stored_path, relative_path) {
-                    return Err(invalid_record(
-                        record_path,
-                        "stored object path alias no longer resolves to its canonical file",
-                    ));
-                }
-                false
+    if stored_path == relative_path {
+        return Ok(true);
+    }
+    Ok(resolve_object_path_claim(
+        paths,
+        stored_path,
+        record_path,
+        paths_equal_ignoring_ascii_case(stored_path, relative_path),
+    )?
+    .as_deref()
+        == Some(relative_path))
+}
+
+fn resolve_object_path_claim(
+    paths: &mut WorkspacePathLookup,
+    stored_path: &Path,
+    record_path: &Path,
+    requested_ascii_alias: bool,
+) -> Result<Option<PathBuf>> {
+    match paths.resolve(stored_path) {
+        Ok((_, canonical_path)) => Ok(Some(canonical_path)),
+        Err(FolderbaseError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            if requested_ascii_alias {
+                return Err(invalid_record(
+                    record_path,
+                    "stored object path alias no longer resolves to its canonical file",
+                ));
             }
-            Err(FolderbaseError::UnsafePath(_))
-                if !paths_equal_ignoring_ascii_case(stored_path, relative_path) =>
-            {
-                false
-            }
-            Err(error) => return Err(error),
+            Ok(None)
         }
-    })
+        Err(FolderbaseError::UnsafePath(_)) if !requested_ascii_alias => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 impl HistoryTransferPlan {
@@ -2003,10 +2021,13 @@ impl LocalVersionStore {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(FolderbaseError::io(directory, source)),
         };
-        let mut found = None;
+        let mut found = Vec::new();
+        let mut names = Vec::new();
+        let mut records = Vec::new();
         let mut paths = WorkspacePathLookup::new(&self.root)?;
         for entry in entries {
             let entry = entry.map_err(|source| FolderbaseError::io(&directory, source))?;
+            names.push(entry.file_name());
             let file_type = entry
                 .file_type()
                 .map_err(|source| FolderbaseError::io(entry.path(), source))?;
@@ -2019,7 +2040,15 @@ impl LocalVersionStore {
                     "object record is not a regular file",
                 ));
             }
-            let mut record: LocalObjectRecord = read_json(&entry.path())?;
+            let encoded = read_optional_file_nofollow(&entry.path())?
+                .ok_or_else(|| invalid_record(entry.path(), "Object record disappeared"))?;
+            let record: LocalObjectRecord = serde_json::from_slice(&encoded)
+                .map_err(|error| FolderbaseError::json(entry.path(), error))?;
+            records.push((
+                Path::new(OBJECTS_DIRECTORY).join(entry.file_name()),
+                encoded.len() as u64,
+                format!("{:x}", Sha256::digest(&encoded)),
+            ));
             record.id.validate(&entry.path())?;
             let stored_path = safe_content_path(Path::new(&record.path)).map_err(|_| {
                 invalid_record(entry.path(), "object path is not a safe relative path")
@@ -2028,18 +2057,135 @@ impl LocalVersionStore {
                 object_path_matches(&mut paths, &stored_path, relative_path, &entry.path())?;
             if is_match {
                 self.deny_if_transferred_out(&record.id)?;
-                if found.is_some() {
-                    return Err(invalid_record(
-                        &directory,
-                        format!("multiple object records claim path {requested_path}"),
-                    ));
-                }
-                record.path.clone_from(&requested_path);
-                found = Some(record);
+                found.push((entry.path(), record));
             }
         }
         paths.finish()?;
-        Ok(found)
+        let record = match found.as_slice() {
+            [] => return Ok(None),
+            [(_, only)] => only.clone(),
+            _ => {
+                let state = FolderbaseState::open_existing_read_only(&self.root)?;
+                let mut witnesses = BTreeMap::new();
+                let version =
+                    path_ownership::current_version(&self.root, &state, |path, maximum| {
+                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
+                        if witnesses
+                            .values()
+                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
+                                bytes.as_ref().map_or(0, Vec::len)
+                            })
+                            .sum::<usize>()
+                            + bytes.as_ref().map_or(0, Vec::len)
+                            > 64 * 1024 * 1024
+                        {
+                            return Err(invalid_record(
+                                path,
+                                "Object ownership metadata exceeds 64 MiB",
+                            ));
+                        }
+                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
+                        Ok::<_, FolderbaseError>(bytes)
+                    })?;
+                let candidates = found
+                    .iter()
+                    .map(|(path, record)| (path.as_path(), record))
+                    .collect::<Vec<_>>();
+                let version = path_ownership::OwnershipHistory::load(
+                    version,
+                    &candidates
+                        .iter()
+                        .map(|(_, object)| (relative_path.to_path_buf(), object.id.clone()))
+                        .collect::<Vec<_>>(),
+                    false,
+                    None,
+                    |path, maximum| {
+                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
+                        if witnesses
+                            .values()
+                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
+                                bytes.as_ref().map_or(0, Vec::len)
+                            })
+                            .sum::<usize>()
+                            + bytes.as_ref().map_or(0, Vec::len)
+                            > 64 * 1024 * 1024
+                        {
+                            return Err(invalid_record(
+                                path,
+                                "Object ownership metadata exceeds 64 MiB",
+                            ));
+                        }
+                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
+                        Ok::<_, FolderbaseError>(bytes)
+                    },
+                )?;
+                let selected = path_ownership::select(relative_path, &candidates, &version)?
+                    .1
+                    .clone();
+                path_ownership::verify_references(
+                    &self.root,
+                    relative_path,
+                    &candidates,
+                    &version,
+                    |path, maximum| {
+                        let bytes = path_ownership::read_metadata(&state, path, maximum)?;
+                        if witnesses
+                            .values()
+                            .map(|(_, bytes): &(u64, Option<Vec<u8>>)| {
+                                bytes.as_ref().map_or(0, Vec::len)
+                            })
+                            .sum::<usize>()
+                            + bytes.as_ref().map_or(0, Vec::len)
+                            > 64 * 1024 * 1024
+                        {
+                            return Err(invalid_record(
+                                path,
+                                "Object ownership metadata exceeds 64 MiB",
+                            ));
+                        }
+                        witnesses.insert(path.to_path_buf(), (maximum, bytes.clone()));
+                        Ok::<_, FolderbaseError>(bytes)
+                    },
+                )?;
+                for (path, (maximum, bytes)) in witnesses {
+                    if path_ownership::read_metadata(&state, &path, maximum)? != bytes {
+                        return Err(invalid_record(&path, "Object ownership evidence changed"));
+                    }
+                }
+                let mut final_names = state
+                    .private_directory_names_if_present(Path::new(OBJECTS_DIRECTORY), 16_384)?;
+                names.sort();
+                final_names.sort();
+                if final_names != names {
+                    return Err(invalid_record(
+                        &directory,
+                        "Object claim names changed during ownership resolution",
+                    ));
+                }
+                for (path, length, digest) in records {
+                    let actual =
+                        path_ownership::read_metadata(&state, &path, length)?.ok_or_else(|| {
+                            invalid_record(
+                                &path,
+                                "Object claim disappeared during ownership resolution",
+                            )
+                        })?;
+                    if actual.len() as u64 != length
+                        || format!("{:x}", Sha256::digest(&actual)) != digest
+                    {
+                        return Err(invalid_record(
+                            &path,
+                            "Object claim changed during ownership resolution",
+                        ));
+                    }
+                }
+                state.verify_still_attached()?;
+                selected
+            }
+        };
+        let mut record = record;
+        record.path.clone_from(&requested_path);
+        Ok(Some(record))
     }
 
     fn persist_canonical_object_path(&self, object: &LocalObjectRecord) -> Result<()> {

@@ -125,7 +125,34 @@ fn read_file_history_with_hook(
         safe_content_path(Path::new(&record.path))?;
         objects.push((path, record));
     }
-    let selected = find_selected(&store, &canonical, &objects)?;
+    let candidates = find_claimants(&store, &canonical, &objects)?;
+    let ownership = if candidates.len() > 1 {
+        let current = path_ownership::current_version(&root, &state, |path, maximum| {
+            observation.read(path, maximum)
+        })?;
+        Some(path_ownership::OwnershipHistory::load(
+            current,
+            &candidates
+                .iter()
+                .map(|(_, object)| (canonical.clone(), object.id.clone()))
+                .collect::<Vec<_>>(),
+            false,
+            None,
+            |path, maximum| observation.read(path, maximum),
+        )?)
+    } else {
+        None
+    };
+    let selected = select_claimant(&canonical, &candidates, ownership.as_ref())?;
+    if let Some(version) = &ownership {
+        path_ownership::verify_references(
+            &root,
+            &canonical,
+            &candidates,
+            version,
+            |path, maximum| observation.read(path, maximum),
+        )?;
+    }
     let mut result = FileVersionHistory {
         format: "folderbase-file-history-v1".to_owned(),
         path: relative_path_to_string(&canonical)?,
@@ -211,7 +238,12 @@ fn read_file_history_with_hook(
     observation.verify()?;
     let mut final_pending = Observation::new(&state);
     ensure_idle(&mut final_pending)?;
-    if find_selected(&store, &canonical, &objects)?.map(|(_, object)| &object.id)
+    if select_claimant(
+        &canonical,
+        &find_claimants(&store, &canonical, &objects)?,
+        ownership.as_ref(),
+    )?
+    .map(|(_, object)| &object.id)
         != result.object_id.as_ref()
     {
         return Err(FileHistoryError::ObservationChanged);
@@ -267,13 +299,13 @@ fn open_selected_file(state: &FolderbaseState, path: &Path) -> HistoryResult<Fil
     }
 }
 
-fn find_selected<'a>(
+fn find_claimants<'a>(
     store: &LocalVersionStore,
     canonical: &Path,
     objects: &'a [(PathBuf, LocalObjectRecord)],
-) -> Result<Option<(&'a Path, &'a LocalObjectRecord)>> {
+) -> Result<Vec<(&'a Path, &'a LocalObjectRecord)>> {
     let mut paths = WorkspacePathLookup::new(&store.root)?;
-    let mut found = None;
+    let mut found = Vec::new();
     for (path, object) in objects {
         if object_path_matches(
             &mut paths,
@@ -281,17 +313,28 @@ fn find_selected<'a>(
             canonical,
             &store.root.join(path),
         )? {
-            if found.is_some() {
-                return Err(invalid_record(
-                    store.root.join(OBJECTS_DIRECTORY),
-                    "multiple object records claim the selected path",
-                ));
-            }
-            found = Some((path.as_path(), object));
+            found.push((path.as_path(), object));
         }
     }
     paths.finish()?;
     Ok(found)
+}
+
+fn select_claimant<'a>(
+    canonical: &Path,
+    candidates: &[(&'a Path, &'a LocalObjectRecord)],
+    ownership: Option<&path_ownership::OwnershipHistory>,
+) -> Result<Option<(&'a Path, &'a LocalObjectRecord)>> {
+    match candidates {
+        [] => Ok(None),
+        [only] => Ok(Some(*only)),
+        _ => path_ownership::select(
+            canonical,
+            candidates,
+            ownership.expect("multiple claims require ownership evidence"),
+        )
+        .map(Some),
+    }
 }
 
 struct ReadLock(Option<(File, PhysicalIdentity)>);
@@ -572,6 +615,95 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn recreated() -> TempDir {
+        let root = fixture();
+        let store = crate::FolderbaseVersionStore::open(root.path()).unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        fs::remove_file(root.path().join("tasks/a.json")).unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        fs::write(root.path().join("tasks/a.json"), "a different file").unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        root
+    }
+
+    #[test]
+    fn recreated_path_selects_only_live_history_without_mutation_and_rechecks_authority() {
+        let root = recreated();
+        let before = snapshot(root.path());
+        let history = read_file_history(root.path(), "tasks/a.json").unwrap();
+        assert_eq!(history.versions.len(), 1);
+        assert_eq!(before, snapshot(root.path()));
+        let head_path = root.path().join(".folderbase/local/head.json");
+        let head: serde_json::Value =
+            serde_json::from_slice(&fs::read(&head_path).unwrap()).unwrap();
+        let version_path = root.path().join(format!(
+            ".folderbase/versions/folderbase/{}.json",
+            head["version_id"].as_str().unwrap()
+        ));
+        for path in [head_path, version_path] {
+            let bytes = fs::read(&path).unwrap();
+            let result =
+                read_file_history_with_hook(root.path(), Path::new("tasks/a.json"), || {
+                    let mut changed = bytes.clone();
+                    changed.push(b' ');
+                    fs::write(&path, changed).unwrap();
+                });
+            assert!(matches!(result, Err(FileHistoryError::ObservationChanged)));
+            fs::write(path, bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn current_head_does_not_hide_an_unexplained_or_corrupt_claimant() {
+        for damage in ["extra-object", "old-version", "alias"] {
+            let root = recreated();
+            let local = LocalVersionStore::open(root.path()).unwrap();
+            let live = read_file_history(root.path(), "tasks/a.json")
+                .unwrap()
+                .object_id
+                .unwrap();
+            let mut object = local.read_object(&live).unwrap();
+            if damage == "extra-object" {
+                object.id = ObjectId::new();
+                fs::write(
+                    local.object_record_path(&object.id),
+                    serde_json::to_vec(&object).unwrap(),
+                )
+                .unwrap();
+            } else {
+                let old = fs::read_dir(root.path().join(OBJECTS_DIRECTORY))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter_map(|path| {
+                        serde_json::from_slice::<LocalObjectRecord>(&fs::read(&path).unwrap())
+                            .ok()
+                            .map(|record| (path, record))
+                    })
+                    .find(|(_, record)| record.path == "tasks/a.json" && record.id != live)
+                    .unwrap();
+                if damage == "old-version" {
+                    let mut version = local.read_version(&old.1.current_version).unwrap();
+                    version.object_id = ObjectId::new();
+                    fs::write(
+                        local.version_record_path(&version.id),
+                        serde_json::to_vec(&version).unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    let mut record = old.1;
+                    record.path = "tasks/A.JSON".into();
+                    fs::write(old.0, serde_json::to_vec(&record).unwrap()).unwrap();
+                }
+            }
+            let before = snapshot(root.path());
+            assert!(
+                read_file_history(root.path(), "tasks/a.json").is_err(),
+                "{damage}"
+            );
+            assert_eq!(before, snapshot(root.path()));
+        }
     }
 
     #[test]
