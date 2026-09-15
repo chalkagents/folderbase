@@ -274,6 +274,13 @@ jobs:
       - name: Test independent-handle locking
         run: cargo test --package folderbase-core --lib --locked local_versions::tests::transaction_lock_is_exclusive_across_independent_handles
 
+      - name: Test native workspace reads and guarded saves
+        run: cargo test --package folderbase-core --test workspace --locked
+
+      - name: Test Windows retained save parent and junction refusal
+        if: runner.os == 'Windows'
+        run: "cargo test --package folderbase-core --lib --locked local_versions::tests::windows_save_parent_handle_"
+
       - name: Test the public migration transaction contract
         run: cargo test --package folderbase-core --test migration_transaction_contract --locked
 
