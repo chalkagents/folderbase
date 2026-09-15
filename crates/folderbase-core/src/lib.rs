@@ -75,8 +75,9 @@ pub use local_versions::{
     ApprovedHistoryTransfer, CaptureResult, ContentDigest, ExportVersionEntry, ExportVersionList,
     FileHistoryError, FileVersionHistory, HistoryTransferPlan, HistoryTransferResult,
     HistoryTransferState, JournalAction, LocalExportError, LocalObjectRecord, LocalVersionRecord,
-    LocalVersionStore, ObjectId, ObjectJournalEvent, RestoreResult, VersionId,
-    apply_history_transfer, approve_history_transfer, list_export_versions, read_file_history,
+    LocalVersionStore, MAX_WORKSPACE_CREATE_BYTES, ObjectId, ObjectJournalEvent, RestoreResult,
+    VersionId, WorkspaceCreateError, WorkspaceCreateResult, apply_history_transfer,
+    approve_history_transfer, create_workspace_file, list_export_versions, read_file_history,
 };
 pub use migration::{
     ApprovedMigration, MigrationAnalysis, MigrationAnswer, MigrationAnswerException,

@@ -14,17 +14,18 @@ use folderbase_core::transfer_manifest::ChunkManifest;
 use folderbase_core::{
     FileHistoryError, FolderbaseCaptureError, FolderbaseError, FolderbaseKind,
     FolderbaseVersionStore, InitializationOptions, InitializationPlan, InitializationPlanDigest,
-    InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
-    MigrationAnalysis, MigrationAnswer, MigrationCommand, MigrationConflict, MigrationExecution,
-    MigrationOutcome, MigrationPlan, MigrationPreview, MigrationResult, MigrationState,
-    ProtocolUpgradePlanDigest, RollbackResult, RootAttestationError, RootClaim, TemplateAnswerType,
-    TemplateAnswerValue, TemplateExpansionPlan, TemplatePackage, ValidationLevel, ValidationReport,
-    ValidationSeverity, VersionId, analyze_migration, apply_migration, apply_protocol_upgrade,
+    InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_CREATE_BYTES,
+    MAX_WORKSPACE_TEXT_BYTES, MigrationAnalysis, MigrationAnswer, MigrationCommand,
+    MigrationConflict, MigrationExecution, MigrationOutcome, MigrationPlan, MigrationPreview,
+    MigrationResult, MigrationState, ProtocolUpgradePlanDigest, RollbackResult,
+    RootAttestationError, RootClaim, TemplateAnswerType, TemplateAnswerValue,
+    TemplateExpansionPlan, TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity,
+    VersionId, WorkspaceCreateError, analyze_migration, apply_migration, apply_protocol_upgrade,
     apply_template_expansion_with_expected_plan_digest, approve_migration, attest_folderbase_root,
-    initialize, initialize_with_expected_plan_digest, inspect, list_workspace,
-    load_builtin_template, plan_initialization, plan_migration, plan_protocol_upgrade,
-    plan_template_expansion, plan_template_initialization, preview_migration, read_file_history,
-    read_workspace_text, save_workspace_text, validate,
+    create_workspace_file, initialize, initialize_with_expected_plan_digest, inspect,
+    list_workspace, load_builtin_template, plan_initialization, plan_migration,
+    plan_protocol_upgrade, plan_template_expansion, plan_template_initialization,
+    preview_migration, read_file_history, read_workspace_text, save_workspace_text, validate,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -452,6 +453,17 @@ enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Create one absent regular file from exact binary stdin (experimental).
+    Create {
+        folderbase: PathBuf,
+        path: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Save UTF-8 content read from standard input with optimistic concurrency.
     Save {
         folderbase: PathBuf,
@@ -597,6 +609,7 @@ enum CliError {
     RootAttestation(RootAttestationError),
     FileHistory(FileHistoryError),
     LocalExport(folderbase_core::LocalExportError),
+    WorkspaceCreate(WorkspaceCreateError),
     OutputSerialization(serde_json::Error),
     OutputWrite {
         stream: &'static str,
@@ -612,6 +625,7 @@ impl fmt::Display for CliError {
             Self::RootAttestation(source) => source.fmt(formatter),
             Self::FileHistory(source) => source.fmt(formatter),
             Self::LocalExport(source) => source.fmt(formatter),
+            Self::WorkspaceCreate(source) => source.fmt(formatter),
             Self::OutputSerialization(source) => {
                 write!(formatter, "failed to serialize command output: {source}")
             }
@@ -630,6 +644,7 @@ impl std::error::Error for CliError {
             Self::RootAttestation(source) => Some(source),
             Self::FileHistory(source) => Some(source),
             Self::LocalExport(source) => Some(source),
+            Self::WorkspaceCreate(source) => Some(source),
             Self::OutputSerialization(source) => Some(source),
             Self::OutputWrite { source, .. } => Some(source),
         }
@@ -657,6 +672,12 @@ impl From<folderbase_core::LocalExportError> for CliError {
 impl From<FileHistoryError> for CliError {
     fn from(source: FileHistoryError) -> Self {
         Self::FileHistory(source)
+    }
+}
+
+impl From<WorkspaceCreateError> for CliError {
+    fn from(source: WorkspaceCreateError) -> Self {
+        Self::WorkspaceCreate(source)
     }
 }
 
@@ -1458,6 +1479,45 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         print!("{}", document.content);
                     }
                 }
+                WorkspaceCommand::Create {
+                    folderbase,
+                    path,
+                    operation_id,
+                    stdin,
+                    json,
+                } => {
+                    if !stdin {
+                        return Err(FolderbaseError::InvalidRecord {
+                            path: PathBuf::from("stdin"),
+                            message: "workspace create requires --stdin".to_owned(),
+                        }
+                        .into());
+                    }
+                    let mut bytes = Vec::new();
+                    std::io::stdin()
+                        .take(MAX_WORKSPACE_CREATE_BYTES as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|source| FolderbaseError::Io {
+                            path: PathBuf::from("stdin"),
+                            source,
+                        })?;
+                    let result = create_workspace_file(folderbase, path, &operation_id, &bytes)?;
+                    if json {
+                        print_json(&result)?;
+                    } else {
+                        println!(
+                            "Created {} as {} ({}){}",
+                            result.path,
+                            result.version_id,
+                            result.content.digest,
+                            if result.replayed {
+                                " [original result replayed]"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                }
                 WorkspaceCommand::Save {
                     folderbase,
                     path,
@@ -1965,6 +2025,7 @@ fn command_emits_json_errors(command: &Command) -> bool {
         },
         Command::Workspace { command } => match command {
             WorkspaceCommand::List { json, .. }
+            | WorkspaceCommand::Create { json, .. }
             | WorkspaceCommand::Read { json, .. }
             | WorkspaceCommand::Save { json, .. } => *json,
         },
@@ -2010,6 +2071,7 @@ fn error_code(error: &CliError) -> &'static str {
         CliError::RootAttestation(error) => return error.code(),
         CliError::FileHistory(error) => return error.code(),
         CliError::LocalExport(error) => return error.code(),
+        CliError::WorkspaceCreate(error) => return error.code(),
         CliError::OutputSerialization(_) => return "output_serialization",
         CliError::OutputWrite { .. } => return "output_write_failed",
     };

@@ -161,3 +161,23 @@ See [the retention contract and complete example](../../docs/local-export-0.1.md
 Packages preserve the selected folder snapshot and retained ordinary-file
 histories; Git metadata is snapshot-only. Restore requires an absent destination
 or the same unchanged, exactly replayable reconstruction.
+
+## Create one absent file (experimental)
+
+Discover `folderbase.workspace-create@0.1.0` before use. Persist an exact request
+UUID, path and original content before the first attempt:
+
+```js
+const request = { operationId: crypto.randomUUID(), content: '{"title":"First"}' };
+const created = await client.workspaceCreate(root, "tasks/new.json", request);
+```
+
+Content is a well-formed UTF-8 string or `Uint8Array`, at most 8 MiB; the existing
+safe parent must exist. A completed retry returns the original historical result
+with `replayed: true` and never recreates a later deletion. Read current content
+before displaying it. Another request under that UUID or any occupied target
+conflicts, even with matching bytes. Attachments followed by a separate task save
+can leave an unlinked attachment; applications own explicit retry/link handling.
+Use a single checked Core build for all writers: older executables do not honor
+pending creation. See [the operation contract](https://github.com/chalkagents/folderbase/blob/main/docs/workspace-create-0.1.md)
+for bounds, recovery, and compatibility limits.

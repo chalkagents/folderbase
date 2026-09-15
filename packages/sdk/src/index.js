@@ -731,6 +731,16 @@ export class FolderbaseClient {
     return this.#runJson(["export", "restore", packagePath, destination, "--stdin", "--json"], request, options);
   }
 
+  workspaceCreate(root, path, { operationId, content }, options = {}) {
+    if (typeof operationId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(operationId)) {
+      throw new TypeError("operationId must be a canonical lowercase hyphenated UUID");
+    }
+    if ((typeof content !== "string" || !content.isWellFormed()) && !(content instanceof Uint8Array)) {
+      throw new TypeError("content must be a well-formed UTF-8 string or Uint8Array");
+    }
+    return this.run(["workspace", "create", root, path, "--operation-id", operationId, "--stdin", "--json"], { ...options, stdin: encodeInput(content, 8 * 1024 * 1024) });
+  }
+
   fileHistory(root, path, options) {
     return this.run(["version", "list", root, path, "--json"], options);
   }

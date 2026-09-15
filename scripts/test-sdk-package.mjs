@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import {randomUUID} from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   chmod,
@@ -153,6 +153,51 @@ try {
     maxOutputBytes: 64 * 1024 * 1024,
     timeoutMs: 10 * 60_000,
   });
+
+  // Exercise the named creation adapter from an installed archive, including
+  // its composition with existing capture/history/CAS operations.
+  const createRoot = join(owner, "create-consumer");
+  await mkdir(join(createRoot, "tasks"), {recursive:true});
+  await mkdir(join(createRoot, "recovered"));
+  await client.init(createRoot);
+  const createAttestation = (await client.attest(createRoot)).document;
+  let captureSequence = 0;
+  const captureCreateRoot = async () => client.changeSetCheckout(createRoot,
+    join(owner, `create-checkout-${captureSequence++}`), {
+      format:"folderbase-checkout-request-v1",
+      folderbase_id:createAttestation.folderbase_id,
+      projection_id:`projection_${randomUUID()}`,
+      folder_scope_id:`folderscope_${randomUUID()}`,
+      scope_revision_sha256:"2".repeat(64), permission:"can_work",
+      authorized_paths:[{path_prefix:"tasks"}],
+    });
+  const createdIds = new Set();
+  for(let cycle=0; cycle<3; cycle++) {
+    const original = `generation ${cycle} 🗂️`;
+    const request = {operationId:randomUUID(), content:original};
+    const created = (await client.workspaceCreate(createRoot, "tasks/task.txt", request)).document;
+    assert.ok(!createdIds.has(created.object_id)); createdIds.add(created.object_id);
+    assert.equal(created.content.digest, createHash("sha256").update(original).digest("hex"));
+    assert.equal((await client.fileHistory(createRoot, "tasks/task.txt")).document.object_id, created.object_id);
+    const saved = (await client.run(["workspace","save",createRoot,"tasks/task.txt","--expected-sha256",created.content.digest,"--stdin","--json"], {stdin:`edit ${cycle}`})).document;
+    assert.equal(saved.object_id, created.object_id);
+    const replay = (await client.workspaceCreate(createRoot, "tasks/task.txt", request)).document;
+    assert.deepEqual(replay, {...created,replayed:true});
+    assert.equal(await readFile(join(createRoot,"tasks/task.txt"),"utf8"),`edit ${cycle}`);
+    const history = (await client.fileHistory(createRoot, "tasks/task.txt")).document;
+    assert.deepEqual(history.versions.map(version=>version.id),[created.version_id,saved.version_id]);
+    await captureCreateRoot();
+    const afterCapture = (await client.fileHistory(createRoot,"tasks/task.txt")).document;
+    assert.equal(afterCapture.object_id, created.object_id);
+    assert.deepEqual(afterCapture.versions.slice(0,2),history.versions);
+    await client.run(["version","restore",createRoot,created.version_id,`recovered/${cycle}.txt`,"--json"]);
+    assert.equal(await readFile(join(createRoot,"recovered",`${cycle}.txt`),"utf8"),original);
+    await rm(join(createRoot,"tasks/task.txt"));
+    await captureCreateRoot();
+  }
+  const attachment = new Uint8Array([0,255,128,13,10]);
+  await client.workspaceCreate(createRoot,"tasks/attachment.bin",{operationId:randomUUID(),content:attachment});
+  assert.deepEqual(await readFile(join(createRoot,"tasks/attachment.bin")),Buffer.from(attachment));
 
   const root = join(owner, "ordinary-folder");
   await mkdir(join(root, "shared"), { recursive: true });
@@ -306,6 +351,8 @@ try {
       "folderbase.file-history@0.1.0",
       "--capability",
       "folderbase.local-export@0.1.0",
+      "--capability",
+      "folderbase.workspace-create@0.1.0",
     ],
     { env: conformanceEnvironment, timeout: 20 * 60_000 },
   );
@@ -313,7 +360,7 @@ try {
     capabilityReport,
     "folderbase-capability-conformance-report-v1",
   );
-  assert.equal(capabilities.passed, 6);
+  assert.equal(capabilities.passed, 7);
 
   process.stdout.write(
     "Packed SDK installed outside the checkout and passed the real-Core adapter journey.\n",

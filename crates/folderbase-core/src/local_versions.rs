@@ -29,8 +29,13 @@ use crate::{
     workspace_path_lookup::WorkspacePathLookup,
 };
 
+#[path = "local_file_create.rs"]
+mod file_create;
 #[path = "local_file_history.rs"]
 mod file_history;
+pub use file_create::{
+    MAX_WORKSPACE_CREATE_BYTES, WorkspaceCreateError, WorkspaceCreateResult, create_workspace_file,
+};
 
 #[path = "local_capture_adoption.rs"]
 mod capture_adoption;
@@ -1378,6 +1383,24 @@ impl LocalVersionStore {
         display_root: &Path,
         state: &FolderbaseState,
     ) -> Result<StoreTransactionLock> {
+        let lock = Self::acquire_transaction_lock_file_for_create(display_root, state)?;
+        if state
+            .read_bounded_if_present(Path::new(file_create::ACTIVE_CREATE_PATH), 64 * 1024)?
+            .is_some()
+        {
+            return Err(FolderbaseError::RecoveryRequired {
+                work: "workspace create; retry its original operation ID and content".to_owned(),
+            });
+        }
+        Ok(lock)
+    }
+
+    // Only the create coordinator may acquire this lease before validating its
+    // own active intent. Protocol-upgrade recovery still uses the guarded path.
+    fn acquire_transaction_lock_file_for_create(
+        display_root: &Path,
+        state: &FolderbaseState,
+    ) -> Result<StoreTransactionLock> {
         state.ensure_private_dir(Path::new(LOCKS_DIRECTORY))?;
         let lock_path = display_root.join(TRANSACTION_LOCK_PATH);
         match state.publish_new(Path::new(TRANSACTION_LOCK_PATH), b"") {
@@ -2086,7 +2109,14 @@ impl LocalVersionStore {
                         .iter()
                         .map(|(_, object)| (relative_path.to_path_buf(), object.id.clone()))
                         .collect::<Vec<_>>(),
-                    false,
+                    true,
+                    &mut observe,
+                )?;
+                let version = version.resolve_created(
+                    &self.root,
+                    &state,
+                    relative_path,
+                    &candidates,
                     &mut observe,
                 )?;
                 let selected = path_ownership::select(relative_path, &candidates, &version)?
@@ -2099,6 +2129,7 @@ impl LocalVersionStore {
                     &version,
                     &mut observe,
                 )?;
+                version.verify_created(&self.root, &state)?;
                 for (path, (maximum, bytes)) in witnesses {
                     if path_ownership::read_metadata(&state, &path, maximum)? != bytes {
                         return Err(invalid_record(&path, "Object ownership evidence changed"));
