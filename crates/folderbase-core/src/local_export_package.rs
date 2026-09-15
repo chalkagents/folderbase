@@ -2187,6 +2187,114 @@ mod tests {
     }
 
     #[test]
+    fn restored_generations_allow_expected_absent_recreation_and_immediate_history() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        initialized(&source);
+        let mut generations = Vec::new();
+        for (index, bytes) in [b"first".as_slice(), b"second", b"third"]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(source.join("task.json"), bytes).unwrap();
+            capture(&source);
+            generations.push(crate::read_file_history(&source, "task.json").unwrap());
+            if index < 2 {
+                fs::remove_file(source.join("task.json")).unwrap();
+                capture(&source);
+            }
+        }
+        let package = fixture.path().join("package");
+        let export =
+            create_local_export(&source, &package, ExportSnapshotSelection::CurrentWorkspace)
+                .unwrap();
+        let restored = fixture.path().join("restored");
+        restore_local_export(&package, &restored, request(&export)).unwrap();
+        fs::remove_file(restored.join("task.json")).unwrap();
+        capture(&restored);
+
+        let operation = uuid::Uuid::now_v7().to_string();
+        let created = crate::create_workspace_file(&restored, "task.json", &operation, b"fourth")
+            .expect(
+                "completed export anchor admits recreation after every prior generation retired",
+            );
+        assert!(
+            generations
+                .iter()
+                .all(|generation| generation.object_id.as_ref() != Some(&created.object_id))
+        );
+        let immediate = crate::read_file_history(&restored, "task.json")
+            .expect("completed create receipt selects the new Object before another full capture");
+        assert_eq!(immediate.object_id, Some(created.object_id.clone()));
+        assert_eq!(immediate.versions[0].id, created.version_id);
+        let document = crate::read_workspace_text(&restored, "task.json").unwrap();
+        let saved = crate::save_workspace_text(
+            &restored,
+            "task.json",
+            &document.sha256,
+            "continued fourth",
+        )
+        .unwrap();
+        assert_eq!(saved.object_id, created.object_id);
+        let retry =
+            crate::create_workspace_file(&restored, "task.json", &operation, b"fourth").unwrap();
+        assert!(retry.replayed);
+        assert_eq!(retry.object_id, created.object_id);
+        assert_eq!(retry.version_id, created.version_id);
+        assert_eq!(
+            fs::read(restored.join("task.json")).unwrap(),
+            b"continued fourth"
+        );
+        assert_eq!(
+            crate::read_file_history(&restored, "task.json")
+                .unwrap()
+                .versions
+                .last()
+                .unwrap()
+                .id,
+            saved.version_id
+        );
+
+        let again_package = fixture.path().join("again-package");
+        let again = create_local_export(
+            &restored,
+            &again_package,
+            ExportSnapshotSelection::CurrentWorkspace,
+        )
+        .unwrap();
+        assert_eq!(again.retained_objects, 4);
+        let again_root = fixture.path().join("again-root");
+        restore_local_export(&again_package, &again_root, request(&again)).unwrap();
+        let continued = crate::read_file_history(&again_root, "task.json").unwrap();
+        assert_eq!(continued.object_id, Some(created.object_id.clone()));
+        assert!(
+            continued
+                .versions
+                .iter()
+                .any(|version| version.id == saved.version_id)
+        );
+        let local = LocalVersionStore::open(&again_root).unwrap();
+        for (index, generation) in generations.iter().enumerate() {
+            let path = format!("recovered-{index}.json");
+            local
+                .restore_version(&generation.versions[0].id, &path)
+                .unwrap();
+            assert_eq!(
+                fs::read(again_root.join(path)).unwrap(),
+                [b"first".as_slice(), b"second", b"third"][index]
+            );
+        }
+        capture(&again_root);
+        assert_eq!(
+            crate::read_file_history(&again_root, "task.json")
+                .unwrap()
+                .object_id,
+            Some(created.object_id)
+        );
+        assert_eq!(fs::read(source.join("task.json")).unwrap(), b"third");
+    }
+
+    #[test]
     fn exported_file_directory_file_replacement_keeps_retired_recovery_and_live_identity() {
         let fixture = tempdir().unwrap();
         let root = fixture.path().join("source");
