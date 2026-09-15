@@ -72,10 +72,10 @@ pub use initialization::{
 };
 pub use inspection::inspect;
 pub use local_versions::{
-    ApprovedHistoryTransfer, CaptureResult, ContentDigest, HistoryTransferPlan,
-    HistoryTransferResult, HistoryTransferState, JournalAction, LocalObjectRecord,
-    LocalVersionRecord, LocalVersionStore, ObjectId, ObjectJournalEvent, RestoreResult, VersionId,
-    apply_history_transfer, approve_history_transfer,
+    ApprovedHistoryTransfer, CaptureResult, ContentDigest, FileHistoryError, FileVersionHistory,
+    HistoryTransferPlan, HistoryTransferResult, HistoryTransferState, JournalAction,
+    LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId, ObjectJournalEvent,
+    RestoreResult, VersionId, apply_history_transfer, approve_history_transfer, read_file_history,
 };
 pub use migration::{
     ApprovedMigration, MigrationAnalysis, MigrationAnswer, MigrationAnswerException,

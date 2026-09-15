@@ -98,3 +98,11 @@ try {
     void document;
   }
 }
+
+
+const fileHistory = await client.fileHistory("/workspace", "tasks/a.json");
+if (fileHistory.kind === "success") {
+  const recordedVersion: string | null = fileHistory.document.current_version;
+  const capturedAt: string | undefined = fileHistory.document.versions[0]?.captured_at;
+  void [recordedVersion, capturedAt];
+}
