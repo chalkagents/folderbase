@@ -12,19 +12,19 @@ use folderbase_core::ROOT_INSTANCE_FORMAT_V2 as CURRENT_ROOT_INSTANCE_FORMAT;
 use folderbase_core::folderbase_version::FolderbaseVersion;
 use folderbase_core::transfer_manifest::ChunkManifest;
 use folderbase_core::{
-    FolderbaseCaptureError, FolderbaseError, FolderbaseKind, FolderbaseVersionStore,
-    InitializationOptions, InitializationPlan, InitializationPlanDigest, InitializationResult,
-    InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES, MigrationAnalysis,
-    MigrationAnswer, MigrationCommand, MigrationConflict, MigrationExecution, MigrationOutcome,
-    MigrationPlan, MigrationPreview, MigrationResult, MigrationState, ProtocolUpgradePlanDigest,
-    RollbackResult, RootAttestationError, RootClaim, TemplateAnswerType, TemplateAnswerValue,
-    TemplateExpansionPlan, TemplatePackage, ValidationLevel, ValidationReport, ValidationSeverity,
-    VersionId, analyze_migration, apply_migration, apply_protocol_upgrade,
+    FileHistoryError, FolderbaseCaptureError, FolderbaseError, FolderbaseKind,
+    FolderbaseVersionStore, InitializationOptions, InitializationPlan, InitializationPlanDigest,
+    InitializationResult, InspectionReport, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES,
+    MigrationAnalysis, MigrationAnswer, MigrationCommand, MigrationConflict, MigrationExecution,
+    MigrationOutcome, MigrationPlan, MigrationPreview, MigrationResult, MigrationState,
+    ProtocolUpgradePlanDigest, RollbackResult, RootAttestationError, RootClaim, TemplateAnswerType,
+    TemplateAnswerValue, TemplateExpansionPlan, TemplatePackage, ValidationLevel, ValidationReport,
+    ValidationSeverity, VersionId, analyze_migration, apply_migration, apply_protocol_upgrade,
     apply_template_expansion_with_expected_plan_digest, approve_migration, attest_folderbase_root,
     initialize, initialize_with_expected_plan_digest, inspect, list_workspace,
     load_builtin_template, plan_initialization, plan_migration, plan_protocol_upgrade,
-    plan_template_expansion, plan_template_initialization, preview_migration, read_workspace_text,
-    save_workspace_text, validate,
+    plan_template_expansion, plan_template_initialization, preview_migration, read_file_history,
+    read_workspace_text, save_workspace_text, validate,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -366,6 +366,13 @@ enum ProtocolArtifactArg {
 
 #[derive(Debug, Subcommand)]
 enum VersionCommand {
+    /// Read all retained Version metadata for one existing file without writing.
+    List {
+        folderbase: PathBuf,
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Capture the current bytes of a file inside a folderbase.
     Capture {
         folderbase: PathBuf,
@@ -554,6 +561,7 @@ enum CliError {
     Folderbase(FolderbaseError),
     Capture(FolderbaseCaptureError),
     RootAttestation(RootAttestationError),
+    FileHistory(FileHistoryError),
     OutputSerialization(serde_json::Error),
     OutputWrite {
         stream: &'static str,
@@ -567,6 +575,7 @@ impl fmt::Display for CliError {
             Self::Folderbase(source) => source.fmt(formatter),
             Self::Capture(source) => source.fmt(formatter),
             Self::RootAttestation(source) => source.fmt(formatter),
+            Self::FileHistory(source) => source.fmt(formatter),
             Self::OutputSerialization(source) => {
                 write!(formatter, "failed to serialize command output: {source}")
             }
@@ -583,6 +592,7 @@ impl std::error::Error for CliError {
             Self::Folderbase(source) => Some(source),
             Self::Capture(source) => Some(source),
             Self::RootAttestation(source) => Some(source),
+            Self::FileHistory(source) => Some(source),
             Self::OutputSerialization(source) => Some(source),
             Self::OutputWrite { source, .. } => Some(source),
         }
@@ -598,6 +608,12 @@ impl From<FolderbaseError> for CliError {
 impl From<FolderbaseCaptureError> for CliError {
     fn from(source: FolderbaseCaptureError) -> Self {
         Self::Capture(source)
+    }
+}
+
+impl From<FileHistoryError> for CliError {
+    fn from(source: FileHistoryError) -> Self {
+        Self::FileHistory(source)
     }
 }
 
@@ -1245,6 +1261,28 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         );
                     }
                 }
+                VersionCommand::List {
+                    folderbase,
+                    path,
+                    json,
+                } => {
+                    let history = read_file_history(folderbase, path)?;
+                    if json {
+                        print_json(&history)?;
+                    } else {
+                        println!(
+                            "{} retained versions for {}",
+                            history.versions.len(),
+                            history.path
+                        );
+                        for version in history.versions {
+                            println!(
+                                "{} {} {} bytes",
+                                version.id, version.captured_at, version.content.bytes
+                            );
+                        }
+                    }
+                }
                 VersionCommand::History { folderbase, json } => {
                     let events = LocalVersionStore::open(folderbase)?.journal_events()?;
                     if json {
@@ -1769,7 +1807,8 @@ fn command_emits_json_errors(command: &Command) -> bool {
             TemplateCommand::Plan { json, .. } | TemplateCommand::Apply { json, .. } => *json,
         },
         Command::Version { command } => match command {
-            VersionCommand::Capture { json, .. }
+            VersionCommand::List { json, .. }
+            | VersionCommand::Capture { json, .. }
             | VersionCommand::Restore { json, .. }
             | VersionCommand::RestoreTombstone { json, .. }
             | VersionCommand::History { json, .. } => *json,
@@ -1829,6 +1868,7 @@ fn error_code(error: &CliError) -> &'static str {
             };
         }
         CliError::RootAttestation(error) => return error.code(),
+        CliError::FileHistory(error) => return error.code(),
         CliError::OutputSerialization(_) => return "output_serialization",
         CliError::OutputWrite { .. } => return "output_write_failed",
     };

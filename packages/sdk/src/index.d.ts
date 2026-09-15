@@ -281,6 +281,21 @@ export class FolderbaseDaemonSession {
   stop(): Promise<{ exitCode: number | null; signal: string | null }>;
 }
 
+export interface FolderbaseFileVersionRecord extends JsonObject {
+  id: string;
+  object_id: string;
+  content: { algorithm: "sha256"; digest: string; bytes: number };
+  captured_at: string;
+}
+
+export interface FolderbaseFileHistory extends JsonObject {
+  format: "folderbase-file-history-v1";
+  path: string;
+  object_id: string | null;
+  current_version: string | null;
+  versions: FolderbaseFileVersionRecord[];
+}
+
 export class FolderbaseClient {
   constructor(options?: FolderbaseClientOptions);
 
@@ -290,6 +305,7 @@ export class FolderbaseClient {
   ): Promise<FolderbaseResult<TSuccess, TAttention>>;
 
   contract<T extends JsonValue = JsonObject>(options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
+  fileHistory(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseFileHistory>>;
   inspect<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   attest<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   observeFolderScope(root: string, selectedPath: string, options?: FolderbaseRunOptions): Promise<FolderbaseSuccess<FolderbaseFolderScopeEvidence>>;

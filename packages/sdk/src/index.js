@@ -717,6 +717,10 @@ export class FolderbaseClient {
     return this.run(["protocol", "contract", "--json"], options);
   }
 
+  fileHistory(root, path, options) {
+    return this.run(["version", "list", root, path, "--json"], options);
+  }
+
   inspect(root, options) {
     return this.run(["inspect", root, "--json"], options);
   }

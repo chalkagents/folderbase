@@ -17,7 +17,15 @@ function writeJson(stream, value) {
 const RECONSTRUCTION_REQUEST_SHA256 =
   "5efe8d56bc354c89ec52006c25e123dfb42cbdb1eeed2b1f4013a634590133e5";
 
-if (mode === "folder-scope") {
+if (mode === "version" && arguments_[0] === "list") {
+  const [, root, path, ...flags] = arguments_;
+  if (path === "pending") {
+    writeJson(process.stderr, {error: {code: "file_history_recovery_required", message: "recover first"}});
+    process.exitCode = 2;
+  } else {
+    writeJson(process.stdout, {format: "folderbase-file-history-v1", path, object_id: null, current_version: null, versions: [], unknown_vendor: {root, flags}});
+  }
+} else if (mode === "folder-scope") {
   const [operation, root, selectedPath, ...flags] = arguments_;
   if (operation !== "observe" || flags.length !== 1 || flags[0] !== "--json") {
     writeJson(process.stderr, {

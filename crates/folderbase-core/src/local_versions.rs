@@ -29,6 +29,10 @@ use crate::{
     workspace_path_lookup::WorkspacePathLookup,
 };
 
+#[path = "local_file_history.rs"]
+mod file_history;
+pub use file_history::{FileHistoryError, FileVersionHistory, read_file_history};
+
 const OBJECT_SCHEMA: &str = "https://folderbase.ai/protocol/0.1/object.schema.json";
 const OBJECTS_DIRECTORY: &str = ".folderbase/objects";
 const VERSION_RECORDS_DIRECTORY: &str = ".folderbase/versions/records";
@@ -233,6 +237,38 @@ pub struct HistoryTransferPlan {
     state: HistoryTransferState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_digest: Option<String>,
+}
+
+fn object_path_matches(
+    paths: &mut WorkspacePathLookup,
+    stored_path: &Path,
+    relative_path: &Path,
+    record_path: &Path,
+) -> Result<bool> {
+    Ok(if stored_path == relative_path {
+        true
+    } else {
+        match paths.resolve(stored_path) {
+            Ok((_, canonical_path)) => canonical_path == relative_path,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                if paths_equal_ignoring_ascii_case(stored_path, relative_path) {
+                    return Err(invalid_record(
+                        record_path,
+                        "stored object path alias no longer resolves to its canonical file",
+                    ));
+                }
+                false
+            }
+            Err(FolderbaseError::UnsafePath(_))
+                if !paths_equal_ignoring_ascii_case(stored_path, relative_path) =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        }
+    })
 }
 
 impl HistoryTransferPlan {
@@ -1887,30 +1923,8 @@ impl LocalVersionStore {
             let stored_path = safe_content_path(Path::new(&record.path)).map_err(|_| {
                 invalid_record(entry.path(), "object path is not a safe relative path")
             })?;
-            let is_match = if stored_path == relative_path {
-                true
-            } else {
-                match paths.resolve(&stored_path) {
-                    Ok((_, canonical_path)) => canonical_path == relative_path,
-                    Err(FolderbaseError::Io { source, .. })
-                        if source.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        if paths_equal_ignoring_ascii_case(&stored_path, relative_path) {
-                            return Err(invalid_record(
-                                entry.path(),
-                                "stored object path alias no longer resolves to its canonical file",
-                            ));
-                        }
-                        false
-                    }
-                    Err(FolderbaseError::UnsafePath(_))
-                        if !paths_equal_ignoring_ascii_case(&stored_path, relative_path) =>
-                    {
-                        false
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
+            let is_match =
+                object_path_matches(&mut paths, &stored_path, relative_path, &entry.path())?;
             if is_match {
                 self.deny_if_transferred_out(&record.id)?;
                 if found.is_some() {

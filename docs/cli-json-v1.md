@@ -93,3 +93,9 @@ interface.
 The caller knows which result definition applies because it selected the
 command. This keeps v1 small and preserves the flat five-field attestation
 receipt.
+
+The experimental optional `folderbase.file-history@0.1.0` capability adds
+`version list ROOT PATH --json` for complete, read-only per-file retained metadata.
+It does not expand the stable CLI minimum or change `version history`. See
+[file history 0.1](file-history-0.1.md), including explicit migration-state refusal,
+pending-work behavior and bounded results.
