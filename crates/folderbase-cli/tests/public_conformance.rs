@@ -76,6 +76,18 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains("\"passed\":10"))
         .stdout(predicate::str::contains("\"failed\":0"));
 
+    Command::new("node")
+        .arg(repository.join("protocol/conformance/capabilities/file-history-0.1/run.mjs"))
+        .arg("--implementation")
+        .arg(implementation)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"capability\": \"folderbase.file-history@0.1.0\"",
+        ))
+        .stdout(predicate::str::contains("\"passed\": 4"))
+        .stdout(predicate::str::contains("\"failed\": 0"));
+
     let scope_passed = if cfg!(windows) { 10 } else { 11 };
     let scope_not_applicable = if cfg!(windows) { 1 } else { 0 };
     Command::new("node")
