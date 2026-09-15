@@ -278,3 +278,17 @@ test("fileHistory uses the read-only per-file command and preserves its result a
     return true;
   });
 });
+
+
+test("workspace create forwards exact bytes and refuses invalid requests before spawning", async () => {
+  const operationId = "019f0000-0000-7000-8000-000000000001";
+  const sdk = client();
+  for (const content of ["first 🗂️\r\n", new Uint8Array([0,255,128,13,10]), new Uint8Array()]) {
+    const result = await sdk.workspaceCreate("/tmp/root", "tasks/résumé.json", {operationId, content});
+    assert.deepEqual(result.document.argv, ["workspace","create","/tmp/root","tasks/résumé.json","--operation-id",operationId,"--stdin","--json"]);
+    assert.equal(result.document.stdin_hex, Buffer.from(content).toString("hex"));
+  }
+  assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId:"wrong", content:""}), TypeError);
+  assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId, content:"\ud800"}), TypeError);
+  assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId, content:new Uint8Array(8*1024*1024+1)}), FolderbaseOutputLimitError);
+});

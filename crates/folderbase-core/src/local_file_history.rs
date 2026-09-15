@@ -398,6 +398,7 @@ impl<'a> Observation<'a> {
 
 fn ensure_idle(observation: &mut Observation<'_>) -> HistoryResult<()> {
     for path in [
+        super::file_create::ACTIVE_CREATE_PATH,
         ".folderbase/transactions/protocol-upgrades/active.json",
         ".folderbase/transactions/folderbase-version-captures/active.json",
         ".folderbase/transactions/folderbase-version-restores/active.json",

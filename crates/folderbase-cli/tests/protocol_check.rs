@@ -75,6 +75,11 @@ fn protocol_contract_discovers_the_stable_machine_interface() {
                 "name": "folderbase.version-cli-json",
                 "version": "0.1.0",
                 "stability": "experimental"
+            },
+            {
+                "name": "folderbase.workspace-create",
+                "version": "0.1.0",
+                "stability": "experimental"
             }
         ])
     );

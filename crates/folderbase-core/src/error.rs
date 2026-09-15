@@ -70,7 +70,7 @@ pub enum FolderbaseError {
     #[error("protocol upgrade is blocked by pending work: {0}")]
     ProtocolUpgradeBlocked(&'static str),
 
-    #[error("Folderbase recovery is required before this migration can continue: {work}")]
+    #[error("Folderbase recovery is required before continuing: {work}")]
     RecoveryRequired { work: String },
 
     #[error("initialization destination changed after approval: {0}")]

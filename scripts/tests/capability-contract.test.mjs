@@ -161,6 +161,11 @@ test("the public and embedded capability registries are exact after advertised p
       version: "0.1.0",
       stability: "experimental",
     },
+    {
+      name: "folderbase.workspace-create",
+      version: "0.1.0",
+      stability: "experimental",
+    },
   ]);
   const selectors = registry.capabilities.map(
     ({ name, version }) => `${name}@${version}`,
@@ -220,4 +225,12 @@ test("file history descriptor matches the optional registry without modifying th
   const descriptor = await load(new URL("../../protocol/capabilities/file-history/0.1.0/capability.json", import.meta.url));
   assert.deepEqual(registry.capabilities.find(({name}) => name === "folderbase.file-history"), descriptor);
   assert.equal(registry.capabilities.find(({name}) => name === "folderbase.version-cli-json").version, "0.1.0");
+});
+
+
+test("workspace create is a separate experimental capability", async () => {
+  const registry = await load(registryUrl);
+  const descriptor = await load(new URL("../../protocol/capabilities/workspace-create/0.1.0/capability.json", import.meta.url));
+  assert.deepEqual(registry.capabilities.find(({name}) => name === descriptor.name), descriptor);
+  assert.equal(descriptor.stability, "experimental");
 });

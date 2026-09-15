@@ -296,6 +296,22 @@ export interface FolderbaseFileHistory extends JsonObject {
   versions: FolderbaseFileVersionRecord[];
 }
 
+export interface FolderbaseWorkspaceCreateInput {
+  operationId: string;
+  content: string | Uint8Array;
+}
+
+export interface FolderbaseWorkspaceCreateResult extends JsonObject {
+  format: "folderbase-workspace-create-result-v1";
+  operation_id: string;
+  path: string;
+  object_id: string;
+  version_id: string;
+  content: { algorithm: "sha256"; digest: string; bytes: number };
+  created_at: string;
+  replayed: boolean;
+}
+
 export class FolderbaseClient {
   constructor(options?: FolderbaseClientOptions);
 
@@ -305,6 +321,7 @@ export class FolderbaseClient {
   ): Promise<FolderbaseResult<TSuccess, TAttention>>;
 
   contract<T extends JsonValue = JsonObject>(options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
+  workspaceCreate(root: string, path: string, input: FolderbaseWorkspaceCreateInput, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceCreateResult>>;
   fileHistory(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseFileHistory>>;
   inspect<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   attest<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
