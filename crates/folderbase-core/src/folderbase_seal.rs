@@ -6515,12 +6515,13 @@ mod tests {
                     .path()
                     .join(format!(".folderbase/objects/{}.json", first.object.id));
                 let store = FolderbaseVersionStore::open(root.path()).unwrap();
-                let mut changed = false;
+                let mut injection_reached = false;
+                let mut rename_prevented = false;
                 let result = store.seal_capture_with_hook(store.plan_capture().unwrap(), |at| {
                     if at != &fault {
                         return;
                     }
-                    changed = true;
+                    injection_reached = true;
                     match damage {
                         "extension" => {
                             let mut object = first.object.clone();
@@ -6540,17 +6541,65 @@ mod tests {
                             .unwrap();
                         }
                         "replaced-file" => {
-                            fs::rename(
+                            match fs::rename(
                                 root.path().join("active.bin"),
                                 root.path().join("original.bin"),
-                            )
-                            .unwrap();
-                            fs::write(root.path().join("active.bin"), b"replacement").unwrap();
+                            ) {
+                                Ok(()) => {
+                                    fs::write(root.path().join("active.bin"), b"replacement")
+                                        .unwrap();
+                                }
+                                // Windows can prevent the attempted swap while the
+                                // original file is retained without delete sharing.
+                                // This exercises blocked mutation, not swapped-file refusal.
+                                Err(error)
+                                    if cfg!(windows)
+                                        && matches!(error.raw_os_error(), Some(5 | 32)) =>
+                                {
+                                    rename_prevented = true;
+                                }
+                                Err(error) => {
+                                    panic!("replace retained file at {fault:?}: {error}")
+                                }
+                            }
                         }
                         _ => unreachable!(),
                     }
                 });
-                assert!(changed);
+                assert!(injection_reached);
+                if rename_prevented {
+                    let sealed = result.expect("prevented replacement leaves capture usable");
+                    assert_eq!(
+                        fs::read(root.path().join("active.bin")).unwrap(),
+                        b"first opaque bytes"
+                    );
+                    assert!(!root.path().join("original.bin").try_exists().unwrap());
+                    assert_eq!(
+                        local_head(root.path()).unwrap().version_id,
+                        sealed.version_id()
+                    );
+                    assert!(active_transaction(root.path()).is_none());
+                    let history = crate::read_file_history(root.path(), "active.bin").unwrap();
+                    assert_eq!(history.object_id, Some(first.object.id.clone()));
+                    assert_eq!(history.versions.len(), first.object.versions.len() + 1);
+                    assert_eq!(history.versions.first(), Some(&first.version));
+                    let current = history.versions.last().unwrap();
+                    assert_eq!(history.current_version.as_ref(), Some(&current.id));
+                    assert_eq!(current.content, first.version.content);
+                    let version = store.read_version(sealed.version_id()).unwrap();
+                    let binding = version.lookup_binding("active.bin").unwrap();
+                    assert_eq!(binding.object_id(), first.object.id.as_str());
+                    assert_eq!(
+                        binding.object_version_id(),
+                        history.current_version.as_ref().map(VersionId::as_str)
+                    );
+                    assert_eq!(
+                        binding.content_sha256(),
+                        Some(current.content.digest.as_str())
+                    );
+                    assert_eq!(binding.bytes(), Some(current.content.bytes));
+                    continue;
+                }
                 assert!(result.is_err(), "{damage} at {fault:?}");
                 assert!(local_head(root.path()).is_none());
                 assert!(active_transaction(root.path()).is_some());
