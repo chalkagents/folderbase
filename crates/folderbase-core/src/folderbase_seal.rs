@@ -827,6 +827,11 @@ impl FolderbaseVersionStore {
                     transaction.expected_head.as_ref(),
                 )?;
                 validate_committed_transaction(transaction, &version, transaction_prior.as_ref())?;
+                let claims =
+                    capture_object_claims(&local, &state, &plan, transaction_prior.as_ref())?;
+                validate_capture_claim_assignments(&claims, transaction)?;
+                verify_missing_capture_claims(&claims, &local, &state, transaction)?;
+                verify_capture_claims(&local, &state, &plan, &claims)?;
                 finish_committed_transaction(self, &local, &state, transaction)?;
                 remove_active_transaction(&state)?;
                 rebind_legacy_root_local_head(self, &local, &state)?;
@@ -850,6 +855,7 @@ impl FolderbaseVersionStore {
 
         let prior = load_prior_head(self, &local, &state, plan.current_local_head())?;
         ensure_prior_bindings_observable(&plan, prior.as_ref())?;
+        let claims = capture_object_claims(&local, &state, &plan, prior.as_ref())?;
         if active.is_none()
             && live_state_matches_prior(
                 self,
@@ -860,6 +866,7 @@ impl FolderbaseVersionStore {
                 &mut checkpoint,
             )?
         {
+            claims.verify_unchanged(&local, &state)?;
             rebind_legacy_root_local_head(self, &local, &state)?;
             let head = plan
                 .current_local_head()
@@ -872,13 +879,18 @@ impl FolderbaseVersionStore {
         }
 
         let transaction = match active {
-            Some(transaction) => transaction,
+            Some(transaction) => {
+                verify_missing_capture_claims(&claims, &local, &state, &transaction)?;
+                transaction
+            }
             None => {
                 let mut transaction =
-                    assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
+                    assign_capture_transaction(&plan, &plan_sha256, prior.as_ref(), &claims)?;
                 if !deltas.is_empty() {
                     bind_created_change_set_identities(&mut transaction, deltas)?;
                 }
+                validate_capture_claim_assignments(&claims, &transaction)?;
+                verify_capture_claims(&local, &state, &plan, &claims)?;
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
@@ -908,6 +920,8 @@ impl FolderbaseVersionStore {
             ));
         }
         validate_transaction_against_plan(&plan, &transaction, prior.as_ref())?;
+        validate_capture_claim_assignments(&claims, &transaction)?;
+        verify_capture_claims(&local, &state, &plan, &claims)?;
         if !deltas.is_empty() {
             validate_change_set_capture_identities(&transaction, deltas)?;
         }
@@ -928,6 +942,7 @@ impl FolderbaseVersionStore {
             prior.as_ref(),
             &mut checkpoint,
         )?;
+        verify_capture_claims(&local, &state, &plan, &claims)?;
         checkpoint(&CaptureCheckpoint::ObjectWritesDurable);
         install_folderbase_version(&state, &built.version, &built.version_sha256)?;
         let installed =
@@ -941,6 +956,7 @@ impl FolderbaseVersionStore {
 
         let final_plan = self.plan_capture()?;
         ensure_same_plan(&plan, &final_plan)?;
+        verify_capture_claims(&local, &state, &plan, &claims)?;
         compare_and_swap_local_head(
             &state,
             plan.current_local_head(),
@@ -956,6 +972,7 @@ impl FolderbaseVersionStore {
             },
         )?;
         checkpoint(&CaptureCheckpoint::HeadReplaced);
+        claims.verify_unchanged(&local, &state)?;
 
         for projection in &built.regular_projections {
             local.write_capture_object_projection_in(&state, projection)?;
@@ -3360,6 +3377,7 @@ fn assign_capture_transaction(
     plan: &CapturePlan,
     plan_sha256: &str,
     prior: Option<&FolderbaseVersion>,
+    claims: &crate::local_versions::CaptureObjectClaims,
 ) -> Result<CaptureTransaction, FolderbaseCaptureError> {
     let identity_state = FolderbaseState::open_existing_read_only(plan.root())?;
     let mut assignments = Vec::with_capacity(plan.entries().len());
@@ -3371,6 +3389,7 @@ fn assign_capture_transaction(
         let object_id = prior_binding
             .filter(|_| reused_object)
             .map(|binding| binding.object_id().to_owned())
+            .or_else(|| claims.adopted_id(entry.path()).map(ToString::to_string))
             .unwrap_or_else(|| ObjectId::new().to_string());
         let candidate_object_version_id =
             (entry.kind() != CaptureEntryKind::Directory).then(|| VersionId::new().to_string());
@@ -3407,6 +3426,141 @@ fn assign_capture_transaction(
         assignments,
         target_tombstones,
     })
+}
+
+fn capture_object_claims(
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    plan: &CapturePlan,
+    prior: Option<&FolderbaseVersion>,
+) -> Result<crate::local_versions::CaptureObjectClaims, FolderbaseCaptureError> {
+    let mut requested = std::collections::BTreeSet::new();
+    let mut unbound = std::collections::BTreeSet::new();
+    let mut bound = BTreeMap::new();
+    for entry in plan.entries().iter().filter(|entry| {
+        entry.kind() == CaptureEntryKind::RegularFile && can_project_legacy_object(entry.path())
+    }) {
+        requested.insert(PathBuf::from(entry.path()));
+        if let Some(binding) = prior_binding_for_capture_entry(prior, state, plan.root(), entry)? {
+            bound.insert(entry.path(), binding.object_id());
+        } else {
+            unbound.insert(PathBuf::from(entry.path()));
+        }
+    }
+    let claims = crate::local_versions::CaptureObjectClaims::read(
+        local,
+        state,
+        plan.folderbase_id(),
+        &requested,
+        &unbound,
+        &plan
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind() != CaptureEntryKind::RegularFile)
+            .map(|entry| PathBuf::from(entry.path()))
+            .collect(),
+        prior,
+    )?;
+    for (path, id) in bound {
+        if claims
+            .claim_id(path)
+            .is_some_and(|claim| claim.as_str() != id)
+        {
+            return Err(FolderbaseCaptureError::InvalidPriorLocalHead(format!(
+                "local Object claim conflicts with the prior binding at {path}"
+            )));
+        }
+    }
+    for (path, id) in claims.adopted_ids() {
+        if prior.is_some_and(|version| {
+            version.bindings().iter().any(|binding| {
+                binding.object_id() == id.as_str() || Path::new(binding.path()) == path
+            }) || version
+                .tombstones()
+                .iter()
+                .any(|tombstone| tombstone.object_id() == id.as_str())
+        }) {
+            return Err(FolderbaseCaptureError::InvalidPriorLocalHead(format!(
+                "local Object adoption conflicts with prior live or tombstoned identity at {}",
+                path.display()
+            )));
+        }
+    }
+    verify_capture_claims(local, state, plan, &claims)?;
+    Ok(claims)
+}
+
+fn validate_capture_claim_assignments(
+    claims: &crate::local_versions::CaptureObjectClaims,
+    transaction: &CaptureTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for assignment in &transaction.assignments {
+        if !ids.insert(&assignment.object_id)
+            || claims
+                .claim_id(&assignment.path)
+                .is_some_and(|id| id.as_str() != assignment.object_id)
+        {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "durable assignment conflicts with existing local Object claims at {}",
+                assignment.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_missing_capture_claims(
+    claims: &crate::local_versions::CaptureObjectClaims,
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    transaction: &CaptureTransaction,
+) -> Result<(), FolderbaseCaptureError> {
+    let candidates = transaction
+        .assignments
+        .iter()
+        .filter(|assignment| {
+            assignment.kind == CaptureEntryKind::RegularFile
+                && !assignment.reused_object
+                && can_project_legacy_object(&assignment.path)
+                && claims.claim_id(&assignment.path).is_none()
+        })
+        .map(|assignment| {
+            Ok((
+                ObjectId::parse(assignment.object_id.clone())?,
+                VersionId::parse(
+                    assignment
+                        .candidate_object_version_id
+                        .clone()
+                        .expect("regular Version ID"),
+                )?,
+            ))
+        })
+        .collect::<crate::Result<BTreeMap<_, _>>>()?;
+    claims.verify_missing_replay_claims(local, state, &candidates)?;
+    Ok(())
+}
+
+fn verify_capture_claims(
+    local: &LocalVersionStore,
+    state: &FolderbaseState,
+    plan: &CapturePlan,
+    claims: &crate::local_versions::CaptureObjectClaims,
+) -> Result<(), FolderbaseCaptureError> {
+    claims.verify_unchanged(local, state)?;
+    for entry in plan
+        .entries()
+        .iter()
+        .filter(|entry| claims.adopted_id(entry.path()).is_some())
+    {
+        let file = open_regular_beneath(plan.root(), Path::new(entry.path()))?;
+        if fingerprint_std_file(&file, &plan.root().join(entry.path()))? != *entry.observed() {
+            return Err(FolderbaseCaptureError::CaptureStateChanged(PathBuf::from(
+                entry.path(),
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_prior_bindings_observable(
@@ -6006,6 +6160,721 @@ mod tests {
         root
     }
 
+    #[test]
+    fn standalone_history_is_adopted_before_full_capture() {
+        let root = folderbase();
+        let local = LocalVersionStore::open(root.path()).expect("local history");
+        let first = local
+            .capture_file("active.bin")
+            .expect("standalone capture");
+        crate::save_workspace_text(
+            root.path(),
+            "active.bin",
+            &first.version.content.digest,
+            "second ordinary bytes",
+        )
+        .expect("standalone CAS");
+        let mut retained_version = first.version.clone();
+        retained_version.extensions.insert(
+            "application_metadata".into(),
+            serde_json::json!({"keep": ["original", 7]}),
+        );
+        fs::write(
+            root.path().join(format!(
+                ".folderbase/versions/records/{}.json",
+                retained_version.id
+            )),
+            json_bytes(&retained_version).unwrap(),
+        )
+        .unwrap();
+        let before = crate::read_file_history(root.path(), "active.bin").expect("prior history");
+        let mut object = local.read_object(&first.object.id).unwrap();
+        object.extensions.insert(
+            "application".into(),
+            serde_json::json!({"keep": [1, "two"]}),
+        );
+        object
+            .provenance
+            .extensions
+            .insert("imported_from".into(), serde_json::json!("original"));
+        fs::write(
+            root.path()
+                .join(format!(".folderbase/objects/{}.json", object.id)),
+            json_bytes(&object).unwrap(),
+        )
+        .unwrap();
+        let store = FolderbaseVersionStore::open(root.path()).expect("whole capture store");
+        let sealed = store
+            .seal_capture(store.plan_capture().expect("plan"))
+            .expect("capture");
+        let version = store
+            .read_version(sealed.version_id())
+            .expect("whole Version");
+        assert_eq!(
+            version.lookup_binding("active.bin").unwrap().object_id(),
+            first.object.id.as_str(),
+            "whole capture must continue the existing per-file Object"
+        );
+        let after =
+            crate::read_file_history(root.path(), "active.bin").expect("unambiguous history");
+        assert_eq!(after.object_id, before.object_id);
+        assert_eq!(&after.versions[..before.versions.len()], &before.versions);
+        let retained = local.read_object(&first.object.id).unwrap();
+        assert_eq!(retained.extensions, object.extensions);
+        assert_eq!(retained.provenance, object.provenance);
+        assert_eq!(retained.lifecycle, object.lifecycle);
+
+        // A new standalone file after an existing Head uses the same seam.
+        fs::create_dir(root.path().join("tasks")).unwrap();
+        fs::write(
+            root.path().join("tasks/external.json"),
+            b"{\"title\":\"External\"}",
+        )
+        .unwrap();
+        let external = local.capture_file("tasks/external.json").unwrap();
+        let operation = tempdir().unwrap();
+        let checkout = operation.path().join("checkout");
+        let staging = operation.path().join("staging");
+        crate::checkout_change_set_projection(
+            root.path(),
+            &checkout,
+            crate::CheckoutRequest {
+                format: "folderbase-checkout-request-v1".into(),
+                folderbase_id: version.folderbase_id().into(),
+                projection_id: format!("projection_{}", Uuid::now_v7()),
+                folder_scope_id: format!("folderscope_{}", Uuid::now_v7()),
+                scope_revision_sha256: "a".repeat(64),
+                permission: "can_work".into(),
+                authorized_paths: vec![crate::AuthorizedPath { path_prefix: None }],
+            },
+        )
+        .expect("checkout adopts new standalone file");
+        fs::write(checkout.join("tasks/new.json"), b"{\"title\":\"New\"}").unwrap();
+        fs::create_dir(checkout.join("attachments")).unwrap();
+        fs::write(checkout.join("attachments/proof.pdf"), b"%PDF-opaque\0\xff").unwrap();
+        fs::write(checkout.join("active.bin"), b"third agent bytes").unwrap();
+        let envelope = crate::propose_change_set(&checkout, &staging).unwrap();
+        assert!(matches!(
+            crate::apply_change_set(root.path(), &staging, envelope).unwrap(),
+            crate::ChangeSetApplyOutcome::Applied(_)
+        ));
+        let final_history = crate::read_file_history(root.path(), "active.bin").unwrap();
+        assert_eq!(final_history.object_id, before.object_id);
+        assert_eq!(
+            &final_history.versions[..before.versions.len()],
+            &before.versions
+        );
+        assert_eq!(
+            crate::read_file_history(root.path(), "tasks/external.json")
+                .unwrap()
+                .object_id,
+            Some(external.object.id)
+        );
+        for path in ["tasks/new.json", "attachments/proof.pdf"] {
+            assert!(
+                !crate::read_file_history(root.path(), path)
+                    .unwrap()
+                    .versions
+                    .is_empty()
+            );
+        }
+        crate::save_workspace_text(
+            root.path(),
+            "active.bin",
+            &crate::read_workspace_text(root.path(), "active.bin")
+                .unwrap()
+                .sha256,
+            "fourth app bytes",
+        )
+        .unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        local
+            .restore_version(&first.version.id, "recovered.bin")
+            .expect("original history remains usable");
+        assert_eq!(
+            fs::read(root.path().join("recovered.bin")).unwrap(),
+            b"first opaque bytes"
+        );
+    }
+
+    #[test]
+    fn standalone_adoption_retains_identity_and_history_at_every_capture_checkpoint() {
+        for fault in [
+            CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ObjectWritesDurable,
+            CaptureCheckpoint::VersionDurable,
+            CaptureCheckpoint::HeadReplaced,
+        ] {
+            let root = folderbase();
+            let first = LocalVersionStore::open(root.path())
+                .unwrap()
+                .capture_file("active.bin")
+                .unwrap();
+            let before = crate::read_file_history(root.path(), "active.bin").unwrap();
+            let store = FolderbaseVersionStore::open(root.path()).unwrap();
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| store.seal_capture_with_hook(
+                    store.plan_capture().unwrap(),
+                    |at| {
+                        if at == &fault {
+                            panic!("capture crash");
+                        }
+                    }
+                )))
+                .is_err()
+            );
+            let intent = active_transaction(root.path()).unwrap();
+            assert_eq!(
+                intent
+                    .assignments
+                    .iter()
+                    .find(|a| a.path == "active.bin")
+                    .unwrap()
+                    .object_id,
+                first.object.id.as_str()
+            );
+            let reopened = FolderbaseVersionStore::open(root.path()).unwrap();
+            let result = reopened
+                .seal_capture(reopened.plan_capture().unwrap())
+                .unwrap();
+            assert_eq!(result.version_id(), intent.target_version_id);
+            let after = crate::read_file_history(root.path(), "active.bin").unwrap();
+            assert_eq!(after.object_id, before.object_id);
+            assert_eq!(&after.versions[..before.versions.len()], &before.versions);
+            assert!(active_transaction(root.path()).is_none());
+        }
+    }
+
+    #[test]
+    fn standalone_adoption_refuses_lost_projection_on_replay_without_shortening_history() {
+        for fault in [
+            CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ObjectWritesDurable,
+            CaptureCheckpoint::HeadReplaced,
+        ] {
+            let root = folderbase();
+            let first = LocalVersionStore::open(root.path())
+                .unwrap()
+                .capture_file("active.bin")
+                .unwrap();
+            let store = FolderbaseVersionStore::open(root.path()).unwrap();
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| store.seal_capture_with_hook(
+                    store.plan_capture().unwrap(),
+                    |at| {
+                        if at == &fault {
+                            panic!("crash");
+                        }
+                    }
+                )))
+                .is_err()
+            );
+            let object_path = root
+                .path()
+                .join(format!(".folderbase/objects/{}.json", first.object.id));
+            let original = fs::read(&object_path).unwrap();
+            fs::remove_file(&object_path).unwrap();
+            let intent = fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH)).unwrap();
+            let head = local_head(root.path());
+            let error = store
+                .seal_capture(store.plan_capture().unwrap())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("retained earlier Version"),
+                "{error}"
+            );
+            assert!(!object_path.exists());
+            assert_eq!(local_head(root.path()), head);
+            assert_eq!(
+                fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH)).unwrap(),
+                intent
+            );
+            fs::write(&object_path, original).unwrap();
+            store
+                .seal_capture(store.plan_capture().unwrap())
+                .expect("repair exact missing evidence and retry");
+            assert_eq!(
+                crate::read_file_history(root.path(), "active.bin")
+                    .unwrap()
+                    .object_id,
+                Some(first.object.id)
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_adoption_refuses_damaged_or_ambiguous_claims_before_intent() {
+        for damage in [
+            "unrelated-json",
+            "duplicate",
+            "id",
+            "path",
+            "alias",
+            "schema",
+            "type",
+            "lifecycle",
+            "duplicate-version",
+            "missing-current",
+            "foreign-version",
+            "missing-blob",
+            "incoming",
+            "outgoing",
+        ] {
+            let root = folderbase();
+            let first = LocalVersionStore::open(root.path())
+                .unwrap()
+                .capture_file("active.bin")
+                .unwrap();
+            let object_path = root
+                .path()
+                .join(format!(".folderbase/objects/{}.json", first.object.id));
+            let mut record = first.object.clone();
+            match damage {
+                "unrelated-json" => {
+                    fs::write(
+                        root.path()
+                            .join(format!(".folderbase/objects/{}.json", ObjectId::new())),
+                        b"{",
+                    )
+                    .unwrap();
+                }
+                "duplicate" => {
+                    let mut second = record.clone();
+                    second.id = ObjectId::new();
+                    fs::write(
+                        root.path()
+                            .join(format!(".folderbase/objects/{}.json", second.id)),
+                        json_bytes(&second).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "id" => record.id = ObjectId::new(),
+                "path" => record.path = "../outside".into(),
+                "alias" => record.path = "ACTIVE.BIN".into(),
+                "schema" => record.schema = "https://example.invalid/unknown".into(),
+                "type" => record.object_type = "other".into(),
+                "lifecycle" => record.lifecycle.status = "deleted".into(),
+                "duplicate-version" => record.versions.push(record.current_version.clone()),
+                "missing-current" => record.current_version = VersionId::new(),
+                "foreign-version" => {
+                    let mut version = first.version.clone();
+                    version.object_id = ObjectId::new();
+                    fs::write(
+                        root.path()
+                            .join(format!(".folderbase/versions/records/{}.json", version.id)),
+                        json_bytes(&version).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "missing-blob" => {
+                    fs::remove_file(root.path().join(format!(
+                        ".folderbase/versions/blobs/sha256/{}",
+                        first.version.content.digest
+                    )))
+                    .unwrap();
+                }
+                "incoming" | "outgoing" => {
+                    let directory = root
+                        .path()
+                        .join(format!(".folderbase/history-transfers/{damage}"));
+                    fs::create_dir_all(&directory).unwrap();
+                    fs::write(directory.join(format!("{}.json", first.object.id)), b"{}").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&object_path, json_bytes(&record).unwrap()).unwrap();
+            let store = FolderbaseVersionStore::open(root.path()).unwrap();
+            let prior_bytes = fs::read(&object_path).unwrap();
+            let error = store
+                .seal_capture(store.plan_capture().unwrap())
+                .expect_err(damage);
+            assert!(!error.to_string().is_empty());
+            assert!(local_head(root.path()).is_none(), "{damage}");
+            assert!(active_transaction(root.path()).is_none(), "{damage}");
+            assert_eq!(fs::read(&object_path).unwrap(), prior_bytes, "{damage}");
+            assert_eq!(
+                fs::read(root.path().join("active.bin")).unwrap(),
+                b"first opaque bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_adoption_rechecks_claim_bytes_names_and_physical_file_before_head() {
+        for damage in ["extension", "duplicate", "replaced-file"] {
+            for fault in [
+                CaptureCheckpoint::JournalDurable,
+                CaptureCheckpoint::BeforeObjectBytesRead("active.bin".into()),
+            ] {
+                let root = folderbase();
+                let first = LocalVersionStore::open(root.path())
+                    .unwrap()
+                    .capture_file("active.bin")
+                    .unwrap();
+                let object_path = root
+                    .path()
+                    .join(format!(".folderbase/objects/{}.json", first.object.id));
+                let store = FolderbaseVersionStore::open(root.path()).unwrap();
+                let mut changed = false;
+                let result = store.seal_capture_with_hook(store.plan_capture().unwrap(), |at| {
+                    if at != &fault {
+                        return;
+                    }
+                    changed = true;
+                    match damage {
+                        "extension" => {
+                            let mut object = first.object.clone();
+                            object
+                                .extensions
+                                .insert("owner".into(), serde_json::json!("edit"));
+                            fs::write(&object_path, json_bytes(&object).unwrap()).unwrap();
+                        }
+                        "duplicate" => {
+                            let mut object = first.object.clone();
+                            object.id = ObjectId::new();
+                            fs::write(
+                                root.path()
+                                    .join(format!(".folderbase/objects/{}.json", object.id)),
+                                json_bytes(&object).unwrap(),
+                            )
+                            .unwrap();
+                        }
+                        "replaced-file" => {
+                            fs::rename(
+                                root.path().join("active.bin"),
+                                root.path().join("original.bin"),
+                            )
+                            .unwrap();
+                            fs::write(root.path().join("active.bin"), b"replacement").unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                });
+                assert!(changed);
+                assert!(result.is_err(), "{damage} at {fault:?}");
+                assert!(local_head(root.path()).is_none());
+                assert!(active_transaction(root.path()).is_some());
+                if damage == "replaced-file" {
+                    assert_eq!(
+                        fs::read(root.path().join("active.bin")).unwrap(),
+                        b"replacement"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn file_directory_file_cycle_preserves_retired_history_and_new_identity() {
+        let root = folderbase();
+        let local = LocalVersionStore::open(root.path()).unwrap();
+        let original = local.capture_file("active.bin").unwrap();
+        let store = FolderbaseVersionStore::open(root.path()).unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        let retained = local.read_object(&original.object.id).unwrap();
+        let retained_bytes = fs::read(
+            root.path()
+                .join(format!(".folderbase/objects/{}.json", original.object.id)),
+        )
+        .unwrap();
+
+        fs::remove_file(root.path().join("active.bin")).unwrap();
+        fs::create_dir(root.path().join("active.bin")).unwrap();
+        let directory = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        let directory_version = store.read_version(directory.version_id()).unwrap();
+        let directory_id = directory_version
+            .lookup_binding("active.bin")
+            .unwrap()
+            .object_id();
+        assert_ne!(directory_id, original.object.id.as_str());
+        assert_eq!(
+            directory_version
+                .lookup_binding("active.bin")
+                .unwrap()
+                .kind(),
+            PathBindingKind::Directory
+        );
+        let unchanged = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        assert!(!unchanged.created());
+        assert_eq!(unchanged.version_id(), directory.version_id());
+        assert_eq!(
+            fs::read(
+                root.path()
+                    .join(format!(".folderbase/objects/{}.json", original.object.id))
+            )
+            .unwrap(),
+            retained_bytes
+        );
+
+        fs::remove_dir(root.path().join("active.bin")).unwrap();
+        fs::write(root.path().join("active.bin"), b"new file after directory").unwrap();
+        let recreated = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        let recreated_version = store.read_version(recreated.version_id()).unwrap();
+        let binding = recreated_version.lookup_binding("active.bin").unwrap();
+        assert_eq!(binding.kind(), PathBindingKind::RegularFile);
+        assert_ne!(binding.object_id(), original.object.id.as_str());
+        assert_ne!(binding.object_id(), directory_id);
+        let history = crate::read_file_history(root.path(), "active.bin").unwrap();
+        assert_eq!(
+            history.object_id.as_ref().unwrap().as_str(),
+            binding.object_id()
+        );
+        let read = crate::read_workspace_text(root.path(), "active.bin").unwrap();
+        crate::save_workspace_text(root.path(), "active.bin", &read.sha256, "continued edit")
+            .unwrap();
+        store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        let after = crate::read_file_history(root.path(), "active.bin").unwrap();
+        assert_eq!(after.object_id, history.object_id);
+        assert_eq!(&after.versions[..history.versions.len()], &history.versions);
+        assert_eq!(local.read_object(&original.object.id).unwrap(), retained);
+        local
+            .restore_version(&original.version.id, "original-recovered.bin")
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join("original-recovered.bin")).unwrap(),
+            b"first opaque bytes"
+        );
+    }
+
+    #[test]
+    fn nonregular_capture_requires_verified_retired_or_retiring_file_claims() {
+        for damage in [
+            "unexplained",
+            "schema",
+            "missing-bound-version",
+            "alias",
+            "malformed",
+        ] {
+            let root = folderbase();
+            let local = LocalVersionStore::open(root.path()).unwrap();
+            let original = local.capture_file("active.bin").unwrap();
+            let store = FolderbaseVersionStore::open(root.path()).unwrap();
+            if damage != "unexplained" {
+                store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            }
+            let prior_head = local_head(root.path()).map(|head| head.version_id);
+            let object_path = root
+                .path()
+                .join(format!(".folderbase/objects/{}.json", original.object.id));
+            let mut record = local.read_object(&original.object.id).unwrap();
+            match damage {
+                "schema" => record.schema = "https://example.invalid/unknown".into(),
+                "missing-bound-version" => {
+                    record.versions = vec![original.version.id.clone()];
+                    record.current_version = original.version.id.clone();
+                }
+                "alias" => record.path = "ACTIVE.BIN".into(),
+                "unexplained" | "malformed" => {}
+                _ => unreachable!(),
+            }
+            fs::write(
+                &object_path,
+                if damage == "malformed" {
+                    b"{".to_vec()
+                } else {
+                    json_bytes(&record).unwrap()
+                },
+            )
+            .unwrap();
+            fs::remove_file(root.path().join("active.bin")).unwrap();
+            fs::create_dir(root.path().join("active.bin")).unwrap();
+            let before = fs::read(&object_path).unwrap();
+            let error = store
+                .seal_capture(store.plan_capture().unwrap())
+                .expect_err(damage);
+            assert!(!error.to_string().is_empty(), "{damage}");
+            assert_eq!(
+                local_head(root.path()).map(|head| head.version_id),
+                prior_head,
+                "{damage}"
+            );
+            assert!(active_transaction(root.path()).is_none(), "{damage}");
+            assert_eq!(fs::read(&object_path).unwrap(), before, "{damage}");
+            assert!(root.path().join("active.bin").is_dir(), "{damage}");
+            assert_eq!(
+                fs::read_dir(root.path().join("active.bin"))
+                    .unwrap()
+                    .count(),
+                0,
+                "{damage}"
+            );
+        }
+    }
+
+    #[test]
+    fn proven_retired_deleted_projections_preserve_separate_readable_histories() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).unwrap();
+        let local = LocalVersionStore::open(root.path()).unwrap();
+        let mut current = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+        let mut retired = Vec::new();
+        for cycle in 0..2 {
+            let version = store.read_version(current.version_id()).unwrap();
+            let id = ObjectId::parse(
+                version
+                    .lookup_binding("active.bin")
+                    .unwrap()
+                    .object_id()
+                    .to_owned(),
+            )
+            .unwrap();
+            let mut record = local.read_object(&id).unwrap();
+            let path = root.path().join(format!(".folderbase/objects/{id}.json"));
+            fs::remove_file(root.path().join("active.bin")).unwrap();
+            store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            // Reconstruction uses this lifecycle for retained historical Objects.
+            // The exact Tombstone, not the status string, proves retirement.
+            record.lifecycle.status = "deleted".into();
+            let encoded = json_bytes(&record).unwrap();
+            fs::write(&path, &encoded).unwrap();
+            retired.push((path, encoded, record));
+            fs::write(
+                root.path().join("active.bin"),
+                format!("recreated file {cycle}"),
+            )
+            .unwrap();
+            let recreated = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            let history = crate::read_file_history(root.path(), "active.bin").unwrap();
+            assert_eq!(
+                history.object_id.as_ref().unwrap().as_str(),
+                store
+                    .read_version(recreated.version_id())
+                    .unwrap()
+                    .lookup_binding("active.bin")
+                    .unwrap()
+                    .object_id()
+            );
+            assert!(
+                retired
+                    .iter()
+                    .all(|(_, _, object)| Some(&object.id) != history.object_id.as_ref())
+            );
+            let read = crate::read_workspace_text(root.path(), "active.bin").unwrap();
+            crate::save_workspace_text(
+                root.path(),
+                "active.bin",
+                &read.sha256,
+                &format!("app edit {cycle}"),
+            )
+            .unwrap();
+            current = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            let after = crate::read_file_history(root.path(), "active.bin").unwrap();
+            assert_eq!(after.object_id, history.object_id);
+            assert_eq!(&after.versions[..history.versions.len()], &history.versions);
+            for (path, bytes, _) in &retired {
+                assert_eq!(fs::read(path).unwrap(), *bytes);
+            }
+        }
+        local
+            .restore_version(&retired[0].2.versions[0], "retired-recovered.bin")
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join("retired-recovered.bin")).unwrap(),
+            b"first opaque bytes"
+        );
+
+        let (old_path, old_bytes, old_object) = &retired[0];
+        let mut damaged = old_object.clone();
+        damaged.lifecycle.status = "unknown".into();
+        fs::write(old_path, json_bytes(&damaged).unwrap()).unwrap();
+        assert!(crate::read_file_history(root.path(), "active.bin").is_err());
+        assert!(store.seal_capture(store.plan_capture().unwrap()).is_err());
+        fs::write(old_path, old_bytes).unwrap();
+        let history = crate::read_file_history(root.path(), "active.bin").unwrap();
+        let live_id = history.object_id.unwrap();
+        let live_path = root
+            .path()
+            .join(format!(".folderbase/objects/{live_id}.json"));
+        let mut live = local.read_object(&live_id).unwrap();
+        live.lifecycle.status = "deleted".into();
+        fs::write(&live_path, json_bytes(&live).unwrap()).unwrap();
+        assert!(
+            crate::read_file_history(root.path(), "active.bin").is_err(),
+            "live claim cannot use the historical lifecycle exception"
+        );
+    }
+
+    #[test]
+    fn repeated_same_path_recreation_preserves_distinct_readable_histories() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).unwrap();
+        let mut ids = std::collections::BTreeSet::new();
+        for cycle in 0..3 {
+            let sealed = store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            let version = store.read_version(sealed.version_id()).unwrap();
+            let id = version
+                .lookup_binding("active.bin")
+                .unwrap()
+                .object_id()
+                .to_owned();
+            assert!(
+                ids.insert(id.clone()),
+                "same-path recreation must never revive an older deleted ID"
+            );
+            let history = crate::read_file_history(root.path(), "active.bin").unwrap();
+            assert_eq!(history.object_id.unwrap().as_str(), id);
+            let read = crate::read_workspace_text(root.path(), "active.bin").unwrap();
+            crate::save_workspace_text(
+                root.path(),
+                "active.bin",
+                &read.sha256,
+                &format!("app edit {cycle}"),
+            )
+            .unwrap();
+            store.seal_capture(store.plan_capture().unwrap()).unwrap();
+            if cycle < 2 {
+                fs::remove_file(root.path().join("active.bin")).unwrap();
+                store.seal_capture(store.plan_capture().unwrap()).unwrap();
+                fs::write(root.path().join("active.bin"), format!("recreated {cycle}")).unwrap();
+            }
+        }
+    }
+
+    fn assert_recreated_file_histories_remain_usable(root: &Path) {
+        let store = FolderbaseVersionStore::open(root).unwrap();
+        let head = local_head(root).unwrap();
+        let version = store.read_version(&head.version_id).unwrap();
+        let current = version.lookup_binding("active.bin").unwrap();
+        let old = version
+            .tombstones()
+            .iter()
+            .find(|tombstone| tombstone.path() == "active.bin")
+            .unwrap();
+        assert_ne!(current.object_id(), old.object_id());
+        let history = crate::read_file_history(root, "active.bin")
+            .expect("recreated file history is unambiguous");
+        assert_eq!(
+            history.object_id.as_ref().unwrap().as_str(),
+            current.object_id()
+        );
+        let local = LocalVersionStore::open(root).unwrap();
+        let older = local
+            .read_object(&ObjectId::parse(old.object_id().to_owned()).unwrap())
+            .unwrap();
+        assert!(
+            older
+                .versions
+                .iter()
+                .any(|id| Some(id.as_str()) == old.last_object_version_id())
+        );
+        local
+            .restore_version(&older.versions[0], "older-recovered.bin")
+            .unwrap();
+        assert_eq!(
+            fs::read(root.join("older-recovered.bin")).unwrap(),
+            b"first opaque bytes"
+        );
+        let read = crate::read_workspace_text(root, "active.bin").unwrap();
+        crate::save_workspace_text(root, "active.bin", &read.sha256, "continued app edit")
+            .expect("CAS chooses the live Object");
+        let after = crate::read_file_history(root, "active.bin").unwrap();
+        assert_eq!(after.object_id, history.object_id);
+        assert_eq!(&after.versions[..history.versions.len()], &history.versions);
+        store
+            .seal_capture(store.plan_capture().unwrap())
+            .expect("further capture keeps ownership distinct");
+    }
+
     fn copy_directory(source: &Path, destination: &Path) {
         fs::create_dir_all(destination).expect("create copied directory");
         for entry in fs::read_dir(source).expect("read copied directory") {
@@ -7567,6 +8436,7 @@ mod tests {
                 fs::read(root.path().join("active.bin")).expect("captured user work"),
                 user_bytes.as_bytes()
             );
+            assert_recreated_file_histories_remain_usable(root.path());
         }
     }
 
@@ -7665,6 +8535,7 @@ mod tests {
                 .is_file(),
             "cleanup retry must retain a durable authority receipt"
         );
+        assert_recreated_file_histories_remain_usable(root.path());
     }
 
     #[cfg(unix)]
@@ -7727,6 +8598,7 @@ mod tests {
         reopened
             .seal_capture(reopened.plan_capture().expect("capture reverted file"))
             .expect("completed cleanup must leave capture unblocked");
+        assert_recreated_file_histories_remain_usable(root.path());
     }
 
     #[cfg(unix)]
@@ -11639,6 +12511,13 @@ mod tests {
             &plan,
             &capture_plan_sha256(&plan).expect("plan digest"),
             None,
+            &capture_object_claims(
+                &LocalVersionStore::open(root.path()).expect("local store"),
+                &FolderbaseState::open(root.path()).expect("state"),
+                &plan,
+                None,
+            )
+            .expect("claims"),
         )
         .expect("assignment");
         let encoded = json_bytes(&transaction).expect("journal bytes");
@@ -11668,6 +12547,13 @@ mod tests {
             &plan,
             &capture_plan_sha256(&plan).expect("plan digest"),
             None,
+            &capture_object_claims(
+                &LocalVersionStore::open(root.path()).expect("local store"),
+                &FolderbaseState::open(root.path()).expect("state"),
+                &plan,
+                None,
+            )
+            .expect("claims"),
         )
         .expect("assignment");
         transaction.target_tombstones = (0..crate::folderbase_version::MAX_VERSION_ENTRIES)
