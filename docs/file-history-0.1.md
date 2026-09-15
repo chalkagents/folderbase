@@ -103,10 +103,25 @@ There is no truncation or pagination. Exceeding a bound refuses the entire resul
 
 Existing path/boundary work limits also apply. All Object JSON files are scanned,
 including unrelated records, to reject malformed/nonregular records, unsafe
-stored paths, filename-ID mismatch, aliases and duplicate claimants. Selected
+stored paths, filename-ID mismatch, aliases and unexplained duplicate claimants. Selected
 Object history rejects duplicate Version IDs, missing records, invalid digests,
 filename-ID mismatches and Versions belonging to another Object. This is a
 metadata scan, not an index-backed point lookup.
+
+When a deleted path is recreated, the current file has a new Object ID. A
+verified live binding and exact path/old-ID Tombstones distinguish retained
+historical Objects from the current owner. Earlier Tombstones may require a
+bounded ancestor metadata walk: at most 1,024 full Versions and 64 MiB of ancestor
+bytes, also subject to the aggregate read budget above. Missing, cyclic,
+conflicting, or changed required evidence refuses without a partial result.
+Parent links contain IDs, not parent digests; digest pins are verified where
+actually supplied by the Head or an explicit verified reconstruction anchor.
+
+History lists only the current Object's Versions. Earlier Object and Version
+records remain retained, and recovery by a known earlier Version ID continues
+to work. Distinct Objects are not concatenated into one history. See
+[the capture/adoption verification note](verification/issue-102-local-object-adoption.md)
+for the exact ownership rules and bounded refusal behavior.
 
 Operational refusals use exit 2, empty stdout and the existing closed JSON error
 envelope on stderr: `{"error":{"code":"...","message":"..."}}`.
