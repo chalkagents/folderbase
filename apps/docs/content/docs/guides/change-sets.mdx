@@ -1,16 +1,29 @@
 ---
 title: Work through scoped Change Sets
-description: Give an agent an ordinary least-authority folder, then review and merge its work without exposing sibling files.
+description: Give an agent a scoped working copy, then review and apply its proposed file changes.
 ---
 
 The stable optional `folderbase.change-set@0.1.0` capability turns a permitted
 part of a Folderbase into a normal working directory. An agent can use its
 usual filesystem tools there, then return one immutable Change Set for
-three-way assessment and atomic application.
+three-way assessment and recoverable application.
 
-This is the local Core workflow. Folder Scope grants, share links, review UI,
-and transport between machines belong to Folderbase Cloud and the App; they do
-not change the portable checkout or Change Set records.
+This guide covers the local Core commands. Hosted grants, share links, and a
+review UI are separate product features; this workflow does not require them.
+
+## Released version and known issue
+
+Core 0.7.2 advertises the stable capability, but has a
+[known new-file defect](https://github.com/chalkagents/folderbase/issues/78): a
+proposal can assess cleanly, then apply can fail after creating the new file
+in the source folder. An error does not mean the folder is unchanged.
+
+The repair in [draft PR #90](https://github.com/chalkagents/folderbase/pull/90)
+is unreleased. Its regression checks cover new transactions; it does not repair
+transactions already left pending by 0.7.2. Keep an affected root, its metadata,
+and the proposal and staging data intact. Do not delete engine records to retry.
+Until a fixed release is available, try proposals that add files only in a
+disposable test folder.
 
 ## Discover support
 
@@ -23,8 +36,10 @@ Continue only when the returned `capabilities` array includes
 
 ## 1. Materialize a scoped checkout
 
-An authorization layer supplies a closed checkout request. This example grants
-Can Work access only to `clients/project-2`:
+The calling application checks the user's authority and supplies a closed
+checkout request. This example describes Can Work access to `clients/project-2`;
+replace the illustrative IDs and scope revision with the caller's actual values.
+The IDs are not credentials.
 
 ```json
 {
@@ -49,10 +64,21 @@ files, and safe relative symlinks plus a closed
 root and contains no source manifest, sibling history, hidden grant, or
 credential.
 
-Give `/tmp/project-2-work` directly to Codex, Claude, a local script, or a
-remote VM. Markdown, source repositories, PDFs, CSVs, SQLite files, videos, and
-other regular files remain opaque ordinary bytes. Folderbase does not pretend
-to text-merge formats it cannot understand.
+Give `/tmp/project-2-work` to the agent as its working folder. The checkout
+limits copied content and the paths Core may apply back to the source. It does
+not create an operating-system sandbox: an agent process still has its host
+user's filesystem permissions. If it must be unable to access the source or
+sibling files, run it in a separately restricted environment that exposes only
+the checkout.
+
+Regular files remain opaque bytes. Core does not merge their internal records
+or coordinate with applications writing them. Before checking out or proposing
+a database file, produce a consistent backup using the database's own tools,
+then keep that backup unchanged during capture. For SQLite, use its
+[Online Backup API or another supported backup method](https://sqlite.org/backup.html).
+Copying a live database file through Core does not create a database transaction
+snapshot. Apply or restore database files only while the owning application is
+closed or under its supported replacement procedure.
 
 ## 2. Propose immutable work
 
@@ -82,7 +108,7 @@ edit, delete/edit, create/create collision, changed scope revision, missing
 projection base, unsafe path alias, or nested Folderbase boundary returns a
 typed attention instead of guessing.
 
-## 4. Apply and replay safely
+## 4. Apply and replay
 
 ```bash
 folderbase change-set apply /path/to/source /tmp/project-2-stage \
@@ -91,22 +117,28 @@ folderbase change-set apply /path/to/source /tmp/project-2-stage \
 
 Apply repeats validation under the Core transaction lease, publishes only
 authorized paths, records real proposal history, and creates a two-parent
-Folderbase Version when clean concurrent source work exists. Publication is
-restart-safe before, during, and after visible filesystem mutations.
+Folderbase Version when clean concurrent source work exists. A durable journal
+and prepared replacement bytes support restart recovery. Ordinary paths change
+in several steps, so external readers can observe an intermediate state; Core
+does not provide a simultaneous multi-file view to other processes.
 
-The Change Set digest is the idempotency key. Replaying the same bytes returns
+The Change Set digest is the idempotency key. After a successful apply,
+replaying the same bytes returns
 `status: "already_applied"` and creates no additional Version. Reusing a
 Change Set ID for different bytes fails.
 
-## What Core guarantees
+## Contract and limits
+
+The capability defines these behaviors. The released 0.7.2 implementation has
+the new-file exception described above.
 
 - scoped checkouts do not reveal sibling content or global Version IDs;
 - assessment never mutates the source folder;
 - apply never crosses the authorized path closure or a nested Folderbase;
 - Object identity survives renames and move-plus-edit;
-- opaque binary changes conflict safely rather than receiving a fake merge;
+- overlapping changes to opaque binary files return a conflict;
 - crash recovery converges from durable prepared work; and
-- every implementation can prove the same behavior with the public suite.
+- the public conformance suite checks these behaviors independently.
 
 See the [Change Set wire reference](/docs/reference/change-sets) for records,
 exit meanings, bounds, and independent conformance.

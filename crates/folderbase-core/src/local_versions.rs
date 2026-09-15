@@ -21,12 +21,17 @@ use uuid::Uuid;
 
 use crate::{
     FolderbaseError, Result,
-    folderbase_state::FolderbaseState,
+    folderbase_state::{CaptureDirectoryCheckpoint, CaptureImmutablePublication, FolderbaseState},
     workspace::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
         refuse_generic_workspace_mutation_path, resolve_existing_workspace_file,
     },
+    workspace_path_lookup::WorkspacePathLookup,
 };
+
+#[path = "local_file_history.rs"]
+mod file_history;
+pub use file_history::{FileHistoryError, FileVersionHistory, read_file_history};
 
 const OBJECT_SCHEMA: &str = "https://folderbase.ai/protocol/0.1/object.schema.json";
 const OBJECTS_DIRECTORY: &str = ".folderbase/objects";
@@ -45,6 +50,73 @@ const HISTORY_TRANSFER_OUTGOING_DIRECTORY: &str = ".folderbase/history-transfers
 const HISTORY_TRANSFER_INCOMING_DIRECTORY: &str = ".folderbase/history-transfers/incoming";
 const HISTORY_TRANSFER_STAGING_DIRECTORY: &str = ".folderbase/history-transfers/staging";
 const VERSION_EXECUTABLE_FIELD: &str = "executable";
+
+/// Typed immutable capture writes, with one explicit directory durability barrier.
+pub(crate) struct LocalCaptureInstaller<'a> {
+    local: &'a LocalVersionStore,
+    state: &'a FolderbaseState,
+    publication: CaptureImmutablePublication<'a>,
+}
+
+impl<'a> LocalCaptureInstaller<'a> {
+    pub(crate) fn new(local: &'a LocalVersionStore, state: &'a FolderbaseState) -> Result<Self> {
+        Ok(Self {
+            local,
+            state,
+            publication: CaptureImmutablePublication::new(
+                state,
+                Path::new(BLOBS_DIRECTORY),
+                Path::new(VERSION_RECORDS_DIRECTORY),
+            )?,
+        })
+    }
+
+    pub(crate) fn install_content_reader(
+        &self,
+        reader: impl Read,
+        source_label: &Path,
+        maximum_bytes: u64,
+    ) -> Result<ContentDigest> {
+        let published =
+            self.publication
+                .publish_reader_sha256(reader, source_label, maximum_bytes)?;
+        Ok(ContentDigest {
+            algorithm: "sha256".to_owned(),
+            digest: published.digest,
+            bytes: published.bytes,
+        })
+    }
+
+    pub(crate) fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
+        self.install_content_reader(
+            std::io::Cursor::new(bytes),
+            Path::new("in-memory content"),
+            bytes.len() as u64,
+        )
+    }
+
+    pub(crate) fn install_or_verify_version_record(
+        &self,
+        record: &LocalVersionRecord,
+    ) -> Result<()> {
+        self.local
+            .install_or_verify_version_record_with(self.state, record, |path, bytes| {
+                self.publication.publish_version_record(path, bytes)
+            })?;
+        self.local
+            .verify_capture_object_version_in(
+                self.state,
+                &record.object_id,
+                &record.id,
+                &record.content,
+            )
+            .map(drop)
+    }
+
+    pub(crate) fn finish(self, checkpoint: impl FnMut(CaptureDirectoryCheckpoint)) -> Result<()> {
+        self.publication.finish(checkpoint)
+    }
+}
 
 /// A stable object identity that does not depend on the object's current path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -232,6 +304,38 @@ pub struct HistoryTransferPlan {
     state: HistoryTransferState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_digest: Option<String>,
+}
+
+fn object_path_matches(
+    paths: &mut WorkspacePathLookup,
+    stored_path: &Path,
+    relative_path: &Path,
+    record_path: &Path,
+) -> Result<bool> {
+    Ok(if stored_path == relative_path {
+        true
+    } else {
+        match paths.resolve(stored_path) {
+            Ok((_, canonical_path)) => canonical_path == relative_path,
+            Err(FolderbaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                if paths_equal_ignoring_ascii_case(stored_path, relative_path) {
+                    return Err(invalid_record(
+                        record_path,
+                        "stored object path alias no longer resolves to its canonical file",
+                    ));
+                }
+                false
+            }
+            Err(FolderbaseError::UnsafePath(_))
+                if !paths_equal_ignoring_ascii_case(stored_path, relative_path) =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        }
+    })
 }
 
 impl HistoryTransferPlan {
@@ -1440,10 +1544,21 @@ impl LocalVersionStore {
         state: &FolderbaseState,
         record: &LocalVersionRecord,
     ) -> Result<()> {
+        self.install_or_verify_version_record_with(state, record, |path, bytes| {
+            state.publish_new(path, bytes)
+        })
+    }
+
+    fn install_or_verify_version_record_with(
+        &self,
+        state: &FolderbaseState,
+        record: &LocalVersionRecord,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<()> {
         let path = self.version_record_path(&record.id);
         let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{}.json", record.id));
         let encoded = json_bytes(&path, record)?;
-        match state.publish_new(&relative, &encoded) {
+        match publish(&relative, &encoded) {
             Ok(()) => Ok(()),
             Err(FolderbaseError::WouldOverwrite(_)) => {
                 let existing = state
@@ -1866,6 +1981,7 @@ impl LocalVersionStore {
             Err(source) => return Err(FolderbaseError::io(directory, source)),
         };
         let mut found = None;
+        let mut paths = WorkspacePathLookup::new(&self.root)?;
         for entry in entries {
             let entry = entry.map_err(|source| FolderbaseError::io(&directory, source))?;
             let file_type = entry
@@ -1885,30 +2001,8 @@ impl LocalVersionStore {
             let stored_path = safe_content_path(Path::new(&record.path)).map_err(|_| {
                 invalid_record(entry.path(), "object path is not a safe relative path")
             })?;
-            let is_match = if stored_path == relative_path {
-                true
-            } else {
-                match resolve_existing_workspace_file(&self.root, &stored_path) {
-                    Ok((_, canonical_path)) => canonical_path == relative_path,
-                    Err(FolderbaseError::Io { source, .. })
-                        if source.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        if paths_equal_ignoring_ascii_case(&stored_path, relative_path) {
-                            return Err(invalid_record(
-                                entry.path(),
-                                "stored object path alias no longer resolves to its canonical file",
-                            ));
-                        }
-                        false
-                    }
-                    Err(FolderbaseError::UnsafePath(_))
-                        if !paths_equal_ignoring_ascii_case(&stored_path, relative_path) =>
-                    {
-                        false
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
+            let is_match =
+                object_path_matches(&mut paths, &stored_path, relative_path, &entry.path())?;
             if is_match {
                 self.deny_if_transferred_out(&record.id)?;
                 if found.is_some() {
@@ -1921,6 +2015,7 @@ impl LocalVersionStore {
                 found = Some(record);
             }
         }
+        paths.finish()?;
         Ok(found)
     }
 

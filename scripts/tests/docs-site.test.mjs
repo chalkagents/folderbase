@@ -346,7 +346,7 @@ test("the stable Change Set capability has a runnable guide, wire reference, and
   assert.match(guide, /change-set propose/u);
   assert.match(guide, /change-set assess/u);
   assert.match(guide, /change-set apply/u);
-  assert.match(guide, /PDFs, CSVs, SQLite files, videos/u);
+  assert.match(guide, /Regular files remain opaque bytes/u);
   assert.match(reference, /folderbase-change-set-attention-v1/u);
   assert.match(reference, /passed: 10/u);
   assert.match(conformance, /capabilities\/change-set-0\.1\/run\.mjs/u);

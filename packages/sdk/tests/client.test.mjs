@@ -263,3 +263,18 @@ test("daemon session exposes ready, serial responses, hints, and shutdown", asyn
   assert.equal(shutdown.document.status, "shutting_down");
   await session.closed;
 });
+
+
+test("fileHistory uses the read-only per-file command and preserves its result and refusals", async () => {
+  const result = await client().fileHistory("/a folder", "tasks/a.json");
+  assert.equal(result.kind, "success");
+  assert.deepEqual(result.document, {
+    format: "folderbase-file-history-v1", path: "tasks/a.json", object_id: null,
+    current_version: null, versions: [], unknown_vendor: {root: "/a folder", flags: ["--json"]},
+  });
+  await assert.rejects(client().fileHistory("/a folder", "pending"), (error) => {
+    assert.ok(error instanceof FolderbaseOperationalError);
+    assert.equal(error.document.error.code, "file_history_recovery_required");
+    return true;
+  });
+});

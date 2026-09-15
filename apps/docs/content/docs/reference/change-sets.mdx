@@ -7,6 +7,10 @@ description: Stable scoped checkout, proposal, assessment, apply, replay, and co
 does not expand Compatibility Contract v1 or Folderbase CLI JSON v1.
 Integrations must discover it with `folderbase protocol contract --json`.
 
+Capability stability describes the contract. For the released Core 0.7.2
+new-file defect, the unreleased repair, and practical access and consistency
+limits, read the [local Change Set guide](/docs/guides/change-sets).
+
 ## Process interface
 
 | Command | Input | Exit 0 document |
@@ -103,8 +107,13 @@ node protocol/conformance/capabilities/change-set-0.1/run.mjs \
   --implementation /absolute/path/to/folderbase
 ```
 
-The ten scenarios cover clean disjoint merge history, move-plus-edit, opaque
+The released suite's ten scenarios cover clean disjoint merge history, move-plus-edit, opaque
 binary and large objects, delete/edit and create/create conflicts, stable
 rename identity, Unicode and case aliases, nested boundaries, stale bases,
 four crash points, restart, and idempotent replay. A conforming report exits
 `0` with `passed: 10` and `failed: 0`.
+
+The unreleased repair in [PR #90](https://github.com/chalkagents/folderbase/pull/90)
+adds three scenarios covering newly created Objects, mixed edits, second-session
+continuity, and creation across crash/replay boundaries. When running that
+candidate's suite, the expected report is `passed: 13` and `failed: 0`.

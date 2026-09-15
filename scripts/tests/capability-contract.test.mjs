@@ -132,6 +132,11 @@ test("the public and embedded capability registries are exact after advertised p
       stability: "experimental",
     },
     {
+      name: "folderbase.file-history",
+      version: "0.1.0",
+      stability: "experimental",
+    },
+    {
       name: "folderbase.folder-scope-evidence",
       version: "0.1.0",
       stability: "stable",
@@ -207,4 +212,12 @@ test("capability discovery does not rewrite the immutable protocol 0.5 release",
     manifest.files.some(({ path }) => path.includes("capabilit")),
     false,
   );
+});
+
+
+test("file history descriptor matches the optional registry without modifying the old journal profile", async () => {
+  const registry = await load(registryUrl);
+  const descriptor = await load(new URL("../../protocol/capabilities/file-history/0.1.0/capability.json", import.meta.url));
+  assert.deepEqual(registry.capabilities.find(({name}) => name === "folderbase.file-history"), descriptor);
+  assert.equal(registry.capabilities.find(({name}) => name === "folderbase.version-cli-json").version, "0.1.0");
 });

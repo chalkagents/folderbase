@@ -249,6 +249,10 @@ jobs:
         if: runner.os == 'Windows'
         run: "cargo test --package folderbase-core --lib --locked migration_filesystem::windows_directory_fidelity_tests::"
 
+      - name: Test Windows reconstruction refusal without mutation
+        if: runner.os == 'Windows'
+        run: cargo test --package folderbase-core --lib --locked root_reconstruction::tests::windows_reconstruction_refuses_before_creating_entries -- --exact
+
       - name: Test the public Folderbase Version contract
         run: cargo test --package folderbase-core --test folderbase_version_conformance --locked
 

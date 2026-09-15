@@ -17,3 +17,29 @@ a separate 64 MiB aggregate chain bound.
 This page describes unreleased work. Folderbase remains Beta; use the exact
 release page for immutable behavior and discover optional capabilities through
 `folderbase protocol contract --json`.
+
+## Local application candidate
+
+The local candidate repairs Change Set application when a proposal adds a new
+file. Accepted files retain the proposal's Object identity through durable
+capture, including retries and interruption recovery. It does not migrate
+transactions already left incomplete by the 0.7.2 defect.
+
+The experimental `folderbase.file-history@0.1.0` capability adds
+`folderbase version list ROOT PATH --json`, the Rust `read_file_history`
+function and TypeScript `client.fileHistory`. Reading history does not capture
+ordinary edits or repair state. It returns the complete bounded stored Version
+list for an existing regular file; the recorded head may differ from its live
+bytes. Listing metadata does not certify that historical content is recoverable.
+Pending work, changed state and exceeded bounds are typed refusals. A nonempty
+migration-history directory is currently unsupported, including completed
+migrations; do not delete private metadata to bypass that refusal.
+
+Conditional saves reuse validated directory handles within a single lookup.
+Full identity and corruption checks remain. Capture batches repeated flushes of
+its two immutable directories before publishing a complete Folderbase Version
+or changing Local Head. Every staged file is still flushed and verified, and
+mutable metadata retains its existing publication behavior. See
+[ADR-0021](https://github.com/chalkagents/folderbase/blob/e45ce5495c9e2d08e33e6d06b4a9f16e3351ac38/docs/adr/0021-batch-capture-immutable-directory-flushes.md)
+for durability ordering and platform limits. These changes introduce no new
+stored format or general record-query API.

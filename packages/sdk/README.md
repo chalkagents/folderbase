@@ -22,9 +22,8 @@ if (contract.kind !== "success") throw new Error("contract needs attention");
 
 const query = await folderbase.query("/absolute/workspace", {
   format: "folderbase-query-request-v1",
-  source: "live",
+  scope: { kind: "live" },
   filters: {},
-  order: [{ field: "path", direction: "ascending" }],
   page: { limit: 100 },
 });
 console.log(query.document.entries);
@@ -128,3 +127,25 @@ Every root and staging path is an explicit argument. Capability discovery,
 portable schemas, CLI JSON, and daemon JSON Lines are the only integration
 authority. Managed Cloud storage, permissions, sync, and remote agent VMs are
 separate product layers.
+
+### Read-only per-file history (experimental)
+
+With `folderbase.file-history@0.1.0`, read complete stored Version metadata without
+capturing the current file or running recovery:
+
+```js
+const history = await folderbase.fileHistory("/absolute/workspace", "tasks/task.json");
+if (history.kind === "success") {
+  console.log(history.document.current_version, history.document.versions);
+}
+```
+
+Requires an existing regular file in an initialized root. An untracked file returns
+null IDs and an empty array. The recorded head may differ from live bytes; stored
+Version order is not timestamp order. Binary files are supported. The reader
+refuses pending work, changed observations, corrupt or oversized metadata, and
+**all roots with nonempty migration metadata**, including completed migrations
+(`file_history_migration_state_unsupported`). That last refusal is not a recovery
+instruction. See [the capability contract](../../docs/file-history-0.1.md) for
+exact bounds, read-only guarantees and error codes. Existing `version history`
+continues to describe the whole-root journal, not a complete per-file list.

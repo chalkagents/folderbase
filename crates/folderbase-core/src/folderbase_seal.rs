@@ -35,7 +35,7 @@ use crate::{
         MAX_RESTORE_AUTHORITIES, MAX_RESTORE_AUTHORITY_BYTES, RESTORE_AUTHORITY_FORMAT_V1,
         RestoreAuthorityRecord, restore_authority_record_path,
     },
-    folderbase_state::FolderbaseState,
+    folderbase_state::{CaptureDirectoryCheckpoint, FolderbaseState},
     folderbase_version::{
         DeletedKind, Exclusion, ExclusionKind, ExclusionReason, FolderbaseVersion,
         FolderbaseVersionEntries, FolderbaseVersionParts, MAX_ENCODED_VERSION_BYTES, PathBinding,
@@ -43,8 +43,9 @@ use crate::{
         validate_capture_version_id,
     },
     local_versions::{
-        ContentDigest, LocalObjectRecord, LocalVersionRecord, LocalVersionStore, ObjectId,
-        ObjectLifecycle, ObjectProvenance, VersionId, safe_content_path,
+        ContentDigest, LocalCaptureInstaller, LocalObjectRecord, LocalVersionRecord,
+        LocalVersionStore, ObjectId, ObjectLifecycle, ObjectProvenance, VersionId,
+        safe_content_path,
     },
     root_attestation::{attest_folderbase_root, metadata_is_link_or_reparse},
 };
@@ -180,6 +181,7 @@ enum CaptureCheckpoint {
     BeforeObjectBytesRead(String),
     AfterObjectBytesRead(String),
     JournalDurable,
+    ImmutableDirectory(CaptureDirectoryCheckpoint),
     ObjectWritesDurable,
     VersionDurable,
     HeadReplaced,
@@ -471,6 +473,22 @@ impl FolderbaseVersionStore {
         self.seal_capture_with_hook(plan, |_| {})
     }
 
+    /// Retain the identities Core already assigned to newly created proposal
+    /// Objects when the published workspace enters durable capture.
+    pub(crate) fn seal_change_set_capture(
+        &self,
+        plan: CapturePlan,
+        deltas: &[ObjectDelta],
+    ) -> Result<SealedCapture, FolderbaseCaptureError> {
+        self.seal_capture_with_change_set_identities(
+            plan,
+            |_| {},
+            MAX_CAPTURE_TRANSACTION_BYTES,
+            MAX_ENCODED_VERSION_BYTES,
+            deltas,
+        )
+    }
+
     /// Read one complete append-only Folderbase Version and verify every
     /// referenced local Object Version and content blob.
     pub fn read_version(
@@ -708,9 +726,26 @@ impl FolderbaseVersionStore {
     fn seal_capture_with_hook_and_limits(
         &self,
         plan: CapturePlan,
+        checkpoint: impl FnMut(&CaptureCheckpoint),
+        maximum_transaction_bytes: u64,
+        maximum_version_bytes: u64,
+    ) -> Result<SealedCapture, FolderbaseCaptureError> {
+        self.seal_capture_with_change_set_identities(
+            plan,
+            checkpoint,
+            maximum_transaction_bytes,
+            maximum_version_bytes,
+            &[],
+        )
+    }
+
+    fn seal_capture_with_change_set_identities(
+        &self,
+        plan: CapturePlan,
         mut checkpoint: impl FnMut(&CaptureCheckpoint),
         maximum_transaction_bytes: u64,
         maximum_version_bytes: u64,
+        deltas: &[ObjectDelta],
     ) -> Result<SealedCapture, FolderbaseCaptureError> {
         if plan.root() != self.root_attestation.root
             || plan.folderbase_id() != self.root_attestation.folderbase_id
@@ -839,7 +874,11 @@ impl FolderbaseVersionStore {
         let transaction = match active {
             Some(transaction) => transaction,
             None => {
-                let transaction = assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
+                let mut transaction =
+                    assign_capture_transaction(&plan, &plan_sha256, prior.as_ref())?;
+                if !deltas.is_empty() {
+                    bind_created_change_set_identities(&mut transaction, deltas)?;
+                }
                 preflight_capture_envelopes(
                     &plan,
                     &transaction,
@@ -869,6 +908,9 @@ impl FolderbaseVersionStore {
             ));
         }
         validate_transaction_against_plan(&plan, &transaction, prior.as_ref())?;
+        if !deltas.is_empty() {
+            validate_change_set_capture_identities(&transaction, deltas)?;
+        }
         preflight_capture_envelopes(
             &plan,
             &transaction,
@@ -3115,6 +3157,75 @@ fn ensure_same_plan(
     Ok(())
 }
 
+fn bind_created_change_set_identities(
+    transaction: &mut CaptureTransaction,
+    deltas: &[ObjectDelta],
+) -> Result<(), FolderbaseCaptureError> {
+    let mut created = BTreeMap::new();
+    for delta in deltas.iter().filter(|delta| delta.before.is_none()) {
+        let after = delta.after.as_ref().ok_or_else(|| {
+            FolderbaseCaptureError::InvalidCaptureTransaction(
+                "created Change Set Object has no after-state".to_owned(),
+            )
+        })?;
+        created.insert(after.path(), delta.object_id.as_str());
+    }
+    for assignment in &mut transaction.assignments {
+        let Some(object_id) = created.remove(assignment.path.as_str()) else {
+            continue;
+        };
+        if assignment.reused_object {
+            if assignment.object_id == object_id {
+                continue;
+            }
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "created Change Set path already has another Object identity: {}",
+                assignment.path
+            )));
+        }
+        ObjectId::parse(object_id.to_owned())?;
+        assignment.object_id = object_id.to_owned();
+    }
+    if let Some((path, _)) = created.first_key_value() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "capture plan omitted created Change Set path {path}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_change_set_capture_identities(
+    transaction: &CaptureTransaction,
+    deltas: &[ObjectDelta],
+) -> Result<(), FolderbaseCaptureError> {
+    let mut expected = deltas
+        .iter()
+        .filter_map(|delta| {
+            delta
+                .after
+                .as_ref()
+                .map(|after| (after.path(), delta.object_id.as_str()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for assignment in &transaction.assignments {
+        let Some(object_id) = expected.remove(assignment.path.as_str()) else {
+            continue;
+        };
+        if assignment.object_id != object_id {
+            return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+                "capture assignment differs from Change Set Object at {}",
+                assignment.path
+            )));
+        }
+    }
+    if let Some((path, _)) = expected.first_key_value() {
+        return Err(FolderbaseCaptureError::InvalidCaptureTransaction(format!(
+            "capture assignment omitted Change Set path {path}"
+        )));
+    }
+    Ok(())
+}
+
 fn assign_capture_transaction(
     plan: &CapturePlan,
     plan_sha256: &str,
@@ -3610,7 +3721,8 @@ fn build_and_install_capture(
     prior: Option<&FolderbaseVersion>,
     checkpoint: &mut impl FnMut(&CaptureCheckpoint),
 ) -> Result<BuiltCapture, FolderbaseCaptureError> {
-    let root_content = capture_root_manifest(store, plan, local, state, || {
+    let installer = LocalCaptureInstaller::new(local, state)?;
+    let root_content = capture_root_manifest(store, plan, &installer, || {
         checkpoint(&CaptureCheckpoint::BeforeObjectBytesRead(
             ".folderbase/manifest.json".to_owned(),
         ));
@@ -3633,8 +3745,7 @@ fn build_and_install_capture(
         version_id
     } else {
         install_object_version(
-            local,
-            state,
+            &installer,
             &transaction.root_manifest_object_id,
             &transaction.root_manifest_candidate_version_id,
             &root_content,
@@ -3667,7 +3778,7 @@ fn build_and_install_capture(
                     &store.root_instance_authority,
                     state,
                     entry,
-                    Some(local),
+                    Some(&installer),
                     checkpoint,
                 )?;
                 let prior_binding = prior.and_then(|version| {
@@ -3700,8 +3811,7 @@ fn build_and_install_capture(
                     version_id
                 } else {
                     install_object_version(
-                        local,
-                        state,
+                        &installer,
                         &assignment.object_id,
                         assignment
                             .candidate_object_version_id
@@ -3733,7 +3843,7 @@ fn build_and_install_capture(
             CaptureEntryKind::Symlink => {
                 verify_symlink_entry(&store.root_attestation.root, entry)?;
                 let target = entry.symlink_target().expect("planned symlink");
-                let content = local.install_content_bytes_in(state, target.as_bytes())?;
+                let content = installer.install_content_bytes(target.as_bytes())?;
                 let prior_binding = prior.and_then(|version| {
                     version
                         .bindings()
@@ -3762,8 +3872,7 @@ fn build_and_install_capture(
                     version_id
                 } else {
                     install_object_version(
-                        local,
-                        state,
+                        &installer,
                         &assignment.object_id,
                         assignment
                             .candidate_object_version_id
@@ -3812,6 +3921,7 @@ fn build_and_install_capture(
     );
     let version = FolderbaseVersion::from_verified_parts(parts)?;
     let version_sha256 = version.canonical_digest()?;
+    installer.finish(|phase| checkpoint(&CaptureCheckpoint::ImmutableDirectory(phase)))?;
     Ok(BuiltCapture {
         version,
         version_sha256,
@@ -3822,8 +3932,7 @@ fn build_and_install_capture(
 fn capture_root_manifest(
     store: &FolderbaseVersionStore,
     plan: &CapturePlan,
-    local: &LocalVersionStore,
-    state: &FolderbaseState,
+    installer: &LocalCaptureInstaller<'_>,
     before_read: impl FnOnce(),
 ) -> Result<ContentDigest, FolderbaseCaptureError> {
     let relative = Path::new(".folderbase/manifest.json");
@@ -3831,9 +3940,8 @@ fn capture_root_manifest(
     let display = store.root_attestation.root.join(relative);
     let before = fingerprint_std_file(&file, &display)?;
     before_read();
-    let content = local
-        .install_content_reader_in(
-            state,
+    let content = installer
+        .install_content_reader(
             &mut file,
             &store.root_attestation.root.join(relative),
             plan.root_manifest_bytes(),
@@ -3859,7 +3967,7 @@ fn hash_regular_entry(
     root_instance_authority: &crate::root_attestation::RootInstanceAuthority,
     state: &FolderbaseState,
     entry: &CapturePlanEntry,
-    installer: Option<&LocalVersionStore>,
+    installer: Option<&LocalCaptureInstaller<'_>>,
     checkpoint: &mut impl FnMut(&CaptureCheckpoint),
 ) -> Result<ContentDigest, FolderbaseCaptureError> {
     let relative = Path::new(entry.path());
@@ -3882,9 +3990,8 @@ fn hash_regular_entry(
         &file,
     )?;
     let content = match installer {
-        Some(local) => local
-            .install_content_reader_in(
-                state,
+        Some(installer) => installer
+            .install_content_reader(
                 &mut file,
                 &display,
                 entry.bytes().expect("planned regular length"),
@@ -3943,8 +4050,7 @@ fn fingerprint_std_file(
 }
 
 fn install_object_version(
-    local: &LocalVersionStore,
-    state: &FolderbaseState,
+    installer: &LocalCaptureInstaller<'_>,
     object_id: &str,
     version_id: &str,
     content: &ContentDigest,
@@ -3959,8 +4065,7 @@ fn install_object_version(
         captured_at: captured_at.to_owned(),
         extensions: BTreeMap::new(),
     };
-    local.install_or_verify_version_record_in(state, &record)?;
-    local.verify_capture_object_version_in(state, &object_id, &version_id, content)?;
+    installer.install_or_verify_version_record(&record)?;
     Ok(version_id)
 }
 
@@ -9198,9 +9303,273 @@ mod tests {
     }
 
     #[test]
+    fn immutable_batch_retry_reuses_exact_assignments_and_crosses_both_barriers() {
+        let root = folderbase();
+        let store = FolderbaseVersionStore::open(root.path()).expect("open");
+        let stopped = catch_unwind(AssertUnwindSafe(|| {
+            store.seal_capture_with_hook(store.plan_capture().expect("plan"), |checkpoint| {
+                if checkpoint
+                    == &CaptureCheckpoint::ImmutableDirectory(
+                        CaptureDirectoryCheckpoint::BeforeFlushes,
+                    )
+                {
+                    panic!("interrupt after all immutable installations but before flushes");
+                }
+            })
+        }));
+        assert!(stopped.is_err());
+        let assigned = active_transaction(root.path()).expect("durable assignments");
+        assert!(local_head(root.path()).is_none());
+        assert!(
+            !root
+                .path()
+                .join(FOLDERBASE_VERSIONS_DIRECTORY)
+                .join(format!("{}.json", assigned.target_version_id))
+                .exists()
+        );
+        let mut crossed = Vec::new();
+        let recovered = store
+            .seal_capture_with_hook(store.plan_capture().expect("same plan"), |checkpoint| {
+                if let CaptureCheckpoint::ImmutableDirectory(phase) = checkpoint {
+                    crossed.push(*phase);
+                }
+            })
+            .expect("retry exact installed entries");
+        assert_eq!(
+            crossed,
+            [
+                CaptureDirectoryCheckpoint::BeforeFlushes,
+                CaptureDirectoryCheckpoint::BlobsFlushed,
+                CaptureDirectoryCheckpoint::RecordsFlushed
+            ]
+        );
+        assert_eq!(recovered.version_id(), assigned.target_version_id);
+        let version = store
+            .read_version(recovered.version_id())
+            .expect("all referenced bytes");
+        for assignment in &assigned.assignments {
+            let binding = version.lookup_binding(&assignment.path).expect("binding");
+            assert_eq!(binding.object_id(), assignment.object_id);
+            if assignment.kind != CaptureEntryKind::Directory {
+                assert_eq!(
+                    binding.object_version_id(),
+                    assignment.candidate_object_version_id.as_deref()
+                );
+            }
+        }
+        assert!(active_transaction(root.path()).is_none());
+    }
+
+    #[test]
+    fn immutable_batch_corrupt_retry_keeps_intent_and_never_installs_full_version_or_head() {
+        for corrupt_blob in [false, true] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            let stopped = catch_unwind(AssertUnwindSafe(|| {
+                store.seal_capture_with_hook(store.plan_capture().expect("plan"), |checkpoint| {
+                    if checkpoint
+                        == &CaptureCheckpoint::ImmutableDirectory(
+                            CaptureDirectoryCheckpoint::BeforeFlushes,
+                        )
+                    {
+                        panic!("interrupt before barrier");
+                    }
+                })
+            }));
+            assert!(stopped.is_err());
+            let assigned = active_transaction(root.path()).expect("active intent");
+            let journal =
+                fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH)).expect("journal");
+            let assignment = assigned
+                .assignments
+                .iter()
+                .find(|entry| entry.path == "active.bin")
+                .expect("assignment");
+            let path = if corrupt_blob {
+                root.path()
+                    .join(".folderbase/versions/blobs/sha256")
+                    .join(format!("{:x}", Sha256::digest(b"first opaque bytes")))
+            } else {
+                root.path()
+                    .join(".folderbase/versions/records")
+                    .join(format!(
+                        "{}.json",
+                        assignment
+                            .candidate_object_version_id
+                            .as_ref()
+                            .expect("version")
+                    ))
+            };
+            fs::write(&path, b"corrupt existing immutable bytes").expect("corrupt collision");
+            assert!(
+                store
+                    .seal_capture(store.plan_capture().expect("same plan"))
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read(root.path().join(ACTIVE_CAPTURE_TRANSACTION_PATH))
+                    .expect("preserved journal"),
+                journal
+            );
+            assert!(local_head(root.path()).is_none());
+            assert!(
+                !root
+                    .path()
+                    .join(FOLDERBASE_VERSIONS_DIRECTORY)
+                    .join(format!("{}.json", assigned.target_version_id))
+                    .exists()
+            );
+            assert_eq!(
+                fs::read(path).expect("collision untouched"),
+                b"corrupt existing immutable bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_batch_parent_or_state_swap_cannot_cross_durability_checkpoint() {
+        for relative in [
+            "",
+            ".folderbase",
+            ".folderbase/versions/blobs/sha256",
+            ".folderbase/versions/records",
+        ] {
+            for phase in [
+                CaptureDirectoryCheckpoint::BeforeFlushes,
+                CaptureDirectoryCheckpoint::BlobsFlushed,
+                CaptureDirectoryCheckpoint::RecordsFlushed,
+            ] {
+                let root = folderbase();
+                let store = FolderbaseVersionStore::open(root.path()).expect("open");
+                let original = root.path().join(relative);
+                let detached = if relative.is_empty() {
+                    original.with_extension("detached-immutable-state")
+                } else {
+                    original.with_file_name("detached-immutable-state")
+                };
+                let mut assigned = None;
+                let mut advanced = false;
+                let error = store
+                    .seal_capture_with_hook(store.plan_capture().expect("plan"), |checkpoint| {
+                        if checkpoint == &CaptureCheckpoint::ImmutableDirectory(phase) {
+                            assigned = Some(
+                                active_transaction(root.path())
+                                    .expect("active intent")
+                                    .target_version_id,
+                            );
+                            fs::rename(&original, &detached).expect("detach retained directory");
+                            fs::create_dir(&original).expect("replacement directory");
+                            fs::write(original.join("sentinel"), b"outside").expect("sentinel");
+                        }
+                        if checkpoint == &CaptureCheckpoint::ObjectWritesDurable {
+                            advanced = true;
+                        }
+                    })
+                    .expect_err("swapped capability must fail");
+                assert!(matches!(error, FolderbaseCaptureError::LocalStore(_)));
+                assert!(!advanced);
+                assert_eq!(fs::read_dir(&original).expect("replacement").count(), 1);
+                assert_eq!(
+                    fs::read(original.join("sentinel")).expect("sentinel"),
+                    b"outside"
+                );
+                fs::remove_dir_all(&original).expect("remove test replacement");
+                fs::rename(&detached, &original).expect("reattach original for recovery");
+                assert!(local_head(root.path()).is_none());
+                let assigned = assigned.expect("assigned target");
+                assert_eq!(
+                    active_transaction(root.path())
+                        .expect("intent retained")
+                        .target_version_id,
+                    assigned
+                );
+                assert!(
+                    !root
+                        .path()
+                        .join(FOLDERBASE_VERSIONS_DIRECTORY)
+                        .join(format!("{assigned}.json"))
+                        .exists()
+                );
+                let recovered = store
+                    .seal_capture(store.plan_capture().expect("retry plan"))
+                    .expect("exact recovery");
+                assert_eq!(recovered.version_id(), assigned);
+                store
+                    .read_version(recovered.version_id())
+                    .expect("verified recovered content");
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_batch_source_change_abandons_uncommitted_assignments_on_retry() {
+        for phase in [
+            CaptureDirectoryCheckpoint::BeforeFlushes,
+            CaptureDirectoryCheckpoint::BlobsFlushed,
+            CaptureDirectoryCheckpoint::RecordsFlushed,
+        ] {
+            let root = folderbase();
+            let store = FolderbaseVersionStore::open(root.path()).expect("open");
+            let mut assigned = None;
+            let error = store
+                .seal_capture_with_hook(store.plan_capture().expect("plan"), |checkpoint| {
+                    if checkpoint == &CaptureCheckpoint::ImmutableDirectory(phase) {
+                        assigned = Some(
+                            active_transaction(root.path())
+                                .expect("intent")
+                                .target_version_id,
+                        );
+                        fs::write(
+                            root.path().join("active.bin"),
+                            b"new source after immutable installation",
+                        )
+                        .expect("source edit");
+                    }
+                })
+                .expect_err("changed source cannot advance Head");
+            assert!(matches!(
+                error,
+                FolderbaseCaptureError::PlanningStateChanged
+                    | FolderbaseCaptureError::CaptureStateChanged(_)
+            ));
+            assert!(local_head(root.path()).is_none());
+            assert_eq!(
+                active_transaction(root.path())
+                    .expect("intent until retry")
+                    .target_version_id,
+                assigned.clone().expect("assigned")
+            );
+            let recovered = store
+                .seal_capture(store.plan_capture().expect("changed plan"))
+                .expect("new capture");
+            assert_ne!(Some(recovered.version_id()), assigned.as_deref());
+            let version = store
+                .read_version(recovered.version_id())
+                .expect("new version");
+            assert_eq!(
+                version
+                    .lookup_binding("active.bin")
+                    .expect("new binding")
+                    .content_sha256(),
+                Some(
+                    format!(
+                        "{:x}",
+                        Sha256::digest(b"new source after immutable installation")
+                    )
+                    .as_str()
+                )
+            );
+            assert!(active_transaction(root.path()).is_none());
+        }
+    }
+
+    #[test]
     fn every_persistence_checkpoint_reopens_and_converges_on_exact_assigned_version() {
         for fault in [
             CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::BeforeFlushes),
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::BlobsFlushed),
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::RecordsFlushed),
             CaptureCheckpoint::ObjectWritesDurable,
             CaptureCheckpoint::VersionDurable,
             CaptureCheckpoint::HeadReplaced,
@@ -10207,6 +10576,9 @@ mod tests {
     fn tombstone_capture_reopens_and_converges_at_every_persistence_checkpoint() {
         for fault in [
             CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::BeforeFlushes),
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::BlobsFlushed),
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::RecordsFlushed),
             CaptureCheckpoint::ObjectWritesDurable,
             CaptureCheckpoint::VersionDurable,
             CaptureCheckpoint::HeadReplaced,
@@ -10374,6 +10746,9 @@ mod tests {
     fn update_faults_never_lose_prior_head_and_retry_preserves_parent() {
         for fault in [
             CaptureCheckpoint::JournalDurable,
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::BeforeFlushes),
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::BlobsFlushed),
+            CaptureCheckpoint::ImmutableDirectory(CaptureDirectoryCheckpoint::RecordsFlushed),
             CaptureCheckpoint::ObjectWritesDurable,
             CaptureCheckpoint::VersionDurable,
             CaptureCheckpoint::HeadReplaced,
