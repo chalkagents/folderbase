@@ -8,9 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-#[cfg(not(windows))]
-use cap_fs_ext::DirExt;
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{
     Deserialize, Serialize,
@@ -2670,6 +2668,22 @@ fn set_regular_executable(
     Ok(())
 }
 
+#[cfg(windows)]
+fn create_exact_symlink(
+    _root: &Dir,
+    display_root: &Path,
+    symlink: &DerivedSymlink,
+) -> Result<(), RootReconstructionError> {
+    // Destination preflight already refuses Windows before staging. Keep this
+    // lower-level operation equally conservative rather than guessing whether
+    // the portable target should be a Windows file or directory symlink.
+    Err(RootReconstructionError::UnsupportedReconstructionFilesystem {
+        path: display_root.join(symlink.path()),
+        reason: "exact symlink reconstruction is unsupported on Windows".to_owned(),
+    })
+}
+
+#[cfg(not(windows))]
 fn create_exact_symlink(
     root: &Dir,
     display_root: &Path,
@@ -4697,6 +4711,31 @@ mod tests {
             Err(RootReconstructionError::UnsupportedReconstructionFilesystem { .. })
         ));
         assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reconstruction_refuses_before_creating_entries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path();
+        let sentinel = parent.join("keep.txt");
+        std::fs::write(&sentinel, b"existing owner bytes").unwrap();
+        let result = RetainedReconstructionDestination::open(parent, "restored");
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::UnsupportedReconstructionFilesystem { .. })
+        ));
+
+        let directory =
+            cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority()).unwrap();
+        let plan = plan_from_fixture(&complete_fixture());
+        let result = super::create_exact_symlink(&directory, parent, &plan.derived_symlinks()[0]);
+        assert!(matches!(
+            result,
+            Err(RootReconstructionError::UnsupportedReconstructionFilesystem { .. })
+        ));
+        assert_eq!(std::fs::read_dir(parent).unwrap().count(), 1);
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"existing owner bytes");
     }
 
     #[test]
