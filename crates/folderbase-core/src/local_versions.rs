@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     FolderbaseError, Result,
-    folderbase_state::FolderbaseState,
+    folderbase_state::{CaptureDirectoryCheckpoint, CaptureImmutablePublication, FolderbaseState},
     workspace::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
         refuse_generic_workspace_mutation_path, resolve_existing_workspace_file,
@@ -46,6 +46,73 @@ const HISTORY_TRANSFER_OUTGOING_DIRECTORY: &str = ".folderbase/history-transfers
 const HISTORY_TRANSFER_INCOMING_DIRECTORY: &str = ".folderbase/history-transfers/incoming";
 const HISTORY_TRANSFER_STAGING_DIRECTORY: &str = ".folderbase/history-transfers/staging";
 const VERSION_EXECUTABLE_FIELD: &str = "executable";
+
+/// Typed immutable capture writes, with one explicit directory durability barrier.
+pub(crate) struct LocalCaptureInstaller<'a> {
+    local: &'a LocalVersionStore,
+    state: &'a FolderbaseState,
+    publication: CaptureImmutablePublication<'a>,
+}
+
+impl<'a> LocalCaptureInstaller<'a> {
+    pub(crate) fn new(local: &'a LocalVersionStore, state: &'a FolderbaseState) -> Result<Self> {
+        Ok(Self {
+            local,
+            state,
+            publication: CaptureImmutablePublication::new(
+                state,
+                Path::new(BLOBS_DIRECTORY),
+                Path::new(VERSION_RECORDS_DIRECTORY),
+            )?,
+        })
+    }
+
+    pub(crate) fn install_content_reader(
+        &self,
+        reader: impl Read,
+        source_label: &Path,
+        maximum_bytes: u64,
+    ) -> Result<ContentDigest> {
+        let published =
+            self.publication
+                .publish_reader_sha256(reader, source_label, maximum_bytes)?;
+        Ok(ContentDigest {
+            algorithm: "sha256".to_owned(),
+            digest: published.digest,
+            bytes: published.bytes,
+        })
+    }
+
+    pub(crate) fn install_content_bytes(&self, bytes: &[u8]) -> Result<ContentDigest> {
+        self.install_content_reader(
+            std::io::Cursor::new(bytes),
+            Path::new("in-memory content"),
+            bytes.len() as u64,
+        )
+    }
+
+    pub(crate) fn install_or_verify_version_record(
+        &self,
+        record: &LocalVersionRecord,
+    ) -> Result<()> {
+        self.local
+            .install_or_verify_version_record_with(self.state, record, |path, bytes| {
+                self.publication.publish_version_record(path, bytes)
+            })?;
+        self.local
+            .verify_capture_object_version_in(
+                self.state,
+                &record.object_id,
+                &record.id,
+                &record.content,
+            )
+            .map(drop)
+    }
+
+    pub(crate) fn finish(self, checkpoint: impl FnMut(CaptureDirectoryCheckpoint)) -> Result<()> {
+        self.publication.finish(checkpoint)
+    }
+}
 
 /// A stable object identity that does not depend on the object's current path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1441,10 +1508,21 @@ impl LocalVersionStore {
         state: &FolderbaseState,
         record: &LocalVersionRecord,
     ) -> Result<()> {
+        self.install_or_verify_version_record_with(state, record, |path, bytes| {
+            state.publish_new(path, bytes)
+        })
+    }
+
+    fn install_or_verify_version_record_with(
+        &self,
+        state: &FolderbaseState,
+        record: &LocalVersionRecord,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<()> {
         let path = self.version_record_path(&record.id);
         let relative = Path::new(VERSION_RECORDS_DIRECTORY).join(format!("{}.json", record.id));
         let encoded = json_bytes(&path, record)?;
-        match state.publish_new(&relative, &encoded) {
+        match publish(&relative, &encoded) {
             Ok(()) => Ok(()),
             Err(FolderbaseError::WouldOverwrite(_)) => {
                 let existing = state
