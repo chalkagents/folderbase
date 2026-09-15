@@ -2677,10 +2677,12 @@ fn create_exact_symlink(
     // Destination preflight already refuses Windows before staging. Keep this
     // lower-level operation equally conservative rather than guessing whether
     // the portable target should be a Windows file or directory symlink.
-    Err(RootReconstructionError::UnsupportedReconstructionFilesystem {
-        path: display_root.join(symlink.path()),
-        reason: "exact symlink reconstruction is unsupported on Windows".to_owned(),
-    })
+    Err(
+        RootReconstructionError::UnsupportedReconstructionFilesystem {
+            path: display_root.join(symlink.path()),
+            reason: "exact symlink reconstruction is unsupported on Windows".to_owned(),
+        },
+    )
 }
 
 #[cfg(not(windows))]
