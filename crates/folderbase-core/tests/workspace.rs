@@ -11,6 +11,68 @@ use folderbase_core::{
 };
 use tempfile::tempdir;
 
+#[test]
+fn saving_still_checks_duplicate_claimants_and_invalid_unrelated_records() {
+    for damage in ["duplicate", "alias_duplicate", "malformed_json", "non_file"] {
+        let fixture = tempdir().unwrap();
+        fs::create_dir(fixture.path().join("records")).unwrap();
+        fs::write(fixture.path().join("records/a.md"), "original\n").unwrap();
+        fs::write(fixture.path().join("records/b.md"), "other\n").unwrap();
+        let store = LocalVersionStore::open(fixture.path()).unwrap();
+        let target = store.capture_file("records/a.md").unwrap();
+        let other = store.capture_file("records/b.md").unwrap();
+        let journal_path = fixture.path().join(".folderbase/journal/objects.ndjson");
+        let before_history = fs::read(&journal_path).unwrap();
+        let other_record = fixture
+            .path()
+            .join(format!(".folderbase/objects/{}.json", other.object.id));
+        match damage {
+            "duplicate" | "alias_duplicate" => {
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&other_record).unwrap()).unwrap();
+                let alias = if fixture.path().join("records/A.md").exists() {
+                    "records/A.md"
+                } else {
+                    "records//a.md"
+                };
+                record["path"] = if damage == "duplicate" {
+                    "records/a.md"
+                } else {
+                    alias
+                }
+                .into();
+                fs::write(&other_record, serde_json::to_vec(&record).unwrap()).unwrap();
+            }
+            "malformed_json" => fs::write(&other_record, "not JSON").unwrap(),
+            "non_file" => {
+                fs::remove_file(fixture.path().join("records/b.md")).unwrap();
+                fs::create_dir(fixture.path().join("records/b.md")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let loaded = read_workspace_text(fixture.path(), "records/a.md").unwrap();
+        let result = save_workspace_text(
+            fixture.path(),
+            "records/a.md",
+            &loaded.sha256,
+            "must not publish\n",
+        );
+        assert!(result.is_err(), "{damage} must reject the save");
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("records/a.md")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            store
+                .read_object(&target.object.id)
+                .unwrap()
+                .current_version,
+            target.version.id
+        );
+        assert_eq!(fs::read(&journal_path).unwrap(), before_history);
+    }
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 
