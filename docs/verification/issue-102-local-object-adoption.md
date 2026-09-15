@@ -26,6 +26,15 @@ The old Object and all its versions remain retained. A verified current live
 binding identifies the current path's Object; an exact path/old-ID Tombstone
 explains a historical claimant. Unexplained duplicates still refuse.
 
+An approved file-to-directory replacement also retires the prior file identity.
+The old file projection is retained without being mistaken for a current regular
+file. Replacing that directory with a file assigns another new identity. Exact
+prior bindings or verified Tombstones must explain these claims; stale aliases,
+malformed records, and unexplained claims on a directory still refuse. Retired
+projections may have either the ordinary retained `canonical` lifecycle or the
+`deleted` lifecycle used by reconstruction. This exception requires verified
+retirement evidence and never makes a deleted Object adoptable as a live file.
+
 Repeated recreation can replace the current Version's same-path Tombstone. A
 bounded ancestor metadata walk then locates earlier Tombstones as needed. It
 also prevents capture from reviving an earlier retired ID. Ordinary captures
@@ -95,6 +104,10 @@ Focused tests cover:
   later full capture, and exact recovery of the previous Object's bytes.
 - Two delete/recreate cycles with three distinct IDs and continued local app
   operations after each cycle.
+- File-to-directory-to-file replacement, unchanged directory capture, continued
+  history/save/capture and exact older recovery; unexplained or damaged claims
+  on nonregular paths refuse. Proven retired `deleted` projections remain usable
+  without loosening live Object admission.
 - Read-only tree equality, authority-byte changes during a read, and private
   ancestry/anchor missing, cycle, membership, finite-count, and digest guards.
 

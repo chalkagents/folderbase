@@ -31,6 +31,7 @@ impl CaptureObjectClaims {
         folderbase_id: &str,
         requested: &BTreeSet<PathBuf>,
         unbound: &BTreeSet<PathBuf>,
+        non_regular: &BTreeSet<PathBuf>,
         prior: Option<&crate::folderbase_version::FolderbaseVersion>,
     ) -> Result<Self> {
         state.verify_still_attached()?;
@@ -43,6 +44,7 @@ impl CaptureObjectClaims {
         };
         let folded = requested
             .iter()
+            .chain(non_regular.iter())
             .filter_map(|path| path.to_str())
             .map(str::to_ascii_lowercase)
             .collect::<BTreeSet<_>>();
@@ -69,7 +71,7 @@ impl CaptureObjectClaims {
             }
             let stored = safe_content_path(Path::new(&record.path))
                 .map_err(|_| invalid_record(&display, "object path is not a safe relative path"))?;
-            let selected = if requested.contains(&stored) {
+            let selected = if requested.contains(&stored) || non_regular.contains(&stored) {
                 Some(stored.clone())
             } else {
                 resolve_object_path_claim(
@@ -136,7 +138,25 @@ impl CaptureObjectClaims {
             let is_historical = history
                 .as_ref()
                 .is_some_and(|history| history.retired(&selected, &record.id).is_some());
+            let retiring_binding = prior
+                .and_then(|version| {
+                    version.bindings().iter().find(|binding| {
+                        Path::new(binding.path()) == selected
+                            && binding.object_id() == record.id.as_str()
+                            && binding.kind()
+                                == crate::folderbase_version::PathBindingKind::RegularFile
+                    })
+                })
+                .filter(|_| non_regular.contains(&selected));
+            let is_retiring = retiring_binding.is_some();
+            if non_regular.contains(&selected) && !is_historical && !is_retiring {
+                return Err(invalid_record(
+                    &display,
+                    "nonregular captured path has an unexplained file Object claim",
+                ));
+            }
             if !is_historical
+                && !is_retiring
                 && result
                     .claims
                     .insert(selected.clone(), record.id.clone())
@@ -147,11 +167,18 @@ impl CaptureObjectClaims {
                     "multiple Object records claim a captured path",
                 ));
             }
-            if !unbound.contains(&selected) && !is_historical {
+            if !unbound.contains(&selected) && !is_historical && !is_retiring {
                 continue;
             }
             // Adoption never silently rewrites an alias into a new canonical claim.
-            let (_, canonical) = paths.resolve(&selected)?;
+            let canonical = if non_regular.contains(&selected) {
+                // Exact spelling comes from the already validated capture plan.
+                // The regular-file resolver cannot resolve a retired file whose
+                // current path is a directory or supported symlink.
+                selected.clone()
+            } else {
+                paths.resolve(&selected)?.1
+            };
             if stored != canonical || selected != canonical {
                 return Err(invalid_record(
                     &display,
@@ -160,11 +187,12 @@ impl CaptureObjectClaims {
             }
             if record.schema != "https://folderbase.ai/protocol/0.1/object.schema.json"
                 || record.object_type != "file"
-                || record.lifecycle.status != "canonical"
+                || (record.lifecycle.status != "canonical"
+                    && !(is_historical && record.lifecycle.status == "deleted"))
             {
                 return Err(invalid_record(
                     &display,
-                    "capture adoption requires a canonical file Object",
+                    "capture requires a canonical file Object or a proven retired deleted Object",
                 ));
             }
             local.validate_object_record_membership(&record.id, &record, &display)?;
@@ -179,6 +207,17 @@ impl CaptureObjectClaims {
                 return Err(invalid_record(
                     &display,
                     "historical Object claim omits its Tombstone Version",
+                ));
+            }
+            if retiring_binding.is_some_and(|binding| {
+                !record
+                    .versions
+                    .iter()
+                    .any(|id| Some(id.as_str()) == binding.object_version_id())
+            }) {
+                return Err(invalid_record(
+                    &display,
+                    "retiring Object claim omits its prior bound Version",
                 ));
             }
             selected_versions = selected_versions
@@ -249,7 +288,7 @@ impl CaptureObjectClaims {
                     ));
                 }
             }
-            if !is_historical {
+            if !is_historical && !is_retiring {
                 if history
                     .as_ref()
                     .is_some_and(|history| history.previously_known(&record.id))

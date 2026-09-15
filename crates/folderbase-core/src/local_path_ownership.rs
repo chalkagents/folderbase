@@ -293,13 +293,15 @@ pub(super) fn select<'a>(
         .ok_or_else(invalid)?;
     let mut live = None;
     for (record_path, object) in candidates {
+        let retired = history.retired(path, &object.id);
         // A case alias or malformed historical claim cannot disappear merely
         // because a full Version also contains a same-path Tombstone.
         if record_path.file_stem().and_then(|name| name.to_str()) != Some(object.id.as_str())
             || Path::new(&object.path) != path
             || object.schema != OBJECT_SCHEMA
             || object.object_type != "file"
-            || object.lifecycle.status != "canonical"
+            || (object.lifecycle.status != "canonical"
+                && !(retired.is_some() && object.lifecycle.status == "deleted"))
             || object.versions.is_empty()
             || !object.versions.contains(&object.current_version)
         {
@@ -321,9 +323,7 @@ pub(super) fn select<'a>(
             {
                 return Err(invalid());
             }
-        } else if !history
-            .retired(path, &object.id)
-            .is_some_and(|last| object.versions.iter().any(|id| id.as_str() == last))
+        } else if !retired.is_some_and(|last| object.versions.iter().any(|id| id.as_str() == last))
         {
             return Err(invalid());
         }
@@ -415,12 +415,32 @@ mod tests {
     use super::*;
 
     fn wire(id: &str, parents: &[String], retired: Option<(&ObjectId, &VersionId)>) -> Vec<u8> {
-        let mut value: Value = serde_json::from_slice(include_bytes!(
-            "../../../protocol/conformance/folderbase-version-0.5/valid/minimal-ordinary-v1.json"
-        ))
-        .unwrap();
-        value["version_id"] = serde_json::json!(id);
-        value["parents"] = serde_json::json!(parents);
+        // Keep the unit fixture inside the crate so extracted package tests
+        // do not depend on the repository's external conformance directory.
+        let mut value = serde_json::json!({
+            "format": "folderbase-version-v1",
+            "protocol_version": "0.5",
+            "folderbase_id": "folderbase_018f43c2-9a1b-7def-8123-456789abcdef",
+            "version_id": id,
+            "parents": parents,
+            "created_at": "2026-07-30T00:00:00Z",
+            "path_policy": {
+                "format": "folderbase-portable-path-v1",
+                "normalization": "NFC",
+                "normalization_unicode_version": "17.0.0",
+                "case_folding": "full-default",
+                "case_folding_unicode_version": "9.0.0"
+            },
+            "root_manifest": {
+                "path": ".folderbase/manifest.json",
+                "object_version_id": "version_0198ee40-c333-7ccc-8000-000000000500",
+                "content_sha256": "e".repeat(64),
+                "bytes": 768
+            },
+            "bindings": [],
+            "tombstones": [],
+            "exclusions": []
+        });
         if let Some((object, version)) = retired {
             value["tombstones"] = serde_json::json!([{"path":"task.json","object_id":object,"lifecycle":"deleted","deleted_kind":"regular_file","last_object_version_id":version}]);
         }
