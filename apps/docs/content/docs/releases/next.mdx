@@ -35,6 +35,12 @@ Pending work, changed state and exceeded bounds are typed refusals. A nonempty
 migration-history directory is currently unsupported, including completed
 migrations; do not delete private metadata to bypass that refusal.
 
+The next SDK release adds typed `workspaceList`, `workspaceRead` and
+`workspaceSave` helpers over the existing stable Core commands. Read/save handle
+existing UTF-8 text files up to 2 MiB; save requires the last-read SHA-256 and
+preserves Core's conflict response. Text is sent without an added newline;
+malformed Unicode is refused before encoding. Published SDK 0.2.0 is unchanged.
+
 Conditional saves reuse validated directory handles within a single lookup.
 Full identity and corruption checks remain. Capture batches repeated flushes of
 its two immutable directories before publishing a complete Folderbase Version

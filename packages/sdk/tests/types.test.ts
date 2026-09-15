@@ -30,6 +30,31 @@ async function useClient(): Promise<void> {
   const observedPath: string = observed.document.selected_path;
   void observedPath;
 
+  const listing = await client.workspaceList("/absolute/workspace");
+  if (listing.kind === "success") {
+    const editable: boolean | undefined = listing.document.entries[0]?.editable;
+    void editable;
+  }
+  const read = await client.workspaceRead("/absolute/workspace", "notes.md");
+  if (read.kind === "success") {
+    const content: string = read.document.content;
+    const saved = await client.workspaceSave("/absolute/workspace", "notes.md", {
+      expectedSha256: read.document.sha256,
+      content: `${content}\nUpdate`,
+    });
+    if (saved.kind === "success") {
+      const hash: string = saved.document.document.sha256;
+      const version: string = saved.document.version_id;
+      // @ts-expect-error Save returns metadata; read again to obtain current text.
+      const returnedText: string = saved.document.document.content;
+      void [hash, version, returnedText];
+    }
+  }
+  // @ts-expect-error A save requires the content hash from a prior read.
+  await client.workspaceSave("/absolute/workspace", "notes.md", { content: "draft" });
+  // @ts-expect-error This command saves UTF-8 text, not binary attachments.
+  await client.workspaceSave("/absolute/workspace", "notes.md", { expectedSha256: "a".repeat(64), content: new Uint8Array() });
+
   const reconstructionRequest: FolderbaseRootReconstructionRequest = {
     format: "folderbase-root-reconstruction-request-v1",
     operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",

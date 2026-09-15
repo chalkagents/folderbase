@@ -50,6 +50,42 @@ design assets, and unknown regular-file formats. The SDK
 does not convert or upload them. It delegates to Core, which inventories
 metadata first and preserves the ordinary bytes.
 
+## Read and safely edit a local file
+
+The development SDK candidate adds typed `workspaceList`, `workspaceRead` and
+`workspaceSave` helpers for the existing stable Core commands. They require the
+next SDK release; published SDK 0.2.0 does not include them.
+
+For an existing `notes.md` inside the initialized root:
+
+```js
+const listed = await folderbase.workspaceList(root);
+if (listed.kind !== "success") throw new Error("Listing needs attention");
+console.log(listed.document.entries);
+
+const read = await folderbase.workspaceRead(root, "notes.md");
+if (read.kind !== "success") throw new Error("Reading needs attention");
+const draft = `${read.document.content}\nAn accepted update.\n`;
+const saved = await folderbase.workspaceSave(root, "notes.md", {
+  expectedSha256: read.document.sha256,
+  content: draft,
+});
+if (saved.kind !== "success") throw new Error("Saving needs attention");
+console.log(saved.document.version_id, saved.document.document.sha256);
+```
+
+Core compares the current bytes with `expectedSha256` before saving. If another
+editor changed the file, the SDK throws `FolderbaseOperationalError` with
+`error.document.error.code === "workspace_content_changed"`. Keep the draft, read again, and let the user resolve
+the conflict before retrying. A timeout or lost response also requires checking
+the current state; it does not prove that no write occurred.
+
+Read/save handle existing UTF-8 text files up to 2 MiB. The SDK sends exactly the
+supplied text with no added newline and refuses malformed Unicode. Save returns
+metadata and stored Object/Version IDs, not a copy of the text. Each save is one
+Core operation; the helpers do not create files or make multi-file updates
+atomic. Listing is a bounded inventory; use the query API for filtered metadata.
+
 ## Query live metadata
 
 ```js

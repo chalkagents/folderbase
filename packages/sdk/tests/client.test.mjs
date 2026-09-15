@@ -116,6 +116,24 @@ test("helpers use exact public arguments and bounded JSON stdin", async () => {
   assert.equal(observed.document.selected_path, "Client Work");
 });
 
+test("workspace save refuses missing guards and text that would be encoded lossily", () => {
+  const sdk = client();
+  for (const expectedSha256 of [undefined, "", "a".repeat(63), "A".repeat(64)]) {
+    assert.throws(
+      () => sdk.workspaceSave("/workspace", "notes.md", { expectedSha256, content: "draft" }),
+      /expectedSha256/,
+    );
+  }
+  for (const content of [undefined, new Uint8Array([65]), "\ud800", "\udfff"]) {
+    assert.throws(
+      () => sdk.workspaceSave("/workspace", "notes.md", {
+        expectedSha256: "a".repeat(64), content,
+      }),
+      /well-formed UTF-8/,
+    );
+  }
+});
+
 test("folder scope adapter validates known fields while preserving additive data", async () => {
   const additive = await client().observeFolderScope("/tmp/folder", "Additive");
   assert.deepEqual(additive.document.unknown_vendor, {
