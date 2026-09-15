@@ -46,6 +46,9 @@ use crate::{
     traversal_policy::is_reserved_workspace_component,
 };
 
+#[path = "local_export_package.rs"]
+pub(crate) mod local_export_package;
+
 pub const PACKAGE_FORMAT_V1: &str = "folderbase-root-reconstruction-package-v1";
 pub const MAX_PACKAGE_INDEX_BYTES: u64 = 8_388_608;
 pub const MAX_PACKAGE_VERSION_BYTES: u64 = 67_108_864;
@@ -783,6 +786,16 @@ pub fn execute_root_reconstruction_with_phase_callback<F>(
 where
     F: FnMut(RootReconstructionPhase),
 {
+    execute_reconstruction_profile(operation, package, destination, None, &mut phase)
+}
+
+fn execute_reconstruction_profile(
+    operation: RootReconstructionOperation<'_>,
+    package: &RetainedReconstructionPackage,
+    destination: &RetainedReconstructionDestination,
+    export: Option<&local_export_package::VerifiedExport>,
+    phase: &mut impl FnMut(RootReconstructionPhase),
+) -> Result<RootReconstructionResult, RootReconstructionError> {
     let record = reconstruction_record(&operation);
 
     if let Some(root) = open_directory_if_present(
@@ -790,9 +803,25 @@ where
         &destination.name,
         &destination.display_parent.join(&destination.name),
     )? {
-        return replay_published_root(&root, destination, &record);
+        let result = replay_published_root(&root, destination, &record)?;
+        if let Some(export) = export {
+            export.verify_restored_history(
+                &root,
+                &destination.display_parent.join(&destination.name),
+            )?;
+            export.verify_replay_anchor(
+                &root,
+                &destination.display_parent.join(&destination.name),
+                &record,
+            )?;
+        }
+        return Ok(result);
     }
-    require_package_destination_separation(package, destination)?;
+    if export.is_some() {
+        local_export_package::require_export_destination_separation(package, destination)?;
+    } else {
+        require_package_destination_separation(package, destination)?;
+    }
     let validated_package = revalidate_package(package, operation.plan)?;
 
     let staged_name = staged_root_name(&operation.operation_id);
@@ -804,7 +833,7 @@ where
         &owner_name,
         &staged_display,
         &record,
-        &mut phase,
+        phase,
     )?;
 
     ensure_directory(&staged, Path::new(".folderbase"), &staged_display)?;
@@ -821,7 +850,7 @@ where
     prepare_reconstructed_history(&state)?;
 
     let local = LocalVersionStore::for_retained_root(&staged_display);
-    let history = materialize_reconstruction(
+    let mut history = materialize_reconstruction(
         &staged,
         &staged_display,
         &state,
@@ -830,6 +859,9 @@ where
         operation.plan,
         &validated_package,
     )?;
+    if let Some(export) = export {
+        export.materialize_history(&staged, &staged_display, &state, &local, &mut history)?;
+    }
     let (attestation, _, profile) =
         attest_retained_folderbase_root_with_profile(&staged, &staged_display)?;
     if attestation.folderbase_id != operation.plan.version().folderbase_id() {
@@ -850,6 +882,10 @@ where
         &revalidate_package(package, operation.plan)?,
     )?;
     verify_visible_tree(&staged, &staged_display, operation.plan.version())?;
+    if let Some(export) = export {
+        export.verify_restored_history(&staged, &staged_display)?;
+        export.install_anchor(&state, &record)?;
+    }
     phase(RootReconstructionPhase::VerifiedStaging);
     let verified = attest_retained_folderbase_root_with_profile(&staged, &staged_display)?.0;
     let completion = ReconstructionCompletion {

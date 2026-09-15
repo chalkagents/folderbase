@@ -17,7 +17,16 @@ function writeJson(stream, value) {
 const RECONSTRUCTION_REQUEST_SHA256 =
   "5efe8d56bc354c89ec52006c25e123dfb42cbdb1eeed2b1f4013a634590133e5";
 
-if (mode === "version" && arguments_[0] === "list") {
+if (mode === "workspace" && arguments_[0] === "create") {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  writeJson(process.stdout, {format:"fixture-create-v1", argv:[mode, ...arguments_], stdin_hex:Buffer.concat(chunks).toString("hex")});
+  process.exit(0);
+}
+
+if (mode === "export") {
+  writeJson(process.stdout, {arguments: arguments_, request: arguments_[0] === "restore" ? JSON.parse(await stdinText()) : null});
+} else if (mode === "version" && arguments_[0] === "list") {
   const [, root, path, ...flags] = arguments_;
   if (path === "pending") {
     writeJson(process.stderr, {error: {code: "file_history_recovery_required", message: "recover first"}});

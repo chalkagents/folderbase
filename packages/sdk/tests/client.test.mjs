@@ -116,6 +116,24 @@ test("helpers use exact public arguments and bounded JSON stdin", async () => {
   assert.equal(observed.document.selected_path, "Client Work");
 });
 
+test("workspace save refuses missing guards and text that would be encoded lossily", () => {
+  const sdk = client();
+  for (const expectedSha256 of [undefined, "", "a".repeat(63), "A".repeat(64)]) {
+    assert.throws(
+      () => sdk.workspaceSave("/workspace", "notes.md", { expectedSha256, content: "draft" }),
+      /expectedSha256/,
+    );
+  }
+  for (const content of [undefined, new Uint8Array([65]), "\ud800", "\udfff"]) {
+    assert.throws(
+      () => sdk.workspaceSave("/workspace", "notes.md", {
+        expectedSha256: "a".repeat(64), content,
+      }),
+      /well-formed UTF-8/,
+    );
+  }
+});
+
 test("folder scope adapter validates known fields while preserving additive data", async () => {
   const additive = await client().observeFolderScope("/tmp/folder", "Additive");
   assert.deepEqual(additive.document.unknown_vendor, {
@@ -277,4 +295,28 @@ test("fileHistory uses the read-only per-file command and preserves its result a
     assert.equal(error.document.error.code, "file_history_recovery_required");
     return true;
   });
+});
+
+
+test("workspace create forwards exact bytes and refuses invalid requests before spawning", async () => {
+  const operationId = "019f0000-0000-7000-8000-000000000001";
+  const sdk = client();
+  for (const content of ["first 🗂️\r\n", new Uint8Array([0,255,128,13,10]), new Uint8Array()]) {
+    const result = await sdk.workspaceCreate("/tmp/root", "tasks/résumé.json", {operationId, content});
+    assert.deepEqual(result.document.argv, ["workspace","create","/tmp/root","tasks/résumé.json","--operation-id",operationId,"--stdin","--json"]);
+    assert.equal(result.document.stdin_hex, Buffer.from(content).toString("hex"));
+  }
+  assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId:"wrong", content:""}), TypeError);
+  assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId, content:"\ud800"}), TypeError);
+  assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId, content:new Uint8Array(8*1024*1024+1)}), FolderbaseOutputLimitError);
+});
+
+test("local export adapters preserve paths, explicit selection, and pinned restore request", async () => {
+  assert.deepEqual((await client().exportVersions("/a folder")).document.arguments, ["list", "/a folder", "--json"]);
+  assert.deepEqual((await client().exportWorkspace("/a folder", "/backup folder")).document.arguments, ["create", "/a folder", "/backup folder", "--json"]);
+  assert.deepEqual((await client().exportWorkspace("/a folder", "/backup folder", {versionId: "fbversion_selected"})).document.arguments,
+    ["create", "/a folder", "/backup folder", "--json", "--version", "fbversion_selected"]);
+  const request = {operation_id: "reconstruction_01998550-a73c-7000-8000-000000000099", export_index_sha256: "a".repeat(64)};
+  const restored = await client().restoreWorkspace("/backup folder", "/new workspace", request);
+  assert.deepEqual(restored.document, {arguments: ["restore", "/backup folder", "/new workspace", "--stdin", "--json"], request});
 });

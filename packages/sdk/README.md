@@ -40,6 +40,57 @@ const folderbase = new FolderbaseClient({
 });
 ```
 
+## List, read and save local text
+
+These helpers are in the development candidate and require the next SDK release;
+they are not included in published SDK 0.2.0. They wrap the existing stable Core
+`workspace list`, `workspace read` and `workspace save` commands.
+
+For an initialized root containing `notes.md`:
+
+```js
+import { FolderbaseClient, FolderbaseOperationalError } from "@folderbase/sdk";
+
+const folderbase = new FolderbaseClient();
+const root = "/absolute/workspace";
+const listing = await folderbase.workspaceList(root);
+if (listing.kind !== "success") throw new Error("Listing needs attention");
+console.log(listing.document.entries);
+
+const read = await folderbase.workspaceRead(root, "notes.md");
+if (read.kind !== "success") throw new Error("Reading needs attention");
+const draft = `${read.document.content}\nAn accepted update.\n`;
+
+try {
+  const saved = await folderbase.workspaceSave(root, "notes.md", {
+    expectedSha256: read.document.sha256,
+    content: draft,
+  });
+  if (saved.kind !== "success") throw new Error("Saving needs attention");
+  console.log(saved.document.version_id, saved.document.document.sha256);
+} catch (error) {
+  if (!(error instanceof FolderbaseOperationalError)
+      || error.document?.error?.code !== "workspace_content_changed") throw error;
+  // Keep the draft for the user to compare with the latest file before retrying.
+  const latest = await folderbase.workspaceRead(root, "notes.md");
+  console.log({ draft, latest: latest.document });
+}
+```
+
+Save requires the SHA-256 returned by the last read. Core refuses a competing
+edit instead of overwriting it and records accepted changes in per-file history.
+The response contains the saved hash, byte count, Object ID and Version ID;
+it does not echo the text. The SDK passes `content` as exact UTF-8 stdin with no
+added newline, rejecting lone Unicode surrogates that would change during
+encoding. A supplied `options.stdin` is replaced by `content`.
+
+Read/save support existing UTF-8 text files up to Core's 2 MiB limit. Listing
+also reports directories, symlinks and noneditable files; it is a bounded
+inventory, not a paginated record query. These helpers do not create files,
+provide binary attachment writes, or combine multiple saves into a transaction.
+Keep a draft until the caller has confirmed the result: a timeout or lost
+response does not establish that a save did nothing.
+
 ## Exit behavior
 
 - exit `0` resolves with `kind: "success"`;
@@ -149,3 +200,34 @@ refuses pending work, changed observations, corrupt or oversized metadata, and
 instruction. See [the capability contract](../../docs/file-history-0.1.md) for
 exact bounds, read-only guarantees and error codes. Existing `version history`
 continues to describe the whole-root journal, not a complete per-file list.
+
+### Create one absent file (experimental)
+
+Discover `folderbase.workspace-create@0.1.0` before use. Persist an exact request
+UUID, path and original content before the first attempt:
+
+```js
+const request = { operationId: crypto.randomUUID(), content: '{"title":"First"}' };
+const created = await client.workspaceCreate(root, "tasks/new.json", request);
+```
+
+Content is a well-formed UTF-8 string or `Uint8Array`, at most 8 MiB; the existing
+safe parent must exist. A completed retry returns the original historical result
+with `replayed: true` and never recreates a later deletion. Read current content
+before displaying it. Another request under that UUID or any occupied target
+conflicts, even with matching bytes. Attachments followed by a separate task save
+can leave an unlinked attachment; applications own explicit retry/link handling.
+Use a single checked Core build for all writers: older executables do not honor
+pending creation. See [the operation contract](https://github.com/chalkagents/folderbase/blob/main/docs/workspace-create-0.1.md)
+for bounds, recovery, and compatibility limits.
+
+## Local export and restore (unreleased)
+
+The candidate-only experimental `folderbase.local-export@0.1.0` capability adds
+`exportVersions(root)`, `exportWorkspace(root, packagePath, {versionId?})`, and
+`restoreWorkspace(packagePath, destination, {operation_id, export_index_sha256})`.
+Use `contract()` to discover support; public Core 0.7.2 lacks these commands.
+See [the retention contract and complete example](../../docs/local-export-0.1.md).
+Packages preserve the selected folder snapshot and retained ordinary-file
+histories; Git metadata is snapshot-only. Restore requires an absent destination
+or the same unchanged, exactly replayable reconstruction.

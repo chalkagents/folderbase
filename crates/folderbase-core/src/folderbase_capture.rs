@@ -694,6 +694,14 @@ impl FolderbaseVersionStore {
         Self::open_with_local_head_validation(root, false)
     }
 
+    /// Explicit immutable-Version export never adopts or advances Local Head.
+    /// The producer must verify the selected Version and its complete closure.
+    pub(crate) fn open_for_retained_export(
+        root: impl AsRef<Path>,
+    ) -> Result<Self, FolderbaseCaptureError> {
+        Self::open_with_local_head_validation(root, false)
+    }
+
     fn open_with_local_head_validation(
         root: impl AsRef<Path>,
         validate_local_head: bool,
@@ -1901,7 +1909,7 @@ fn ensure_record_capacity(current: usize, path: &Path) -> Result<(), FolderbaseC
     Ok(())
 }
 
-fn read_local_head(
+pub(crate) fn read_local_head(
     attestation: &FolderbaseRootAttestation,
     root_instance_authority: &RootInstanceAuthority,
     root: &Dir,

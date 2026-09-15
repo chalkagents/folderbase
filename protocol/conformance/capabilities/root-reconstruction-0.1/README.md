@@ -15,9 +15,14 @@ node protocol/conformance/capabilities/root-reconstruction-0.1/run.mjs \
 
 Exit `0` with `failed: 0` is the complete capability claim. Exit `1` is a
 bounded behavioral report. Bad runner arguments or runner failures exit `2`.
-The released v0.6.1 executable remains the expected RED baseline because it
-predates this capability. A reference executable built from the implementing
-source advertises the profile only after all twelve cases pass.
+The historical v0.6.1 executable is a negative baseline because it predates this
+capability. A reference executable advertises the profile only after all twelve
+cases pass. The development candidate limits advertisement to Linux and macOS
+release targets; Windows and other targets currently omit it. The known profile
+and this complete suite remain unchanged. A valid request that always refuses
+an unsupported filesystem cannot establish successful reconstruction support.
+On an eligible target, the actual destination filesystem still must pass Core's
+retained no-replace publication and durability preflight.
 
 The generator creates a bounded exact package containing Markdown, CSV, PDF,
 DOCX-shaped opaque bytes, immutable SQLite-shaped bytes, media, archive,

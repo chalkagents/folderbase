@@ -7,9 +7,52 @@ use std::{
 
 use folderbase_core::{
     JournalAction, LocalVersionStore, MAX_WORKSPACE_TEXT_BYTES, WorkspaceEntryKind, list_workspace,
-    read_workspace_text, save_workspace_text,
+    read_file_history, read_workspace_text, save_workspace_text,
 };
 use tempfile::tempdir;
+
+#[test]
+fn nested_workspace_save_retains_history_refuses_stale_content_and_continues() {
+    let fixture = tempdir().unwrap();
+    folderbase_core::initialize(
+        &folderbase_core::plan_initialization(
+            fixture.path(),
+            folderbase_core::InitializationOptions::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let path = "notes/drafts/résumé.md";
+    fs::create_dir_all(fixture.path().join("notes/drafts")).unwrap();
+    fs::write(fixture.path().join(path), "first 🗂️\r\n").unwrap();
+    let original = read_workspace_text(fixture.path(), path).unwrap();
+    let saved = save_workspace_text(fixture.path(), path, &original.sha256, "second 🗂️").unwrap();
+    assert_eq!(
+        fs::read(fixture.path().join(path)).unwrap(),
+        "second 🗂️".as_bytes()
+    );
+    let history = read_file_history(fixture.path(), path).unwrap();
+    assert_eq!(history.object_id.as_ref(), Some(&saved.object_id));
+    assert_eq!(history.current_version.as_ref(), Some(&saved.version_id));
+    assert_eq!(history.versions.len(), 2);
+    assert_eq!(history.versions[0].content.digest, original.sha256);
+    assert_eq!(history.versions[1].content.digest, saved.document.sha256);
+
+    assert!(matches!(
+        save_workspace_text(fixture.path(), path, &original.sha256, "stale"),
+        Err(folderbase_core::FolderbaseError::WorkspaceContentChanged(_))
+    ));
+    assert_eq!(read_file_history(fixture.path(), path).unwrap(), history);
+    let reopened = read_workspace_text(fixture.path(), path).unwrap();
+    assert_eq!(reopened.content, "second 🗂️");
+    let continued = save_workspace_text(fixture.path(), path, &reopened.sha256, "third\n").unwrap();
+    assert_eq!(continued.object_id, saved.object_id);
+    let final_history = read_file_history(fixture.path(), path).unwrap();
+    assert_eq!(&final_history.versions[..2], history.versions.as_slice());
+    assert_eq!(final_history.versions.len(), 3);
+    assert_eq!(final_history.current_version, Some(continued.version_id));
+    assert_eq!(fs::read(fixture.path().join(path)).unwrap(), b"third\n");
+}
 
 #[test]
 fn saving_still_checks_duplicate_claimants_and_invalid_unrelated_records() {

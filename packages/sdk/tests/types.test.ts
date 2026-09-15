@@ -30,6 +30,31 @@ async function useClient(): Promise<void> {
   const observedPath: string = observed.document.selected_path;
   void observedPath;
 
+  const listing = await client.workspaceList("/absolute/workspace");
+  if (listing.kind === "success") {
+    const editable: boolean | undefined = listing.document.entries[0]?.editable;
+    void editable;
+  }
+  const read = await client.workspaceRead("/absolute/workspace", "notes.md");
+  if (read.kind === "success") {
+    const content: string = read.document.content;
+    const saved = await client.workspaceSave("/absolute/workspace", "notes.md", {
+      expectedSha256: read.document.sha256,
+      content: `${content}\nUpdate`,
+    });
+    if (saved.kind === "success") {
+      const hash: string = saved.document.document.sha256;
+      const version: string = saved.document.version_id;
+      // @ts-expect-error Save returns metadata; read again to obtain current text.
+      const returnedText: string = saved.document.document.content;
+      void [hash, version, returnedText];
+    }
+  }
+  // @ts-expect-error A save requires the content hash from a prior read.
+  await client.workspaceSave("/absolute/workspace", "notes.md", { content: "draft" });
+  // @ts-expect-error This command saves UTF-8 text, not binary attachments.
+  await client.workspaceSave("/absolute/workspace", "notes.md", { expectedSha256: "a".repeat(64), content: new Uint8Array() });
+
   const reconstructionRequest: FolderbaseRootReconstructionRequest = {
     format: "folderbase-root-reconstruction-request-v1",
     operation_id: "reconstruction_019f0000-0000-7000-8000-000000000001",
@@ -105,4 +130,31 @@ if (fileHistory.kind === "success") {
   const recordedVersion: string | null = fileHistory.document.current_version;
   const capturedAt: string | undefined = fileHistory.document.versions[0]?.captured_at;
   void [recordedVersion, capturedAt];
+}
+
+
+const created = await client.workspaceCreate("/workspace", "tasks/new.json", {
+  operationId: "019f0000-0000-7000-8000-000000000001", content: new Uint8Array([0,255]),
+});
+if (created.kind === "success") {
+  const objectId: string = created.document.object_id;
+  const replayed: boolean = created.document.replayed;
+  const digest: string = created.document.content.digest;
+  void [objectId, replayed, digest];
+}
+
+const exported = await client.exportWorkspace("/workspace", "/backup", {versionId: "fbversion_selected"});
+if (exported.kind === "success") {
+  const pin: string = exported.document.export_index_sha256;
+  const restored = await client.restoreWorkspace("/backup", "/new-workspace", {operation_id: "reconstruction_example", export_index_sha256: pin});
+  if (restored.kind === "success") {
+    const count: number = restored.document.export.retained_file_versions;
+    void count;
+  }
+}
+
+const exportVersions = await client.exportVersions("/workspace");
+if (exportVersions.kind === "success") {
+  const folderbaseId: string = exportVersions.document.folderbase_id;
+  void folderbaseId;
 }

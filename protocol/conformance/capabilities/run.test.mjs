@@ -165,3 +165,13 @@ test("known capability stability must match the public registry", () => {
   assert.equal(report.failed, 1);
   assert.match(report.cases[0].message, /stability does not match the registry/);
 });
+
+
+test("explicit local export requirement refuses an implementation that cannot advertise its complete profile", () => {
+  const result = run("v1-without-capabilities.mjs", ["--capability", "folderbase.local-export@0.1.0"]);
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.selected, 1);
+  assert.equal(report.failed, 1);
+  assert.match(report.cases[0].message, /is not advertised/);
+});

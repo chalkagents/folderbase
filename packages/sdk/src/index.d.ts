@@ -296,6 +296,95 @@ export interface FolderbaseFileHistory extends JsonObject {
   versions: FolderbaseFileVersionRecord[];
 }
 
+export interface FolderbaseWorkspaceEntry extends JsonObject {
+  path: string;
+  name: string;
+  kind: "folderbase" | "directory" | "file" | "symlink";
+  bytes: number;
+  editable: boolean;
+  reconstructable: boolean;
+}
+
+export interface FolderbaseWorkspaceListing extends JsonObject {
+  root: string;
+  entries: FolderbaseWorkspaceEntry[];
+}
+
+export interface FolderbaseWorkspaceDocumentState extends JsonObject {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface FolderbaseWorkspaceTextDocument extends FolderbaseWorkspaceDocumentState {
+  content: string;
+}
+
+export interface FolderbaseWorkspaceSaveResult extends JsonObject {
+  path: string;
+  previous_sha256: string;
+  document: FolderbaseWorkspaceDocumentState;
+  object_id: string;
+  version_id: string;
+}
+
+export interface FolderbaseWorkspaceSaveInput {
+  expectedSha256: string;
+  content: string;
+}
+
+export interface FolderbaseWorkspaceCreateInput {
+  operationId: string;
+  content: string | Uint8Array;
+}
+
+export interface FolderbaseWorkspaceCreateResult extends JsonObject {
+  format: "folderbase-workspace-create-result-v1";
+  operation_id: string;
+  path: string;
+  object_id: string;
+  version_id: string;
+  content: { algorithm: "sha256"; digest: string; bytes: number };
+  created_at: string;
+  replayed: boolean;
+}
+
+export interface FolderbaseExportSelection { versionId?: string; }
+export interface FolderbaseExportVersion extends JsonObject {
+  version_id: string;
+  canonical_sha256: string;
+  created_at: string;
+  visible_entries: number;
+  retained_tombstones: number;
+}
+export interface FolderbaseExportVersions extends JsonObject {
+  format: "folderbase-export-version-list-v1";
+  folderbase_id: string;
+  versions: FolderbaseExportVersion[];
+}
+export interface FolderbaseExportResult extends JsonObject {
+  format: "folderbase-local-export-v1";
+  export_index_sha256: string;
+  retention_profile: "selected-snapshot-file-history-v1";
+  selection: "current_workspace" | "retained_version";
+  folderbase_id: string;
+  folderbase_version_id: string;
+  retained_objects: number;
+  retained_file_versions: number;
+  capture_exclusions: number;
+  snapshot_only_reserved_paths: JsonObject[];
+  omitted_objects: JsonObject[];
+  retired_objects: JsonObject[];
+}
+export interface FolderbaseExportRestoreRequest extends JsonObject {
+  operation_id: string;
+  export_index_sha256: string;
+}
+export interface FolderbaseExportRestoreResult extends JsonObject {
+  replayed: boolean;
+  export: FolderbaseExportResult;
+}
+
 export class FolderbaseClient {
   constructor(options?: FolderbaseClientOptions);
 
@@ -305,7 +394,14 @@ export class FolderbaseClient {
   ): Promise<FolderbaseResult<TSuccess, TAttention>>;
 
   contract<T extends JsonValue = JsonObject>(options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
+  workspaceCreate(root: string, path: string, input: FolderbaseWorkspaceCreateInput, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceCreateResult>>;
+  exportVersions(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseExportVersions>>;
+  exportWorkspace(root: string, packagePath: string, selection?: FolderbaseExportSelection, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseExportResult>>;
+  restoreWorkspace(packagePath: string, destination: string, request: FolderbaseExportRestoreRequest, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseExportRestoreResult>>;
   fileHistory(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseFileHistory>>;
+  workspaceList(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceListing>>;
+  workspaceRead(root: string, path: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceTextDocument>>;
+  workspaceSave(root: string, path: string, input: FolderbaseWorkspaceSaveInput, options?: FolderbaseRunOptions): Promise<FolderbaseResult<FolderbaseWorkspaceSaveResult>>;
   inspect<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   attest<T extends JsonValue = JsonObject>(root: string, options?: FolderbaseRunOptions): Promise<FolderbaseResult<T>>;
   observeFolderScope(root: string, selectedPath: string, options?: FolderbaseRunOptions): Promise<FolderbaseSuccess<FolderbaseFolderScopeEvidence>>;

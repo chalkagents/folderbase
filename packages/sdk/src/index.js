@@ -717,8 +717,53 @@ export class FolderbaseClient {
     return this.run(["protocol", "contract", "--json"], options);
   }
 
+  workspaceCreate(root, path, { operationId, content }, options = {}) {
+    if (typeof operationId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(operationId)) {
+      throw new TypeError("operationId must be a canonical lowercase hyphenated UUID");
+    }
+    if ((typeof content !== "string" || !content.isWellFormed()) && !(content instanceof Uint8Array)) {
+      throw new TypeError("content must be a well-formed UTF-8 string or Uint8Array");
+    }
+    return this.run(["workspace", "create", root, path, "--operation-id", operationId, "--stdin", "--json"], { ...options, stdin: encodeInput(content, 8 * 1024 * 1024) });
+  }
+
+  exportVersions(root, options) {
+    return this.run(["export", "list", root, "--json"], options);
+  }
+
+  exportWorkspace(root, packagePath, selection = {}, options) {
+    const arguments_ = ["export", "create", root, packagePath, "--json"];
+    if (selection.versionId !== undefined) arguments_.push("--version", selection.versionId);
+    return this.run(arguments_, options);
+  }
+
+  restoreWorkspace(packagePath, destination, request, options) {
+    return this.#runJson(["export", "restore", packagePath, destination, "--stdin", "--json"], request, options);
+  }
+
   fileHistory(root, path, options) {
     return this.run(["version", "list", root, path, "--json"], options);
+  }
+
+  workspaceList(root, options) {
+    return this.run(["workspace", "list", root, "--json"], options);
+  }
+
+  workspaceRead(root, path, options) {
+    return this.run(["workspace", "read", root, path, "--json"], options);
+  }
+
+  workspaceSave(root, path, { expectedSha256, content }, options = {}) {
+    if (typeof expectedSha256 !== "string" || !SHA256_PATTERN.test(expectedSha256)) {
+      throw new TypeError("expectedSha256 must be the lowercase SHA-256 from the last read");
+    }
+    if (typeof content !== "string" || !content.isWellFormed()) {
+      throw new TypeError("content must be a well-formed UTF-8 text string");
+    }
+    return this.run([
+      "workspace", "save", root, path,
+      "--expected-sha256", expectedSha256, "--stdin", "--json",
+    ], { ...options, stdin: content });
   }
 
   inspect(root, options) {

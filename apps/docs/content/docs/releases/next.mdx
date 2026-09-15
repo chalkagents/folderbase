@@ -18,6 +18,20 @@ This page describes unreleased work. Folderbase remains Beta; use the exact
 release page for immutable behavior and discover optional capabilities through
 `folderbase protocol contract --json`.
 
+The candidate now advertises `folderbase.root-reconstruction@0.1.0` only on
+Linux and macOS release targets. Windows and other targets omit it because the
+complete retained publication/replay behavior is unavailable. The command
+preserves its typed filesystem refusal; returning that refusal is not proof of
+the complete capability. Per-destination filesystem checks remain required on
+eligible targets. The file-history conformance runner also accepts the
+documented native path separators instead of assuming POSIX separators.
+
+Existing-file saves on Windows now open the destination parent with directory
+handle semantics, fixing an access-denied failure. The retained handle refuses
+reparse points and prevents renaming that parent until replacement finishes.
+This changes no stored record and adds no Windows directory-flush durability
+guarantee.
+
 ## Local application candidate
 
 The local candidate repairs Change Set application when a proposal adds a new
@@ -34,6 +48,12 @@ bytes. Listing metadata does not certify that historical content is recoverable.
 Pending work, changed state and exceeded bounds are typed refusals. A nonempty
 migration-history directory is currently unsupported, including completed
 migrations; do not delete private metadata to bypass that refusal.
+
+The next SDK release adds typed `workspaceList`, `workspaceRead` and
+`workspaceSave` helpers over the existing stable Core commands. Read/save handle
+existing UTF-8 text files up to 2 MiB; save requires the last-read SHA-256 and
+preserves Core's conflict response. Text is sent without an added newline;
+malformed Unicode is refused before encoding. Published SDK 0.2.0 is unchanged.
 
 Conditional saves reuse validated directory handles within a single lookup.
 Full identity and corruption checks remain. Capture batches repeated flushes of
