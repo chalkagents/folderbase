@@ -26,6 +26,12 @@ the complete capability. Per-destination filesystem checks remain required on
 eligible targets. The file-history conformance runner also accepts the
 documented native path separators instead of assuming POSIX separators.
 
+Existing-file saves on Windows now open the destination parent with directory
+handle semantics, fixing an access-denied failure. The retained handle refuses
+reparse points and prevents renaming that parent until replacement finishes.
+This changes no stored record and adds no Windows directory-flush durability
+guarantee.
+
 ## Local application candidate
 
 The local candidate repairs Change Set application when a proposal adds a new

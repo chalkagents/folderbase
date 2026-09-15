@@ -3771,14 +3771,35 @@ fn open_directory_nofollow(path: &Path) -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        };
+        options
+            // A directory is namespace authority, not a readable data stream.
+            // Retain it without delete sharing while its child is replaced.
+            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(path)
         .map_err(|source| FolderbaseError::io(path, source))?;
-    if !file
+    let metadata = file
         .metadata()
-        .map_err(|source| FolderbaseError::io(path, source))?
-        .is_dir()
+        .map_err(|source| FolderbaseError::io(path, source))?;
+    #[cfg(windows)]
     {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
+        }
+    }
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(FolderbaseError::UnsafePath(path.to_path_buf()));
     }
     Ok(file)
@@ -3965,6 +3986,53 @@ mod tests {
         FolderbaseKind, InitializationOptions,
         initialization::{initialize, plan_initialization},
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_save_parent_handle_keeps_directory_in_place_until_release() {
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().join("notes");
+        let moved = fixture.path().join("moved");
+        fs::create_dir(&parent).unwrap();
+        fs::write(parent.join("note.md"), b"original").unwrap();
+
+        let retained = open_directory_nofollow(&parent).unwrap();
+        assert!(fs::rename(&parent, &moved).is_err());
+        assert_eq!(fs::read(parent.join("note.md")).unwrap(), b"original");
+        assert!(!moved.exists());
+        drop(retained);
+        fs::rename(&parent, &moved).unwrap();
+        assert_eq!(fs::read(moved.join("note.md")).unwrap(), b"original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_save_parent_handle_refuses_a_directory_junction() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        fs::write(target.path().join("foreign.md"), b"foreign").unwrap();
+        let junction = fixture.path().join("linked");
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(target.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(matches!(
+            open_directory_nofollow(&junction),
+            Err(FolderbaseError::UnsafePath(path)) if path == junction
+        ));
+        assert_eq!(
+            fs::read(target.path().join("foreign.md")).unwrap(),
+            b"foreign"
+        );
+    }
 
     #[test]
     fn generic_versioned_replace_refuses_the_exact_root_ignore_policy_before_writes() {
