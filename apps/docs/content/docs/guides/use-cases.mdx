@@ -1,0 +1,72 @@
+---
+title: Three ways to use Folderbase
+description: Use JSON and Markdown as app data, keep deployed data durable, and share and sync work. See concrete examples and current availability.
+---
+
+**Storage for agents.** Folderbase starts with a familiar situation: your app or agent already saves useful work in files. The product direction is one understandable data contract that works locally, in deployed apps, and across authorized people and devices.
+
+The standard we are building toward: a developer understands Folderbase quickly, removes meaningful code, trusts what happens when a save fails, and chooses it again for their next project.
+
+## Availability at a glance
+
+| Customer job | Available today | Next milestone |
+| --- | --- | --- |
+| Use files as an app database | Core 0.7.2 provides local file discovery, reads, content-hash-guarded saves, and metadata queries. Some capabilities are experimental; check their individual guides. | Discoverable JSON/Markdown record shapes, validation, field queries, and record revisions. |
+| Keep deployed app data durable | The local Core can run on a supported host with a persistent folder under your control. | A managed database service shared by deployed app instances. |
+| Share and sync work | Local versioning and scoped Change Sets provide pieces of the workflow. | Authenticated hosted sharing, then persistent device synchronization and explicit conflict resolution. |
+
+The [local workflow candidate](https://github.com/chalkagents/folderbase/pull/108) has additional tested file workflows, but remains unreleased. Public package installation does not install that candidate. Cloud and device sync are not generally available products.
+
+## Use JSON and Markdown as your app's database
+
+### Example: a project assistant
+
+Your app keeps tasks in JSON, notes in Markdown, and attachments in ordinary files. A person edits a note in their editor while an agent updates a task through the app.
+
+Today, each app often has to implement file discovery, parsing, validation, filtering, safe writes, and recovery itself. Folderbase's goal is to move the reusable storage rules into one small interface.
+
+The proposed application contract describes the record types, supported fields, operations, and limits. An app or agent can discover those rules before changing data. Instructions explain how to use the data; they do not grant permissions or execute business actions.
+
+**What works now:** initialize a folder, list its files, read existing text, and save with a content hash precondition. Query file metadata and use the supported versioning workflows. Your app still owns JSON parsing, application validation, and field filtering. A content hash checks bytes; it is not yet a record revision that distinguishes every edit or delete/recreate cycle.
+
+**What the next milestone must prove:** two independently written consumers use the same JSON/Markdown profile without copying persistence rules. Invalid direct file edits remain visible and recoverable. Competing edits produce an explicit conflict, and history stays accessible.
+
+**Start here:** complete the [local quickstart](/docs/getting-started/quickstart), then [read and save from an agent](/docs/guides/agents) or use the [TypeScript adapter](/docs/guides/typescript-sdk). Use a copy of your data while evaluating the beta.
+
+Choose Folderbase when ordinary, inspectable files matter to the workflow. If your application primarily needs relational joins, multi-record transactions, or established hosted database operations, evaluate a conventional database against those needs.
+
+## Keep deployed app data durable and accessible
+
+### Example: two app instances serving the same customer
+
+One instance saves a customer brief. A second instance must read that accepted result, even after the first instance restarts. Two requests editing the same brief must not silently overwrite each other.
+
+A temporary folder inside an app instance cannot serve as the shared authority for this workflow. The planned Folderbase service owns accepted records and durable content; deployed clients use a remote endpoint and scoped credentials.
+
+**What works now:** run local Core against a persistent folder you operate yourself. This requires managing the host, backups, and supported writer coordination. Installing the local package does not provision a managed database or make separate instance folders share data.
+
+**What the hosted milestone must prove:** acknowledged data survives instance replacement; concurrent clients see documented read/write behavior; lost replies can be resolved; stale updates conflict; and an export can be restored. Credentials and permissions are enforced by the service.
+
+**Next step:** validate the local workflow first and describe the deployed workload you need through the [Cloud pilot contact](https://folderbase.ai/#access). Include record count, typical document size, writers, and recovery needs. Managed pricing and signup are not launched.
+
+The intended paid journey is explicit: choose a hosted workspace, understand its limits and price, move data with a reviewed migration, and verify a real write and read from another client. Payment should unlock a working hosted outcome.
+
+## Share data and sync across people, agents, and devices
+
+### Example: a teammate, an agent, and an offline laptop
+
+You share a project with a teammate. An agent updates a task online while your laptop edits the same task offline. On reconnect, both drafts survive and the application asks you to resolve the competing change.
+
+Sharing determines who may read or change data. Sync moves accepted revisions and pending edits between copies. Downloading an export is useful, but does not by itself provide either ongoing access control or synchronization.
+
+**What works now:** [capture and restore local versions](/docs/guides/versioning), and use [Change Sets](/docs/guides/change-sets) for scoped, reviewable agent work. These features are not a persistent background sync service.
+
+**What comes next:** workspace reader/editor access enforced by the hosted service, followed by explicit pull and push between two replicas. The application must distinguish “saved locally,” “synced,” and “needs resolution.” Revoking access prevents future authorized operations; it cannot recall bytes already downloaded.
+
+**Next step:** read the [planned sync journey](/docs/guides/sync-agent-workspace). Start with one local authority while evaluating Core. Copying private `.folderbase/` state between active roots is not a supported substitute for replica synchronization.
+
+## One path from first use to repeat value
+
+Recognize a file-storage problem → try a local folder → make a useful read and guarded save → validate the application contract when available → connect a durable hosted workspace → share access → sync another machine → complete another real job.
+
+Each step should earn the next. Local use does not require a Folderbase account or hosting payment. Hosted access, pricing, and synchronization remain future milestones until their documented workflows ship.

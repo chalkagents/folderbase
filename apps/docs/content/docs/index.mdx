@@ -1,21 +1,33 @@
 ---
 title: Folderbase documentation
-description: Install and operate the open folder database for AI agents.
+description: Start with local files, understand the deployed database roadmap, and plan for sharing and sync.
 ---
 
-Folderbase turns an ordinary folder into a structured, versioned workspace that humans and agents can understand across sessions. Your files remain normal files. A small `.folderbase/` directory adds durable identity, protocol records, history, and policy.
+**Storage for agents.** Folderbase is being built for apps and agents that use ordinary JSON, Markdown, and other files as persistent data.
+
+Start with the local file foundation today. The next milestones add a shared application data contract, durable access from deployed apps, and sharing and sync. Your files remain normal files; a small `.folderbase/` directory holds engine-managed state.
 
 > **Beta status:** Folderbase is under active development. Compatibility
 > Contract v1 names the stable portable records and CLI behavior. Everything
 > else must be treated as Beta, and optional capabilities marked
 > **Experimental** are the most likely to change between releases.
 
-## Start here
+## What are you building?
+
+<Cards>
+  <Card title="Use JSON and Markdown as your app’s database" href="/docs/guides/use-cases#use-json-and-markdown-as-your-apps-database" description="Tasks, notes, and attachments that your app and agent can use. Local file operations are available; record schemas and field queries are planned." />
+  <Card title="Keep deployed app data durable and accessible" href="/docs/guides/use-cases#keep-deployed-app-data-durable-and-accessible" description="Keep the same data available across app restarts and instances. Hosted database access is in development." />
+  <Card title="Share data and sync across people, agents, and devices" href="/docs/guides/use-cases#share-data-and-sync-across-people-agents-and-devices" description="Give others access and continue on another machine with visible conflicts. Hosted sharing and device sync are planned." />
+</Cards>
+
+Read the [three use cases](/docs/guides/use-cases) for concrete examples, current availability, and the next step for each.
+
+## Start locally
 
 <Cards>
   <Card title="Install Folderbase" href="/docs/getting-started/install" description="Choose npx, a native release binary, or Cargo." />
   <Card title="Five-minute quickstart" href="/docs/getting-started/quickstart" description="Inspect, preview, initialize, and validate a folder." />
-  <Card title="Explore the Folderbase App" href="/docs/getting-started/app" description="See the complete Better Finder, organization, sharing, transfer, and Changes journey." />
+  <Card title="Explore the Folderbase App" href="/docs/getting-started/app" description="See the native alpha and distinguish current workflows from planned sharing and transfer." />
   <Card title="Query metadata (Unstable Beta)" href="/docs/guides/querying" description="Filter live or historical file metadata without searching file contents." />
   <Card title="Keep an active session fresh" href="/docs/guides/daemon-sessions" description="Give an App or agent one root-pinned query session with bounded filesystem-change hints." />
   <Card title="Expand from a template" href="/docs/guides/templates" description="Preview and apply additive guidance without replacing existing work." />
