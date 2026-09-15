@@ -1,0 +1,29 @@
+{
+  "format": "folderbase-change-set-conformance-scenario-v1",
+  "name": "create-mixed",
+  "covers": ["create", "created-directory-identity", "edit", "rename", "delete", "mixed-deltas"],
+  "initial": [
+    { "operation": "write_utf8", "path": "shared/draft.md", "content": "approved draft\n" },
+    { "operation": "write_utf8", "path": "shared/obsolete.md", "content": "obsolete draft\n" }
+  ],
+  "checkout_changes": [
+    { "operation": "write_utf8", "path": "shared/notes.md", "content": "agent revision\n" },
+    { "operation": "write_utf8", "path": "shared/outputs/report.md", "content": "new report\n" },
+    { "operation": "write_base64", "path": "shared/outputs/result.bin", "content_base64": "AP8Q" },
+    { "operation": "write_utf8", "path": "shared/outputs/empty.txt", "content": "" },
+    { "operation": "rename", "from": "shared/draft.md", "to": "shared/approved.md" },
+    { "operation": "delete", "path": "shared/obsolete.md" }
+  ],
+  "expected": {
+    "outcome": "clean",
+    "assertions": [
+      { "kind": "utf8", "path": "shared/notes.md", "content": "agent revision\n" },
+      { "kind": "utf8", "path": "shared/outputs/report.md", "content": "new report\n" },
+      { "kind": "sha256", "path": "shared/outputs/result.bin", "sha256": "2da45f2cd1f9c8e69a67abf7a6b26c282533d0a7686787a9533265418680d4d2" },
+      { "kind": "bytes", "path": "shared/outputs/empty.txt", "bytes": 0 },
+      { "kind": "utf8", "path": "shared/approved.md", "content": "approved draft\n" },
+      { "kind": "absent", "path": "shared/draft.md" },
+      { "kind": "absent", "path": "shared/obsolete.md" }
+    ]
+  }
+}

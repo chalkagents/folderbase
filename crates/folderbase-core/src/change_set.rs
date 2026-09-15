@@ -840,7 +840,9 @@ pub fn apply_change_set(
     drop(lease);
     let store = FolderbaseVersionStore::open(root).map_err(capture_operational)?;
     let plan = store.plan_capture().map_err(capture_operational)?;
-    let final_capture = store.seal_capture(plan).map_err(capture_operational)?;
+    let final_capture = store
+        .seal_change_set_capture(plan, &envelope.payload.deltas)
+        .map_err(capture_operational)?;
     let history = store
         .finalize_change_set_history(
             &trusted_before_apply.source_version_id,
