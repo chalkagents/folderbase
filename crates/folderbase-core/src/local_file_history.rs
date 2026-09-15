@@ -195,11 +195,17 @@ fn read_file_history_with_hook(
         result.object_id = Some(object.id.clone());
         result.current_version = Some(object.current_version.clone());
     }
-    // Count the actual CLI representation, including its envelope and newline.
-    let encoded = serde_json::to_vec_pretty(&result)
-        .map_err(|source| FolderbaseError::json(&root, source))?;
-    if encoded.len() >= MAX_RESULT_BYTES {
-        return Err(limit("encoded_result_bytes", MAX_RESULT_BYTES as u64));
+    // Stop serialization at the wire cap, including the CLI's final newline.
+    // A bounded input can still expand substantially under pretty indentation.
+    let mut encoded = EncodedResultBudget {
+        bytes: 1,
+        exceeded: false,
+    };
+    if let Err(source) = serde_json::to_writer_pretty(&mut encoded, &result) {
+        if encoded.exceeded {
+            return Err(limit("encoded_result_bytes", MAX_RESULT_BYTES as u64));
+        }
+        return Err(FolderbaseError::json(&root, source).into());
     }
     before_revalidation();
     observation.verify()?;
@@ -225,6 +231,30 @@ fn read_file_history_with_hook(
     }
     lock.verify(&state)?;
     Ok(result)
+}
+
+/// Counts the exact encoding without retaining it or letting indentation expand
+/// an otherwise bounded metadata input into an unbounded temporary allocation.
+struct EncodedResultBudget {
+    bytes: usize,
+    exceeded: bool,
+}
+
+impl io::Write for EncodedResultBudget {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_RESULT_BYTES.saturating_sub(self.bytes) {
+            self.exceeded = true;
+            return Err(io::Error::other(
+                "file history encoded result limit exceeded",
+            ));
+        }
+        self.bytes += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn open_selected_file(state: &FolderbaseState, path: &Path) -> HistoryResult<File> {
@@ -950,5 +980,67 @@ mod tests {
             })
         ));
         assert_eq!(before, snapshot(root.path()));
+    }
+
+    #[test]
+    fn deeply_nested_small_metadata_stops_before_serializing_the_remaining_output() {
+        let (root, first) = tracked();
+        let store = LocalVersionStore::open(root.path()).unwrap();
+        let mut nested = Value::Array(vec![Value::Bool(false); 50_000]);
+        for _ in 0..90 {
+            nested = Value::Array(vec![nested]);
+        }
+        let mut version = first.version;
+        version.extensions.insert("nested".to_owned(), nested);
+        let bytes = serde_json::to_vec(&version).unwrap();
+        assert!(bytes.len() < MAX_RECORD_BYTES as usize);
+        fs::write(store.version_record_path(&version.id), &bytes).unwrap();
+        let before = snapshot(root.path());
+        assert!(matches!(
+            read_file_history(root.path(), "tasks/a.json"),
+            Err(FileHistoryError::LimitExceeded {
+                limit: "encoded_result_bytes",
+                ..
+            })
+        ));
+        assert_eq!(before, snapshot(root.path()));
+
+        // Prove that serialization propagates the bound before visiting a
+        // subsequent field, rather than encoding everything and checking later.
+        struct TailProbe<'a> {
+            value: &'a LocalVersionRecord,
+            visited: &'a std::cell::Cell<bool>,
+        }
+        impl Serialize for TailProbe<'_> {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element(self.value)?;
+                self.visited.set(true);
+                sequence.serialize_element("unvisited tail")?;
+                sequence.end()
+            }
+        }
+        let visited = std::cell::Cell::new(false);
+        let mut budget = EncodedResultBudget {
+            bytes: 1,
+            exceeded: false,
+        };
+        assert!(
+            serde_json::to_writer_pretty(
+                &mut budget,
+                &TailProbe {
+                    value: &version,
+                    visited: &visited
+                }
+            )
+            .is_err()
+        );
+        assert!(budget.exceeded);
+        assert!(budget.bytes <= MAX_RESULT_BYTES);
+        assert!(!visited.get());
     }
 }
