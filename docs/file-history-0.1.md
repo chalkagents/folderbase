@@ -117,6 +117,14 @@ conflicting, or changed required evidence refuses without a partial result.
 Parent links contain IDs, not parent digests; digest pins are verified where
 actually supplied by the Head or an explicit verified reconstruction anchor.
 
+A workspace restored from local export can use its completed, physically bound
+anchor to explain exported retired Objects. Its bounded proof metadata and
+selected full Version enter the same read observations and are rechecked before
+success. The history reader does not load the export's full history payload or
+hash retained blobs. A missing older blob can therefore leave metadata readable
+while recovery refuses. Current bindings and Tombstones that already explain
+all claimants require no export proof read.
+
 History lists only the current Object's Versions. Earlier Object and Version
 records remain retained, and recovery by a known earlier Version ID continues
 to work. Distinct Objects are not concatenated into one history. See

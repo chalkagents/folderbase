@@ -116,14 +116,14 @@ impl CaptureObjectClaims {
                     "prior ownership Version changed",
                 ));
             }
-            Some(path_ownership::OwnershipHistory::load(
+            Some(path_ownership::OwnershipHistory::load_with_export_anchor(
+                state,
                 observed,
                 &selected_records
                     .iter()
                     .map(|(_, _, path, record)| (path.clone(), record.id.clone()))
                     .collect::<Vec<_>>(),
                 true,
-                None,
                 |path, maximum| {
                     result
                         .observe_bounded(state, path, maximum)
