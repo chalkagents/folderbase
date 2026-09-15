@@ -302,6 +302,18 @@ pub(crate) fn resolve_existing_workspace_file(
     root: &Path,
     relative: &Path,
 ) -> Result<(PathBuf, PathBuf)> {
+    resolve_existing_workspace_file_with_boundary_check(
+        root,
+        relative,
+        has_nested_folderbase_marker,
+    )
+}
+
+pub(crate) fn resolve_existing_workspace_file_with_boundary_check(
+    root: &Path,
+    relative: &Path,
+    mut has_boundary: impl FnMut(&Path) -> Result<bool>,
+) -> Result<(PathBuf, PathBuf)> {
     let relative = safe_workspace_path(relative)?;
     let mut resolved = root.to_path_buf();
     for component in relative.components() {
@@ -314,7 +326,7 @@ pub(crate) fn resolve_existing_workspace_file(
         if metadata.file_type().is_symlink() {
             return Err(FolderbaseError::UnsafePath(resolved));
         }
-        if metadata.is_dir() && has_nested_folderbase_marker(&resolved)? {
+        if metadata.is_dir() && has_boundary(&resolved)? {
             return Err(FolderbaseError::UnsafePath(relative.to_path_buf()));
         }
     }

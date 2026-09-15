@@ -43,6 +43,7 @@ pub mod transfer_source;
 mod traversal_policy;
 mod validation;
 mod workspace;
+mod workspace_path_lookup;
 
 pub use change_set::{
     AuthorizedPath, ChangeSetApplyOutcome, ChangeSetApplyResult, ChangeSetAssessment,

@@ -26,6 +26,7 @@ use crate::{
         canonical_folderbase_root, has_nested_folderbase_marker, is_reserved_workspace_component,
         refuse_generic_workspace_mutation_path, resolve_existing_workspace_file,
     },
+    workspace_path_lookup::WorkspacePathLookup,
 };
 
 const OBJECT_SCHEMA: &str = "https://folderbase.ai/protocol/0.1/object.schema.json";
@@ -1866,6 +1867,7 @@ impl LocalVersionStore {
             Err(source) => return Err(FolderbaseError::io(directory, source)),
         };
         let mut found = None;
+        let mut paths = WorkspacePathLookup::new(&self.root)?;
         for entry in entries {
             let entry = entry.map_err(|source| FolderbaseError::io(&directory, source))?;
             let file_type = entry
@@ -1888,7 +1890,7 @@ impl LocalVersionStore {
             let is_match = if stored_path == relative_path {
                 true
             } else {
-                match resolve_existing_workspace_file(&self.root, &stored_path) {
+                match paths.resolve(&stored_path) {
                     Ok((_, canonical_path)) => canonical_path == relative_path,
                     Err(FolderbaseError::Io { source, .. })
                         if source.kind() == std::io::ErrorKind::NotFound =>
@@ -1921,6 +1923,7 @@ impl LocalVersionStore {
                 found = Some(record);
             }
         }
+        paths.finish()?;
         Ok(found)
     }
 
