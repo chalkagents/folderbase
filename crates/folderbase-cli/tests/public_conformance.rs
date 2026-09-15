@@ -116,8 +116,8 @@ fn public_runners_accept_the_reference_cli_serially_through_only_their_process_i
         .stdout(predicate::str::contains(
             "\"format\": \"folderbase-capability-conformance-report-v1\"",
         ))
-        .stdout(predicate::str::contains("\"selected\": 7"))
-        .stdout(predicate::str::contains("\"passed\": 7"))
+        .stdout(predicate::str::contains("\"selected\": 8"))
+        .stdout(predicate::str::contains("\"passed\": 8"))
         .stdout(predicate::str::contains("\"failed\": 0"));
 
     Command::new("node")
