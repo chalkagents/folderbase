@@ -1901,7 +1901,7 @@ fn ensure_record_capacity(current: usize, path: &Path) -> Result<(), FolderbaseC
     Ok(())
 }
 
-fn read_local_head(
+pub(crate) fn read_local_head(
     attestation: &FolderbaseRootAttestation,
     root_instance_authority: &RootInstanceAuthority,
     root: &Dir,
