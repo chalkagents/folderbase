@@ -42,6 +42,11 @@ const MAX_MIGRATION_ANSWERS_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TEMPLATE_EXPANSION_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 const CAPABILITY_REGISTRY: &str = include_str!("../assets/capability-registry-v1.json");
 
+// Advertise reconstruction only on supported release targets. Core still probes
+// the actual destination filesystem before retained no-replace publication.
+const ROOT_RECONSTRUCTION_PLATFORM_ELIGIBLE: bool =
+    cfg!(any(target_os = "linux", target_os = "macos"));
+
 #[derive(Debug, Deserialize)]
 struct EmbeddedCapabilityRegistry {
     capabilities: Vec<CapabilityProfile>,
@@ -1411,6 +1416,14 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     let registry: EmbeddedCapabilityRegistry =
                         serde_json::from_str(CAPABILITY_REGISTRY)
                             .expect("embedded capability registry must be valid JSON");
+                    let capabilities: Vec<_> = registry
+                        .capabilities
+                        .into_iter()
+                        .filter(|profile| {
+                            profile.name != "folderbase.root-reconstruction"
+                                || ROOT_RECONSTRUCTION_PLATFORM_ELIGIBLE
+                        })
+                        .collect();
                     print_json(&serde_json::json!({
                         "format": "folderbase-compatibility-contract-v1",
                         "contract_version": "1.0.0",
@@ -1420,7 +1433,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                             "folderbase_version": ["0.4", "0.5"],
                             "chunk_manifest": ["folderbase-chunk-manifest-v1"],
                         },
-                        "capabilities": registry.capabilities,
+                        "capabilities": capabilities,
                     }))?;
                 } else {
                     println!("Folderbase Compatibility Contract v1.0.0");

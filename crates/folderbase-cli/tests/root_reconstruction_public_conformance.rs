@@ -4,6 +4,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn public_root_reconstruction_runner_accepts_the_cli_slice() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let implementation = assert_cmd::cargo::cargo_bin!("folderbase");
@@ -19,4 +20,21 @@ fn public_root_reconstruction_runner_accepts_the_cli_slice() {
         ))
         .stdout(predicate::str::contains("\"passed\": 12"))
         .stdout(predicate::str::contains("\"failed\": 0"));
+}
+
+#[test]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn unsupported_target_cannot_claim_root_reconstruction_conformance() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    Command::new("node")
+        .arg(repository.join("protocol/conformance/capabilities/run.mjs"))
+        .arg("--implementation")
+        .arg(assert_cmd::cargo::cargo_bin!("folderbase"))
+        .args(["--capability", "folderbase.root-reconstruction@0.1.0"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "folderbase.root-reconstruction@0.1.0 is not advertised by the implementation",
+        ))
+        .stdout(predicate::str::contains("\"passed\": 0"));
 }

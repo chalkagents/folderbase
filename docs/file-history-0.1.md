@@ -53,7 +53,8 @@ recorded head, which need not be the final array item or match live file bytes.
 
 The path must name an **existing regular file** under an initialized, attested
 root; binary attachments work. The returned path uses canonical filesystem
-spelling. Missing/deleted files are refused; this version has no Object-ID or
+spelling and native separators (`tasks\task.json` on Windows). Missing/deleted
+files are refused; this version has no Object-ID or
 Tombstone selector. The operation neither reads current content nor verifies
 retained blobs. A successful metadata list does not certify recoverability of
 content or capture an ordinary-file edit.
