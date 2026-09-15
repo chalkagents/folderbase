@@ -337,10 +337,10 @@ fn select_claimant<'a>(
     }
 }
 
-struct ReadLock(Option<(File, PhysicalIdentity)>);
+pub(super) struct ReadLock(Option<(File, PhysicalIdentity)>);
 
 impl ReadLock {
-    fn acquire(state: &FolderbaseState) -> HistoryResult<Self> {
+    pub(super) fn acquire(state: &FolderbaseState) -> HistoryResult<Self> {
         let Some(file) = Self::open(state)? else {
             return Ok(Self(None));
         };
@@ -368,7 +368,7 @@ impl ReadLock {
         }
     }
 
-    fn verify(&self, state: &FolderbaseState) -> HistoryResult<()> {
+    pub(super) fn verify(&self, state: &FolderbaseState) -> HistoryResult<()> {
         let actual = Self::open(state)?
             .map(|file| PhysicalIdentity::from_file(&file))
             .transpose()
@@ -381,7 +381,7 @@ impl ReadLock {
 }
 
 /// Bounded byte/name witnesses; no private file is opened with write access.
-struct Observation<'a> {
+pub(super) struct Observation<'a> {
     state: &'a FolderbaseState,
     files: BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>,
     directories: BTreeMap<PathBuf, Vec<OsString>>,
@@ -389,7 +389,7 @@ struct Observation<'a> {
 }
 
 impl<'a> Observation<'a> {
-    fn new(state: &'a FolderbaseState) -> Self {
+    pub(super) fn new(state: &'a FolderbaseState) -> Self {
         Self {
             state,
             files: BTreeMap::new(),
@@ -398,8 +398,14 @@ impl<'a> Observation<'a> {
         }
     }
 
-    fn read(&mut self, path: &Path, maximum: u64) -> HistoryResult<Option<Vec<u8>>> {
+    pub(super) fn read(&mut self, path: &Path, maximum: u64) -> HistoryResult<Option<Vec<u8>>> {
         let bytes = bounded_read(self.state, path, maximum)?;
+        if let Some((_, observed)) = self.files.get(path) {
+            if observed != &bytes {
+                return Err(FileHistoryError::ObservationChanged);
+            }
+            return Ok(bytes);
+        }
         self.bytes += bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
         if self.bytes > MAX_READ_BYTES {
             return Err(limit("metadata_bytes", MAX_READ_BYTES));
@@ -412,18 +418,18 @@ impl<'a> Observation<'a> {
         Ok(bytes)
     }
 
-    fn required(&mut self, path: &Path, maximum: u64) -> HistoryResult<Vec<u8>> {
+    pub(super) fn required(&mut self, path: &Path, maximum: u64) -> HistoryResult<Vec<u8>> {
         self.read(path, maximum)?
             .ok_or_else(|| invalid_record(path, "required history record is missing").into())
     }
 
-    fn names(&mut self, path: &Path) -> HistoryResult<Vec<OsString>> {
+    pub(super) fn names(&mut self, path: &Path) -> HistoryResult<Vec<OsString>> {
         let names = directory_names(self.state, path)?;
         self.directories.insert(path.to_path_buf(), names.clone());
         Ok(names)
     }
 
-    fn verify(&self) -> HistoryResult<()> {
+    pub(super) fn verify(&self) -> HistoryResult<()> {
         for (path, (maximum, expected)) in &self.files {
             if bounded_read(self.state, path, *maximum)? != *expected {
                 return Err(FileHistoryError::ObservationChanged);
@@ -439,7 +445,7 @@ impl<'a> Observation<'a> {
     }
 }
 
-fn ensure_idle(observation: &mut Observation<'_>) -> HistoryResult<()> {
+pub(super) fn ensure_idle(observation: &mut Observation<'_>) -> HistoryResult<()> {
     for path in [
         super::file_create::ACTIVE_CREATE_PATH,
         ".folderbase/transactions/protocol-upgrades/active.json",

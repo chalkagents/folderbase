@@ -42,8 +42,13 @@ pub use file_create::{
 };
 pub use file_history::{FileHistoryError, FileVersionHistory, read_file_history};
 
+#[path = "local_export.rs"]
+pub(crate) mod local_export;
 #[path = "local_path_ownership.rs"]
 pub(crate) mod path_ownership;
+pub use local_export::{
+    ExportVersionEntry, ExportVersionList, LocalExportError, list_export_versions,
+};
 
 const OBJECT_SCHEMA: &str = "https://folderbase.ai/protocol/0.1/object.schema.json";
 const OBJECTS_DIRECTORY: &str = ".folderbase/objects";

@@ -84,6 +84,14 @@ fn protocol_contract_discovers_the_stable_machine_interface() {
                 "stability": "stable"
             }),
         );
+        expected_capabilities.as_array_mut().unwrap().insert(
+            4,
+            serde_json::json!({
+                "name": "folderbase.local-export",
+                "version": "0.1.0",
+                "stability": "experimental"
+            }),
+        );
     }
     assert_eq!(descriptor["capabilities"], expected_capabilities);
 }

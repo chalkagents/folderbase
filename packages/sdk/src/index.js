@@ -727,6 +727,20 @@ export class FolderbaseClient {
     return this.run(["workspace", "create", root, path, "--operation-id", operationId, "--stdin", "--json"], { ...options, stdin: encodeInput(content, 8 * 1024 * 1024) });
   }
 
+  exportVersions(root, options) {
+    return this.run(["export", "list", root, "--json"], options);
+  }
+
+  exportWorkspace(root, packagePath, selection = {}, options) {
+    const arguments_ = ["export", "create", root, packagePath, "--json"];
+    if (selection.versionId !== undefined) arguments_.push("--version", selection.versionId);
+    return this.run(arguments_, options);
+  }
+
+  restoreWorkspace(packagePath, destination, request, options) {
+    return this.#runJson(["export", "restore", packagePath, destination, "--stdin", "--json"], request, options);
+  }
+
   fileHistory(root, path, options) {
     return this.run(["version", "list", root, path, "--json"], options);
   }

@@ -21,6 +21,11 @@ if (mode === "workspace" && arguments_[0] === "create") {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   writeJson(process.stdout, {format:"fixture-create-v1", argv:[mode, ...arguments_], stdin_hex:Buffer.concat(chunks).toString("hex")});
+  process.exit(0);
+}
+
+if (mode === "export") {
+  writeJson(process.stdout, {arguments: arguments_, request: arguments_[0] === "restore" ? JSON.parse(await stdinText()) : null});
 } else if (mode === "version" && arguments_[0] === "list") {
   const [, root, path, ...flags] = arguments_;
   if (path === "pending") {

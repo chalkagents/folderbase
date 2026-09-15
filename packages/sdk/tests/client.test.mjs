@@ -310,3 +310,13 @@ test("workspace create forwards exact bytes and refuses invalid requests before 
   assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId, content:"\ud800"}), TypeError);
   assert.throws(() => sdk.workspaceCreate("/tmp/root", "tasks/a", {operationId, content:new Uint8Array(8*1024*1024+1)}), FolderbaseOutputLimitError);
 });
+
+test("local export adapters preserve paths, explicit selection, and pinned restore request", async () => {
+  assert.deepEqual((await client().exportVersions("/a folder")).document.arguments, ["list", "/a folder", "--json"]);
+  assert.deepEqual((await client().exportWorkspace("/a folder", "/backup folder")).document.arguments, ["create", "/a folder", "/backup folder", "--json"]);
+  assert.deepEqual((await client().exportWorkspace("/a folder", "/backup folder", {versionId: "fbversion_selected"})).document.arguments,
+    ["create", "/a folder", "/backup folder", "--json", "--version", "fbversion_selected"]);
+  const request = {operation_id: "reconstruction_01998550-a73c-7000-8000-000000000099", export_index_sha256: "a".repeat(64)};
+  const restored = await client().restoreWorkspace("/backup folder", "/new workspace", request);
+  assert.deepEqual(restored.document, {arguments: ["restore", "/backup folder", "/new workspace", "--stdin", "--json"], request});
+});

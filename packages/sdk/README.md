@@ -220,3 +220,14 @@ can leave an unlinked attachment; applications own explicit retry/link handling.
 Use a single checked Core build for all writers: older executables do not honor
 pending creation. See [the operation contract](https://github.com/chalkagents/folderbase/blob/main/docs/workspace-create-0.1.md)
 for bounds, recovery, and compatibility limits.
+
+## Local export and restore (unreleased)
+
+The candidate-only experimental `folderbase.local-export@0.1.0` capability adds
+`exportVersions(root)`, `exportWorkspace(root, packagePath, {versionId?})`, and
+`restoreWorkspace(packagePath, destination, {operation_id, export_index_sha256})`.
+Use `contract()` to discover support; public Core 0.7.2 lacks these commands.
+See [the retention contract and complete example](../../docs/local-export-0.1.md).
+Packages preserve the selected folder snapshot and retained ordinary-file
+histories; Git metadata is snapshot-only. Restore requires an absent destination
+or the same unchanged, exactly replayable reconstruction.
